@@ -69,6 +69,10 @@ impl Settings {
         }
     }
 
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.0.get(key).map(String::as_str)
+    }
+
     /// Renders as nested JSON, e.g. `{"index": {"number_of_shards": "1"}}`.
     pub fn to_json(&self) -> Value {
         let mut out = Value::Object(Default::default());

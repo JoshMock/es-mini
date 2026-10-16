@@ -8,7 +8,12 @@ use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-async fn call(app: &Router, method: Method, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
+pub(crate) async fn call(
+    app: &Router,
+    method: Method,
+    uri: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
     let body = body.map_or(Body::empty(), |b| Body::from(b.to_string()));
     let req = Request::builder()
         .method(method)

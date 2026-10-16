@@ -12,6 +12,8 @@ pub enum AppError {
     IndexExists(String),
     Parse(String),
     MapperParsing(String),
+    VersionConflict { id: String, current_version: u64 },
+    DocumentMissing(String),
 }
 
 impl IntoResponse for AppError {
@@ -33,6 +35,23 @@ impl IntoResponse for AppError {
             Self::MapperParsing(r) => {
                 (StatusCode::BAD_REQUEST, "mapper_parsing_exception", r, None)
             }
+            Self::VersionConflict {
+                id,
+                current_version,
+            } => (
+                StatusCode::CONFLICT,
+                "version_conflict_engine_exception",
+                format!(
+                    "[{id}]: version conflict, document already exists (current version [{current_version}])"
+                ),
+                None,
+            ),
+            Self::DocumentMissing(id) => (
+                StatusCode::NOT_FOUND,
+                "document_missing_exception",
+                format!("[{id}]: document missing"),
+                None,
+            ),
         };
         let mut cause = json!({"type": kind, "reason": reason});
         if let Some(i) = index {

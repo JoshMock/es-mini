@@ -1,9 +1,10 @@
+mod docs;
 mod error;
 mod indices;
 
 use axum::{
     Json, Router,
-    routing::{get, put},
+    routing::{get, post, put},
 };
 use es_index::Indices;
 use serde_json::{Value, json};
@@ -71,6 +72,19 @@ fn app() -> Router {
             put(indices::put_settings).get(indices::get_settings),
         )
         .route("/{index}/_mapping", get(indices::get_mapping))
+        .route("/{index}/_doc", post(docs::index_auto_id))
+        .route(
+            "/{index}/_doc/{id}",
+            put(docs::index_with_id)
+                .post(docs::index_with_id)
+                .get(docs::get)
+                .delete(docs::delete),
+        )
+        .route(
+            "/{index}/_create/{id}",
+            put(docs::create).post(docs::create),
+        )
+        .route("/{index}/_update/{id}", post(docs::update))
         .with_state(AppState::default())
 }
 
@@ -87,6 +101,9 @@ async fn main() {
 
 #[cfg(test)]
 mod indices_tests;
+
+#[cfg(test)]
+mod docs_tests;
 
 #[cfg(test)]
 mod tests {
