@@ -80,6 +80,7 @@ record bool POST /fixture/_search '{"query":{"bool":{"must":{"match":{"title":"d
 record count_published POST /fixture/_count '{"query":{"term":{"published":true}}}'
 record esql POST /_query '{"query":"FROM fixture | WHERE views > 5 | SORT views DESC | KEEP tag, views | LIMIT 3"}'
 record mapping GET /fixture/_mapping
+req GET /fixture/_settings | python3 -c 'import json,sys; print(json.load(sys.stdin)["fixture"]["settings"]["index"]["uuid"])' > expected/index_uuid
 
 docker stop -t 60 "$NAME" >/dev/null
 echo "fixture written to $DATA"
