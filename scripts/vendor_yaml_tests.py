@@ -6,7 +6,7 @@ that pass the out-of-scope feature scan below (plus a short allowlist of core AP
 out-of-scope sections the runner's xfail list covers), and writes tests/yaml/INCLUDED.md.
 Never edit vendored files; rerun this script instead.
 """
-import json, re, subprocess, urllib.request
+import json, re, subprocess, urllib.error, urllib.request
 from pathlib import Path
 
 TAG = "v9.5.5"
@@ -74,5 +74,21 @@ lines += [f"- `{n}`" + (f" (allowlisted core file; also touches: {', '.join(r)})
 lines += ["", f"## Excluded ({len(excluded)})", "",
           "Excluded files exercise features outside the MVP scope (see z_old/PLAN.md).", ""]
 lines += [f"- `{n}`: {', '.join(r)}" for n, r in excluded]
+# API specs map `do: {api: {...}}` steps to HTTP method and path.
+apis = set()
+for name, _ in included:
+    text = (root / name).read_text()
+    apis |= set(re.findall(r"^\s+(?:- )?do:\s*\n\s+(?:(?:catch|headers|warnings|allowed_warnings|node_selector)\b.*\n(?:\s{8,}.*\n)*\s+)*([a-z_.]+):", text, re.M))
+spec_dir = root / "api"
+spec_dir.mkdir(exist_ok=True)
+SPEC_URL = f"https://raw.githubusercontent.com/elastic/elasticsearch/{TAG}/rest-api-spec/src/main/resources/rest-api-spec/api"
+for api in sorted(apis.copy()):
+    try:
+        (spec_dir / f"{api}.json").write_bytes(urllib.request.urlopen(f"{SPEC_URL}/{api}.json").read())
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            raise
+        apis.discard(api)  # the scan also catches non-API keys under `do:`
+lines += ["", f"## API specs ({len(apis)})", "", "`api/` holds the matching `rest-api-spec/api/*.json` files: " + ", ".join(sorted(apis)) + "."]
 (root / "INCLUDED.md").write_text("\n".join(lines) + "\n")
 print(f"included {len(included)}, excluded {len(excluded)}")

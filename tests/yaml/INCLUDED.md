@@ -189,3 +189,7 @@ Excluded files exercise features outside the MVP scope (see z_old/PLAN.md).
 - `update/40_routing.yml`: multi-shard/routing, out-of-scope search options
 - `update/80_source_filtering.yml`: multi-shard/routing
 - `update/95_require_alias.yml`: aliases, data streams
+
+## API specs (24)
+
+`api/` holds the matching `rest-api-spec/api/*.json` files: bulk, cluster.health, count, create, delete, exists, get, get_source, index, indices.close, indices.create, indices.delete, indices.exists, indices.exists_alias, indices.get, indices.get_alias, indices.get_mapping, indices.get_settings, indices.open, indices.put_alias, indices.put_settings, indices.refresh, search, update.
