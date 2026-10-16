@@ -15,8 +15,11 @@ use std::{
 
 type Reply = Result<(StatusCode, Json<Value>), AppError>;
 
-fn parse_source(body: &Bytes) -> Result<Value, AppError> {
-    let v: Value = serde_json::from_slice(body).map_err(|e| AppError::Parse(e.to_string()))?;
+pub fn parse_json(body: &[u8]) -> Result<Value, AppError> {
+    serde_json::from_slice(body).map_err(|e| AppError::Parse(e.to_string()))
+}
+
+fn check_source(v: Value) -> Result<Value, AppError> {
     if !v.is_object() {
         return Err(AppError::MapperParsing(
             "failed to parse, document is not an object".into(),
@@ -26,7 +29,7 @@ fn parse_source(body: &Bytes) -> Result<Value, AppError> {
 }
 
 // ponytail: time+counter hex ids; ES uses base64 time-based UUIDs, same length
-fn auto_id() -> String {
+pub fn auto_id() -> String {
     static COUNTER: AtomicU32 = AtomicU32::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -66,8 +69,14 @@ fn reply(index: &str, id: &str, w: WriteResult, shards_total: u64) -> (StatusCod
     (status, Json(body))
 }
 
-fn put_or_create(state: &AppState, index: &str, id: &str, body: &Bytes, create: bool) -> Reply {
-    let source = parse_source(body)?;
+pub fn put_or_create(
+    state: &AppState,
+    index: &str,
+    id: &str,
+    source: Value,
+    create: bool,
+) -> Reply {
+    let source = check_source(source)?;
     let (w, total) = write(state, index, |i| match create {
         true => i.create(id, source),
         false => Ok(i.put(id, source)),
@@ -86,7 +95,7 @@ pub async fn index_with_id(
     body: Bytes,
 ) -> Reply {
     let create = params.get("op_type").is_some_and(|o| o == "create");
-    put_or_create(&state, &index, &id, &body, create)
+    put_or_create(&state, &index, &id, parse_json(&body)?, create)
 }
 
 pub async fn index_auto_id(
@@ -94,7 +103,7 @@ pub async fn index_auto_id(
     Path(index): Path<String>,
     body: Bytes,
 ) -> Reply {
-    put_or_create(&state, &index, &auto_id(), &body, true)
+    put_or_create(&state, &index, &auto_id(), parse_json(&body)?, true)
 }
 
 pub async fn create(
@@ -102,7 +111,7 @@ pub async fn create(
     Path((index, id)): Path<(String, String)>,
     body: Bytes,
 ) -> Reply {
-    put_or_create(&state, &index, &id, &body, true)
+    put_or_create(&state, &index, &id, parse_json(&body)?, true)
 }
 
 pub async fn get(
@@ -132,8 +141,12 @@ pub async fn delete(
     State(state): State<AppState>,
     Path((index, id)): Path<(String, String)>,
 ) -> Reply {
-    let (w, total) = write(&state, &index, |i| i.delete(&id));
-    Ok(reply(&index, &id, w, total))
+    delete_doc(&state, &index, &id)
+}
+
+pub fn delete_doc(state: &AppState, index: &str, id: &str) -> Reply {
+    let (w, total) = write(state, index, |i| i.delete(id));
+    Ok(reply(index, id, w, total))
 }
 
 pub async fn update(
@@ -141,13 +154,16 @@ pub async fn update(
     Path((index, id)): Path<(String, String)>,
     body: Bytes,
 ) -> Reply {
-    let body: Value = serde_json::from_slice(&body).map_err(|e| AppError::Parse(e.to_string()))?;
+    update_doc(&state, &index, &id, &parse_json(&body)?)
+}
+
+pub fn update_doc(state: &AppState, index: &str, id: &str, body: &Value) -> Reply {
     let partial = body.get("doc").cloned().unwrap_or_else(|| json!({}));
     let upsert = match body["doc_as_upsert"].as_bool() == Some(true) {
         true => Some(partial.clone()),
         false => body.get("upsert").cloned(),
     };
-    let (w, total) = write(&state, &index, |i| i.update(&id, &partial, upsert));
-    let w = w.ok_or_else(|| AppError::DocumentMissing(id.clone()))?;
-    Ok(reply(&index, &id, w, total))
+    let (w, total) = write(state, index, |i| i.update(id, &partial, upsert));
+    let w = w.ok_or_else(|| AppError::DocumentMissing(id.to_owned()))?;
+    Ok(reply(index, id, w, total))
 }

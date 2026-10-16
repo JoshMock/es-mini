@@ -1,3 +1,4 @@
+mod bulk;
 mod docs;
 mod error;
 mod indices;
@@ -72,6 +73,11 @@ fn app() -> Router {
             put(indices::put_settings).get(indices::get_settings),
         )
         .route("/{index}/_mapping", get(indices::get_mapping))
+        .route("/_bulk", post(bulk::bulk).put(bulk::bulk))
+        .route(
+            "/{index}/_bulk",
+            post(bulk::bulk_index).put(bulk::bulk_index),
+        )
         .route("/{index}/_doc", post(docs::index_auto_id))
         .route(
             "/{index}/_doc/{id}",
@@ -104,6 +110,9 @@ mod indices_tests;
 
 #[cfg(test)]
 mod docs_tests;
+
+#[cfg(test)]
+mod bulk_tests;
 
 #[cfg(test)]
 mod tests {

@@ -3,7 +3,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use serde_json::json;
+use serde_json::{Value, json};
 
 /// Errors rendered in the ES `{error: {root_cause, type, reason, ...}, status}` envelope.
 #[derive(Debug)]
@@ -14,10 +14,13 @@ pub enum AppError {
     MapperParsing(String),
     VersionConflict { id: String, current_version: u64 },
     DocumentMissing(String),
+    ActionRequestValidation(String),
+    IllegalArgument(String),
 }
 
-impl IntoResponse for AppError {
-    fn into_response(self) -> Response {
+impl AppError {
+    /// Status and the `error` object (with `root_cause`) of the ES envelope.
+    pub fn parts(self) -> (StatusCode, Value) {
         let (status, kind, reason, index) = match self {
             Self::IndexNotFound(i) => (
                 StatusCode::NOT_FOUND,
@@ -52,6 +55,18 @@ impl IntoResponse for AppError {
                 format!("[{id}]: document missing"),
                 None,
             ),
+            Self::ActionRequestValidation(r) => (
+                StatusCode::BAD_REQUEST,
+                "action_request_validation_exception",
+                format!("Validation Failed: 1: {r};"),
+                None,
+            ),
+            Self::IllegalArgument(r) => (
+                StatusCode::BAD_REQUEST,
+                "illegal_argument_exception",
+                r,
+                None,
+            ),
         };
         let mut cause = json!({"type": kind, "reason": reason});
         if let Some(i) = index {
@@ -60,6 +75,13 @@ impl IntoResponse for AppError {
         }
         let mut error = cause.clone();
         error["root_cause"] = json!([cause]);
+        (status, error)
+    }
+}
+
+impl IntoResponse for AppError {
+    fn into_response(self) -> Response {
+        let (status, error) = self.parts();
         (
             status,
             Json(json!({"error": error, "status": status.as_u16()})),
