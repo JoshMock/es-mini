@@ -1,0 +1,29 @@
+{
+  "columns": [
+    {
+      "name": "tag",
+      "type": "keyword"
+    },
+    {
+      "name": "views",
+      "type": "long"
+    }
+  ],
+  "documents_found": 3,
+  "is_partial": false,
+  "values": [
+    [
+      "news",
+      42
+    ],
+    [
+      "animal",
+      26
+    ],
+    [
+      "animal",
+      10
+    ]
+  ],
+  "values_loaded": 6
+}

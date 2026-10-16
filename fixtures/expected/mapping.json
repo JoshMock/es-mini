@@ -1,0 +1,26 @@
+{
+  "fixture": {
+    "mappings": {
+      "properties": {
+        "date": {
+          "type": "date"
+        },
+        "published": {
+          "type": "boolean"
+        },
+        "rating": {
+          "type": "double"
+        },
+        "tag": {
+          "type": "keyword"
+        },
+        "title": {
+          "type": "text"
+        },
+        "views": {
+          "type": "long"
+        }
+      }
+    }
+  }
+}
