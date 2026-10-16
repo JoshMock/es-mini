@@ -113,6 +113,25 @@ fn flatten<'a>(prefix: &str, json: &'a Value, out: &mut Vec<(String, &'a Value)>
 pub struct Document {
     pub source: Value,
     pub version: u64,
+    pub seq_no: u64,
+}
+
+/// The `result` field of ES write responses.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DocResult {
+    Created,
+    Updated,
+    Deleted,
+    NotFound,
+    Noop,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WriteResult {
+    pub result: DocResult,
+    pub version: u64,
+    pub seq_no: u64,
 }
 
 #[derive(Debug, Default)]
@@ -120,26 +139,111 @@ pub struct Index {
     pub settings: Settings,
     pub mappings: Mappings,
     docs: HashMap<String, Document>,
+    // ponytail: tombstones are never pruned; ES drops them after index.gc_deletes (60s)
+    deleted_versions: HashMap<String, u64>,
+    next_seq_no: u64,
 }
 
 impl Index {
-    /// Returns (new version, created).
-    // ponytail: no delete tombstones, so a re-created doc restarts at version 1 (ES continues the count)
-    pub fn put(&mut self, id: &str, source: Value) -> (u64, bool) {
-        let version = self.docs.get(id).map_or(1, |d| d.version + 1);
-        let created = version == 1;
+    fn last_version(&self, id: &str) -> u64 {
         self.docs
-            .insert(id.to_owned(), Document { source, version });
-        (version, created)
+            .get(id)
+            .map(|d| d.version)
+            .or_else(|| self.deleted_versions.get(id).copied())
+            .unwrap_or(0)
+    }
+
+    fn next_seq_no(&mut self) -> u64 {
+        self.next_seq_no += 1;
+        self.next_seq_no - 1
+    }
+
+    /// Creates or overwrites a document.
+    pub fn put(&mut self, id: &str, source: Value) -> WriteResult {
+        let version = self.last_version(id) + 1;
+        let seq_no = self.next_seq_no();
+        self.deleted_versions.remove(id);
+        let old = self.docs.insert(
+            id.to_owned(),
+            Document {
+                source,
+                version,
+                seq_no,
+            },
+        );
+        let result = if old.is_some() {
+            DocResult::Updated
+        } else {
+            DocResult::Created
+        };
+        WriteResult {
+            result,
+            version,
+            seq_no,
+        }
+    }
+
+    /// Creates a document; `Err(current_version)` if it already exists.
+    pub fn create(&mut self, id: &str, source: Value) -> Result<WriteResult, u64> {
+        match self.docs.get(id) {
+            Some(doc) => Err(doc.version),
+            None => Ok(self.put(id, source)),
+        }
     }
 
     pub fn get(&self, id: &str) -> Option<&Document> {
         self.docs.get(id)
     }
 
-    /// Returns the version recorded for the delete, if the doc existed.
-    pub fn delete(&mut self, id: &str) -> Option<u64> {
-        self.docs.remove(id).map(|d| d.version + 1)
+    /// Deletes a document. Like ES, a missing document still consumes a version and seq_no.
+    pub fn delete(&mut self, id: &str) -> WriteResult {
+        let version = self.last_version(id) + 1;
+        let seq_no = self.next_seq_no();
+        self.deleted_versions.insert(id.to_owned(), version);
+        let result = match self.docs.remove(id) {
+            Some(_) => DocResult::Deleted,
+            None => DocResult::NotFound,
+        };
+        WriteResult {
+            result,
+            version,
+            seq_no,
+        }
+    }
+
+    /// Merges `partial` into an existing document, or indexes `upsert` if it is missing.
+    /// `None` means the document is missing and there is no upsert.
+    pub fn update(
+        &mut self,
+        id: &str,
+        partial: &Value,
+        upsert: Option<Value>,
+    ) -> Option<WriteResult> {
+        let Some(doc) = self.docs.get(id) else {
+            return upsert.map(|source| self.put(id, source));
+        };
+        let mut source = doc.source.clone();
+        merge(&mut source, partial);
+        if source == doc.source {
+            let (version, seq_no) = (doc.version, doc.seq_no);
+            return Some(WriteResult {
+                result: DocResult::Noop,
+                version,
+                seq_no,
+            });
+        }
+        Some(self.put(id, source))
+    }
+}
+
+fn merge(target: &mut Value, patch: &Value) {
+    match (target, patch) {
+        (Value::Object(t), Value::Object(p)) => {
+            for (k, v) in p {
+                merge(t.entry(k).or_insert(Value::Null), v);
+            }
+        }
+        (t, p) => *t = p.clone(),
     }
 }
 
@@ -210,15 +314,77 @@ mod tests {
         assert_eq!(s.to_json()["index"]["a"]["b"], "y");
     }
 
+    fn w(result: DocResult, version: u64, seq_no: u64) -> WriteResult {
+        WriteResult {
+            result,
+            version,
+            seq_no,
+        }
+    }
+
     #[test]
     fn document_put_get_delete() {
         let mut idx = Index::default();
-        assert_eq!(idx.put("1", json!({"a": 1})), (1, true));
-        assert_eq!(idx.put("1", json!({"a": 2})), (2, false));
+        assert_eq!(idx.put("1", json!({"a": 1})), w(DocResult::Created, 1, 0));
+        assert_eq!(idx.put("1", json!({"a": 2})), w(DocResult::Updated, 2, 1));
         let doc = idx.get("1").unwrap();
-        assert_eq!((doc.version, &doc.source), (2, &json!({"a": 2})));
-        assert_eq!(idx.delete("1"), Some(3));
+        assert_eq!(
+            (doc.version, doc.seq_no, &doc.source),
+            (2, 1, &json!({"a": 2}))
+        );
+        assert_eq!(idx.delete("1"), w(DocResult::Deleted, 3, 2));
         assert!(idx.get("1").is_none());
-        assert_eq!(idx.delete("1"), None);
+        assert_eq!(idx.delete("1"), w(DocResult::NotFound, 4, 3));
+    }
+
+    #[test]
+    fn version_continues_after_delete() {
+        let mut idx = Index::default();
+        idx.put("1", json!({}));
+        idx.delete("1");
+        assert_eq!(idx.put("1", json!({})), w(DocResult::Created, 3, 2));
+    }
+
+    #[test]
+    fn delete_of_never_seen_doc_is_version_1() {
+        assert_eq!(Index::default().delete("x"), w(DocResult::NotFound, 1, 0));
+    }
+
+    #[test]
+    fn create_conflicts_with_existing() {
+        let mut idx = Index::default();
+        assert_eq!(idx.create("1", json!({})), Ok(w(DocResult::Created, 1, 0)));
+        assert_eq!(idx.create("1", json!({})), Err(1));
+    }
+
+    #[test]
+    fn update_merges_recursively() {
+        let mut idx = Index::default();
+        idx.put("1", json!({"a": 1, "o": {"x": 1, "y": 1}}));
+        let r = idx.update("1", &json!({"b": 2, "o": {"y": 2}}), None);
+        assert_eq!(r, Some(w(DocResult::Updated, 2, 1)));
+        assert_eq!(
+            idx.get("1").unwrap().source,
+            json!({"a": 1, "b": 2, "o": {"x": 1, "y": 2}})
+        );
+    }
+
+    #[test]
+    fn update_without_change_is_noop() {
+        let mut idx = Index::default();
+        idx.put("1", json!({"a": 1}));
+        assert_eq!(
+            idx.update("1", &json!({"a": 1}), None),
+            Some(w(DocResult::Noop, 1, 0))
+        );
+    }
+
+    #[test]
+    fn update_missing_doc() {
+        let mut idx = Index::default();
+        assert_eq!(idx.update("1", &json!({"a": 1}), None), None);
+        let r = idx.update("1", &json!({"a": 1}), Some(json!({"u": 1})));
+        assert_eq!(r, Some(w(DocResult::Created, 1, 0)));
+        assert_eq!(idx.get("1").unwrap().source, json!({"u": 1}));
     }
 }
