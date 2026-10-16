@@ -3,6 +3,8 @@
 //! ponytail: queries scan every document and compute BM25 statistics per query; replace with
 //! postings lookups once the Lucene codec (es-codec) provides an inverted index.
 
+pub mod esql;
+
 use es_index::{Document, FieldMapping, Index, analysis::Analyzer};
 use serde_json::Value;
 use std::{cell::RefCell, cmp::Ordering, collections::HashMap};
