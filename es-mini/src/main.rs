@@ -1,5 +1,16 @@
-use axum::{Json, Router, routing::get};
+mod error;
+mod indices;
+
+use axum::{
+    Json, Router,
+    routing::{get, put},
+};
+use es_index::Indices;
 use serde_json::{Value, json};
+use std::sync::{Arc, RwLock};
+
+// ponytail: one global lock over all indices; per-index locks if write contention shows up
+type AppState = Arc<RwLock<Indices>>;
 
 const CLUSTER_NAME: &str = "es-mini";
 
@@ -48,6 +59,19 @@ fn app() -> Router {
     Router::new()
         .route("/", get(info))
         .route("/_cluster/health", get(health))
+        .route(
+            "/{index}",
+            put(indices::create)
+                .get(indices::get)
+                .head(indices::head)
+                .delete(indices::delete),
+        )
+        .route(
+            "/{index}/_settings",
+            put(indices::put_settings).get(indices::get_settings),
+        )
+        .route("/{index}/_mapping", get(indices::get_mapping))
+        .with_state(AppState::default())
 }
 
 #[tokio::main]
@@ -60,6 +84,9 @@ async fn main() {
     tracing::info!("listening on {}", listener.local_addr().unwrap());
     axum::serve(listener, app()).await.unwrap();
 }
+
+#[cfg(test)]
+mod indices_tests;
 
 #[cfg(test)]
 mod tests {

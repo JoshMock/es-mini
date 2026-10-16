@@ -92,8 +92,11 @@ dependencies = [
  "axum",
  "es-index",
  "es-query",
+ "http-body-util",
+ "serde",
  "serde_json",
  "tokio",
+ "tower",
  "tracing",
  "tracing-subscriber",
 ]
