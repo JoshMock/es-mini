@@ -4,6 +4,7 @@
 
 pub mod codec_util;
 pub mod compound;
+pub mod field_infos;
 pub mod input;
 pub mod segment_infos;
 

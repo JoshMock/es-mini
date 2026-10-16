@@ -66,3 +66,36 @@ fn rejects_corrupt_checksums() {
     bytes[20] ^= 1;
     assert!(es_codec::codec_util::check_footer(&bytes).is_err());
 }
+
+#[test]
+fn reads_field_infos_including_updated_generation() {
+    use es_codec::field_infos::{DocValuesType, IndexOptions, read_field_infos};
+    let dir = shard_index_dir();
+    let infos = SegmentInfos::read_latest(&dir).unwrap();
+    for seg in &infos.segments {
+        let cfs = CompoundFile::open(&dir, &seg.name, &seg.info.id).unwrap();
+        let fields = read_field_infos(&dir, seg, &cfs).unwrap();
+        let get = |n: &str| {
+            fields
+                .iter()
+                .find(|f| f.name == n)
+                .unwrap_or_else(|| panic!("{} lacks {n}", seg.name))
+        };
+        let title = get("title");
+        assert_eq!(title.index_options, IndexOptions::DocsAndFreqsAndPositions);
+        assert!(!title.omit_norms);
+        let tag = get("tag");
+        assert_eq!(
+            (tag.index_options, tag.doc_values),
+            (IndexOptions::Docs, DocValuesType::SortedSet)
+        );
+        let views = get("views");
+        assert_eq!(views.doc_values, DocValuesType::SortedNumeric);
+        assert_eq!((views.point_dimensions, views.point_num_bytes), (1, 8));
+        assert_eq!(get("_source").index_options, IndexOptions::None);
+        assert!(get("__soft_deletes").soft_deletes);
+        let mut numbers: Vec<i32> = fields.iter().map(|f| f.number).collect();
+        numbers.dedup();
+        assert_eq!(numbers.len(), fields.len(), "field numbers are unique");
+    }
+}
