@@ -201,6 +201,11 @@ impl Index {
         self.docs.get(id)
     }
 
+    /// All live documents, in no particular order.
+    pub fn docs(&self) -> impl Iterator<Item = (&str, &Document)> {
+        self.docs.iter().map(|(id, d)| (id.as_str(), d))
+    }
+
     /// Deletes a document. Like ES, a missing document still consumes a version and seq_no.
     pub fn delete(&mut self, id: &str) -> WriteResult {
         let version = self.last_version(id) + 1;

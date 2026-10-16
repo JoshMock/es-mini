@@ -1,0 +1,181 @@
+use es_index::{FieldMapping, Index};
+use es_query::{SearchRequest, count, parse_query, search};
+use serde_json::{Value, json};
+
+fn index() -> Index {
+    let mut i = Index::default();
+    i.mappings
+        .properties
+        .insert("tag".into(), FieldMapping::Keyword);
+    i.put(
+        "1",
+        json!({"title": "The quick brown fox", "tag": "animal", "n": 5, "ok": true}),
+    );
+    i.put(
+        "2",
+        json!({"title": "Quick quick rabbits", "tag": "animal", "n": 10, "ok": false}),
+    );
+    i.put(
+        "3",
+        json!({"title": "Lazy dog", "tag": "pet", "n": 1, "nested": {"x": "deep"}}),
+    );
+    i.put(
+        "4",
+        json!({"title": ["a brown", "dog"], "tag": "Pet", "n": 7}),
+    );
+    i
+}
+
+fn ids(body: Value) -> Vec<String> {
+    let idx = index();
+    let req = SearchRequest::parse(&body).unwrap();
+    search(&idx, &req)
+        .hits
+        .iter()
+        .map(|h| h.id.to_owned())
+        .collect()
+}
+
+fn sorted(mut v: Vec<String>) -> Vec<String> {
+    v.sort();
+    v
+}
+
+#[test]
+fn match_all_is_default() {
+    let idx = index();
+    let r = search(&idx, &SearchRequest::parse(&json!({})).unwrap());
+    assert_eq!(r.total, 4);
+    assert_eq!(r.hits[0].score, Some(1.0));
+}
+
+#[test]
+fn match_analyzes_and_ranks_by_bm25() {
+    // "quick" twice in a shorter doc outranks once.
+    assert_eq!(
+        ids(json!({"query": {"match": {"title": "QUICK"}}})),
+        ["2", "1"]
+    );
+}
+
+#[test]
+fn match_operator_and() {
+    assert_eq!(
+        ids(json!({"query": {"match": {"title": {"query": "brown dog", "operator": "and"}}}})),
+        ["4"]
+    );
+    assert_eq!(
+        sorted(ids(json!({"query": {"match": {"title": "brown dog"}}}))),
+        ["1", "3", "4"]
+    );
+}
+
+#[test]
+fn term_is_not_analyzed() {
+    assert_eq!(ids(json!({"query": {"term": {"tag": "pet"}}})), ["3"]);
+    assert_eq!(
+        ids(json!({"query": {"term": {"tag": {"value": "Pet"}}}})),
+        ["4"]
+    );
+    // Text fields hold lowercased tokens, so an uppercase term finds nothing.
+    assert!(ids(json!({"query": {"term": {"title": "Quick"}}})).is_empty());
+    assert_eq!(
+        sorted(ids(json!({"query": {"term": {"title": "quick"}}}))),
+        ["1", "2"]
+    );
+}
+
+#[test]
+fn unmapped_string_has_keyword_subfield() {
+    assert_eq!(
+        ids(json!({"query": {"term": {"title.keyword": "Lazy dog"}}})),
+        ["3"]
+    );
+    assert_eq!(ids(json!({"query": {"term": {"nested.x": "deep"}}})), ["3"]);
+}
+
+#[test]
+fn term_on_numbers_and_booleans() {
+    assert_eq!(ids(json!({"query": {"term": {"n": 5}}})), ["1"]);
+    assert_eq!(ids(json!({"query": {"term": {"n": "10"}}})), ["2"]);
+    assert_eq!(ids(json!({"query": {"term": {"ok": false}}})), ["2"]);
+}
+
+#[test]
+fn range() {
+    let q = json!({"query": {"range": {"n": {"gte": 5, "lt": 10}}}});
+    assert_eq!(sorted(ids(q)), ["1", "4"]);
+    assert_eq!(ids(json!({"query": {"range": {"n": {"gt": 7}}}})), ["2"]);
+}
+
+#[test]
+fn bool_clauses() {
+    let q = json!({"query": {"bool": {
+        "must": [{"match": {"title": "dog"}}],
+        "must_not": {"term": {"tag": "pet"}},
+    }}});
+    assert_eq!(ids(q), ["4"]);
+    let q = json!({"query": {"bool": {
+        "filter": [{"range": {"n": {"gte": 5}}}],
+        "should": [{"match": {"title": "rabbits"}}],
+    }}});
+    // should is optional next to a filter, but boosts matches.
+    assert_eq!(ids(q)[0], "2");
+    let q = json!({"query": {"bool": {"should": [{"term": {"n": 1}}, {"term": {"n": 5}}]}}});
+    assert_eq!(sorted(ids(q)), ["1", "3"]);
+    let q = json!({"query": {"bool": {"should": [{"term": {"n": 1}}, {"term": {"tag": "pet"}}], "minimum_should_match": 2}}});
+    assert_eq!(ids(q), ["3"]);
+}
+
+#[test]
+fn filter_only_scores_zero() {
+    let idx = index();
+    let req =
+        SearchRequest::parse(&json!({"query": {"bool": {"filter": {"term": {"tag": "pet"}}}}}))
+            .unwrap();
+    assert_eq!(search(&idx, &req).hits[0].score, Some(0.0));
+}
+
+#[test]
+fn sort_and_pagination() {
+    assert_eq!(
+        ids(json!({"sort": [{"n": {"order": "desc"}}]})),
+        ["2", "4", "1", "3"]
+    );
+    assert_eq!(
+        ids(json!({"sort": ["n"], "from": 1, "size": 2})),
+        ["1", "4"]
+    );
+    assert_eq!(
+        ids(json!({"sort": [{"tag": "asc"}, {"n": "desc"}]})),
+        ["4", "2", "1", "3"]
+    );
+    let idx = index();
+    let r = search(
+        &idx,
+        &SearchRequest::parse(&json!({"sort": ["n"], "size": 1})).unwrap(),
+    );
+    assert_eq!(
+        (r.total, r.hits[0].score, r.hits[0].sort.clone()),
+        (4, None, vec![json!(1)])
+    );
+}
+
+#[test]
+fn count_matches_total() {
+    let idx = index();
+    let q = parse_query(&json!({"match": {"title": "dog"}})).unwrap();
+    assert_eq!(count(&idx, &q), 2);
+}
+
+#[test]
+fn bad_queries_are_errors() {
+    for q in [
+        json!({"nope": {}}),
+        json!({"match": {}}),
+        json!({"term": 5}),
+        json!({"range": {"n": {"gte": 1, "zzz": 2}}}),
+    ] {
+        assert!(parse_query(&q).is_err(), "{q}");
+    }
+}

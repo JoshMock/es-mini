@@ -5,6 +5,8 @@ edition.workspace = true
 
 [dependencies]
 es-codec.workspace = true
+es-index.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true
