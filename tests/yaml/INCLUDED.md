@@ -1,0 +1,191 @@
+# Vendored YAML REST tests
+
+Source: `elastic/elasticsearch` tag `v9.5.5`, `rest-api-spec/src/yamlRestTest/resources/rest-api-spec/test/`.
+Files are verbatim; regenerate with `scripts/vendor_yaml_tests.py`. Never edit them.
+
+## Included (63)
+
+- `bulk/10_basic.yml` (allowlisted core file; also touches: aliases, data streams)
+- `bulk/20_list_of_strings.yml`
+- `bulk/30_big_string.yml`
+- `bulk/50_refresh.yml`
+- `cluster.health/10_basic.yml` (allowlisted core file; also touches: out-of-scope APIs)
+- `cluster.health/20_request_timeout.yml`
+- `count/10_basic.yml` (allowlisted core file; also touches: out-of-scope search options)
+- `count/20_query_string.yml`
+- `count/40_stats.yml`
+- `create/10_with_id.yml`
+- `create/15_without_id.yml`
+- `delete/10_basic.yml`
+- `delete/11_shard_header.yml`
+- `delete/12_result.yml`
+- `delete/60_missing.yml`
+- `exists/10_basic.yml` (allowlisted core file; also touches: out-of-scope queries)
+- `get/10_basic.yml`
+- `get/15_default_values.yml`
+- `get/50_with_headers.yml`
+- `get/60_realtime_refresh.yml`
+- `get/80_missing.yml`
+- `get_source/15_default_values.yml`
+- `get_source/60_realtime_refresh.yml`
+- `get_source/80_missing.yml`
+- `get_source/85_source_missing.yml`
+- `index/10_with_id.yml`
+- `index/110_array_objects_limit.yml`
+- `index/110_columnar_id.yml`
+- `index/12_result.yml`
+- `index/15_without_id.yml`
+- `index/20_optype.yml`
+- `index/60_refresh.yml`
+- `indices.create/10_basic.yml` (allowlisted core file; also touches: aliases, runtime fields, multi-shard/routing, index modes / synthetic source, analysis config)
+- `indices.create/40_dynamic_strings_auto_keyword.yml`
+- `indices.delete/10_basic.yml` (allowlisted core file; also touches: aliases)
+- `indices.exists/10_basic.yml` (allowlisted core file; also touches: out-of-scope queries)
+- `indices.get/10_basic.yml` (allowlisted core file; also touches: aliases, out-of-scope APIs)
+- `indices.get_mapping/10_basic.yml`
+- `indices.get_mapping/30_missing_index.yml`
+- `indices.get_mapping/60_empty.yml`
+- `indices.get_settings/10_basic.yml` (allowlisted core file; also touches: multi-shard/routing)
+- `indices.get_settings/30_defaults.yml`
+- `indices.put_settings/10_basic.yml` (allowlisted core file; also touches: out-of-scope APIs)
+- `indices.put_settings/11_reset.yml`
+- `indices.put_settings/20_update_non_dynamic_settings.yml`
+- `indices.put_settings/all_path_options.yml`
+- `search/171_term_query.yml`
+- `search/180_locale_dependent_mapping.yml`
+- `search/20_default_values.yml`
+- `search/220_total_hits_object.yml`
+- `search/500_date_range.yml`
+- `search/60_query_string.yml`
+- `search/70_response_filtering.yml`
+- `update/10_doc.yml`
+- `update/110_seq_no_disabled.yml`
+- `update/11_shard_header.yml`
+- `update/12_result.yml`
+- `update/13_legacy_doc.yml`
+- `update/16_noop.yml`
+- `update/20_doc_upsert.yml`
+- `update/22_doc_as_upsert.yml`
+- `update/60_refresh.yml`
+- `update/90_error.yml`
+
+## Excluded (116)
+
+Excluded files exercise features outside the MVP scope (see z_old/PLAN.md).
+
+- `bulk/11_dynamic_templates.yml`: geo, out-of-scope field types, analysis config
+- `bulk/12_noop.yml`: out-of-scope APIs
+- `bulk/40_source.yml`: out-of-scope search options
+- `bulk/60_deprecated.yml`: multi-shard/routing
+- `bulk/80_cas.yml`: external versioning / CAS
+- `bulk/90_pipeline.yml`: ingest pipelines
+- `cluster.health/30_indices_options.yml`: multi-shard/routing, out-of-scope APIs
+- `count/30_min_score.yml`: out-of-scope search options
+- `create/35_external_version.yml`: external versioning / CAS
+- `create/40_routing.yml`: multi-shard/routing, out-of-scope search options
+- `create/60_refresh.yml`: multi-shard/routing
+- `create/70_nested.yml`: nested/join fields
+- `delete/20_cas.yml`: external versioning / CAS
+- `delete/25_external_version.yml`: external versioning / CAS
+- `delete/26_external_gte_version.yml`: external versioning / CAS
+- `delete/30_routing.yml`: multi-shard/routing
+- `delete/50_refresh.yml`: multi-shard/routing, out-of-scope queries
+- `delete/70_tsdb.yml`: out-of-scope APIs, out-of-scope field types, index modes / synthetic source
+- `delete/71_tsdb_synthetic_id_false.yml`: out-of-scope APIs, out-of-scope field types, index modes / synthetic source
+- `delete/72_tsdb_synthetic_id_true.yml`: out-of-scope APIs, out-of-scope field types, index modes / synthetic source
+- `exists/40_routing.yml`: multi-shard/routing, out-of-scope queries
+- `exists/60_realtime_refresh.yml`: out-of-scope queries
+- `exists/70_defaults.yml`: out-of-scope queries
+- `get/100_synthetic_source.yml`: vectors, out-of-scope search options, out-of-scope field types, index modes / synthetic source
+- `get/110_ignore_malformed.yml`: out-of-scope field types
+- `get/120_stored_fields_ignored.yml`: out-of-scope search options, out-of-scope field types
+- `get/130_columnar_source.yml`: out-of-scope queries, out-of-scope search options, index modes / synthetic source
+- `get/20_stored_fields.yml`: out-of-scope search options
+- `get/40_routing.yml`: multi-shard/routing, out-of-scope search options
+- `get/41_routing_doc_values.yml`: multi-shard/routing, out-of-scope APIs, out-of-scope search options
+- `get/70_source_filtering.yml`: out-of-scope search options
+- `get/90_versions.yml`: external versioning / CAS
+- `get_source/10_basic.yml`: ingest pipelines
+- `get_source/40_routing.yml`: multi-shard/routing
+- `get_source/70_source_filtering.yml`: out-of-scope search options
+- `index/100_field_name_length_limit.yml`: out-of-scope search options, index modes / synthetic source
+- `index/30_cas.yml`: external versioning / CAS
+- `index/35_external_version.yml`: external versioning / CAS
+- `index/36_external_gte_version.yml`: external versioning / CAS
+- `index/40_routing.yml`: multi-shard/routing, out-of-scope search options
+- `index/70_require_alias.yml`: aliases, data streams
+- `index/80_date_nanos.yml`: multi-shard/routing, out-of-scope field types
+- `index/90_geo_point.yml`: aggregations, geo, out-of-scope field types
+- `index/91_metrics_no_subobjects.yml`: out-of-scope APIs, out-of-scope field types, index modes / synthetic source, analysis config
+- `indices.create/20_synthetic_source.yml`: nested/join fields, runtime fields, vectors, geo, out-of-scope search options, out-of-scope field types, index modes / synthetic source, analysis config
+- `indices.create/21_synthetic_source_stored.yml`: nested/join fields, geo, out-of-scope field types, index modes / synthetic source
+- `indices.create/30_dynamic_template.yml`: analysis config
+- `indices.delete/20_destructive_wildcard.yml`: out-of-scope APIs
+- `indices.exists/20_read_only_index.yml`: out-of-scope queries
+- `indices.get_mapping/40_aliases.yml`: aliases, analysis config
+- `indices.get_mapping/50_wildcard_expansion.yml`: out-of-scope APIs
+- `indices.get_mapping/70_remote.yml`: remote clusters
+- `indices.get_settings/20_aliases.yml`: aliases, multi-shard/routing
+- `indices.put_settings/40_merge_scheduler.yml`: merge settings
+- `search/100_stored_fields.yml`: out-of-scope search options
+- `search/10_source_filtering.yml`: runtime fields, out-of-scope search options
+- `search/110_field_collapsing.yml`: aliases, scroll/PIT/async, out-of-scope search options, external versioning / CAS, out-of-scope field types
+- `search/111_field_collapsing_with_max_score.yml`: out-of-scope search options
+- `search/112_field_collapsing_with_rescore.yml`: scripting, multi-shard/routing, out-of-scope search options
+- `search/115_multiple_field_collapsing.yml`: out-of-scope search options
+- `search/120_batch_reduce_size.yml`: aggregations, multi-shard/routing, out-of-scope queries
+- `search/140_pre_filter_search_shards.yml`: aggregations, out-of-scope queries, out-of-scope field types
+- `search/150_rewrite_on_coordinator.yml`: multi-shard/routing, out-of-scope APIs, out-of-scope queries
+- `search/160_exists_query.yml`: multi-shard/routing, geo, out-of-scope queries, out-of-scope field types
+- `search/161_exists_query_within_nested_query.yml`: nested/join fields, multi-shard/routing, geo, out-of-scope queries, out-of-scope field types
+- `search/170_terms_query.yml`: out-of-scope queries
+- `search/190_index_prefix_search.yml`: out-of-scope APIs, out-of-scope queries
+- `search/200_ignore_malformed.yml`: out-of-scope queries, out-of-scope search options, out-of-scope field types
+- `search/200_index_phrase_search.yml`: out-of-scope queries
+- `search/210_rescore_explain.yml`: out-of-scope APIs, out-of-scope search options
+- `search/230_interval_query.yml`: out-of-scope queries, analysis config
+- `search/240_date_nanos.yml`: aggregations, multi-shard/routing, out-of-scope search options, out-of-scope field types
+- `search/250_distance_feature.yml`: geo, out-of-scope queries, out-of-scope field types
+- `search/260_parameter_validation.yml`: out-of-scope search options
+- `search/300_sequence_numbers.yml`: out-of-scope search options
+- `search/30_limits.yml`: scripting, scroll/PIT/async, out-of-scope queries, out-of-scope search options
+- `search/310_match_bool_prefix.yml`: out-of-scope queries, analysis config
+- `search/310_sequence_numbers_disabled.yml`: out-of-scope search options
+- `search/320_disallow_queries.yml`: nested/join fields, out-of-scope APIs, out-of-scope queries, analysis config
+- `search/330_fetch_fields.yml`: aliases, nested/join fields, geo, out-of-scope search options, out-of-scope field types, analysis config
+- `search/340_flattened.yml`: aggregations, aliases, out-of-scope APIs, out-of-scope queries, out-of-scope field types, index modes / synthetic source
+- `search/350_binary_field.yml`: out-of-scope search options, out-of-scope field types, index modes / synthetic source
+- `search/350_point_in_time.yml`: multi-shard/routing, scroll/PIT/async, out-of-scope APIs, out-of-scope queries
+- `search/360_combined_fields.yml`: out-of-scope queries
+- `search/370_profile.yml`: aliases, nested/join fields, multi-shard/routing, vectors, remote clusters, out-of-scope search options
+- `search/380_sort_segments_on_timestamp.yml`: multi-shard/routing, out-of-scope APIs
+- `search/390_doc_values_search.yml`: geo, out-of-scope queries, out-of-scope field types
+- `search/390_lookup_fields.yml`: aggregations, runtime fields, out-of-scope queries
+- `search/395_binary_doc_values_search.yml`: out-of-scope queries, out-of-scope field types
+- `search/396_text_doc_values_multiterm_search.yml`: out-of-scope queries
+- `search/397_match_only_text_doc_values_multiterm_search.yml`: out-of-scope queries, out-of-scope field types
+- `search/398_keyword_doc_values_multiterm_search.yml`: out-of-scope queries
+- `search/400_columnar_default_field.yml`: out-of-scope APIs, out-of-scope queries, index modes / synthetic source
+- `search/400_synthetic_source.yml`: out-of-scope queries, index modes / synthetic source
+- `search/40_indices_boost.yml`: aliases, remote clusters, out-of-scope queries, out-of-scope search options
+- `search/410_named_queries.yml`: scripting, out-of-scope queries
+- `search/510_fragment_trimming_fix.yml`: highlighting, analysis config
+- `search/510_range_query_out_of_bounds.yml`: out-of-scope field types
+- `search/520_fetch_fields.yml`: out-of-scope search options
+- `search/530_ignore_above_stored_source.yml`: out-of-scope field types
+- `search/540_ignore_above_synthetic_source.yml`: out-of-scope field types, index modes / synthetic source
+- `search/550_ignore_above_invalid.yml`: out-of-scope queries, out-of-scope field types
+- `search/600_flattened_ignore_above.yml`: out-of-scope field types
+- `search/610_function_score.yml`: out-of-scope queries
+- `search/620_rescore_script.yml`: scripting, out-of-scope APIs, out-of-scope search options
+- `search/630_format_sort_missing_dates.yml`: out-of-scope field types
+- `search/630_ids_query.yml`: aggregations, highlighting, out-of-scope queries
+- `search/80_indices_options.yml`: out-of-scope APIs
+- `search/90_search_after.yml`: scroll/PIT/async, out-of-scope field types
+- `search/95_sort_mixed_numeric_types.yml`: scroll/PIT/async
+- `search/issue4895.yml`: out-of-scope search options
+- `update/100_synthetic_source.yml`: index modes / synthetic source
+- `update/35_if_seq_no.yml`: external versioning / CAS
+- `update/40_routing.yml`: multi-shard/routing, out-of-scope search options
+- `update/80_source_filtering.yml`: multi-shard/routing
+- `update/95_require_alias.yml`: aliases, data streams
