@@ -74,9 +74,13 @@ mod tests {
         for (path, key) in [("/", "tagline"), ("/_cluster/health", "status")] {
             let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
             let req = format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
-            tokio::io::AsyncWriteExt::write_all(&mut stream, req.as_bytes()).await.unwrap();
+            tokio::io::AsyncWriteExt::write_all(&mut stream, req.as_bytes())
+                .await
+                .unwrap();
             let mut resp = String::new();
-            tokio::io::AsyncReadExt::read_to_string(&mut stream, &mut resp).await.unwrap();
+            tokio::io::AsyncReadExt::read_to_string(&mut stream, &mut resp)
+                .await
+                .unwrap();
             assert!(resp.starts_with("HTTP/1.1 200"), "{path}: {resp}");
             assert!(resp.contains(&format!("\"{key}\"")), "{path}: {resp}");
         }

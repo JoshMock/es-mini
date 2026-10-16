@@ -46,7 +46,8 @@ impl Index {
     pub fn put(&mut self, id: &str, source: Value) -> (u64, bool) {
         let version = self.docs.get(id).map_or(1, |d| d.version + 1);
         let created = version == 1;
-        self.docs.insert(id.to_owned(), Document { source, version });
+        self.docs
+            .insert(id.to_owned(), Document { source, version });
         (version, created)
     }
 
@@ -84,7 +85,10 @@ mod tests {
 
     #[test]
     fn empty_mappings_serialize_as_empty_object() {
-        assert_eq!(serde_json::to_value(Mappings::default()).unwrap(), json!({}));
+        assert_eq!(
+            serde_json::to_value(Mappings::default()).unwrap(),
+            json!({})
+        );
     }
 
     #[test]
