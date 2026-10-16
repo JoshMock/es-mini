@@ -1,0 +1,120 @@
+# Known-failing YAML tests. Fix one, then delete its line.
+bulk/10_basic.yml/Empty _id
+bulk/10_basic.yml/Empty _id with op_type create
+bulk/10_basic.yml/Return item-level error when no write index defined for an alias
+bulk/10_basic.yml/When setting require_alias flag
+bulk/10_basic.yml/When setting require_alias flag per request
+bulk/10_basic.yml/empty action
+cluster.health/10_basic.yml/cluster health levels
+count/10_basic.yml/count body without query element
+count/10_basic.yml/count with body
+count/10_basic.yml/count with empty body
+count/10_basic.yml/test negative terminate_after throws IAE
+count/20_query_string.yml/count with query_string parameters
+count/40_stats.yml/count with stats parameter (multiple comma-separated values)
+count/40_stats.yml/count with stats parameter (single value)
+count/40_stats.yml/count with stats parameter and query
+count/40_stats.yml/count with stats parameter and query string
+create/15_without_id.yml/Create without ID
+get/60_realtime_refresh.yml/Realtime Refresh
+get_source/15_default_values.yml/Default values
+get_source/60_realtime_refresh.yml/Realtime
+index/10_with_id.yml/Index with ID
+index/110_array_objects_limit.yml/Test array objects limit accepts documents at or below the limit
+index/110_array_objects_limit.yml/Test array objects limit applies in bulk and only fails offending docs
+index/110_array_objects_limit.yml/Test array objects limit can be updated dynamically
+index/110_array_objects_limit.yml/Test array objects limit counts cumulatively across sibling arrays
+index/110_array_objects_limit.yml/Test array objects limit rejects documents above the limit
+index/110_array_objects_limit.yml/Test array objects limit rejects non-positive values
+index/110_columnar_id.yml/Index with ID and columnar _id mode
+index/110_columnar_id.yml/Search with columnar _id mode
+index/60_refresh.yml/Refresh
+index/60_refresh.yml/When refresh url parameter is an empty string that means "refresh immediately"
+index/60_refresh.yml/refresh=wait_for waits until changes are visible in search
+indices.create/10_basic.yml/Create index with aliases
+indices.create/10_basic.yml/Create index with invalid field type
+indices.create/10_basic.yml/Create index with invalid mappings
+indices.create/10_basic.yml/Create index with invalid multi-field type
+indices.create/10_basic.yml/Create index with invalid runtime field type
+indices.create/10_basic.yml/Create index with write aliases
+indices.create/10_basic.yml/Create index without soft deletes
+indices.create/10_basic.yml/Create with alias containing date math
+indices.create/10_basic.yml/Throw exception for unsupported value type
+indices.create/40_dynamic_strings_auto_keyword.yml/Dynamic string defaults to text with keyword subfield
+indices.create/40_dynamic_strings_auto_keyword.yml/Dynamic string with auto text later disabled omits text subfield
+indices.create/40_dynamic_strings_auto_keyword.yml/Dynamic string without auto text omits text field
+indices.delete/10_basic.yml/Delete index against alias
+indices.delete/10_basic.yml/Delete index against alias -  ignore unavailable - multiple indices
+indices.delete/10_basic.yml/Delete index against alias -  multiple indices
+indices.delete/10_basic.yml/Delete index against alias - ignore unavailable
+indices.delete/10_basic.yml/Delete index against wildcard matching alias
+indices.delete/10_basic.yml/Delete index against wildcard matching alias - disallow no indices
+indices.delete/10_basic.yml/Delete index against wildcard matching alias - disallow no indices - multiple indices
+indices.delete/10_basic.yml/Delete index against wildcard matching alias - multiple indices
+indices.get/10_basic.yml/Get index infos
+indices.get/10_basic.yml/Get index infos by default shouldn't return index creation date and version in readable format
+indices.get/10_basic.yml/Get index infos should work for wildcards
+indices.get/10_basic.yml/Get index infos with human settings should return index creation date and version in readable format
+indices.get/10_basic.yml/Missing index should return empty object if ignore_unavailable
+indices.get/10_basic.yml/Missing index should throw an Error
+indices.get/10_basic.yml/Should return an exception when querying invalid indices
+indices.get/10_basic.yml/Should return empty object if allow_no_indices
+indices.get/10_basic.yml/Should return only selected features
+indices.get/10_basic.yml/Should return test_index_2 and test_index_3 if expand_wildcards=open,closed
+indices.get/10_basic.yml/Should return test_index_2 if expand_wildcards=open
+indices.get/10_basic.yml/Should return test_index_3 if expand_wildcards=closed
+indices.get/10_basic.yml/Should throw error if allow_no_indices=false
+indices.get_mapping/10_basic.yml/Get /*/_mapping
+indices.get_mapping/10_basic.yml/Get /_all/_mapping
+indices.get_mapping/10_basic.yml/Get /_mapping
+indices.get_mapping/10_basic.yml/Get /index*/_mapping/
+indices.get_mapping/10_basic.yml/Get /index,index/_mapping
+indices.get_mapping/30_missing_index.yml/Index missing, ignore_unavailable=true
+indices.get_mapping/60_empty.yml/Check empty mapping when getting all mappings via /_mapping
+indices.get_settings/10_basic.yml/Get /*/_settings/{name}
+indices.get_settings/10_basic.yml/Get /_all/_settings/{name}
+indices.get_settings/10_basic.yml/Get /_settings
+indices.get_settings/10_basic.yml/Get /_settings with local flag
+indices.get_settings/10_basic.yml/Get /_settings/{name}
+indices.get_settings/10_basic.yml/Get /index*/_settings/{name}
+indices.get_settings/10_basic.yml/Get /index,index/_settings/{name}
+indices.get_settings/10_basic.yml/Get /{index}/_settings/*
+indices.get_settings/10_basic.yml/Get /{index}/_settings/_all
+indices.get_settings/10_basic.yml/Get /{index}/_settings/{name*}
+indices.get_settings/10_basic.yml/Get /{index}/_settings/{name,name}
+indices.get_settings/10_basic.yml/Get /{index}/_settings/{name}
+indices.get_settings/30_defaults.yml/Test retrieval of default settings
+indices.put_settings/10_basic.yml/Test indices settings
+indices.put_settings/10_basic.yml/Test indices settings allow_no_indices
+indices.put_settings/10_basic.yml/Test indices settings ignore_unavailable
+indices.put_settings/10_basic.yml/Test preserve_existing settings
+indices.put_settings/10_basic.yml/put unsupported setting
+indices.put_settings/11_reset.yml/Test reset index settings
+indices.put_settings/20_update_non_dynamic_settings.yml/Test update non dynamic settings
+indices.put_settings/all_path_options.yml/put settings in * index
+indices.put_settings/all_path_options.yml/put settings in _all index
+indices.put_settings/all_path_options.yml/put settings in blank index
+indices.put_settings/all_path_options.yml/put settings in prefix* index
+indices.put_settings/all_path_options.yml/put settings per index
+search/171_term_query.yml/case insensitive term query on blank keyword is consistent
+search/180_locale_dependent_mapping.yml/Test Index and Search locale dependent mappings / dates
+search/20_default_values.yml/Basic search
+search/20_default_values.yml/Search body without query element
+search/20_default_values.yml/Search with new response format
+search/220_total_hits_object.yml/hits.total as an object
+search/220_total_hits_object.yml/track_total_hits with rest_total_hits_as_int
+search/500_date_range.yml/test bad dates in range - future
+search/500_date_range.yml/test bad dates in range - past
+search/500_date_range.yml/test match query gte and lt for single result with year uuuu
+search/500_date_range.yml/test match query gte and lte with year uuuu
+search/500_date_range.yml/test match query with year uuuu
+search/500_date_range.yml/test range query for all docs with year uuuu
+search/60_query_string.yml/search with query_string parameters
+search/70_response_filtering.yml/Search results filtered using both includes and excludes filters
+search/70_response_filtering.yml/Search with response filtering
+update/12_result.yml/Update result field
+update/16_noop.yml/Noop
+update/60_refresh.yml/Refresh
+update/60_refresh.yml/When refresh url parameter is an empty string that means "refresh immediately"
+update/60_refresh.yml/refresh=wait_for waits until changes are visible in search
+update/90_error.yml/Misspelled fields get "did you mean"
