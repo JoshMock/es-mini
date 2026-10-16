@@ -26,6 +26,89 @@ pub struct Mappings {
     pub properties: BTreeMap<String, FieldMapping>,
 }
 
+/// Index settings stored the way ES normalizes them: flat `index.*` keys with string values.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Settings(BTreeMap<String, String>);
+
+const DEFAULT_SETTINGS: [(&str, &str); 2] = [
+    ("index.number_of_shards", "1"),
+    ("index.number_of_replicas", "1"),
+];
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self(
+            DEFAULT_SETTINGS
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        )
+    }
+}
+
+impl Settings {
+    /// Merges user-supplied settings (nested or dotted keys, `index.` prefix optional).
+    /// A `null` value resets the key to its default.
+    pub fn merge(&mut self, json: &Value) {
+        let mut flat = Vec::new();
+        flatten("", json, &mut flat);
+        for (key, value) in flat {
+            let key = if key.starts_with("index.") {
+                key
+            } else {
+                format!("index.{key}")
+            };
+            match value {
+                Value::Null => match DEFAULT_SETTINGS.iter().find(|(k, _)| *k == key) {
+                    Some((_, v)) => self.0.insert(key, v.to_string()),
+                    None => self.0.remove(&key),
+                },
+                Value::String(v) => self.0.insert(key, v.clone()),
+                v => self.0.insert(key, v.to_string()),
+            };
+        }
+    }
+
+    /// Renders as nested JSON, e.g. `{"index": {"number_of_shards": "1"}}`.
+    pub fn to_json(&self) -> Value {
+        let mut out = Value::Object(Default::default());
+        for (key, value) in &self.0 {
+            let mut node = &mut out;
+            for part in key.split('.') {
+                // ponytail: a leaf that is also a branch (`a` and `a.b`) loses the leaf; ES rejects this
+                if !node.is_object() {
+                    *node = Value::Object(Default::default());
+                }
+                let Value::Object(map) = node else {
+                    unreachable!()
+                };
+                node = map
+                    .entry(part)
+                    .or_insert_with(|| Value::Object(Default::default()));
+            }
+            *node = Value::String(value.clone());
+        }
+        out
+    }
+}
+
+fn flatten<'a>(prefix: &str, json: &'a Value, out: &mut Vec<(String, &'a Value)>) {
+    match json {
+        Value::Object(map) => {
+            for (k, v) in map {
+                let key = if prefix.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{prefix}.{k}")
+                };
+                flatten(&key, v, out);
+            }
+        }
+        // ponytail: arrays are stringified, not expanded like ES's list settings
+        v => out.push((prefix.to_owned(), v)),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Document {
     pub source: Value,
@@ -34,8 +117,7 @@ pub struct Document {
 
 #[derive(Debug, Default)]
 pub struct Index {
-    // ponytail: settings kept as raw JSON until something needs typed access
-    pub settings: Value,
+    pub settings: Settings,
     pub mappings: Mappings,
     docs: HashMap<String, Document>,
 }
@@ -96,6 +178,36 @@ mod tests {
         let r: Result<Mappings, _> =
             serde_json::from_value(json!({"properties": {"x": {"type": "nope"}}}));
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn settings_are_flattened_prefixed_and_stringified() {
+        let mut s = Settings::default();
+        s.merge(
+            &json!({"number_of_shards": 3, "index": {"refresh_interval": "1s"}, "index.foo": true}),
+        );
+        assert_eq!(
+            s.to_json(),
+            json!({"index": {"number_of_shards": "3", "number_of_replicas": "1", "refresh_interval": "1s", "foo": "true"}})
+        );
+    }
+
+    #[test]
+    fn null_setting_resets_to_default() {
+        let mut s = Settings::default();
+        s.merge(&json!({"index.number_of_replicas": 0, "index.foo": "x"}));
+        s.merge(&json!({"index.number_of_replicas": null, "index.foo": null}));
+        assert_eq!(
+            s.to_json(),
+            json!({"index": {"number_of_shards": "1", "number_of_replicas": "1"}})
+        );
+    }
+
+    #[test]
+    fn leaf_and_branch_on_same_key_does_not_panic() {
+        let mut s = Settings::default();
+        s.merge(&json!({"a": "x", "a.b": "y"}));
+        assert_eq!(s.to_json()["index"]["a"]["b"], "y");
     }
 
     #[test]
