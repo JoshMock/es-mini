@@ -1,5 +1,7 @@
 //! Index/document model, mappings, analysis, storage glue.
 
+pub mod analysis;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
