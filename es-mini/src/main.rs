@@ -9,15 +9,14 @@ async fn info() -> Json<Value> {
         "cluster_name": CLUSTER_NAME,
         "cluster_uuid": "_na_",
         "version": {
-            // ponytail: placeholder until COMPATIBILITY.md pins the exact ES 9.x / Lucene 10 versions
-            "number": "9.0.0",
+            "number": "9.5.5",
             "build_flavor": "default",
             "build_type": "es-mini",
             "build_hash": "unknown",
             "build_date": "1970-01-01T00:00:00.000Z",
             "build_snapshot": false,
-            "lucene_version": "10.0.0",
-            "minimum_wire_compatibility_version": "8.18.0",
+            "lucene_version": "10.5.1",
+            "minimum_wire_compatibility_version": "8.19.0",
             "minimum_index_compatibility_version": "8.0.0"
         },
         "tagline": "You Know, for Search"
