@@ -4,7 +4,11 @@ use axum::{
     body::Bytes,
     extract::{Path, State},
 };
-use es_query::{SearchRequest, parse_query};
+use es_query::{
+    SearchRequest,
+    esql::{self, EsqlError},
+    parse_query,
+};
 use serde_json::{Value, json};
 use std::time::Instant;
 
@@ -61,4 +65,22 @@ pub async fn count(
     Ok(Json(
         json!({"count": es_query::count(index, &query), "_shards": shards()}),
     ))
+}
+
+pub async fn esql(State(state): State<AppState>, body: Bytes) -> Result<Json<Value>, AppError> {
+    let start = Instant::now();
+    let body = parse_body(&body)?;
+    let query = body["query"]
+        .as_str()
+        .ok_or_else(|| AppError::ParsingException("[query] is required".into()))?;
+    let r = esql::run(&state.read().expect("lock poisoned"), query).map_err(|e| match e {
+        EsqlError::Parse(m) => AppError::ParsingException(m),
+        EsqlError::Verification(m) => AppError::Verification(m),
+    })?;
+    Ok(Json(json!({
+        "took": start.elapsed().as_millis() as u64,
+        "is_partial": false,
+        "columns": r.columns,
+        "values": r.values,
+    })))
 }

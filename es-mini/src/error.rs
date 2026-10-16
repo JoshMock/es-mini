@@ -17,6 +17,7 @@ pub enum AppError {
     ActionRequestValidation(String),
     IllegalArgument(String),
     ParsingException(String),
+    Verification(String),
 }
 
 impl AppError {
@@ -63,6 +64,7 @@ impl AppError {
                 None,
             ),
             Self::ParsingException(r) => (StatusCode::BAD_REQUEST, "parsing_exception", r, None),
+            Self::Verification(r) => (StatusCode::BAD_REQUEST, "verification_exception", r, None),
             Self::IllegalArgument(r) => (
                 StatusCode::BAD_REQUEST,
                 "illegal_argument_exception",

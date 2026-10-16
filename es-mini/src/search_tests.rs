@@ -120,3 +120,43 @@ async fn errors() {
     .await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn esql_query() {
+    let app = seeded().await;
+    let body = json!({"query": "FROM idx | WHERE n >= 2 | SORT n | KEEP t, n"});
+    let (s, r) = call(&app, Method::POST, "/_query", Some(body)).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(
+        r["columns"],
+        json!([{"name": "t", "type": "text"}, {"name": "n", "type": "long"}])
+    );
+    assert_eq!(r["values"], json!([["red apple", 2], ["pear", 3]]));
+    assert_eq!(r["is_partial"], false);
+    assert!(r["took"].is_u64());
+
+    let (s, r) = call(
+        &app,
+        Method::POST,
+        "/_query",
+        Some(json!({"query": "FROM idx | BOGUS"})),
+    )
+    .await;
+    assert_eq!(
+        (s, &r["error"]["type"]),
+        (StatusCode::BAD_REQUEST, &json!("parsing_exception"))
+    );
+    let (s, r) = call(
+        &app,
+        Method::POST,
+        "/_query",
+        Some(json!({"query": "FROM idx | KEEP zz"})),
+    )
+    .await;
+    assert_eq!(
+        (s, &r["error"]["type"]),
+        (StatusCode::BAD_REQUEST, &json!("verification_exception"))
+    );
+    let (s, _) = call(&app, Method::POST, "/_query", Some(json!({}))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+}

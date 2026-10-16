@@ -74,6 +74,7 @@ fn app() -> Router {
             put(indices::put_settings).get(indices::get_settings),
         )
         .route("/{index}/_mapping", get(indices::get_mapping))
+        .route("/_query", post(search::esql))
         .route("/_bulk", post(bulk::bulk).put(bulk::bulk))
         .route(
             "/{index}/_bulk",
