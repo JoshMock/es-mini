@@ -1,0 +1,12 @@
+{
+  "name": "es-mini-ralph",
+  "private": true,
+  "type": "module",
+  "description": "Ralph loop: fix one known-failing test per agent iteration.",
+  "scripts": {
+    "ralph": "node ralph.ts"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "1.2.0"
+  }
+}
