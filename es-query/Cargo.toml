@@ -1,0 +1,7 @@
+[package]
+name = "es-query"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+es-codec.workspace = true

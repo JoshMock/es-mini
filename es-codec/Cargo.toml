@@ -1,0 +1,4 @@
+[package]
+name = "es-codec"
+version.workspace = true
+edition.workspace = true

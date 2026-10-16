@@ -1,0 +1,18 @@
+[workspace]
+resolver = "3"
+members = ["es-mini", "es-codec", "es-query", "es-index"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+es-codec = { path = "es-codec" }
+es-index = { path = "es-index" }
+es-query = { path = "es-query" }
+axum = "0.8"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"

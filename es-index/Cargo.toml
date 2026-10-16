@@ -1,0 +1,7 @@
+[package]
+name = "es-index"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+es-codec.workspace = true
