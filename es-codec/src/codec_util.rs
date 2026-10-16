@@ -1,0 +1,110 @@
+//! Lucene `CodecUtil`: file headers and checksummed footers.
+
+use crate::{Result, err, input::DataInput};
+
+pub const CODEC_MAGIC: i32 = 0x3fd7_6c17;
+pub const FOOTER_MAGIC: i32 = !CODEC_MAGIC;
+pub const FOOTER_LEN: usize = 16;
+pub const ID_LEN: usize = 16;
+
+/// Reads `magic, codec name, version` and returns the version.
+pub fn check_header(input: &mut DataInput, codec: &str, min: i32, max: i32) -> Result<i32> {
+    let magic = input.read_be_int()?;
+    if magic != CODEC_MAGIC {
+        return err(format!("bad codec magic {magic:#x}"));
+    }
+    check_header_no_magic(input, codec, min, max)
+}
+
+pub fn check_header_no_magic(
+    input: &mut DataInput,
+    codec: &str,
+    min: i32,
+    max: i32,
+) -> Result<i32> {
+    let actual = input.read_string()?;
+    if actual != codec {
+        return err(format!("codec mismatch: expected {codec}, got {actual}"));
+    }
+    let version = input.read_be_int()?;
+    if !(min..=max).contains(&version) {
+        return err(format!(
+            "unsupported {codec} version {version} (supported {min}..={max})"
+        ));
+    }
+    Ok(version)
+}
+
+/// A header plus the segment id and suffix that tie a file to its segment.
+pub fn check_index_header(
+    input: &mut DataInput,
+    codec: &str,
+    min: i32,
+    max: i32,
+    id: &[u8; ID_LEN],
+    suffix: &str,
+) -> Result<i32> {
+    let version = check_header(input, codec, min, max)?;
+    check_index_header_id(input, id)?;
+    check_index_header_suffix(input, suffix)?;
+    Ok(version)
+}
+
+pub fn check_index_header_id(input: &mut DataInput, id: &[u8; ID_LEN]) -> Result<()> {
+    if input.read_bytes(ID_LEN)? != id {
+        return err("segment id mismatch");
+    }
+    Ok(())
+}
+
+pub fn check_index_header_suffix(input: &mut DataInput, suffix: &str) -> Result<()> {
+    let n = input.read_byte()? as usize;
+    if input.read_bytes(n)? != suffix.as_bytes() {
+        return err(format!("header suffix mismatch: expected {suffix}"));
+    }
+    Ok(())
+}
+
+/// Validates the footer magic, algorithm id, and CRC32 of everything before the checksum.
+pub fn check_footer(file: &[u8]) -> Result<()> {
+    let Some(start) = file.len().checked_sub(FOOTER_LEN) else {
+        return err("file too short for a footer");
+    };
+    let mut f = DataInput::new(&file[start..]);
+    if f.read_be_int()? != FOOTER_MAGIC {
+        return err("bad footer magic");
+    }
+    let algorithm = f.read_be_int()?;
+    if algorithm != 0 {
+        return err(format!("unknown checksum algorithm {algorithm}"));
+    }
+    let expected = f.read_be_long()?;
+    let actual = crc32(&file[..file.len() - 8]) as i64;
+    if expected != actual {
+        return err(format!(
+            "checksum mismatch: expected {expected:#x}, got {actual:#x}"
+        ));
+    }
+    Ok(())
+}
+
+/// CRC-32 (IEEE), as java.util.zip.CRC32.
+pub fn crc32(data: &[u8]) -> u32 {
+    // ponytail: bitwise CRC, about 8x slower than a table; fine for checksumming at open
+    let mut crc = !0u32;
+    for &b in data {
+        crc ^= b as u32;
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ (0xedb8_8320 & (crc & 1).wrapping_neg());
+        }
+    }
+    !crc
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn crc32_matches_java() {
+        assert_eq!(super::crc32(b"123456789"), 0xcbf4_3926);
+    }
+}
