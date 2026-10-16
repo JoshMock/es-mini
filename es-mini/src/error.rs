@@ -16,6 +16,7 @@ pub enum AppError {
     DocumentMissing(String),
     ActionRequestValidation(String),
     IllegalArgument(String),
+    ParsingException(String),
 }
 
 impl AppError {
@@ -61,6 +62,7 @@ impl AppError {
                 format!("Validation Failed: 1: {r};"),
                 None,
             ),
+            Self::ParsingException(r) => (StatusCode::BAD_REQUEST, "parsing_exception", r, None),
             Self::IllegalArgument(r) => (
                 StatusCode::BAD_REQUEST,
                 "illegal_argument_exception",

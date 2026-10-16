@@ -2,6 +2,7 @@ mod bulk;
 mod docs;
 mod error;
 mod indices;
+mod search;
 
 use axum::{
     Json, Router,
@@ -78,6 +79,8 @@ fn app() -> Router {
             "/{index}/_bulk",
             post(bulk::bulk_index).put(bulk::bulk_index),
         )
+        .route("/{index}/_search", get(search::search).post(search::search))
+        .route("/{index}/_count", get(search::count).post(search::count))
         .route("/{index}/_doc", post(docs::index_auto_id))
         .route(
             "/{index}/_doc/{id}",
@@ -113,6 +116,9 @@ mod docs_tests;
 
 #[cfg(test)]
 mod bulk_tests;
+
+#[cfg(test)]
+mod search_tests;
 
 #[cfg(test)]
 mod tests {

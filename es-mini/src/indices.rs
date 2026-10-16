@@ -9,7 +9,7 @@ use es_index::{Index, Mappings};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-fn parse_body(body: &Bytes) -> Result<Value, AppError> {
+pub fn parse_body(body: &Bytes) -> Result<Value, AppError> {
     if body.is_empty() {
         return Ok(json!({}));
     }
