@@ -46,6 +46,12 @@ pub async fn create(
             "Failed to parse value [{l}] for setting [index.mapping.array_objects.limit] must be >= 1"
         )));
     }
+    if index.settings.get("index.soft_deletes.enabled") == Some("false") {
+        return Err(AppError::IllegalArgument(
+            "Creating indices with soft-deletes disabled is no longer supported. Please do not specify a value for setting [index.soft_deletes.enabled]."
+                .into(),
+        ));
+    }
     if !body["mappings"].is_null() {
         for (field, spec) in body["mappings"]["properties"]
             .as_object()
