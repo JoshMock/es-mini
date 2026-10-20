@@ -295,6 +295,7 @@ pub async fn update(State(state): State<AppState>, body: Bytes) -> Result<Json<V
         .map(|(n, i)| (n.clone(), i.aliases.clone()))
         .collect();
     let mut drop = BTreeSet::new();
+    let mut added = Vec::new();
     for action in actions {
         let Some((kind, a)) = action
             .as_object()
@@ -323,12 +324,12 @@ pub async fn update(State(state): State<AppState>, body: Bytes) -> Result<Json<V
                 }
                 let meta = parse_alias(&meta)?;
                 for alias in names_of(a, "alias", "aliases") {
-                    check_alias_name(&indices, &alias)?;
                     for t in &targets {
                         tables
                             .get_mut(t)
                             .map(|m| m.insert(alias.clone(), meta.clone()));
                     }
+                    added.push(alias);
                 }
             }
             "remove" => {
@@ -352,6 +353,12 @@ pub async fn update(State(state): State<AppState>, body: Bytes) -> Result<Json<V
                     "unknown alias action [{other}]"
                 )));
             }
+        }
+    }
+    // Checked after the loop so a later remove_index may free the name.
+    for alias in &added {
+        if !drop.contains(alias) {
+            check_alias_name(&indices, alias)?;
         }
     }
     for (name, table) in tables {
