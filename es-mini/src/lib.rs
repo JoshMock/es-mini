@@ -8,10 +8,12 @@ mod search;
 
 use axum::{
     Json, Router,
+    extract::{Query, State},
     routing::{get, post, put},
 };
 use es_index::Indices;
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 // ponytail: one global lock over all indices; per-index locks if write contention shows up
@@ -39,8 +41,12 @@ async fn info() -> Json<Value> {
     }))
 }
 
-async fn health() -> Json<Value> {
-    Json(json!({
+async fn health(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Json<Value> {
+    let level = params.get("level").map(String::as_str);
+    let mut body = json!({
         "cluster_name": CLUSTER_NAME,
         "status": "green",
         "timed_out": false,
@@ -57,7 +63,45 @@ async fn health() -> Json<Value> {
         "number_of_in_flight_fetch": 0,
         "task_max_waiting_in_queue_millis": 0,
         "active_shards_percent_as_number": 100.0
-    }))
+    });
+    if matches!(level, Some("indices" | "shards")) {
+        let shards = level == Some("shards");
+        let indices: serde_json::Map<String, Value> = state
+            .read()
+            .expect("lock poisoned")
+            .keys()
+            .map(|name| (name.clone(), index_health(shards)))
+            .collect();
+        body["indices"] = Value::Object(indices);
+    }
+    Json(body)
+}
+
+// ponytail: every index is one green primary shard, no replicas
+fn index_health(shards: bool) -> Value {
+    let mut h = json!({
+        "status": "green",
+        "number_of_shards": 1,
+        "number_of_replicas": 0,
+        "active_primary_shards": 1,
+        "active_shards": 1,
+        "relocating_shards": 0,
+        "initializing_shards": 0,
+        "unassigned_shards": 0,
+        "unassigned_primary_shards": 0
+    });
+    if shards {
+        h["shards"] = json!({"0": {
+            "status": "green",
+            "primary_active": true,
+            "active_shards": 1,
+            "relocating_shards": 0,
+            "initializing_shards": 0,
+            "unassigned_shards": 0,
+            "unassigned_primary_shards": 0
+        }});
+    }
+    h
 }
 
 /// The full HTTP API over a fresh, empty in-memory store.
