@@ -163,3 +163,15 @@ fn from_aliases_and_multiple_sources_with_filters() {
         Err(EsqlError::Verification(_))
     ));
 }
+
+#[test]
+fn text_with_keyword_subfield_keeps_both_columns() {
+    let mut i = Index::default();
+    i.map_dynamic(&json!({"t": "Hello"}));
+    i.put("1", json!({"t": "Hello"}));
+    let all = BTreeMap::from([("idx".to_owned(), i)]);
+    let r = run(&all, "FROM idx | KEEP t, t.keyword").unwrap();
+    let types: Vec<&str> = r.columns.iter().map(|c| c.r#type.as_str()).collect();
+    assert_eq!(types, ["text", "keyword"]);
+    assert_eq!(r.values, vec![vec![json!("Hello"), json!("Hello")]]);
+}

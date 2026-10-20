@@ -333,6 +333,12 @@ fn columns(index: &Index) -> BTreeMap<String, String> {
         };
         cols.insert(name.clone(), t.to_owned());
         cols.remove(&format!("{name}.keyword"));
+        // ponytail: dynamic strings only ever get a keyword multi-field
+        if let FieldMapping::TextKeyword { fields } = m {
+            for sub in fields.keys() {
+                cols.insert(format!("{name}.{sub}"), "keyword".to_owned());
+            }
+        }
     }
     cols
 }
