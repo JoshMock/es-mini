@@ -1,6 +1,4 @@
 # Known-failing YAML tests. Fix one, then delete its line.
-get_source/15_default_values.yml/Default values
-get_source/60_realtime_refresh.yml/Realtime
 index/10_with_id.yml/Index with ID
 index/110_array_objects_limit.yml/Test array objects limit accepts documents at or below the limit
 index/110_array_objects_limit.yml/Test array objects limit applies in bulk and only fails offending docs
@@ -12,6 +10,7 @@ index/110_columnar_id.yml/Index with ID and columnar _id mode
 index/60_refresh.yml/Refresh
 index/60_refresh.yml/When refresh url parameter is an empty string that means "refresh immediately"
 index/60_refresh.yml/refresh=wait_for waits until changes are visible in search
+index/70_require_alias.yml/Set require_alias flag
 indices.create/10_basic.yml/Create index with invalid field type
 indices.create/10_basic.yml/Create index with invalid mappings
 indices.create/10_basic.yml/Create index with invalid multi-field type
@@ -30,19 +29,12 @@ indices.delete/10_basic.yml/Delete index against wildcard matching alias
 indices.delete/10_basic.yml/Delete index against wildcard matching alias - disallow no indices
 indices.delete/10_basic.yml/Delete index against wildcard matching alias - disallow no indices - multiple indices
 indices.delete/10_basic.yml/Delete index against wildcard matching alias - multiple indices
-indices.get/10_basic.yml/Get index infos
-indices.get/10_basic.yml/Get index infos by default shouldn't return index creation date and version in readable format
-indices.get/10_basic.yml/Get index infos should work for wildcards
-indices.get/10_basic.yml/Get index infos with human settings should return index creation date and version in readable format
-indices.get/10_basic.yml/Missing index should return empty object if ignore_unavailable
-indices.get/10_basic.yml/Missing index should throw an Error
-indices.get/10_basic.yml/Should return an exception when querying invalid indices
-indices.get/10_basic.yml/Should return empty object if allow_no_indices
-indices.get/10_basic.yml/Should return only selected features
-indices.get/10_basic.yml/Should return test_index_2 and test_index_3 if expand_wildcards=open,closed
-indices.get/10_basic.yml/Should return test_index_2 if expand_wildcards=open
-indices.get/10_basic.yml/Should return test_index_3 if expand_wildcards=closed
-indices.get/10_basic.yml/Should throw error if allow_no_indices=false
+indices.get_alias/30_wildcards.yml/Exclusion of non wildcarded aliases
+indices.get_alias/30_wildcards.yml/Get aliases and wildcard exclusion
+indices.get_alias/30_wildcards.yml/Get aliases wildcard and simple exclusion
+indices.get_alias/30_wildcards.yml/Missing exclusions does not fire 404
+indices.get_alias/30_wildcards.yml/Non-existent exclusion alias before wildcard returns 404
+indices.get_alias/30_wildcards.yml/Wildcard exclusions does not trigger 404
 indices.get_mapping/10_basic.yml/Get /*/_mapping
 indices.get_mapping/10_basic.yml/Get /_all/_mapping
 indices.get_mapping/10_basic.yml/Get /_mapping
@@ -75,6 +67,11 @@ indices.put_settings/all_path_options.yml/put settings in _all index
 indices.put_settings/all_path_options.yml/put settings in blank index
 indices.put_settings/all_path_options.yml/put settings in prefix* index
 indices.put_settings/all_path_options.yml/put settings per index
+indices.update_aliases/30_remove_index_and_replace_with_alias.yml/Remove an index and replace it with an alias
+indices.update_aliases/40_must_exist.yml/Alias must_exist only on remove
+indices.update_aliases/40_must_exist.yml/Partial success with must_exist == false
+indices.update_aliases/40_must_exist.yml/Partial success with must_exist == null (default)
+indices.update_aliases/40_must_exist.yml/Single result per input action
 search/171_term_query.yml/case insensitive term query on blank keyword is consistent
 search/180_locale_dependent_mapping.yml/Test Index and Search locale dependent mappings / dates
 search/20_default_values.yml/Basic search
@@ -97,3 +94,4 @@ update/60_refresh.yml/Refresh
 update/60_refresh.yml/When refresh url parameter is an empty string that means "refresh immediately"
 update/60_refresh.yml/refresh=wait_for waits until changes are visible in search
 update/90_error.yml/Misspelled fields get "did you mean"
+update/95_require_alias.yml/Set require_alias flag

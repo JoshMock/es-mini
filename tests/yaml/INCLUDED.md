@@ -3,9 +3,9 @@
 Source: `elastic/elasticsearch` tag `v9.5.5`, `rest-api-spec/src/yamlRestTest/resources/rest-api-spec/test/`.
 Files are verbatim; regenerate with `scripts/vendor_yaml_tests.py`. Never edit them.
 
-## Included (63)
+## Included (71)
 
-- `bulk/10_basic.yml` (allowlisted core file; also touches: aliases, data streams)
+- `bulk/10_basic.yml`
 - `bulk/20_list_of_strings.yml`
 - `bulk/30_big_string.yml`
 - `bulk/50_refresh.yml`
@@ -37,11 +37,12 @@ Files are verbatim; regenerate with `scripts/vendor_yaml_tests.py`. Never edit t
 - `index/15_without_id.yml`
 - `index/20_optype.yml`
 - `index/60_refresh.yml`
-- `indices.create/10_basic.yml` (allowlisted core file; also touches: aliases, runtime fields, multi-shard/routing, index modes / synthetic source, analysis config)
+- `index/70_require_alias.yml`
+- `indices.create/10_basic.yml` (allowlisted core file; also touches: runtime fields, multi-shard/routing, index modes / synthetic source, analysis config)
 - `indices.create/40_dynamic_strings_auto_keyword.yml`
-- `indices.delete/10_basic.yml` (allowlisted core file; also touches: aliases)
+- `indices.delete/10_basic.yml`
 - `indices.exists/10_basic.yml` (allowlisted core file; also touches: out-of-scope queries)
-- `indices.get/10_basic.yml` (allowlisted core file; also touches: aliases, out-of-scope APIs)
+- `indices.get/10_basic.yml` (allowlisted core file; also touches: out-of-scope APIs)
 - `indices.get_mapping/10_basic.yml`
 - `indices.get_mapping/30_missing_index.yml`
 - `indices.get_mapping/60_empty.yml`
@@ -68,8 +69,15 @@ Files are verbatim; regenerate with `scripts/vendor_yaml_tests.py`. Never edit t
 - `update/22_doc_as_upsert.yml`
 - `update/60_refresh.yml`
 - `update/90_error.yml`
+- `update/95_require_alias.yml`
+- `indices.put_alias/all_path_options.yml`
+- `indices.get_alias/20_empty.yml`
+- `indices.get_alias/30_wildcards.yml`
+- `indices.exists_alias/10_basic.yml`
+- `indices.update_aliases/30_remove_index_and_replace_with_alias.yml`
+- `indices.update_aliases/40_must_exist.yml`
 
-## Excluded (116)
+## Excluded (120)
 
 Excluded files exercise features outside the MVP scope (see z_old/PLAN.md).
 
@@ -113,7 +121,6 @@ Excluded files exercise features outside the MVP scope (see z_old/PLAN.md).
 - `index/35_external_version.yml`: external versioning / CAS
 - `index/36_external_gte_version.yml`: external versioning / CAS
 - `index/40_routing.yml`: multi-shard/routing, out-of-scope search options
-- `index/70_require_alias.yml`: aliases, data streams
 - `index/80_date_nanos.yml`: multi-shard/routing, out-of-scope field types
 - `index/90_geo_point.yml`: aggregations, geo, out-of-scope field types
 - `index/91_metrics_no_subobjects.yml`: out-of-scope APIs, out-of-scope field types, index modes / synthetic source, analysis config
@@ -122,14 +129,14 @@ Excluded files exercise features outside the MVP scope (see z_old/PLAN.md).
 - `indices.create/30_dynamic_template.yml`: analysis config
 - `indices.delete/20_destructive_wildcard.yml`: out-of-scope APIs
 - `indices.exists/20_read_only_index.yml`: out-of-scope queries
-- `indices.get_mapping/40_aliases.yml`: aliases, analysis config
+- `indices.get_mapping/40_aliases.yml`: analysis config
 - `indices.get_mapping/50_wildcard_expansion.yml`: out-of-scope APIs
 - `indices.get_mapping/70_remote.yml`: remote clusters
-- `indices.get_settings/20_aliases.yml`: aliases, multi-shard/routing
+- `indices.get_settings/20_aliases.yml`: multi-shard/routing
 - `indices.put_settings/40_merge_scheduler.yml`: merge settings
 - `search/100_stored_fields.yml`: out-of-scope search options
 - `search/10_source_filtering.yml`: runtime fields, out-of-scope search options
-- `search/110_field_collapsing.yml`: aliases, scroll/PIT/async, out-of-scope search options, external versioning / CAS, out-of-scope field types
+- `search/110_field_collapsing.yml`: scroll/PIT/async, out-of-scope search options, external versioning / CAS, out-of-scope field types
 - `search/111_field_collapsing_with_max_score.yml`: out-of-scope search options
 - `search/112_field_collapsing_with_rescore.yml`: scripting, multi-shard/routing, out-of-scope search options
 - `search/115_multiple_field_collapsing.yml`: out-of-scope search options
@@ -152,12 +159,12 @@ Excluded files exercise features outside the MVP scope (see z_old/PLAN.md).
 - `search/310_match_bool_prefix.yml`: out-of-scope queries, analysis config
 - `search/310_sequence_numbers_disabled.yml`: out-of-scope search options
 - `search/320_disallow_queries.yml`: nested/join fields, out-of-scope APIs, out-of-scope queries, analysis config
-- `search/330_fetch_fields.yml`: aliases, nested/join fields, geo, out-of-scope search options, out-of-scope field types, analysis config
-- `search/340_flattened.yml`: aggregations, aliases, out-of-scope APIs, out-of-scope queries, out-of-scope field types, index modes / synthetic source
+- `search/330_fetch_fields.yml`: nested/join fields, geo, out-of-scope search options, out-of-scope field types, analysis config
+- `search/340_flattened.yml`: aggregations, out-of-scope APIs, out-of-scope queries, out-of-scope field types, index modes / synthetic source
 - `search/350_binary_field.yml`: out-of-scope search options, out-of-scope field types, index modes / synthetic source
 - `search/350_point_in_time.yml`: multi-shard/routing, scroll/PIT/async, out-of-scope APIs, out-of-scope queries
 - `search/360_combined_fields.yml`: out-of-scope queries
-- `search/370_profile.yml`: aliases, nested/join fields, multi-shard/routing, vectors, remote clusters, out-of-scope search options
+- `search/370_profile.yml`: nested/join fields, multi-shard/routing, vectors, remote clusters, out-of-scope search options
 - `search/380_sort_segments_on_timestamp.yml`: multi-shard/routing, out-of-scope APIs
 - `search/390_doc_values_search.yml`: geo, out-of-scope queries, out-of-scope field types
 - `search/390_lookup_fields.yml`: aggregations, runtime fields, out-of-scope queries
@@ -167,7 +174,7 @@ Excluded files exercise features outside the MVP scope (see z_old/PLAN.md).
 - `search/398_keyword_doc_values_multiterm_search.yml`: out-of-scope queries
 - `search/400_columnar_default_field.yml`: out-of-scope APIs, out-of-scope queries, index modes / synthetic source
 - `search/400_synthetic_source.yml`: out-of-scope queries, index modes / synthetic source
-- `search/40_indices_boost.yml`: aliases, remote clusters, out-of-scope queries, out-of-scope search options
+- `search/40_indices_boost.yml`: remote clusters, out-of-scope queries, out-of-scope search options
 - `search/410_named_queries.yml`: scripting, out-of-scope queries
 - `search/510_fragment_trimming_fix.yml`: highlighting, analysis config
 - `search/510_range_query_out_of_bounds.yml`: out-of-scope field types
@@ -188,8 +195,13 @@ Excluded files exercise features outside the MVP scope (see z_old/PLAN.md).
 - `update/35_if_seq_no.yml`: external versioning / CAS
 - `update/40_routing.yml`: multi-shard/routing, out-of-scope search options
 - `update/80_source_filtering.yml`: multi-shard/routing
-- `update/95_require_alias.yml`: aliases, data streams
+- `indices.put_alias/10_basic.yml`: multi-shard/routing, out-of-scope field types
+- `indices.delete_alias/10_basic.yml`: multi-shard/routing
+- `indices.delete_alias/all_path_options.yml`: multi-shard/routing
+- `indices.get_alias/10_basic.yml`: out-of-scope APIs
+- `indices.update_aliases/10_basic.yml`: multi-shard/routing, out-of-scope queries
+- `indices.update_aliases/20_routing.yml`: multi-shard/routing
 
-## API specs (24)
+## API specs (25)
 
-`api/` holds the matching `rest-api-spec/api/*.json` files: bulk, cluster.health, count, create, delete, exists, get, get_source, index, indices.close, indices.create, indices.delete, indices.exists, indices.exists_alias, indices.get, indices.get_alias, indices.get_mapping, indices.get_settings, indices.open, indices.put_alias, indices.put_settings, indices.refresh, search, update.
+`api/` holds the matching `rest-api-spec/api/*.json` files: bulk, cluster.health, count, create, delete, exists, get, get_source, index, indices.close, indices.create, indices.delete, indices.exists, indices.exists_alias, indices.get, indices.get_alias, indices.get_mapping, indices.get_settings, indices.open, indices.put_alias, indices.put_settings, indices.refresh, indices.update_aliases, search, update.
