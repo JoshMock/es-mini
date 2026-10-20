@@ -20,6 +20,12 @@ Indices:
 - `PUT /{index}/_settings`, `GET /{index}/_settings`
 - `GET /{index}/_mapping`
 
+Aliases:
+- `PUT`/`POST`/`DELETE /{index}/_alias/{name}` (and `_aliases/{name}`)
+- `GET /_alias`, `/_alias/{name}`, `/{index}/_alias`, `/{index}/_alias/{name}`; `HEAD` on the named forms
+- `POST /_aliases` (`add`, `remove`, `remove_index` actions)
+- Aliases resolve for reads (search, count, ES|QL, GET; with alias `filter`) and writes (single index or `is_write_index`); `require_alias` honored
+
 Documents:
 - `POST`/`PUT /{index}/_doc`, `/{index}/_doc/{id}`, `/{index}/_create/{id}`
 - `GET`/`DELETE /{index}/_doc/{id}`
@@ -40,7 +46,6 @@ This is a non-exhaustive list:
 
 - multi-node; single-node support only
 - `_cat` APIs
-- index aliases (for now)
 - index lifecycle management
 - vector storage (for now, unless it's easy to support "for free")
 - multi-search, multi-get, async search

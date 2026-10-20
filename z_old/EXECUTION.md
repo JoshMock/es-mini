@@ -71,6 +71,16 @@ start a codec until the HTTP layer it feeds is exercised by tests.
 - **DoD:** Each endpoint returns spec-correct success and error payloads. Integration tests cover
   create/get/delete happy paths and the main error cases.
 
+### 6a. Index aliases
+- Add alias metadata (`filter`, `is_write_index`, routing fields stored but unused on one shard) to
+  the index model, and the alias endpoints listed in `PLAN.md`, including `POST /_aliases` and
+  aliases supplied at index creation.
+- Resolve index expressions (comma lists, `*` wildcards, `_all`, aliases) in one place. Reads span
+  every target index and apply alias filters; writes go to the single index or the write index.
+- **DoD:** Alias endpoints return spec-shaped responses and errors (`aliases_not_found_exception`,
+  `invalid_alias_name_exception`, `invalid_index_name_exception`). Integration tests cover reads
+  across a multi-index alias, filtered aliases, and write-index selection.
+
 ### 7. Document CRUD endpoints
 - Wire `POST`/`PUT /{index}/_doc[/{id}]`, `/{index}/_create/{id}`, `GET`/`DELETE /{index}/_doc/{id}`,
   `POST /{index}/_update/{id}`.
