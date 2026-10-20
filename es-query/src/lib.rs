@@ -359,7 +359,8 @@ impl<'a> Searcher<'a> {
             .copied()
             .unwrap_or(0.0);
         let idf = (1.0 + (n - df + 0.5) / (df + 0.5)).ln();
-        idf * freq / (freq + K1 * (1.0 - B + B * len / avg))
+        // ES's LegacyBM25Similarity scales Lucene's BM25 by (1 + k1).
+        idf * (1.0 + K1) * freq / (freq + K1 * (1.0 - B + B * len / avg))
     }
 
     /// `None` if the document does not match; otherwise its score.

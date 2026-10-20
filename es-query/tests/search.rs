@@ -222,3 +222,14 @@ mod many {
         assert!(search_many(&[("a", &a, Some(&bad))], &req).is_err());
     }
 }
+
+/// ES's default similarity is LegacyBM25Similarity, which scales Lucene's BM25 by (1 + k1).
+/// One doc, one matching term: idf = ln(1 + 0.5/1.5), tf = 1/(1 + 1.2), times 2.2.
+#[test]
+fn bm25_matches_elasticsearch_legacy_scaling() {
+    let mut idx = Index::default();
+    idx.put("1", json!({"t": "fox"}));
+    let req = SearchRequest::parse(&json!({"query": {"match": {"t": "fox"}}})).unwrap();
+    let score = search(&idx, &req).hits[0].score.unwrap();
+    assert!((score - 0.287_682_1).abs() < 1e-6, "{score}");
+}
