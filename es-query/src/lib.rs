@@ -391,8 +391,9 @@ impl<'a> Searcher<'a> {
         let (kind, path) = self.kind(field);
         let (mut docs, mut len) = (0.0, 0.0);
         let mut df: HashMap<&str, f64> = HashMap::new();
-        for (_, d) in self.index.docs() {
-            let t = terms(kind, &values(&d.source, path));
+        let sources = (self.index.docs().map(|(_, d)| &d.source)).chain(self.index.superseded());
+        for source in sources {
+            let t = terms(kind, &values(source, path));
             if t.is_empty() {
                 continue;
             }

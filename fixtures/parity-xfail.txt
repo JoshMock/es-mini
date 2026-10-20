@@ -1,11 +1,6 @@
 # Recorded-response cases (fixtures/expected/<name>.json) that es-mini does not match yet.
 # Fix one, then delete its line. Run with PARITY_VERBOSE=1 to see the differences.
 
-# Scores: Lucene's BM25 statistics still count docs that were updated or deleted but not
-# yet merged away (7 title docs here, not 5 live ones). The in-memory store has no such
-# history; disk reads (task 17) get the real statistics.
-match_fox
-
 # ES|QL documents_found / values_loaded report ES's internal execution (e.g. top-N pushed
 # down to Lucene loads 3 of the 4 matching docs); not modelled.
 esql

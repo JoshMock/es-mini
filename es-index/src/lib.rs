@@ -187,6 +187,9 @@ pub struct Index {
     pub mappings: Mappings,
     pub aliases: BTreeMap<String, aliases::Alias>,
     docs: HashMap<String, Document>,
+    // ponytail: sources of updated/deleted docs, kept for BM25 stats like Lucene's unmerged
+    // segments; real merges drop them, which this never does
+    superseded: Vec<Value>,
     // ponytail: tombstones are never pruned; ES drops them after index.gc_deletes (60s)
     deleted_versions: HashMap<String, u64>,
     next_seq_no: u64,
@@ -243,7 +246,8 @@ impl Index {
                 seq_no,
             },
         );
-        let result = if old.is_some() {
+        let result = if let Some(old) = old {
+            self.superseded.push(old.source);
             DocResult::Updated
         } else {
             DocResult::Created
@@ -288,13 +292,21 @@ impl Index {
         self.docs.iter().map(|(id, d)| (id.as_str(), d))
     }
 
+    /// Sources of documents that were updated or deleted (see `superseded`).
+    pub fn superseded(&self) -> &[Value] {
+        &self.superseded
+    }
+
     /// Deletes a document. Like ES, a missing document still consumes a version and seq_no.
     pub fn delete(&mut self, id: &str) -> WriteResult {
         let version = self.last_version(id) + 1;
         let seq_no = self.next_seq_no();
         self.deleted_versions.insert(id.to_owned(), version);
         let result = match self.docs.remove(id) {
-            Some(_) => DocResult::Deleted,
+            Some(old) => {
+                self.superseded.push(old.source);
+                DocResult::Deleted
+            }
             None => DocResult::NotFound,
         };
         WriteResult {
