@@ -184,3 +184,38 @@ pub fn inflate(data: &[u8]) -> Result<Vec<u8>> {
         }
     }
 }
+
+/// Frames `data` as an Elasticsearch `DFL\0` blob using uncompressed (stored) DEFLATE blocks.
+// ponytail: no compression; valid DEFLATE that any reader accepts, add real deflate if size matters.
+pub fn frame(data: &[u8]) -> Vec<u8> {
+    let mut out = b"DFL\0".to_vec();
+    let mut blocks = data.chunks(0xFFFF).peekable();
+    if blocks.peek().is_none() {
+        out.extend([1, 0, 0, 0xFF, 0xFF]);
+    }
+    while let Some(b) = blocks.next() {
+        let len = b.len() as u16;
+        out.push(u8::from(blocks.peek().is_none()));
+        out.extend(len.to_le_bytes());
+        out.extend((!len).to_le_bytes());
+        out.extend(b);
+    }
+    out
+}
+
+#[cfg(test)]
+mod frame_tests {
+    use super::*;
+
+    #[test]
+    fn frame_round_trips() {
+        for n in [0, 1, 0xFFFF, 0x10000, 150_000] {
+            let data: Vec<u8> = (0..n).map(|i| (i * 7) as u8).collect();
+            let framed = frame(&data);
+            assert_eq!(
+                inflate(framed.strip_prefix(b"DFL\0").unwrap()).unwrap(),
+                data
+            );
+        }
+    }
+}
