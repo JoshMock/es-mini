@@ -110,6 +110,7 @@ pub fn app() -> Router {
     Router::new()
         .route("/", get(info))
         .route("/_cluster/health", get(health))
+        .route("/_cluster/health/{index}", get(health)) // ponytail: index filter ignored
         .route(
             "/{index}",
             put(indices::create)
