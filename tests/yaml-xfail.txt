@@ -1,5 +1,4 @@
 # Known-failing YAML tests. Fix one, then delete its line.
-indices.delete/10_basic.yml/Delete index against alias
 indices.delete/10_basic.yml/Delete index against alias -  ignore unavailable - multiple indices
 indices.delete/10_basic.yml/Delete index against alias -  multiple indices
 indices.delete/10_basic.yml/Delete index against alias - ignore unavailable

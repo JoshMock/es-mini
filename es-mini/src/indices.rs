@@ -126,11 +126,13 @@ pub async fn delete(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<Value>, AppError> {
-    state
-        .write()
-        .expect("lock poisoned")
-        .remove(&name)
-        .ok_or(AppError::IndexNotFound(name))?;
+    let mut indices = state.write().expect("lock poisoned");
+    if !indices.contains_key(&name) && es_index::aliases::is_alias(&indices, &name) {
+        return Err(AppError::IllegalArgument(format!(
+            "The provided expression [{name}] matches an alias, specify the corresponding concrete indices instead."
+        )));
+    }
+    indices.remove(&name).ok_or(AppError::IndexNotFound(name))?;
     Ok(Json(json!({"acknowledged": true})))
 }
 
