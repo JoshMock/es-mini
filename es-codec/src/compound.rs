@@ -57,3 +57,30 @@ impl CompoundFile {
         self.entries.keys().map(String::as_str)
     }
 }
+
+/// Writes `<segment>.cfs` and `<segment>.cfe` from `(name without segment prefix, file bytes)`
+/// pairs (inverse of [`CompoundFile::open`]).
+pub fn write_compound(
+    dir: &Path,
+    segment: &str,
+    id: &[u8; ID_LEN],
+    files: &[(String, Vec<u8>)],
+) -> Result<()> {
+    use crate::output::Output;
+    let (mut cfs, mut cfe) = (Output::default(), Output::default());
+    cfs.index_header("Lucene90CompoundData", 0, id, "");
+    cfe.index_header("Lucene90CompoundEntries", 0, id, "");
+    cfe.vint(files.len() as i32);
+    for (name, bytes) in files {
+        cfe.string(name);
+        cfe.long(cfs.0.len() as i64);
+        cfe.long(bytes.len() as i64);
+        cfs.bytes(bytes);
+    }
+    for (ext, out) in [("cfs", cfs), ("cfe", cfe)] {
+        let path = dir.join(format!("{segment}.{ext}"));
+        std::fs::write(&path, out.finish())
+            .map_err(|e| crate::Error(format!("{}: {e}", path.display())))?;
+    }
+    Ok(())
+}

@@ -15,6 +15,7 @@ pub mod output;
 pub mod postings;
 pub mod segment;
 pub mod segment_infos;
+pub mod segment_writer;
 pub mod smile;
 pub mod stored_fields;
 pub mod terms;
