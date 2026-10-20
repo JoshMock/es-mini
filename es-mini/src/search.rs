@@ -40,7 +40,13 @@ pub async fn search(
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
     let start = Instant::now();
-    let req = SearchRequest::parse(&parse_body(&body)?).map_err(AppError::ParsingException)?;
+    let req = SearchRequest::parse(&parse_body(&body)?).map_err(|e| {
+        if e.starts_with("failed to parse date field") {
+            AppError::IllegalArgument(e)
+        } else {
+            AppError::ParsingException(e)
+        }
+    })?;
     let indices = state.read().expect("lock poisoned");
     let resolved = aliases::resolve_read(&indices, &name)?;
     let targets = targets(&indices, &resolved);

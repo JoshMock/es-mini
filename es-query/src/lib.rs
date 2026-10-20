@@ -105,6 +105,18 @@ pub fn parse_query(v: &Value) -> Result<Query, String> {
                 return Err(format!("[range] query does not support [{k}]"));
             }
             let get = |k| p.get(k).cloned();
+            if p.get("format").and_then(Value::as_str) == Some("date_optional_time") {
+                // ponytail: only bare-number years are checked; ES's max year is 292278993
+                if let Some(n) = ["gt", "gte", "lt", "lte"]
+                    .iter()
+                    .filter_map(|k| p.get(*k)?.as_i64())
+                    .find(|n| n.abs() > 292_278_993)
+                {
+                    return Err(format!(
+                        "failed to parse date field [{n}] with format [date_optional_time]"
+                    ));
+                }
+            }
             Ok(Query::Range {
                 field: field.clone(),
                 gt: get("gt"),
