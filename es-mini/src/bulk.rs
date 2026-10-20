@@ -73,6 +73,9 @@ fn execute(state: &AppState, a: Action) -> Value {
     let id = a.id.unwrap_or_else(auto_id);
     let body = a.body.unwrap_or(Value::Null);
     let result = match a.op.as_str() {
+        _ if id.is_empty() => Err(AppError::IllegalArgument(
+            "if _id is specified it must not be empty".into(),
+        )),
         "index" => put_or_create(state, &a.index, &id, body, false),
         "create" => put_or_create(state, &a.index, &id, body, true),
         "update" => update_doc(state, &a.index, &id, &body),

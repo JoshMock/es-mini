@@ -1,5 +1,4 @@
 # Known-failing YAML tests. Fix one, then delete its line.
-bulk/10_basic.yml/Empty _id
 bulk/10_basic.yml/Empty _id with op_type create
 bulk/10_basic.yml/Return item-level error when no write index defined for an alias
 bulk/10_basic.yml/When setting require_alias flag
