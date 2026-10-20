@@ -175,3 +175,10 @@ fn text_with_keyword_subfield_keeps_both_columns() {
     assert_eq!(types, ["text", "keyword"]);
     assert_eq!(r.values, vec![vec![json!("Hello"), json!("Hello")]]);
 }
+
+#[test]
+fn reports_documents_found_and_values_loaded() {
+    let r = q("FROM people | KEEP name | LIMIT 2");
+    assert_eq!(r.documents_found, 2);
+    assert_eq!(r.values_loaded, 2);
+}

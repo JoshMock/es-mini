@@ -187,5 +187,7 @@ pub async fn esql(State(state): State<AppState>, body: Bytes) -> Result<Json<Val
         "is_partial": false,
         "columns": r.columns,
         "values": r.values,
+        "documents_found": r.documents_found,
+        "values_loaded": r.values_loaded,
     })))
 }

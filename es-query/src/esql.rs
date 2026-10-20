@@ -32,6 +32,8 @@ pub struct Column {
 pub struct Response {
     pub columns: Vec<Column>,
     pub values: Vec<Vec<Value>>,
+    pub documents_found: usize,
+    pub values_loaded: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -610,7 +612,11 @@ pub fn run(indices: &BTreeMap<String, Index>, query: &str) -> Result<Response, E
         }
     }
     rows.truncate(limit);
+    // ponytail: assumes top-N pushdown, so only returned rows are loaded; ES's real counts vary by plan
+    let (documents_found, values_loaded) = (rows.len(), rows.len() * cols.len());
     Ok(Response {
+        documents_found,
+        values_loaded,
         columns: cols
             .iter()
             .map(|c| Column {

@@ -1,6 +1,3 @@
 # Recorded-response cases (fixtures/expected/<name>.json) that es-mini does not match yet.
 # Fix one, then delete its line. Run with PARITY_VERBOSE=1 to see the differences.
 
-# ES|QL documents_found / values_loaded report ES's internal execution (e.g. top-N pushed
-# down to Lucene loads 3 of the 4 matching docs); not modelled.
-esql

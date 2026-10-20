@@ -160,8 +160,7 @@ async fn disk_matches_recorded_elasticsearch_responses() {
     let _ = setup;
     let data = fixtures().join("es-9.5.5/data");
     let app = es_mini::app_with(es_index::disk::open(&data).unwrap());
-    // ES|QL documents_found / values_loaded report ES's internal execution; not modelled.
-    let xfail: BTreeSet<String> = ["esql".to_owned()].into();
+    let xfail: BTreeSet<String> = BTreeSet::new();
     let verbose = std::env::var("PARITY_VERBOSE").is_ok();
     let mut problems = vec![];
     for c in &cases {
