@@ -60,6 +60,36 @@ pub fn retention_leases_doc(primary_term: i64) -> Value {
     ])
 }
 
+/// `manifest-N.st` document; `indices` are `(name, uuid, metadata generation)`.
+pub fn manifest_doc(
+    current_term: i64,
+    cluster_state_version: i64,
+    generation: i64,
+    indices: &[(&str, &str, i64)],
+) -> Value {
+    let gens = indices
+        .iter()
+        .map(|(name, uuid, generation)| {
+            obj(vec![
+                (
+                    "index",
+                    obj(vec![
+                        ("index_name", Value::String((*name).into())),
+                        ("index_uuid", Value::String((*uuid).into())),
+                    ]),
+                ),
+                ("generation", Value::Int(*generation)),
+            ])
+        })
+        .collect();
+    obj(vec![
+        ("current_term", Value::Int(current_term)),
+        ("cluster_state_version", Value::Int(cluster_state_version)),
+        ("generation", Value::Int(generation)),
+        ("index_generations", Value::Array(gens)),
+    ])
+}
+
 pub fn read(path: &Path) -> Result<Value> {
     let file = std::fs::read(path).map_err(|e| crate::Error(format!("{}: {e}", path.display())))?;
     check_footer(&file)?;
@@ -91,6 +121,7 @@ mod tests {
 
         let data = fixture.parent().unwrap();
         let shard = data.join("indices/D9r2xux8T1aNWB7zpBLShg/0/_state");
+        assert_eq!(manifest_doc(0, 0, -1, &[]), manifest);
         assert_eq!(node_doc("rQYqacfoQ7uXdXc7tkJ9vQ", 9050599, 9111000), node);
         assert_eq!(
             shard_state_doc("D9r2xux8T1aNWB7zpBLShg", "LZN8helzS5G-ZGRov0Geww"),
