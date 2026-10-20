@@ -1,5 +1,4 @@
 # Known-failing YAML tests. Fix one, then delete its line.
-update/16_noop.yml/Noop
 update/60_refresh.yml/Refresh
 update/60_refresh.yml/When refresh url parameter is an empty string that means "refresh immediately"
 update/90_error.yml/Misspelled fields get "did you mean"
