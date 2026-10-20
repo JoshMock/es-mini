@@ -226,6 +226,117 @@ fn read_pfor(input: &mut DataInput) -> Result<Vec<u32>> {
     Ok(ints)
 }
 
+/// One occurrence of a term in a doc.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Position {
+    pub position: u32,
+    /// `(start, end)` character offsets, for fields indexed with offsets.
+    pub offsets: Option<(u32, u32)>,
+    /// Empty when the occurrence has no payload.
+    pub payload: Vec<u8>,
+}
+
+/// Where a term's positions are, and what its field stores beside them.
+pub(crate) struct PositionFiles<'a> {
+    pub pos: &'a [u8],
+    pub pay: &'a [u8],
+    pub pos_fp: usize,
+    pub pay_fp: usize,
+    pub offsets: bool,
+    pub payloads: bool,
+}
+
+/// One occurrence as stored: deltas, not yet resolved against its doc.
+#[derive(Default, Clone)]
+struct Raw {
+    delta: u32,
+    payload: Vec<u8>,
+    start_delta: u32,
+    offset_len: u32,
+}
+
+/// Positions, offsets, and payloads for every doc of a term, given each doc's freq. Full blocks
+/// of [`BLOCK_SIZE`] occurrences are packed in `.pos` (payloads and offsets in `.pay`); the
+/// remaining `total % BLOCK_SIZE` are varints in `.pos`.
+pub(crate) fn read_positions(f: &PositionFiles, freqs: &[u32]) -> Result<Vec<Vec<Position>>> {
+    let total: usize = freqs.iter().map(|f| *f as usize).sum();
+    let pos = &mut DataInput::new(f.pos);
+    pos.pos = f.pos_fp;
+    let pay = &mut DataInput::new(f.pay);
+    pay.pos = f.pay_fp;
+    let mut raw: Vec<Raw> = Vec::with_capacity(total);
+    for _ in 0..total / BLOCK_SIZE {
+        let mut block = vec![Raw::default(); BLOCK_SIZE];
+        for (r, d) in block.iter_mut().zip(read_pfor(pos)?) {
+            r.delta = d;
+        }
+        if f.payloads {
+            let lengths = read_pfor(pay)?;
+            let len = pay.read_len()?;
+            let mut bytes = DataInput::new(pay.read_bytes(len)?);
+            for (r, l) in block.iter_mut().zip(lengths) {
+                r.payload = bytes.read_bytes(l as usize)?.to_vec();
+            }
+        }
+        if f.offsets {
+            let (starts, lengths) = (read_pfor(pay)?, read_pfor(pay)?);
+            for (r, (s, l)) in block.iter_mut().zip(starts.into_iter().zip(lengths)) {
+                (r.start_delta, r.offset_len) = (s, l);
+            }
+        }
+        raw.extend(block);
+    }
+    // The tail repeats the previous payload or offset length unless a flag bit says otherwise.
+    let (mut payload_len, mut offset_len) = (0, 0);
+    for _ in 0..total % BLOCK_SIZE {
+        let mut r = Raw::default();
+        let code = pos.read_vint()? as u32;
+        if f.payloads {
+            if code & 1 != 0 {
+                payload_len = pos.read_len()?;
+            }
+            r.delta = code >> 1;
+            r.payload = pos.read_bytes(payload_len)?.to_vec();
+        } else {
+            r.delta = code;
+        }
+        if f.offsets {
+            let code = pos.read_vint()? as u32;
+            if code & 1 != 0 {
+                offset_len = code_len(pos.read_vint()?)?;
+            }
+            (r.start_delta, r.offset_len) = (code >> 1, offset_len);
+        }
+        raw.push(r);
+    }
+    let mut raw = raw.into_iter();
+    freqs
+        .iter()
+        .map(|&freq| {
+            let (mut position, mut last_start) = (0, 0);
+            (0..freq)
+                .map(|_| {
+                    let r = raw.next().expect("counted above");
+                    position += r.delta;
+                    let offsets = f.offsets.then(|| {
+                        last_start += r.start_delta;
+                        (last_start, last_start + r.offset_len)
+                    });
+                    Ok(Position {
+                        position,
+                        offsets,
+                        payload: r.payload,
+                    })
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn code_len(v: i32) -> Result<u32> {
+    u32::try_from(v).or_else(|_| err("negative offset length"))
+}
+
 /// `GroupVIntUtil.readGroupVInts`: groups of four ints behind a length byte, then plain vints.
 fn read_group_vints(input: &mut DataInput, n: usize) -> Result<Vec<u32>> {
     let mut out = Vec::with_capacity(n);

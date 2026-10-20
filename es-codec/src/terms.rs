@@ -1,13 +1,14 @@
 //! Terms dictionary and postings (Lucene103 block tree + Lucene104 postings).
 //!
 //! Terms are enumerated by walking blocks from the root, so the `.tip` trie is only consulted
-//! for the root block's file pointer. Positions, offsets, payloads, and impacts are skipped.
+//! for the root block's file pointer. Impacts and skip data are skipped.
 
+pub use crate::postings::Position;
 use crate::{
     CompoundFile, Result, SegmentCommitInfo, codec_util, err,
     field_infos::{FieldInfo, IndexOptions},
     input::DataInput,
-    postings,
+    postings::{self},
     stored_fields::{lz4, zigzag},
 };
 
@@ -18,6 +19,8 @@ pub struct TermPostings {
     pub total_term_freq: u64,
     /// `(doc id, freq)`, ascending by doc id.
     pub docs: Vec<(u32, u32)>,
+    /// Occurrences per doc, parallel to `docs`; empty for fields indexed without positions.
+    pub positions: Vec<Vec<Position>>,
 }
 
 /// Every term of `field` in term order with its postings.
@@ -45,11 +48,21 @@ pub fn read_terms(
     };
     let id = &seg.info.id;
     let (tim, tip, tmd, doc) = (file("tim")?, file("tip")?, file("tmd")?, file("doc")?);
+    // `.pos` and `.pay` exist only when some field has positions, or offsets or payloads.
+    let (pos, pay) = (
+        cfs.file(&format!("_{suffix}.pos")).unwrap_or_default(),
+        cfs.file(&format!("_{suffix}.pay")).unwrap_or_default(),
+    );
     for (name, f, codec) in [
         ("tim", tim, "BlockTreeTermsDict"),
         ("tip", tip, "BlockTreeTermsIndex"),
         ("doc", doc, "Lucene104PostingsWriterDoc"),
+        ("pos", pos, "Lucene104PostingsWriterPos"),
+        ("pay", pay, "Lucene104PostingsWriterPay"),
     ] {
+        if f.is_empty() {
+            continue;
+        }
         codec_util::check_footer(f)?;
         codec_util::check_index_header(&mut DataInput::new(f), codec, 0, 0, id, &suffix)
             .map_err(|e| crate::Error(format!(".{name}: {e}")))?;
@@ -92,6 +105,8 @@ pub fn read_terms(
         let mut walker = Walker {
             tim,
             doc,
+            pos,
+            pay,
             info,
             out: Vec::new(),
         };
@@ -160,6 +175,8 @@ fn trie_root_output_fp(tip: &[u8], start: usize, end: usize, root: usize) -> Res
 struct Walker<'a> {
     tim: &'a [u8],
     doc: &'a [u8],
+    pos: &'a [u8],
+    pay: &'a [u8],
     info: &'a FieldInfo,
     out: Vec<TermPostings>,
 }
@@ -170,6 +187,8 @@ struct TermState {
     doc_freq: u64,
     total_term_freq: u64,
     doc_start_fp: u64,
+    pos_start_fp: u64,
+    pay_start_fp: u64,
     singleton_doc_id: i64,
     singleton_run: u64,
 }
@@ -232,9 +251,11 @@ impl Walker<'_> {
                 self.decode_postings(metas, &mut state, first_term)?;
                 first_term = false;
                 let docs = self.docs(&state)?;
+                let positions = self.positions(&state, &docs)?;
                 self.out.push(TermPostings {
                     term,
                     total_term_freq: state.total_term_freq,
+                    positions,
                     docs,
                 });
             }
@@ -274,7 +295,7 @@ impl Walker<'_> {
         absolute: bool,
     ) -> Result<()> {
         if absolute {
-            s.doc_start_fp = 0;
+            (s.doc_start_fp, s.pos_start_fp, s.pay_start_fp) = (0, 0, 0);
         }
         let l = metas.read_vlong()? as u64;
         if l & 1 == 0 {
@@ -291,17 +312,36 @@ impl Walker<'_> {
             s.singleton_doc_id += zigzag(l >> 1);
         }
         if self.info.index_options >= IndexOptions::DocsAndFreqsAndPositions {
-            metas.read_vlong()?; // posStartFP
+            s.pos_start_fp += metas.read_vlong()? as u64;
             if self.info.index_options >= IndexOptions::DocsAndFreqsAndPositionsAndOffsets
                 || self.info.store_payloads
             {
-                metas.read_vlong()?; // payStartFP
+                s.pay_start_fp += metas.read_vlong()? as u64;
             }
             if s.total_term_freq > postings::BLOCK_SIZE as u64 {
                 metas.read_vlong()?; // lastPosBlockOffset
             }
         }
         Ok(())
+    }
+
+    fn positions(&self, s: &TermState, docs: &[(u32, u32)]) -> Result<Vec<Vec<Position>>> {
+        let options = self.info.index_options;
+        if options < IndexOptions::DocsAndFreqsAndPositions {
+            return Ok(vec![]);
+        }
+        let freqs: Vec<u32> = docs.iter().map(|(_, f)| *f).collect();
+        postings::read_positions(
+            &postings::PositionFiles {
+                pos: self.pos,
+                pay: self.pay,
+                pos_fp: s.pos_start_fp as usize,
+                pay_fp: s.pay_start_fp as usize,
+                offsets: options >= IndexOptions::DocsAndFreqsAndPositionsAndOffsets,
+                payloads: self.info.store_payloads,
+            },
+            &freqs,
+        )
     }
 
     fn docs(&self, s: &TermState) -> Result<Vec<(u32, u32)>> {
