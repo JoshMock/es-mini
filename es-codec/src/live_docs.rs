@@ -1,7 +1,7 @@
 //! Live docs: hard deletes (`.liv`) combined with soft deletes (the soft-deletes doc values field).
 use crate::{
     Result, SegmentReader, codec_util, doc_values::DocValues, err, input::DataInput,
-    segment_infos::radix36,
+    output::Output, segment_infos::radix36,
 };
 
 /// `Lucene90LiveDocsFormat`: a bit set of live docs; absent when the segment has no hard deletes.
@@ -26,6 +26,21 @@ fn parse_liv(
         return err("live docs do not match the committed delete count");
     }
     Ok(live)
+}
+
+/// Writes a `.liv` file for `live` (one flag per doc); inverse of `parse_liv`.
+pub fn write_liv(live: &[bool], id: &[u8; codec_util::ID_LEN], del_gen: i64) -> Vec<u8> {
+    let mut out = Output::default();
+    out.index_header("Lucene90LiveDocs", 0, id, &radix36(del_gen as u64));
+    for chunk in live.chunks(64) {
+        out.long(
+            chunk
+                .iter()
+                .enumerate()
+                .fold(0, |w, (b, l)| w | (*l as i64) << b),
+        );
+    }
+    out.finish()
 }
 
 /// Whether each doc id is live: not hard-deleted and without a value in the soft-deletes field.
@@ -72,6 +87,19 @@ mod tests {
         let crc = codec_util::crc32(&f) as i64;
         f.extend(crc.to_be_bytes());
         f
+    }
+
+    #[test]
+    fn write_liv_round_trips() {
+        let id = [9; 16];
+        let live: Vec<bool> = (0..70).map(|d| d != 3 && d != 66).collect();
+        let file = write_liv(&live, &id, 1);
+        assert_eq!(parse_liv(&file, &id, 1, 70, 2).unwrap(), live);
+        // Same bytes as the hand-built Lucene layout (padding bits are 0).
+        let mut words = [!0u64; 2];
+        words[0] &= !(1 << 3);
+        words[1] = 0b11_1111 & !(1 << 2);
+        assert_eq!(file, liv_file(&id, "1", &words));
     }
 
     #[test]
