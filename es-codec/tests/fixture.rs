@@ -99,3 +99,74 @@ fn reads_field_infos_including_updated_generation() {
         assert_eq!(numbers.len(), fields.len(), "field numbers are unique");
     }
 }
+
+/// `(_id, _source)` per doc id; the delete tombstone has no `_source`.
+fn stored_docs(seg: &es_codec::SegmentCommitInfo) -> Vec<(Vec<u8>, Option<String>)> {
+    use es_codec::{field_infos::read_field_infos, stored_fields::*};
+    let dir = shard_index_dir();
+    let cfs = CompoundFile::open(&dir, &seg.name, &seg.info.id).unwrap();
+    let names = read_field_infos(&dir, seg, &cfs).unwrap();
+    let name = |n: i32| names.iter().find(|f| f.number == n).unwrap().name.clone();
+    read_stored_fields(&cfs, seg)
+        .unwrap()
+        .into_iter()
+        .map(|doc| {
+            let bytes = |f: &str| match doc.iter().find(|(n, _)| name(*n) == f) {
+                Some((_, StoredValue::Bytes(b))) => Some(b.clone()),
+                Some(other) => panic!("{f}: {other:?}"),
+                None => None,
+            };
+            let src = bytes("_source").map(|b| String::from_utf8(b).unwrap());
+            (bytes("_id").unwrap(), src)
+        })
+        .collect()
+}
+
+/// ES `Uid.encodeId`: digit-only ids are `0xfe` then packed decimal nibbles, `0xf` padding.
+fn decode_numeric_id(b: &[u8]) -> String {
+    assert_eq!(b[0], 0xfe);
+    b[1..]
+        .iter()
+        .flat_map(|x| [x >> 4, x & 0xf])
+        .take_while(|n| *n != 0xf)
+        .map(|n| char::from(b'0' + n))
+        .collect()
+}
+
+fn title(source: &str) -> &str {
+    source
+        .split("\"title\":\"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap()
+}
+
+#[test]
+fn reads_stored_fields() {
+    let infos = SegmentInfos::read_latest(&shard_index_dir()).unwrap();
+    let docs: Vec<_> = infos.segments.iter().map(stored_docs).collect();
+    let ids = |s: usize| -> Vec<String> {
+        docs[s]
+            .iter()
+            .map(|(id, _)| decode_numeric_id(id))
+            .collect()
+    };
+    assert_eq!(ids(0), ["1", "2", "3", "4", "5"]);
+    // Doc 2 again (the update), then the tombstone for the deleted doc 5.
+    assert_eq!(ids(1), ["6", "2", "5"]);
+    let titles = |s: usize| -> Vec<Option<&str>> {
+        docs[s]
+            .iter()
+            .map(|(_, src)| src.as_deref().map(title))
+            .collect()
+    };
+    assert_eq!(titles(0)[0], Some("The quick brown fox"));
+    assert_eq!(titles(0)[4], Some("Ünïcödé café naïve 東京"));
+    assert_eq!(
+        titles(1),
+        [Some("Fresh fox news"), Some("Quick quick rabbits"), None]
+    );
+    assert!(docs[1][1].1.as_ref().unwrap().contains("\"views\":26"));
+}

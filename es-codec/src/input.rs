@@ -14,6 +14,10 @@ impl<'a> DataInput<'a> {
         Self { buf, pos: 0 }
     }
 
+    pub fn remaining(&self) -> usize {
+        self.buf.len() - self.pos
+    }
+
     pub fn read_bytes(&mut self, n: usize) -> Result<&'a [u8]> {
         let end = self.pos.checked_add(n).filter(|e| *e <= self.buf.len());
         let Some(end) = end else {

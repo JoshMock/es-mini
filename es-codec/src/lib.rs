@@ -7,6 +7,7 @@ pub mod compound;
 pub mod field_infos;
 pub mod input;
 pub mod segment_infos;
+pub mod stored_fields;
 
 pub use compound::CompoundFile;
 pub use segment_infos::{SegmentCommitInfo, SegmentInfo, SegmentInfos};
