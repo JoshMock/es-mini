@@ -4,7 +4,8 @@
 //! metadata is skipped over.
 
 use crate::{
-    Result, SegmentReader, codec_util, err, input::DataInput, lz4, segment_infos::radix36,
+    Result, SegmentReader, codec_util, err, input::DataInput, lz4, output::Output,
+    segment_infos::radix36,
 };
 
 const VERSION_MAX: i32 = 2;
@@ -41,7 +42,9 @@ pub(crate) fn read_field_values(r: &SegmentReader, field: &str) -> Result<DocVal
         owned = (name("dvm")?, name("dvd")?);
         (&owned.0, &owned.1, suffix)
     };
-    decode(r, meta, data, &suffix, info.number)
+    let (id, max_doc) = (&r.seg.info.id, r.seg.info.max_doc);
+    let skip = |n| Ok(r.field_by_number(n)?.doc_values_skip_index);
+    decode(meta, data, (id, max_doc), &suffix, info.number, &skip)
 }
 
 /// Location of the `IndexedDISI` listing docs with a value; offset -2 is none, -1 is all docs.
@@ -525,13 +528,13 @@ fn read_entry(meta: &mut DataInput, kind: u8) -> Result<Entry> {
 }
 
 fn decode(
-    r: &SegmentReader,
     meta: &[u8],
     data: &[u8],
+    (id, max_doc): (&[u8; codec_util::ID_LEN], i32),
     suffix: &str,
     field_number: i32,
+    has_skip_index: &dyn Fn(i32) -> Result<bool>,
 ) -> Result<DocValues> {
-    let (id, max_doc) = (&r.seg.info.id, r.seg.info.max_doc);
     codec_util::check_footer(meta)?;
     let m = &mut DataInput::new(meta);
     let version =
@@ -549,7 +552,7 @@ fn decode(
             return err(format!("no doc values for field {field_number}"));
         }
         let kind = m.read_byte()?;
-        if r.field_by_number(number)?.doc_values_skip_index {
+        if has_skip_index(number)? {
             // offset, length, maxValue, minValue, docCount, maxDocID[, maxValueCount]
             m.read_bytes(if version >= 2 { 36 } else { 32 })?;
         }
@@ -579,5 +582,74 @@ fn decode(
             }
             Entry::Binary(b) => Ok(DocValues::Bytes(b.per_doc(data, max_doc)?)),
         };
+    }
+}
+
+/// Returns `(.dvm, .dvd)` for dense, single-valued numeric fields, one `(field number, value per
+/// doc)` each.
+///
+/// ponytail: no table, gcd, or block encoding, and no sparse or multi-valued fields; add them when
+/// size or cross-engine compatibility (task 20) demands.
+pub fn write_numeric_doc_values(
+    fields: &[(i32, Vec<i64>)],
+    id: &[u8; codec_util::ID_LEN],
+    suffix: &str,
+) -> (Vec<u8>, Vec<u8>) {
+    let (mut dvm, mut dvd) = (Output::default(), Output::default());
+    dvm.index_header("Lucene90DocValuesMetadata", VERSION_MAX, id, suffix);
+    dvd.index_header("Lucene90DocValuesData", VERSION_MAX, id, suffix);
+    for (number, values) in fields {
+        let min = values.iter().copied().min().unwrap_or(0);
+        let range = values
+            .iter()
+            .fold(0, |m, v| m.max(v.wrapping_sub(min) as u64));
+        let bits = (64 - range.leading_zeros()) as u8;
+        dvm.bytes(&number.to_le_bytes());
+        dvm.byte(0);
+        dvm.long(-1); // all docs have a value
+        dvm.long(0);
+        dvm.bytes(&(-1i16).to_le_bytes());
+        dvm.byte(0xff);
+        dvm.long(values.len() as i64);
+        dvm.bytes(&(-1i32).to_le_bytes()); // no table, no blocks
+        dvm.byte(bits);
+        dvm.long(min);
+        dvm.long(1);
+        dvm.long(dvd.0.len() as i64);
+        let start = dvd.0.len();
+        let mut packed = vec![0u8; (values.len() * bits as usize).div_ceil(8)];
+        for (i, v) in values.iter().enumerate() {
+            let (v, bit) = (v.wrapping_sub(min) as u64, i * bits as usize);
+            for b in (0..bits as usize).filter(|b| v >> b & 1 == 1) {
+                packed[(bit + b) / 8] |= 1 << ((bit + b) % 8);
+            }
+        }
+        dvd.bytes(&packed);
+        dvm.long((dvd.0.len() - start) as i64);
+        dvm.long(-1); // no value jump table
+    }
+    dvm.bytes(&(-1i32).to_le_bytes());
+    (dvm.finish(), dvd.finish())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_then_read_numeric_round_trips() {
+        let id = [3u8; 16];
+        let a: Vec<i64> = (0..1000).map(|i| i * 37 - 5000).collect();
+        let b = vec![i64::MIN, i64::MAX, 0];
+        let c = vec![42; 1000];
+        let fields = [(0, a.clone()), (1, c.clone())];
+        let (m, d) = write_numeric_doc_values(&fields, &id, "Lucene90_0");
+        let read = |n, len| decode(&m, &d, (&id, len), "Lucene90_0", n, &|_| Ok(false)).unwrap();
+        let wrap = |v: Vec<i64>| DocValues::Numbers(v.into_iter().map(|x| vec![x]).collect());
+        assert_eq!(read(0, 1000), wrap(a));
+        assert_eq!(read(1, 1000), wrap(c));
+        let (m, d) = write_numeric_doc_values(&[(7, b.clone())], &id, "Lucene90_0");
+        let got = decode(&m, &d, (&id, 3), "Lucene90_0", 7, &|_| Ok(false)).unwrap();
+        assert_eq!(got, wrap(b));
     }
 }
