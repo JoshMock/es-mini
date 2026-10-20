@@ -279,8 +279,7 @@ fn settings_response(
     let filter = if filter == "_all" { "*" } else { filter };
     let include_defaults = params.get("include_defaults").is_some_and(|v| v == "true");
     let render = |i: &Index| {
-        let mut out =
-            json!({"settings": i.settings.to_json_where(|k| es_index::aliases::glob(filter, k))});
+        let mut out = json!({"settings": i.settings.to_json_where(|k| filter.split(',').any(|f| es_index::aliases::glob(f, k)))});
         if include_defaults {
             // ponytail: only defaults for settings we model; add more as tests need them
             let mut defaults = json!({});
