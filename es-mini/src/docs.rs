@@ -246,6 +246,26 @@ pub async fn update(
 }
 
 pub fn update_doc(state: &AppState, index: &str, id: &str, body: &Value) -> Reply {
+    const FIELDS: [&str; 8] = [
+        "doc",
+        "upsert",
+        "doc_as_upsert",
+        "detect_noop",
+        "script",
+        "scripted_upsert",
+        "_source",
+        "lang",
+    ];
+    if let Some(k) = body
+        .as_object()
+        .and_then(|o| o.keys().find(|k| !FIELDS.contains(&k.as_str())))
+    {
+        let near = FIELDS.iter().find(|f| edit_distance(f, k) <= 2);
+        let hint = near.map_or(String::new(), |f| format!(" did you mean [{f}]?"));
+        return Err(AppError::Parse(format!(
+            "[UpdateRequest] unknown field [{k}]{hint}"
+        )));
+    }
     let partial = body.get("doc").cloned().unwrap_or_else(|| json!({}));
     let upsert = match body["doc_as_upsert"].as_bool() == Some(true) {
         true => Some(partial.clone()),
@@ -257,4 +277,19 @@ pub fn update_doc(state: &AppState, index: &str, id: &str, body: &Value) -> Repl
     })?;
     let w = w.ok_or_else(|| AppError::DocumentMissing(id.to_owned()))?;
     Ok(reply(&index, id, w, total))
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut prev = std::mem::replace(&mut row[0], i + 1);
+        for (j, cb) in b.iter().enumerate() {
+            let cur = (prev + usize::from(ca != *cb))
+                .min(row[j] + 1)
+                .min(row[j + 1] + 1);
+            prev = std::mem::replace(&mut row[j + 1], cur);
+        }
+    }
+    row[b.len()]
 }

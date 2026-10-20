@@ -1,3 +1,2 @@
 # Known-failing YAML tests. Fix one, then delete its line.
-update/90_error.yml/Misspelled fields get "did you mean"
 update/95_require_alias.yml/Set require_alias flag

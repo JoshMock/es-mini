@@ -141,6 +141,22 @@ async fn update() {
 }
 
 #[tokio::test]
+async fn update_unknown_field_suggests_doc() {
+    let (s, r) = call(
+        &app(),
+        Method::POST,
+        "/idx/_update/1",
+        Some(json!({"dac": {}})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        r["error"]["reason"],
+        "[UpdateRequest] unknown field [dac] did you mean [doc]?"
+    );
+}
+
+#[tokio::test]
 async fn non_object_source_is_400() {
     let (s, r) = call(&app(), Method::PUT, "/idx/_doc/1", Some(json!([1]))).await;
     assert_eq!(
