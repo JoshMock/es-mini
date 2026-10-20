@@ -54,6 +54,14 @@ pub async fn count(
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
     let body = parse_body(&body)?;
+    if let Some(k) = body
+        .as_object()
+        .and_then(|o| o.keys().find(|k| *k != "query"))
+    {
+        return Err(AppError::ParsingException(format!(
+            "request does not support [{k}]"
+        )));
+    }
     let query = body
         .get("query")
         .map_or(Ok(es_query::Query::MatchAll), parse_query)

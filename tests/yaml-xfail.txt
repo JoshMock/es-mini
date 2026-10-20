@@ -1,12 +1,6 @@
 # Known-failing YAML tests. Fix one, then delete its line.
-count/10_basic.yml/count body without query element
-count/10_basic.yml/count with body
-count/10_basic.yml/count with empty body
 count/10_basic.yml/test negative terminate_after throws IAE
 count/20_query_string.yml/count with query_string parameters
-count/40_stats.yml/count with stats parameter (multiple comma-separated values)
-count/40_stats.yml/count with stats parameter (single value)
-count/40_stats.yml/count with stats parameter and query
 count/40_stats.yml/count with stats parameter and query string
 create/15_without_id.yml/Create without ID
 get/60_realtime_refresh.yml/Realtime Refresh
@@ -20,7 +14,6 @@ index/110_array_objects_limit.yml/Test array objects limit counts cumulatively a
 index/110_array_objects_limit.yml/Test array objects limit rejects documents above the limit
 index/110_array_objects_limit.yml/Test array objects limit rejects non-positive values
 index/110_columnar_id.yml/Index with ID and columnar _id mode
-index/110_columnar_id.yml/Search with columnar _id mode
 index/60_refresh.yml/Refresh
 index/60_refresh.yml/When refresh url parameter is an empty string that means "refresh immediately"
 index/60_refresh.yml/refresh=wait_for waits until changes are visible in search

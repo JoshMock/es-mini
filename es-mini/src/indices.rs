@@ -85,6 +85,16 @@ pub async fn head(State(state): State<AppState>, Path(name): Path<String>) -> St
     }
 }
 
+pub async fn refresh(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    with_index(&state, name, |_| ())?;
+    Ok(Json(
+        json!({"_shards": {"total": 1, "successful": 1, "failed": 0}}),
+    ))
+}
+
 pub async fn get_settings(
     State(state): State<AppState>,
     Path(name): Path<String>,
