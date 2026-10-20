@@ -117,12 +117,17 @@ pub async fn create(
 pub async fn get(
     State(state): State<AppState>,
     Path((index, id)): Path<(String, String)>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Reply {
     let indices = state.read().expect("lock poisoned");
     let i = indices
         .get(&index)
         .ok_or_else(|| AppError::IndexNotFound(index.clone()))?;
-    Ok(match i.get(&id) {
+    // ponytail: no refresh model; a non-realtime get of an index with refresh disabled sees nothing
+    let unrefreshed = params.get("realtime").is_some_and(|v| v == "false")
+        && params.get("refresh").is_none_or(|v| v == "false")
+        && i.settings.get("index.refresh_interval") == Some("-1");
+    Ok(match i.get(&id).filter(|_| !unrefreshed) {
         Some(d) => (
             StatusCode::OK,
             Json(json!({

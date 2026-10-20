@@ -1,5 +1,4 @@
 # Known-failing YAML tests. Fix one, then delete its line.
-get/60_realtime_refresh.yml/Realtime Refresh
 get_source/15_default_values.yml/Default values
 get_source/60_realtime_refresh.yml/Realtime
 index/10_with_id.yml/Index with ID
