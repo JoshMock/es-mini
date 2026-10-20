@@ -41,6 +41,27 @@ pub fn resolve_date_math(name: &str) -> String {
     out + rest
 }
 
+/// Rejects values of the wrong scalar type for alias fields, as ES does at index creation.
+pub fn reject_bad_scalars(name: &str, v: &Value) -> Result<(), AppError> {
+    for (f, ty) in [
+        ("is_write_index", "String"),
+        ("is_hidden", "String"),
+        ("routing", "boolean"),
+    ] {
+        let bad = match (v.get(f), ty) {
+            (Some(Value::String(s)), "String") => Some(s.clone()),
+            (Some(Value::Bool(b)), "boolean") => Some(b.to_string()),
+            _ => None,
+        };
+        if let Some(x) = bad {
+            return Err(AppError::IllegalArgument(format!(
+                "Unsupported {ty} type value [{x}] for field [{f}] in alias [{name}]"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Parses alias metadata, validating its filter as a query.
 pub fn parse_alias(v: &Value) -> Result<Alias, AppError> {
     let alias = Alias::parse(v).map_err(AppError::IllegalArgument)?;
