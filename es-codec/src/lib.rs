@@ -17,6 +17,7 @@ pub mod segment;
 pub mod segment_infos;
 pub mod segment_writer;
 pub mod smile;
+pub mod state_file;
 pub mod stored_fields;
 pub mod terms;
 
