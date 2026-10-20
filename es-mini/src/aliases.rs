@@ -182,12 +182,17 @@ fn lookup(
             out.insert(name, json!({"aliases": aliases}));
         }
     }
+    // Exclusions only count as missing when no positive pattern was given.
+    let has_positive = patterns.iter().flatten().any(|p| !p.starts_with('-'));
     let missing = patterns
         .into_iter()
         .flatten()
         .filter(|p| {
             let name = p.strip_prefix('-').unwrap_or(p);
-            !p.contains('*') && *p != "_all" && !seen.contains(name)
+            !(has_positive && p.starts_with('-'))
+                && !p.contains('*')
+                && *p != "_all"
+                && !seen.contains(name)
         })
         .map(str::to_owned)
         .collect();

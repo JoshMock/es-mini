@@ -1,5 +1,4 @@
 # Known-failing YAML tests. Fix one, then delete its line.
-indices.get_alias/30_wildcards.yml/Missing exclusions does not fire 404
 indices.get_alias/30_wildcards.yml/Non-existent exclusion alias before wildcard returns 404
 indices.get_alias/30_wildcards.yml/Wildcard exclusions does not trigger 404
 indices.get_mapping/10_basic.yml/Get /*/_mapping
