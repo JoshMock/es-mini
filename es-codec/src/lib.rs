@@ -4,8 +4,10 @@
 
 pub mod codec_util;
 pub mod compound;
+pub mod doc_values;
 pub mod field_infos;
 pub mod input;
+pub mod live_docs;
 pub mod segment_infos;
 pub mod stored_fields;
 

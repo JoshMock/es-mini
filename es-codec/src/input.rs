@@ -43,6 +43,10 @@ impl<'a> DataInput<'a> {
         Ok(self.array::<1>()?[0])
     }
 
+    pub fn read_short(&mut self) -> Result<i16> {
+        Ok(i16::from_le_bytes(self.array()?))
+    }
+
     pub fn read_int(&mut self) -> Result<i32> {
         Ok(i32::from_le_bytes(self.array()?))
     }

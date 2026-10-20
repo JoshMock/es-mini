@@ -170,3 +170,28 @@ fn reads_stored_fields() {
     );
     assert!(docs[1][1].1.as_ref().unwrap().contains("\"views\":26"));
 }
+
+#[test]
+fn reads_live_docs_from_soft_deletes() {
+    use es_codec::{field_infos::read_field_infos, live_docs::read_live_docs};
+    let dir = shard_index_dir();
+    let infos = SegmentInfos::read_latest(&dir).unwrap();
+    let live_ids = |seg: &es_codec::SegmentCommitInfo| -> Vec<String> {
+        let cfs = CompoundFile::open(&dir, &seg.name, &seg.info.id).unwrap();
+        let fields = read_field_infos(&dir, seg, &cfs).unwrap();
+        let live = read_live_docs(&dir, seg, &cfs, &fields).unwrap();
+        let ids: Vec<_> = stored_docs(seg)
+            .iter()
+            .map(|(id, _)| decode_numeric_id(id))
+            .collect();
+        assert_eq!(live.len(), ids.len());
+        ids.into_iter()
+            .zip(live)
+            .filter(|(_, l)| *l)
+            .map(|(id, _)| id)
+            .collect()
+    };
+    // Doc 2 is superseded and doc 5 deleted; _1 holds the new doc 2, doc 6 and doc 5's tombstone.
+    assert_eq!(live_ids(&infos.segments[0]), ["1", "3", "4"]);
+    assert_eq!(live_ids(&infos.segments[1]), ["6", "2"]);
+}
