@@ -125,14 +125,29 @@ pub async fn create(
 pub async fn delete(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Value>, AppError> {
+    let ignore = params
+        .get("ignore_unavailable")
+        .is_some_and(|v| v == "true");
     let mut indices = state.write().expect("lock poisoned");
-    if !indices.contains_key(&name) && es_index::aliases::is_alias(&indices, &name) {
-        return Err(AppError::IllegalArgument(format!(
-            "The provided expression [{name}] matches an alias, specify the corresponding concrete indices instead."
-        )));
+    let mut to_remove = Vec::new();
+    for n in name.split(',') {
+        if indices.contains_key(n) {
+            to_remove.push(n);
+        } else if ignore {
+            continue;
+        } else if es_index::aliases::is_alias(&indices, n) {
+            return Err(AppError::IllegalArgument(format!(
+                "The provided expression [{n}] matches an alias, specify the corresponding concrete indices instead."
+            )));
+        } else {
+            return Err(AppError::IndexNotFound(n.to_string()));
+        }
     }
-    indices.remove(&name).ok_or(AppError::IndexNotFound(name))?;
+    for n in to_remove {
+        indices.remove(n);
+    }
     Ok(Json(json!({"acknowledged": true})))
 }
 
@@ -152,8 +167,18 @@ fn with_index<T>(
 pub async fn get(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Value>, AppError> {
     let indices = state.read().expect("lock poisoned");
+    let name = if params
+        .get("ignore_unavailable")
+        .is_some_and(|v| v == "true")
+    {
+        let found = |p: &&str| es_index::aliases::resolve_read(&indices, p).is_ok();
+        name.split(',').filter(found).collect::<Vec<_>>().join(",")
+    } else {
+        name
+    };
     let body: serde_json::Map<String, Value> = es_index::aliases::resolve_read(&indices, &name)?
         .into_iter()
         .map(|t| {
