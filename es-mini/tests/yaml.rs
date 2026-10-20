@@ -1,7 +1,8 @@
 //! Runs the vendored Elasticsearch YAML REST tests (tests/yaml) against es-mini in-process.
 //!
 //! Known failures live in tests/yaml-xfail.txt; the run fails on any other failure and on any
-//! xfail that now passes (remove it from the list). Environment:
+//! xfail that now passes (remove it from the list). Tests in tests/yaml-out-of-scope.txt are
+//! skipped: they exercise features es-mini deliberately does not implement. Environment:
 //! - `YAML_FILTER=substr`: only run tests whose `file/name` contains `substr`.
 //! - `YAML_VERBOSE=1`: print every failure and skip reason.
 //! - `YAML_WRITE_XFAIL=1`: rewrite the xfail list from this run's failures.
@@ -567,6 +568,16 @@ async fn run_test(specs: &Specs, setup: &[Value], test: &Section) -> Outcome {
     Ok(())
 }
 
+/// Test ids, one per line; blank lines and `#` comments are ignored.
+fn read_id_list(path: &Path) -> BTreeSet<String> {
+    let text = fs::read_to_string(path).unwrap_or_default();
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(str::to_owned)
+        .collect()
+}
+
 fn walk(dir: &Path) -> Vec<PathBuf> {
     let mut out = vec![];
     for e in fs::read_dir(dir).unwrap() {
@@ -586,12 +597,11 @@ async fn yaml_rest_tests() {
     let filter = std::env::var("YAML_FILTER").unwrap_or_default();
     let verbose = std::env::var("YAML_VERBOSE").is_ok();
     let xfail_path = root().join("yaml-xfail.txt");
-    let xfail: BTreeSet<String> = fs::read_to_string(&xfail_path)
-        .unwrap_or_default()
-        .lines()
-        .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
-        .map(str::to_owned)
-        .collect();
+    let xfail = read_id_list(&xfail_path);
+    let out_of_scope = read_id_list(&root().join("yaml-out-of-scope.txt"));
+    if let Some(id) = xfail.intersection(&out_of_scope).next() {
+        panic!("{id} is in both yaml-xfail.txt and yaml-out-of-scope.txt");
+    }
 
     let yaml_dir = root().join("yaml");
     let mut files = walk(&yaml_dir);
@@ -611,7 +621,11 @@ async fn yaml_rest_tests() {
             if !id.contains(&filter) {
                 continue;
             }
-            if let Some(why) = skip_reason(&setup).or_else(|| skip_reason(&t.steps)) {
+            let why = match out_of_scope.contains(&id) {
+                true => Some("out of scope".to_owned()),
+                false => skip_reason(&setup).or_else(|| skip_reason(&t.steps)),
+            };
+            if let Some(why) = why {
                 skipped += 1;
                 if verbose {
                     println!("SKIP {id}: {why}");

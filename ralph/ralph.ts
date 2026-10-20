@@ -11,7 +11,7 @@ import { join, resolve } from "node:path";
 interface Suite {
   /** Known-failing test ids, one per line; `#` lines are comments. */
   xfail: string;
-  /** Paths the agent must never modify (vendored test definitions). */
+  /** Paths the agent must never modify: test definitions, the runner, and the scope list. */
   frozen: string[];
   /** Command that runs the suite and fails on any unlisted failure or listed pass. */
   check: string[];
@@ -22,7 +22,7 @@ interface Suite {
 const SUITES: Record<string, Suite> = {
   yaml: {
     xfail: "tests/yaml-xfail.txt",
-    frozen: ["tests/yaml"],
+    frozen: ["tests/yaml", "tests/yaml-out-of-scope.txt", "es-mini/tests/yaml.rs"],
     check: ["scripts/check.sh"],
     runOne: (id) => `YAML_FILTER='${id}' YAML_VERBOSE=1 cargo test -p es-mini --test yaml -- --nocapture`,
   },
@@ -51,7 +51,7 @@ function prompt(id: string, model: string): string {
 Goal: make exactly one known-failing test pass: \`${id}\`
 
 Rules:
-1. Do not modify anything under ${suite.frozen.map((p) => `\`${p}\``).join(", ")}. Fix the implementation, not the test.
+1. Do not modify anything under ${suite.frozen.map((p) => `\`${p}\``).join(", ")}. Fix the implementation, not the test or its runner. If a runner bug blocks the test, stop and explain it instead.
 2. Fix only this test. Keep the change minimal and follow AGENTS.md.
 3. Reproduce first: \`${suite.runOne(id)}\`
 4. Delete exactly the line \`${id}\` from \`${suite.xfail}\`. If other listed tests now pass too, delete their lines as well; never add lines.

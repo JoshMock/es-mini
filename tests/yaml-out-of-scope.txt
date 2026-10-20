@@ -1,0 +1,2 @@
+# YAML tests es-mini deliberately does not implement, grouped by reason.
+# The runner skips these. Changing this file requires a human decision; Ralph may not edit it.
