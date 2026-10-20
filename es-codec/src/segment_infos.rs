@@ -74,6 +74,26 @@ fn read_version(input: &mut DataInput, vint: bool) -> Result<Version> {
     Ok((next()?, next()?, next()?))
 }
 
+/// Commit user data Elasticsearch 9.5.5 requires on a shard's Lucene commit.
+pub fn shard_user_data(
+    history_uuid: &str,
+    translog_uuid: &str,
+    max_seq_no: i64,
+    local_checkpoint: i64,
+) -> BTreeMap<String, String> {
+    [
+        ("history_uuid", history_uuid.to_string()),
+        ("translog_uuid", translog_uuid.to_string()),
+        ("es_version", "9111000".into()),
+        ("max_seq_no", max_seq_no.to_string()),
+        ("local_checkpoint", local_checkpoint.to_string()),
+        ("min_retained_seq_no", (local_checkpoint + 1).to_string()),
+        ("max_unsafe_auto_id_timestamp", "-1".into()),
+    ]
+    .map(|(k, v)| (k.to_string(), v))
+    .into()
+}
+
 impl SegmentInfos {
     /// Reads the commit with the highest generation in `dir`.
     pub fn read_latest(dir: &Path) -> Result<Self> {
@@ -360,5 +380,27 @@ mod tests {
         assert_eq!(super::radix36(0), "0");
         assert_eq!(super::radix36(35), "z");
         assert_eq!(super::radix36(36 * 2 + 9), "29");
+    }
+
+    #[test]
+    fn shard_user_data_has_the_keys_of_an_es_shard_commit() {
+        use super::*;
+        let fixture = std::fs::read_dir(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../fixtures/es-9.5.5/data/indices"
+        ))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path()
+        .join("0/index");
+        let real = SegmentInfos::read_latest(&fixture).unwrap().user_data;
+        let ours = shard_user_data("h", "t", 0, 0);
+        assert_eq!(
+            real.keys().collect::<Vec<_>>(),
+            ours.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(real["es_version"], ours["es_version"]);
     }
 }
