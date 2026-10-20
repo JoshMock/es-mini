@@ -1,5 +1,6 @@
 //! es-mini: an Elasticsearch-compatible HTTP server.
 
+mod aliases;
 mod bulk;
 mod docs;
 mod error;
@@ -120,13 +121,25 @@ pub fn app() -> Router {
             "/{index}/_settings",
             put(indices::put_settings).get(indices::get_settings),
         )
+        .route("/_alias", get(aliases::get_all))
+        .route("/_aliases", get(aliases::get_all).post(aliases::update))
+        .route(
+            "/_alias/{name}",
+            get(aliases::get_named).head(aliases::head_named),
+        )
+        .route("/{index}/_alias", get(aliases::get_for_index))
+        .route("/{index}/_aliases", get(aliases::get_for_index))
         .route(
             "/{index}/_alias/{name}",
-            put(indices::put_alias).post(indices::put_alias),
+            put(aliases::put)
+                .post(aliases::put)
+                .delete(aliases::delete)
+                .get(aliases::get_for_index_named)
+                .head(aliases::head_for_index_named),
         )
         .route(
             "/{index}/_aliases/{name}",
-            put(indices::put_alias).post(indices::put_alias),
+            put(aliases::put).post(aliases::put).delete(aliases::delete),
         )
         .route(
             "/{index}/_refresh",
@@ -168,6 +181,9 @@ mod bulk_tests;
 
 #[cfg(test)]
 mod search_tests;
+
+#[cfg(test)]
+mod aliases_tests;
 
 #[cfg(test)]
 mod tests {

@@ -5,7 +5,7 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
 };
-use es_index::{DocResult, Index, WriteResult};
+use es_index::{DocResult, Index, WriteResult, aliases};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -42,16 +42,38 @@ pub fn auto_id() -> String {
     )
 }
 
-/// Runs `f` against the named index, creating it first if missing (ES auto-create).
-fn write<T>(state: &AppState, name: &str, f: impl FnOnce(&mut Index) -> T) -> (T, u64) {
+/// Runs `f` against the write target `name` resolves to (an index, created if missing as ES
+/// auto-create does, or an alias's write index). Returns the result, shard total, and index name.
+fn write<T>(
+    state: &AppState,
+    name: &str,
+    f: impl FnOnce(&mut Index) -> T,
+) -> Result<(T, u64, String), AppError> {
     let mut indices = state.write().expect("lock poisoned");
-    let index = indices.entry(name.to_owned()).or_default();
+    let target = aliases::resolve_write(&indices, name)?;
+    let index = indices.entry(target.clone()).or_default();
     let replicas = index
         .settings
         .get("index.number_of_replicas")
         .and_then(|r| r.parse().ok())
         .unwrap_or(0);
-    (f(index), 1 + replicas)
+    Ok((f(index), 1 + replicas, target))
+}
+
+/// The one concrete index a single-document read targets.
+fn single_index(indices: &es_index::Indices, name: &str) -> Result<String, AppError> {
+    let targets = aliases::resolve_read(indices, name)?;
+    match targets.as_slice() {
+        [t] => Ok(t.index.clone()),
+        [] => Err(AppError::IndexNotFound(name.to_owned())),
+        many => Err(AppError::IllegalArgument(format!(
+            "alias [{name}] has more than one index associated with it [{}], can't execute a single index op",
+            many.iter()
+                .map(|t| t.index.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
 }
 
 fn reply(index: &str, id: &str, w: WriteResult, shards_total: u64) -> (StatusCode, Json<Value>) {
@@ -77,15 +99,15 @@ pub fn put_or_create(
     create: bool,
 ) -> Reply {
     let source = check_source(source)?;
-    let (w, total) = write(state, index, |i| match create {
+    let (w, total, index) = write(state, index, |i| match create {
         true => i.create(id, source),
         false => Ok(i.put(id, source)),
-    });
+    })?;
     let w = w.map_err(|current_version| AppError::VersionConflict {
         id: id.to_owned(),
         current_version,
     })?;
-    Ok(reply(index, id, w, total))
+    Ok(reply(&index, id, w, total))
 }
 
 pub async fn index_with_id(
@@ -120,9 +142,8 @@ pub async fn get(
     Query(params): Query<HashMap<String, String>>,
 ) -> Reply {
     let indices = state.read().expect("lock poisoned");
-    let i = indices
-        .get(&index)
-        .ok_or_else(|| AppError::IndexNotFound(index.clone()))?;
+    let index = single_index(&indices, &index)?;
+    let i = &indices[&index];
     // ponytail: no refresh model; a non-realtime get of an index with refresh disabled sees nothing
     let unrefreshed = params.get("realtime").is_some_and(|v| v == "false")
         && params.get("refresh").is_none_or(|v| v == "false")
@@ -150,8 +171,8 @@ pub async fn delete(
 }
 
 pub fn delete_doc(state: &AppState, index: &str, id: &str) -> Reply {
-    let (w, total) = write(state, index, |i| i.delete(id));
-    Ok(reply(index, id, w, total))
+    let (w, total, index) = write(state, index, |i| i.delete(id))?;
+    Ok(reply(&index, id, w, total))
 }
 
 pub async fn update(
@@ -168,7 +189,7 @@ pub fn update_doc(state: &AppState, index: &str, id: &str, body: &Value) -> Repl
         true => Some(partial.clone()),
         false => body.get("upsert").cloned(),
     };
-    let (w, total) = write(state, index, |i| i.update(id, &partial, upsert));
+    let (w, total, index) = write(state, index, |i| i.update(id, &partial, upsert))?;
     let w = w.ok_or_else(|| AppError::DocumentMissing(id.to_owned()))?;
-    Ok(reply(index, id, w, total))
+    Ok(reply(&index, id, w, total))
 }

@@ -1,3 +1,4 @@
+use crate::aliases::parse_alias;
 use crate::{AppState, error::AppError};
 use axum::{
     Json,
@@ -5,7 +6,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
-use es_index::{Index, Mappings, aliases::Alias};
+use es_index::{Index, Mappings};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -29,14 +30,25 @@ pub async fn create(
             .map_err(|e| AppError::MapperParsing(e.to_string()))?;
     }
     for (alias, meta) in body["aliases"].as_object().into_iter().flatten() {
-        index.aliases.insert(
-            alias.clone(),
-            Alias::parse(meta).map_err(AppError::IllegalArgument)?,
-        );
+        index.aliases.insert(alias.clone(), parse_alias(meta)?);
     }
     let mut indices = state.write().expect("lock poisoned");
     if indices.contains_key(&name) {
         return Err(AppError::IndexExists(name));
+    }
+    if es_index::aliases::is_alias(&indices, &name) {
+        return Err(AppError::InvalidIndexName {
+            index: name,
+            reason: "already exists as alias".into(),
+        });
+    }
+    for alias in index.aliases.keys() {
+        if indices.contains_key(alias) || *alias == name {
+            return Err(AppError::InvalidAliasName {
+                alias: alias.clone(),
+                reason: "an index or data stream exists with the same name as the alias".into(),
+            });
+        }
     }
     indices.insert(name.clone(), index);
     Ok(Json(
@@ -76,7 +88,7 @@ pub async fn get(
     let body = with_index(
         &state,
         name.clone(),
-        |i| json!({"aliases": {}, "mappings": i.mappings, "settings": i.settings.to_json()}),
+        |i| json!({"aliases": i.aliases, "mappings": i.mappings, "settings": i.settings.to_json()}),
     )?;
     Ok(Json(json!({ name: body })))
 }
@@ -124,12 +136,4 @@ pub async fn get_mapping(
 ) -> Result<Json<Value>, AppError> {
     let mappings = with_index(&state, name.clone(), |i| json!(i.mappings))?;
     Ok(Json(json!({ name: {"mappings": mappings} })))
-}
-
-pub async fn put_alias(
-    State(state): State<AppState>,
-    Path((index, name)): Path<(String, String)>,
-) -> Result<Json<Value>, AppError> {
-    with_index(&state, index, |i| i.aliases.insert(name, Alias::default()))?;
-    Ok(Json(json!({"acknowledged": true})))
 }

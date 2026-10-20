@@ -12,6 +12,16 @@ pub enum AppError {
     /// Write to a non-alias with `require_alias` set.
     RequireAlias(String),
     IndexExists(String),
+    /// Removing or reading aliases that do not exist.
+    AliasesNotFound(Vec<String>),
+    InvalidAliasName {
+        alias: String,
+        reason: String,
+    },
+    InvalidIndexName {
+        index: String,
+        reason: String,
+    },
     Parse(String),
     MapperParsing(String),
     VersionConflict {
@@ -29,6 +39,24 @@ impl AppError {
     /// Status and the `error` object (with `root_cause`) of the ES envelope.
     pub fn parts(self) -> (StatusCode, Value) {
         let (status, kind, reason, index) = match self {
+            Self::AliasesNotFound(a) => (
+                StatusCode::NOT_FOUND,
+                "aliases_not_found_exception",
+                format!("aliases [{}] missing", a.join(",")),
+                None,
+            ),
+            Self::InvalidAliasName { alias, reason } => (
+                StatusCode::BAD_REQUEST,
+                "invalid_alias_name_exception",
+                format!("Invalid alias name [{alias}]: {reason}"),
+                None,
+            ),
+            Self::InvalidIndexName { index, reason } => (
+                StatusCode::BAD_REQUEST,
+                "invalid_index_name_exception",
+                format!("Invalid index name [{index}], {reason}"),
+                Some(index),
+            ),
             Self::IndexNotFound(i) => (
                 StatusCode::NOT_FOUND,
                 "index_not_found_exception",

@@ -4,6 +4,7 @@ use axum::{
     body::Bytes,
     extract::{Path, Query, State},
 };
+use es_index::{Indices, aliases};
 use es_query::{
     SearchRequest,
     esql::{self, EsqlError},
@@ -12,6 +13,14 @@ use es_query::{
 use serde_json::{Value, json};
 use std::{collections::HashMap, time::Instant};
 
+fn targets<'a>(indices: &'a Indices, resolved: &'a [aliases::Target]) -> Vec<es_query::Target<'a>> {
+    resolved
+        .iter()
+        .map(|t| (t.index.as_str(), &indices[&t.index], t.filter.as_ref()))
+        .collect()
+}
+
+// ponytail: one shard per target index is reported as a single shard
 fn shards() -> Value {
     json!({"total": 1, "successful": 1, "skipped": 0, "failed": 0})
 }
@@ -24,16 +33,15 @@ pub async fn search(
     let start = Instant::now();
     let req = SearchRequest::parse(&parse_body(&body)?).map_err(AppError::ParsingException)?;
     let indices = state.read().expect("lock poisoned");
-    let index = indices
-        .get(&name)
-        .ok_or_else(|| AppError::IndexNotFound(name.clone()))?;
-    let r = es_query::search(index, &req);
+    let resolved = aliases::resolve_read(&indices, &name)?;
+    let targets = targets(&indices, &resolved);
+    let r = es_query::search_many(&targets, &req).map_err(AppError::ParsingException)?;
     let hits: Vec<Value> = r
         .hits
         .iter()
         .map(|h| {
             let mut hit =
-                json!({"_index": name, "_id": h.id, "_score": h.score, "_source": h.doc.source});
+                json!({"_index": h.index, "_id": h.id, "_score": h.score, "_source": h.doc.source});
             if !h.sort.is_empty() {
                 hit["sort"] = h.sort.clone().into();
             }
@@ -86,12 +94,10 @@ pub async fn count(
             .map_err(AppError::ParsingException)?,
     };
     let indices = state.read().expect("lock poisoned");
-    let index = indices
-        .get(&name)
-        .ok_or_else(|| AppError::IndexNotFound(name.clone()))?;
-    Ok(Json(
-        json!({"count": es_query::count(index, &query), "_shards": shards()}),
-    ))
+    let resolved = aliases::resolve_read(&indices, &name)?;
+    let n = es_query::count_many(&targets(&indices, &resolved), &query)
+        .map_err(AppError::ParsingException)?;
+    Ok(Json(json!({"count": n, "_shards": shards()})))
 }
 
 pub async fn esql(State(state): State<AppState>, body: Bytes) -> Result<Json<Value>, AppError> {
