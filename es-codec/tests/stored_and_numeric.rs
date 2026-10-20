@@ -4,6 +4,7 @@
 
 use es_codec::{
     CompoundFile, SegmentCommitInfo, SegmentInfos,
+    doc_values::{DocValues, read_field_values},
     field_infos::{FieldInfo, read_field_infos},
     live_docs::read_live_docs,
     stored_fields::{StoredValue, read_stored_fields},
@@ -96,4 +97,41 @@ fn reads_hard_deletes_from_liv() {
     let dead: Vec<usize> = (0..DOCS).filter(|d| !live[*d]).collect();
     let want: Vec<usize> = (0..DOCS).filter(|d| d % 1000 == 7).collect();
     assert_eq!(dead, want);
+}
+
+#[test]
+fn reads_numeric_doc_values_across_disi_and_value_blocks() {
+    let (dir, seg, cfs, fields) = open();
+    let numbers = |field: &str| match read_field_values(&dir, &seg, &cfs, &fields, field).unwrap() {
+        DocValues::Numbers(n) => n,
+        other => panic!("{field}: {other:?}"),
+    };
+    let expect = |field: &str, value: &dyn Fn(i64) -> Vec<i64>| {
+        let want: Vec<Vec<i64>> = (0..DOCS as i64).map(value).collect();
+        assert_eq!(numbers(field), want, "{field}");
+    };
+    // Dense bit-set block (every other doc of 65536), then a sparse block.
+    expect("half", &|d| if d % 2 == 0 { vec![d % 8] } else { vec![] });
+    // A block holding every doc, then a sparse block.
+    expect("head", &|d| {
+        if d < 65536 || d % 9 == 0 {
+            vec![1]
+        } else {
+            vec![]
+        }
+    });
+    // 2 bits per value in the first 16384-value block, 12 in the second.
+    expect("varying", &|d| match d {
+        0..16384 => vec![d % 4],
+        16384..32768 => vec![d % 4096],
+        _ => vec![],
+    });
+    expect("multi", &|d| {
+        let mut v = vec![d % 4];
+        if d % 3 == 0 {
+            v.push(-(d % 4));
+        }
+        v.sort();
+        v
+    });
 }

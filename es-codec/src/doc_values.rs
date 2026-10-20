@@ -276,7 +276,8 @@ impl Numeric {
                 let packed = if bits == 0 {
                     &[][..]
                 } else {
-                    let len = input.read_len()?;
+                    let len = input.read_int()?;
+                    let len = usize::try_from(len).or_else(|_| err("negative block length"))?;
                     input.read_bytes(len)?
                 };
                 for i in 0..in_block {
