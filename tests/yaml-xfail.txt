@@ -1,5 +1,4 @@
 # Known-failing YAML tests. Fix one, then delete its line.
-indices.get_mapping/10_basic.yml/Get /_all/_mapping
 indices.get_mapping/10_basic.yml/Get /_mapping
 indices.get_mapping/10_basic.yml/Get /index,index/_mapping
 indices.get_mapping/30_missing_index.yml/Index missing, ignore_unavailable=true
