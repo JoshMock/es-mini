@@ -1,6 +1,4 @@
 # Known-failing YAML tests. Fix one, then delete its line.
-search/70_response_filtering.yml/Search results filtered using both includes and excludes filters
-search/70_response_filtering.yml/Search with response filtering
 update/12_result.yml/Update result field
 update/16_noop.yml/Noop
 update/60_refresh.yml/Refresh

@@ -4,6 +4,7 @@ mod aliases;
 mod bulk;
 mod docs;
 mod error;
+mod filter_path;
 mod indices;
 mod search;
 
@@ -167,6 +168,7 @@ pub fn app() -> Router {
         )
         .route("/_search", get(search::search_all).post(search::search_all))
         .route("/{index}/_search", get(search::search).post(search::search))
+        .route("/_count", get(search::count_all).post(search::count_all))
         .route("/{index}/_count", get(search::count).post(search::count))
         .route("/{index}/_doc", post(docs::index_auto_id))
         .route(

@@ -104,12 +104,24 @@ pub async fn search(
     if total.is_null() {
         hits.as_object_mut().unwrap().remove("total");
     }
-    Ok(Json(json!({
+    let resp = json!({
         "took": start.elapsed().as_millis() as u64,
         "timed_out": false,
         "_shards": shards(),
         "hits": hits
-    })))
+    });
+    Ok(Json(match params.get("filter_path") {
+        Some(f) => crate::filter_path::apply(&resp, f),
+        None => resp,
+    }))
+}
+
+pub async fn count_all(
+    state: State<AppState>,
+    params: Query<HashMap<String, String>>,
+    body: Bytes,
+) -> Result<Json<Value>, AppError> {
+    count(state, Path("_all".into()), params, body).await
 }
 
 pub async fn count(
@@ -153,7 +165,11 @@ pub async fn count(
     let resolved = aliases::resolve_read(&indices, &name)?;
     let n = es_query::count_many(&targets(&indices, &resolved), &query)
         .map_err(AppError::ParsingException)?;
-    Ok(Json(json!({"count": n, "_shards": shards()})))
+    let resp = json!({"count": n, "_shards": shards()});
+    Ok(Json(match params.get("filter_path") {
+        Some(f) => crate::filter_path::apply(&resp, f),
+        None => resp,
+    }))
 }
 
 pub async fn esql(State(state): State<AppState>, body: Bytes) -> Result<Json<Value>, AppError> {
