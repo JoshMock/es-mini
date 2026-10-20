@@ -3,6 +3,7 @@ use crate::{
     Result, SegmentReader, codec_util, err,
     input::{DataInput, zigzag},
     lz4,
+    output::Output,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -132,23 +133,34 @@ fn read_field(doc: &mut DataInput, ty: u64) -> Result<StoredValue> {
 }
 
 pub(crate) fn read_stored_fields(r: &SegmentReader) -> Result<Vec<Vec<(i32, StoredValue)>>> {
-    let id = &r.seg.info.id;
-    let meta = r.cfs_file(".fdm")?;
+    read_stored_fields_files(
+        r.cfs_file(".fdm")?,
+        r.cfs_file(".fdt")?,
+        &r.seg.info.id,
+        r.max_doc(),
+    )
+}
+
+fn read_stored_fields_files(
+    meta: &[u8],
+    fdt: &[u8],
+    id: &[u8; codec_util::ID_LEN],
+    max_doc: usize,
+) -> Result<Vec<Vec<(i32, StoredValue)>>> {
     codec_util::check_footer(meta)?;
     let m = &mut DataInput::new(meta);
     codec_util::check_index_header(m, "Lucene90FieldsIndexMeta", 0, 1, id, "")?;
     let chunk_size = m.read_len()?;
 
-    let fdt = r.cfs_file(".fdt")?;
     codec_util::check_footer(fdt)?;
     let inp = &mut DataInput::new(&fdt[..fdt.len() - codec_util::FOOTER_LEN]);
     codec_util::check_index_header(inp, "Lucene90StoredFieldsFastData", 1, 1, id, "")?;
-    let mut docs = Vec::with_capacity(r.max_doc());
+    let mut docs = Vec::with_capacity(max_doc);
     while inp.remaining() > 0 {
         let doc_base = inp.read_len()?;
         let token = inp.read_len()?;
         let (n_docs, sliced) = (token >> 2, token & 1 != 0);
-        if doc_base != docs.len() || docs.len() + n_docs > r.max_doc() {
+        if doc_base != docs.len() || docs.len() + n_docs > max_doc {
             return err(format!("corrupt stored fields chunk at doc {doc_base}"));
         }
         let (counts, lens) = if n_docs == 1 {
@@ -180,8 +192,170 @@ pub(crate) fn read_stored_fields(r: &SegmentReader) -> Result<Vec<Vec<(i32, Stor
             docs.push(fields);
         }
     }
-    if docs.len() != r.max_doc() {
+    if docs.len() != max_doc {
         return err("stored fields do not cover every doc");
     }
     Ok(docs)
+}
+
+const CHUNK_SIZE: usize = 80 * 1024;
+const MAX_DOCS_PER_CHUNK: usize = 1024;
+
+fn write_field(out: &mut Output, number: i32, v: &StoredValue) {
+    let tag = |ty: i64| ((number as i64) << TYPE_BITS) | ty;
+    let zz = |v: i64| ((v << 1) ^ (v >> 63)) as u64;
+    match v {
+        StoredValue::String(s) => {
+            out.vlong(tag(0));
+            out.string(s);
+        }
+        StoredValue::Bytes(b) => {
+            out.vlong(tag(1));
+            out.vint(b.len() as i32);
+            out.bytes(b);
+        }
+        StoredValue::Int(i) => {
+            out.vlong(tag(2));
+            out.vint(zz(*i as i64) as u32 as i32);
+        }
+        StoredValue::Float(f) => {
+            out.vlong(tag(3));
+            out.byte(0xff);
+            out.bytes(&f.to_bits().to_le_bytes());
+        }
+        StoredValue::Long(l) => {
+            // Millisecond unit, so no date-style scaling.
+            out.vlong(tag(4));
+            let z = zz(*l);
+            let more = z >> 5 != 0;
+            out.byte((z & 0x1f) as u8 | if more { 0x20 } else { 0 });
+            if more {
+                out.vlong((z >> 5) as i64);
+            }
+        }
+        StoredValue::Double(d) => {
+            out.vlong(tag(5));
+            out.byte(0xff);
+            out.long(d.to_bits() as i64);
+        }
+    }
+}
+
+/// `StoredFieldsInts.writeInts` for `count >= 2`.
+fn write_ints(out: &mut Output, vals: &[usize]) {
+    if vals.iter().all(|v| *v == vals[0]) {
+        out.byte(0);
+        out.vint(vals[0] as i32);
+        return;
+    }
+    out.byte(32);
+    let blocks = vals.len() / 128;
+    for b in vals[..blocks * 128].chunks(128) {
+        for k in 0..64 {
+            out.long((b[k] as i64) << 32 | b[k + 64] as i64);
+        }
+    }
+    for v in &vals[blocks * 128..] {
+        out.bytes(&(*v as i32).to_le_bytes());
+    }
+}
+
+/// One `LZ4WithPresetDictCompressor.compress` of `data` with an empty dictionary and a single
+/// literal-only block.
+fn compress(out: &mut Output, data: &[u8]) {
+    let mut block = Output::default();
+    let lit = data.len();
+    block.byte((lit.min(15) as u8) << 4);
+    if lit >= 15 {
+        let mut rest = lit - 15;
+        while rest >= 255 {
+            block.byte(255);
+            rest -= 255;
+        }
+        block.byte(rest as u8);
+    }
+    block.bytes(data);
+    out.vint(0);
+    out.vint(data.len() as i32);
+    out.vint(1);
+    out.vint(block.0.len() as i32);
+    out.byte(0); // empty dictionary
+    out.bytes(&block.0);
+}
+
+/// Returns `(.fdm, .fdt)`.
+///
+/// ponytail: `.fdm` carries only the chunk size; the `.fdx` doc-to-chunk index Lucene itself needs
+/// is added with cross-engine compatibility (task 20). Each doc is `(field number, value)`.
+pub fn write_stored_fields(
+    docs: &[Vec<(i32, StoredValue)>],
+    id: &[u8; codec_util::ID_LEN],
+) -> Result<(Vec<u8>, Vec<u8>)> {
+    let mut fdt = Output::default();
+    fdt.index_header("Lucene90StoredFieldsFastData", 1, id, "");
+    let mut base = 0;
+    while base < docs.len() {
+        let (mut data, mut counts, mut lens) = (Output::default(), vec![], vec![]);
+        while base + counts.len() < docs.len()
+            && counts.len() < MAX_DOCS_PER_CHUNK
+            && data.0.len() < CHUNK_SIZE
+        {
+            let doc = &docs[base + counts.len()];
+            let before = data.0.len();
+            doc.iter().for_each(|(n, v)| write_field(&mut data, *n, v));
+            counts.push(doc.len());
+            lens.push(data.0.len() - before);
+        }
+        if data.0.len() >= 2 * CHUNK_SIZE {
+            return err("stored fields chunk too large to write");
+        }
+        fdt.vint(base as i32);
+        fdt.vint((counts.len() << 2) as i32);
+        if counts.len() == 1 {
+            fdt.vint(counts[0] as i32);
+            fdt.vint(lens[0] as i32);
+        } else {
+            write_ints(&mut fdt, &counts);
+            write_ints(&mut fdt, &lens);
+        }
+        compress(&mut fdt, &data.0);
+        base += counts.len();
+    }
+    let mut fdm = Output::default();
+    fdm.index_header("Lucene90FieldsIndexMeta", 1, id, "");
+    fdm.vint(CHUNK_SIZE as i32);
+    Ok((fdm.finish(), fdt.finish()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_then_read_round_trips() {
+        let docs: Vec<Vec<(i32, StoredValue)>> = (0..3000)
+            .map(|i| {
+                let mut d = vec![(0, StoredValue::String(format!("doc-{i}")))];
+                if i % 3 == 0 {
+                    d.push((1, StoredValue::Long(-(i as i64) * 1_000_003)));
+                    d.push((2, StoredValue::Double(i as f64 / 7.0)));
+                    d.push((3, StoredValue::Float(-1.5)));
+                    d.push((4, StoredValue::Int(-i)));
+                    d.push((5, StoredValue::Bytes(vec![i as u8; 300])));
+                }
+                d
+            })
+            .collect();
+        let id = [7u8; 16];
+        let (fdm, fdt) = write_stored_fields(&docs, &id).unwrap();
+        assert_eq!(
+            read_stored_fields_files(&fdm, &fdt, &id, 3000).unwrap(),
+            docs
+        );
+        let (fdm, fdt) = write_stored_fields(&docs[..1], &id).unwrap();
+        assert_eq!(
+            read_stored_fields_files(&fdm, &fdt, &id, 1).unwrap(),
+            docs[..1]
+        );
+    }
 }
