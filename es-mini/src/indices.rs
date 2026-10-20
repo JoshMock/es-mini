@@ -278,6 +278,7 @@ fn settings_response(
 ) -> Result<Json<Value>, AppError> {
     let filter = if filter == "_all" { "*" } else { filter };
     let include_defaults = params.get("include_defaults").is_some_and(|v| v == "true");
+    let flat = params.get("flat_settings").is_some_and(|v| v == "true");
     let render = |i: &Index| {
         let mut out = json!({"settings": i.settings.to_json_where(|k| filter.split(',').any(|f| es_index::aliases::glob(f, k)))});
         if include_defaults {
@@ -290,7 +291,17 @@ fn settings_response(
                 defaults =
                     json!({"index": {"mapping": {"dynamic_strings": {"auto_text": "true"}}}});
             }
+            if i.settings.get("index.refresh_interval").is_none() {
+                defaults["index"]["refresh_interval"] = json!("1s");
+            }
             out["defaults"] = defaults;
+        }
+        if flat {
+            for v in out.as_object_mut().expect("object").values_mut() {
+                let mut flat = Map::new();
+                flatten_settings("", v, &mut flat);
+                *v = Value::Object(flat);
+            }
         }
         out
     };
@@ -300,6 +311,22 @@ fn settings_response(
         .map(|n| (n.clone(), render(&indices[&n])))
         .collect();
     Ok(Json(Value::Object(out)))
+}
+
+fn flatten_settings(prefix: &str, v: &Value, out: &mut Map<String, Value>) {
+    match v {
+        Value::Object(m) => m.iter().for_each(|(k, v)| {
+            let key = if prefix.is_empty() {
+                k.clone()
+            } else {
+                format!("{prefix}.{k}")
+            };
+            flatten_settings(&key, v, out);
+        }),
+        _ => {
+            out.insert(prefix.to_string(), v.clone());
+        }
+    }
 }
 
 pub async fn put_settings(
