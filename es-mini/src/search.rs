@@ -2,7 +2,7 @@ use crate::{AppState, error::AppError, indices::parse_body};
 use axum::{
     Json,
     body::Bytes,
-    extract::{Path, State},
+    extract::{Path, Query, State},
 };
 use es_query::{
     SearchRequest,
@@ -10,7 +10,7 @@ use es_query::{
     parse_query,
 };
 use serde_json::{Value, json};
-use std::time::Instant;
+use std::{collections::HashMap, time::Instant};
 
 fn shards() -> Value {
     json!({"total": 1, "successful": 1, "skipped": 0, "failed": 0})
@@ -51,8 +51,18 @@ pub async fn search(
 pub async fn count(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
+    if params
+        .get("terminate_after")
+        .and_then(|v| v.parse::<i64>().ok())
+        .is_some_and(|n| n < 0)
+    {
+        return Err(AppError::IllegalArgument(
+            "terminateAfter must be > 0".into(),
+        ));
+    }
     let body = parse_body(&body)?;
     if let Some(k) = body
         .as_object()
