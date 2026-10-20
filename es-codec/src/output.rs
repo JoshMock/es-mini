@@ -54,6 +54,13 @@ impl Output {
         }
     }
 
+    pub fn set_of_strings(&mut self, set: &std::collections::BTreeSet<String>) {
+        self.vint(set.len() as i32);
+        for v in set {
+            self.string(v);
+        }
+    }
+
     pub fn index_header(&mut self, codec: &str, version: i32, id: &[u8; ID_LEN], suffix: &str) {
         self.be_int(CODEC_MAGIC);
         self.string(codec);

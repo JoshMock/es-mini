@@ -5,6 +5,7 @@ use crate::{
     codec_util::{self, ID_LEN},
     err,
     input::DataInput,
+    output::Output,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -99,6 +100,47 @@ impl SegmentInfos {
         Self::parse(dir, &file, generation)
     }
 
+    /// Writes each segment's `.si` and `segments_<generation>` into `dir`.
+    pub fn write(&self, dir: &Path) -> Result<()> {
+        let mut out = Output::default();
+        out.index_header(
+            "segments",
+            SEGMENTS_VERSION_CURRENT,
+            &self.id,
+            &radix36(self.generation),
+        );
+        write_version(&mut out, self.lucene_version, true);
+        out.vint(self.index_created_major);
+        out.be_long(self.version);
+        out.vlong(self.counter);
+        out.be_int(self.segments.len() as i32);
+        if let Some(min) = self.segments.iter().map(|s| s.info.version).min() {
+            write_version(&mut out, min, true);
+        }
+        for s in &self.segments {
+            write_si(dir, &s.name, &s.info)?;
+            out.string(&s.name);
+            out.bytes(&s.info.id);
+            out.string(&s.codec);
+            out.be_long(s.del_gen);
+            out.be_int(s.del_count);
+            out.be_long(s.field_infos_gen);
+            out.be_long(s.dv_gen);
+            out.be_int(s.soft_del_count);
+            out.byte(0); // no SegmentCommitInfo id
+            out.set_of_strings(&s.field_infos_files);
+            out.be_int(s.dv_update_files.len() as i32);
+            for (field, files) in &s.dv_update_files {
+                out.be_int(*field);
+                out.set_of_strings(files);
+            }
+        }
+        out.map_of_strings(&self.user_data);
+        let path = dir.join(format!("segments_{}", radix36(self.generation)));
+        std::fs::write(&path, out.finish())
+            .map_err(|e| crate::Error(format!("{}: {e}", path.display())))
+    }
+
     fn parse(dir: &Path, file: &[u8], generation: u64) -> Result<Self> {
         codec_util::check_footer(file)?;
         let input = &mut DataInput::new(file);
@@ -178,6 +220,39 @@ impl SegmentInfos {
     }
 }
 
+fn write_version(out: &mut Output, (a, b, c): Version, vint: bool) {
+    for v in [a, b, c] {
+        if vint {
+            out.vint(v);
+        } else {
+            out.bytes(&v.to_le_bytes());
+        }
+    }
+}
+
+fn write_si(dir: &Path, name: &str, si: &SegmentInfo) -> Result<()> {
+    let mut out = Output::default();
+    out.index_header("Lucene90SegmentInfo", 0, &si.id, "");
+    write_version(&mut out, si.version, false);
+    match si.min_version {
+        None => out.byte(0),
+        Some(v) => {
+            out.byte(1);
+            write_version(&mut out, v, false);
+        }
+    }
+    out.bytes(&si.max_doc.to_le_bytes());
+    out.byte(si.is_compound as u8);
+    out.byte(si.has_blocks as u8);
+    out.map_of_strings(&si.diagnostics);
+    out.set_of_strings(&si.files);
+    out.map_of_strings(&si.attributes);
+    out.vint(0); // no index sort
+    let path = dir.join(format!("{name}.si"));
+    std::fs::write(&path, out.finish())
+        .map_err(|e| crate::Error(format!("{}: {e}", path.display())))
+}
+
 fn read_si(dir: &Path, name: &str, id: &[u8; ID_LEN]) -> Result<SegmentInfo> {
     let file = crate::read_file(&dir.join(format!("{name}.si")))?;
     codec_util::check_footer(&file)?;
@@ -230,6 +305,56 @@ pub(crate) fn radix36(mut n: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn write_then_read_latest() {
+        use super::*;
+        let dir = std::env::temp_dir().join(format!("esm-si-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let info = SegmentInfo {
+            id: [7; ID_LEN],
+            version: (10, 3, 0),
+            min_version: Some((10, 3, 0)),
+            max_doc: 5,
+            is_compound: false,
+            has_blocks: false,
+            diagnostics: [("source".to_string(), "flush".to_string())].into(),
+            files: ["_0.fnm".to_string()].into(),
+            attributes: BTreeMap::new(),
+        };
+        let seg = SegmentCommitInfo {
+            name: "_0".into(),
+            codec: "Lucene103".into(),
+            info,
+            del_gen: -1,
+            del_count: 0,
+            field_infos_gen: -1,
+            dv_gen: -1,
+            soft_del_count: 0,
+            field_infos_files: BTreeSet::new(),
+            dv_update_files: BTreeMap::new(),
+        };
+        let infos = SegmentInfos {
+            id: [9; ID_LEN],
+            generation: 40,
+            lucene_version: (10, 3, 0),
+            index_created_major: 10,
+            version: 12,
+            counter: 1,
+            segments: vec![seg],
+            user_data: [("k".to_string(), "v".to_string())].into(),
+        };
+        infos.write(&dir).unwrap();
+        let back = SegmentInfos::read_latest(&dir).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(back.generation, 40);
+        assert_eq!(back.counter, 1);
+        assert_eq!(back.user_data, infos.user_data);
+        let (a, b) = (&back.segments[0], &infos.segments[0]);
+        assert_eq!((a.name.as_str(), a.info.max_doc), ("_0", 5));
+        assert_eq!(a.info.files, b.info.files);
+        assert_eq!(a.info.diagnostics, b.info.diagnostics);
+    }
+
     #[test]
     fn radix36_matches_java() {
         assert_eq!(super::radix36(0), "0");
