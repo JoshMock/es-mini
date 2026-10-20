@@ -261,7 +261,11 @@ pub async fn put_settings(
 pub async fn get_mapping(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Value>, AppError> {
+    let ignore = params
+        .get("ignore_unavailable")
+        .is_some_and(|v| v == "true");
     if name == "_all" || name.contains('*') {
         let name = if name == "_all" { "*" } else { &name };
         // ponytail: single wildcard pattern only; no comma lists
@@ -275,12 +279,15 @@ pub async fn get_mapping(
     }
     let mut out = serde_json::Map::new();
     for n in name.split(',') {
-        let m = with_index(&state, n.to_string(), |i| json!(i.mappings))?;
-        out.insert(n.to_string(), json!({"mappings": m}));
+        match with_index(&state, n.to_string(), |i| json!(i.mappings)) {
+            Ok(m) => out.insert(n.to_string(), json!({"mappings": m})),
+            Err(_) if ignore && params.get("allow_no_indices").is_none_or(|v| v != "false") => None,
+            Err(e) => return Err(e),
+        };
     }
     Ok(Json(Value::Object(out)))
 }
 
 pub async fn get_all_mappings(state: State<AppState>) -> Result<Json<Value>, AppError> {
-    get_mapping(state, Path("_all".to_string())).await
+    get_mapping(state, Path("_all".to_string()), Query(Default::default())).await
 }
