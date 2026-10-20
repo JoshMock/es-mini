@@ -6,7 +6,7 @@ use crate::{
 };
 use std::{collections::BTreeMap, path::Path};
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub enum IndexOptions {
     None,
     Docs,

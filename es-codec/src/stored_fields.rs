@@ -21,7 +21,7 @@ const NUMERIC_TIME_UNITS: [(u8, i64); 4] = [
 
 /// Lucene `LZ4.decompress`: reads until `out` has grown by `len` bytes. Matches may reference
 /// earlier bytes of `out` (the preset dictionary).
-fn lz4(inp: &mut DataInput, len: usize, out: &mut Vec<u8>) -> Result<()> {
+pub(crate) fn lz4(inp: &mut DataInput, len: usize, out: &mut Vec<u8>) -> Result<()> {
     let end = out.len() + len;
     let extra = |inp: &mut DataInput, mut n: usize| -> Result<usize> {
         loop {
@@ -131,7 +131,7 @@ fn read_ints(inp: &mut DataInput, count: usize) -> Result<Vec<u64>> {
     }
 }
 
-fn zigzag(v: u64) -> i64 {
+pub(crate) fn zigzag(v: u64) -> i64 {
     (v >> 1) as i64 ^ -((v & 1) as i64)
 }
 

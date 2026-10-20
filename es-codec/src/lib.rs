@@ -10,6 +10,7 @@ pub mod input;
 pub mod live_docs;
 pub mod segment_infos;
 pub mod stored_fields;
+pub mod terms;
 
 pub use compound::CompoundFile;
 pub use segment_infos::{SegmentCommitInfo, SegmentInfo, SegmentInfos};

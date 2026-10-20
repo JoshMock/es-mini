@@ -195,3 +195,68 @@ fn reads_live_docs_from_soft_deletes() {
     assert_eq!(live_ids(&infos.segments[0]), ["1", "3", "4"]);
     assert_eq!(live_ids(&infos.segments[1]), ["6", "2"]);
 }
+
+/// `(term, [(doc, freq)])` for a field of a segment.
+fn terms_of(seg: &es_codec::SegmentCommitInfo, field: &str) -> Vec<(String, Vec<(u32, u32)>)> {
+    let dir = shard_index_dir();
+    let cfs = CompoundFile::open(&dir, &seg.name, &seg.info.id).unwrap();
+    let fields = es_codec::field_infos::read_field_infos(&dir, seg, &cfs).unwrap();
+    es_codec::terms::read_terms(&cfs, seg, &fields, field)
+        .unwrap()
+        .into_iter()
+        .map(|t| (String::from_utf8(t.term).unwrap(), t.docs))
+        .collect()
+}
+
+fn postings(terms: &[(String, Vec<(u32, u32)>)], term: &str) -> Vec<(u32, u32)> {
+    terms.iter().find(|(t, _)| t == term).unwrap().1.clone()
+}
+
+#[test]
+fn reads_terms_and_postings() {
+    let infos = SegmentInfos::read_latest(&shard_index_dir()).unwrap();
+    let (s0, s1) = (&infos.segments[0], &infos.segments[1]);
+
+    let tag = terms_of(s0, "tag");
+    let names: Vec<_> = tag.iter().map(|(t, _)| t.as_str()).collect();
+    assert_eq!(names, ["animal", "misc", "pet"]);
+    assert_eq!(postings(&tag, "animal"), [(0, 1), (1, 1)]);
+    assert_eq!(postings(&tag, "misc"), [(4, 1)]);
+    assert_eq!(postings(&tag, "pet"), [(2, 1), (3, 1)]);
+
+    let title = terms_of(s0, "title");
+    let names: Vec<_> = title.iter().map(|(t, _)| t.as_str()).collect();
+    let mut sorted = names.clone();
+    sorted.sort_unstable();
+    assert_eq!(names, sorted, "terms come out in byte order");
+    assert_eq!(
+        names,
+        [
+            "a",
+            "and",
+            "brown",
+            "café",
+            "dog",
+            "fox",
+            "lazy",
+            "naïve",
+            "quick",
+            "rabbits",
+            "sleeps",
+            "the",
+            "ünïcödé",
+            "京",
+            "東"
+        ]
+    );
+    assert_eq!(postings(&title, "brown"), [(0, 1), (3, 1)]);
+    assert_eq!(postings(&title, "a"), [(3, 2)]);
+    assert_eq!(postings(&title, "quick"), [(0, 1), (1, 2)]);
+
+    let tag = terms_of(s1, "tag");
+    assert_eq!(postings(&tag, "animal"), [(1, 1)]);
+    assert_eq!(postings(&tag, "news"), [(0, 1)]);
+    let title = terms_of(s1, "title");
+    assert_eq!(postings(&title, "fox"), [(0, 1)]);
+    assert_eq!(postings(&title, "quick"), [(1, 2)]);
+}
