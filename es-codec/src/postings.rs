@@ -5,7 +5,7 @@
 //! `LEVEL1_NUM_DOCS` (32 blocks) docs a level-1 skip header precedes the next blocks. Skip data is
 //! skipped, not used: a whole term is decoded front to back.
 
-use crate::{Result, err, input::DataInput};
+use crate::{Result, err, input::DataInput, output::Output};
 
 pub const BLOCK_SIZE: usize = 256;
 /// Docs per level-1 skip entry (`LEVEL1_FACTOR` 32 blocks).
@@ -89,6 +89,41 @@ pub(crate) fn read_docs(
         out.extend(block.into_iter().zip(freqs));
     }
     Ok(out)
+}
+
+/// Writes one term's docs (fewer than [`BLOCK_SIZE`], ascending) in the group-varint tail form
+/// `read_docs` reads: all doc deltas (low bit set when the freq is 1), then the other freqs.
+pub fn write_docs_tail(out: &mut Output, docs: &[(u32, u32)], has_freqs: bool) {
+    assert!(docs.len() < BLOCK_SIZE, "full blocks are not written yet");
+    let mut prev = -1i64;
+    let deltas: Vec<u32> = docs
+        .iter()
+        .map(|&(d, f)| {
+            let delta = (d as i64 - prev) as u32;
+            prev = d as i64;
+            if has_freqs {
+                (delta << 1) | (f == 1) as u32
+            } else {
+                delta
+            }
+        })
+        .collect();
+    let len = |v: u32| (4 - v.leading_zeros() as usize / 8).max(1);
+    let (chunks, rest) = deltas.as_chunks::<4>();
+    for c in chunks {
+        out.byte(c.iter().fold(0, |f, &v| (f << 2) | (len(v) - 1) as u8));
+        for &v in c {
+            out.bytes(&v.to_le_bytes()[..len(v)]);
+        }
+    }
+    for &v in rest {
+        out.vint(v as i32);
+    }
+    if has_freqs {
+        for &(_, f) in docs.iter().filter(|d| d.1 != 1) {
+            out.vint(f as i32);
+        }
+    }
 }
 
 fn read_vint15(input: &mut DataInput) -> Result<i32> {
@@ -376,5 +411,19 @@ mod tests {
         b.extend([5, 0xc8, 0x01]);
         let got = read_group_vints(&mut DataInput::new(&b), 6).unwrap();
         assert_eq!(got, [1, 300, 70000, 0x7fff_ffff, 5, 200]);
+    }
+
+    #[test]
+    fn docs_tail_round_trips() {
+        for has_freqs in [true, false] {
+            let docs: Vec<(u32, u32)> = [0u32, 1, 5, 300, 70000, 70001, 1 << 24, 1 << 25, 1 << 26]
+                .iter()
+                .enumerate()
+                .map(|(i, &d)| (d, if has_freqs { 1 + (i as u32 % 3) } else { 1 }))
+                .collect();
+            let mut out = Output::default();
+            write_docs_tail(&mut out, &docs, has_freqs);
+            assert_eq!(read_docs(&out.0, 0, docs.len(), has_freqs).unwrap(), docs);
+        }
     }
 }
