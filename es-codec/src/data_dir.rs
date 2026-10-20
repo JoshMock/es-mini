@@ -86,9 +86,86 @@ pub fn write_empty_data_dir(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cluster_state::read_indices;
+    use crate::{cluster_state::read_indices, uid::encode_id};
 
     /// Set `ESM_WRITE_DIR` to keep the output for `scripts/cross_engine.sh`.
+    /// Experiment: one doc "1" with only the meta fields; run cross_engine.sh get_1 on it.
+    #[test]
+    fn one_doc_segment() {
+        use crate::{
+            segment_writer::{NewSegment, es_meta_fields, write_segment},
+            stored_fields::StoredValue,
+            terms::TermPostings,
+        };
+        let Some(out) = std::env::var_os("ESM_WRITE_DIR1").map(std::path::PathBuf::from) else {
+            return;
+        };
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/es-9.5.5/data");
+        let indices = read_indices(&fixture).unwrap();
+        let global = GlobalMetadata {
+            cluster_uuid: "esminiClusterUuid00A".into(),
+            node_id: "esminiNodeId0000000000".into(),
+            term: 1,
+        };
+        write_empty_data_dir(&out, &global, &indices).unwrap();
+        let ix = indices.iter().find(|i| i.name == "fixture").unwrap();
+        let dir = out.join("indices").join(&ix.uuid).join("0/index");
+        let mut fields = es_meta_fields();
+        fields[3].point_dimensions = 0;
+        fields[3].point_index_dimensions = 0;
+        fields[3].point_num_bytes = 0;
+        let src = br#"{"title":"The quick brown fox","tag":"animal","views":10,"rating":4.5,"published":true,"date":"2024-01-01"}"#;
+        let stored = [vec![
+            (0, StoredValue::Bytes(encode_id("1"))),
+            (1, StoredValue::Bytes(src.to_vec())),
+        ]];
+        let numeric = [(2, vec![1]), (3, vec![0]), (4, vec![1])];
+        let terms = [(
+            0,
+            vec![TermPostings {
+                term: encode_id("1"),
+                total_term_freq: 1,
+                docs: vec![(0, 1)],
+                positions: vec![],
+            }],
+        )];
+        let seg = write_segment(
+            &dir,
+            &NewSegment {
+                name: "_0",
+                id: [7; 16],
+                max_doc: 1,
+                fields: &fields,
+                stored: &stored,
+                numeric: &numeric,
+                keyword: &[],
+                norms: &[],
+                terms: &terms,
+            },
+        )
+        .unwrap();
+        SegmentInfos {
+            id: [1; 16],
+            generation: 2,
+            lucene_version: (10, 0, 0),
+            index_created_major: 10,
+            version: 2,
+            counter: 1,
+            segments: vec![seg],
+            user_data: shard_user_data(HISTORY_UUID, TRANSLOG_UUID, 0, 0),
+        }
+        .write(&dir)
+        .unwrap();
+        // The safe commit is chosen by the translog's global checkpoint.
+        let cp = Checkpoint {
+            generation: 1,
+            global_checkpoint: 0,
+            primary_term: 1,
+        };
+        let (_, ckp) = write_empty(TRANSLOG_UUID, &cp);
+        std::fs::write(dir.join("../translog/translog.ckp"), ckp).unwrap();
+    }
+
     #[test]
     fn written_dir_reads_back() {
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/es-9.5.5/data");

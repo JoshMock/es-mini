@@ -9,7 +9,8 @@ SRC="${1:-$ROOT/fixtures/es-9.5.5/data}"
 NAME=es-mini-cross-engine
 ES=http://localhost:9200
 WORK="$(mktemp -d)"
-cleanup() { docker rm -f "$NAME" >/dev/null 2>&1 || true; rm -rf "$WORK"; }
+cleanup() { [ -z "${VERBOSE:-}" ] || docker logs "$NAME" 2>&1 | grep -E "fixture|Caused|Exception" | grep -v rest.suppressed | cut -c1-600 | head -15 | sed "s/.*\"message\":\"\([^\"]*\)\".*/\1/"
+  docker rm -f "$NAME" >/dev/null 2>&1 || true; rm -rf "$WORK"; }
 trap cleanup EXIT
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 cp -r "$SRC" "$WORK/data"
@@ -24,7 +25,7 @@ docker run -d --name "$NAME" --cpus 1 --memory 1g \
 req() { printf '%s' "${3:-}" | docker exec -i "$NAME" curl -s -X "$1" "$ES$2" \
   -H 'content-type: application/json' ${3:+--data-binary @-}; }
 tries=0
-until req GET '/_cluster/health?wait_for_status=yellow&timeout=1s' 2>/dev/null | grep -q status; do
+until req GET '/_cluster/health?wait_for_status=green&timeout=1s' 2>/dev/null | grep -q '"timed_out":false'; do
   tries=$((tries + 1))
   [ $tries -lt 60 ] || { docker logs "$NAME" 2>&1 | tail -20 >&2; echo "ES did not come up" >&2; exit 1; }
   sleep 2
@@ -36,7 +37,10 @@ fail=0
 check() { # name method path [body]
   if req "$2" "$3" "${4:-}" | strip | diff -q - "$ROOT/fixtures/expected/$1.json" >/dev/null 2>&1; then
     echo "ok   $1"
-  else echo "FAIL $1"; fail=1; fi
+  else
+    echo "FAIL $1"; fail=1
+    [ -z "${VERBOSE:-}" ] || req "$2" "$3" "${4:-}" | strip | diff - "$ROOT/fixtures/expected/$1.json" | head -20 || true
+  fi
 }
 check get_1 GET /fixture/_doc/1
 check get_5_deleted GET /fixture/_doc/5
@@ -47,4 +51,5 @@ check range_views POST /fixture/_search '{"query":{"range":{"views":{"gte":7,"lt
 check bool POST /fixture/_search '{"query":{"bool":{"must":{"match":{"title":"dog"}},"must_not":{"term":{"tag":"pet"}}}}}'
 check count_published POST /fixture/_count '{"query":{"term":{"published":true}}}'
 check mapping GET /fixture/_mapping
+[ -z "${VERBOSE:-}" ] || { req GET /_cat/shards?v; req GET /_cluster/allocation/explain | cut -c1-1500; }
 exit $fail
