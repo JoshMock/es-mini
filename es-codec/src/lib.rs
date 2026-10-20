@@ -2,16 +2,19 @@
 //!
 //! ponytail: files are read fully into memory; switch to mmap when indices outgrow RAM.
 
+pub mod cluster_state;
 pub mod codec_util;
 pub mod compound;
 pub mod doc_values;
 pub mod field_infos;
+pub mod inflate;
 pub mod input;
 pub mod live_docs;
 mod lz4;
 pub mod postings;
 pub mod segment;
 pub mod segment_infos;
+pub mod smile;
 pub mod stored_fields;
 pub mod terms;
 
