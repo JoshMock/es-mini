@@ -27,15 +27,22 @@ fn parse(
 ) -> Result<Vec<Action>, AppError> {
     let mut lines = body
         .split(|b| *b == b'\n')
-        .filter(|l| !l.trim_ascii().is_empty());
+        .filter(|l| !l.trim_ascii().is_empty())
+        .enumerate();
     let mut actions = Vec::new();
-    while let Some(line) = lines.next() {
+    while let Some((n, line)) = lines.next() {
         let meta = parse_json(line)?;
         let Some((op, meta)) = meta
             .as_object()
             .filter(|m| m.len() == 1)
             .and_then(|m| m.iter().next())
         else {
+            if meta.as_object().is_some_and(|m| m.is_empty()) {
+                return Err(AppError::IllegalArgument(format!(
+                    "Malformed action/metadata line [{}], expected FIELD_NAME but found [END_OBJECT]",
+                    n + 1
+                )));
+            }
             return Err(AppError::IllegalArgument(format!(
                 "Malformed action/metadata line, found [{meta}]"
             )));
@@ -61,7 +68,7 @@ fn parse(
         let body = match op.as_str() {
             "delete" => None,
             _ => {
-                let line = lines.next().ok_or_else(|| {
+                let (_, line) = lines.next().ok_or_else(|| {
                     AppError::IllegalArgument(
                         "The bulk request must be terminated by a newline [\\n]".into(),
                     )

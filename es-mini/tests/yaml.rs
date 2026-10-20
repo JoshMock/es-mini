@@ -176,7 +176,13 @@ fn catch_ok(catch: &str, status: u16, body: &Value) -> bool {
         "request_timeout" => status == 408,
         "unavailable" => status == 503,
         "request" => status >= 400 && ![400, 401, 403, 404, 408, 409].contains(&status),
-        c if is_regex(c) => status >= 400 && regex_match(c, &body.to_string()),
+        // Unlike `match`, catch patterns are not in extended mode: spaces are literal.
+        c if is_regex(c) => {
+            let inner = c.trim().trim_start_matches('/').trim_end_matches('/');
+            status >= 400
+                && Regex::new(&format!("(?s){inner}"))
+                    .is_ok_and(|re| re.is_match(&body.to_string()))
+        }
         // "param" means the client rejects the request before sending it.
         _ => false,
     }
