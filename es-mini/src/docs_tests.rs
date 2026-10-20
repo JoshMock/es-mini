@@ -148,3 +148,10 @@ async fn non_object_source_is_400() {
         (StatusCode::BAD_REQUEST, &json!("mapper_parsing_exception"))
     );
 }
+
+#[tokio::test]
+async fn id_over_512_bytes_is_rejected() {
+    let uri = format!("/idx/_doc/{}", "a".repeat(513));
+    let (s, _) = call(&app(), Method::POST, &uri, Some(json!({"a": 1}))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+}

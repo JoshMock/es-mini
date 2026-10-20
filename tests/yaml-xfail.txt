@@ -1,12 +1,10 @@
 # Known-failing YAML tests. Fix one, then delete its line.
-index/10_with_id.yml/Index with ID
 index/110_array_objects_limit.yml/Test array objects limit accepts documents at or below the limit
 index/110_array_objects_limit.yml/Test array objects limit applies in bulk and only fails offending docs
 index/110_array_objects_limit.yml/Test array objects limit can be updated dynamically
 index/110_array_objects_limit.yml/Test array objects limit counts cumulatively across sibling arrays
 index/110_array_objects_limit.yml/Test array objects limit rejects documents above the limit
 index/110_array_objects_limit.yml/Test array objects limit rejects non-positive values
-index/110_columnar_id.yml/Index with ID and columnar _id mode
 index/60_refresh.yml/Refresh
 index/60_refresh.yml/When refresh url parameter is an empty string that means "refresh immediately"
 index/60_refresh.yml/refresh=wait_for waits until changes are visible in search

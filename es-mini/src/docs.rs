@@ -98,6 +98,12 @@ pub fn put_or_create(
     source: Value,
     create: bool,
 ) -> Reply {
+    if id.len() > 512 {
+        return Err(AppError::IllegalArgument(format!(
+            "id [{id}] is too long, must be no longer than 512 bytes but was: {}",
+            id.len()
+        )));
+    }
     let source = check_source(source)?;
     let (w, total, index) = write(state, index, |i| match create {
         true => i.create(id, source),
