@@ -12,6 +12,11 @@ use std::collections::{BTreeMap, HashMap};
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum FieldMapping {
     Text,
+    /// Dynamically mapped string: `text` with a `keyword` subfield.
+    #[serde(rename = "text", skip_deserializing)]
+    TextKeyword {
+        fields: BTreeMap<String, FieldMapping>,
+    },
     Keyword,
     Long,
     Integer,
@@ -165,6 +170,23 @@ impl Index {
     fn next_seq_no(&mut self) -> u64 {
         self.next_seq_no += 1;
         self.next_seq_no - 1
+    }
+
+    /// Adds dynamic mappings for fields of `source` not yet mapped.
+    pub fn map_dynamic(&mut self, source: &Value) {
+        // ponytail: top-level string fields only; no other dynamic types or nested objects
+        if self.settings.get("index.mapping.dynamic_strings.auto_text") != Some("false")
+            && let Some(obj) = source.as_object()
+        {
+            for k in obj.iter().filter(|(_, v)| v.is_string()).map(|(k, _)| k) {
+                self.mappings
+                    .properties
+                    .entry(k.clone())
+                    .or_insert_with(|| FieldMapping::TextKeyword {
+                        fields: [("keyword".to_owned(), FieldMapping::Keyword)].into(),
+                    });
+            }
+        }
     }
 
     /// Creates or overwrites a document.
