@@ -262,6 +262,16 @@ pub async fn get_mapping(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<Value>, AppError> {
+    if name.contains('*') {
+        // ponytail: single wildcard pattern only; no comma lists or _all
+        let indices = state.read().expect("lock poisoned");
+        let out: serde_json::Map<String, Value> = indices
+            .iter()
+            .filter(|(k, _)| es_index::aliases::glob(&name, k))
+            .map(|(k, i)| (k.clone(), json!({"mappings": i.mappings})))
+            .collect();
+        return Ok(Json(Value::Object(out)));
+    }
     let mappings = with_index(&state, name.clone(), |i| json!(i.mappings))?;
     Ok(Json(json!({ name: {"mappings": mappings} })))
 }

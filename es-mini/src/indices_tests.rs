@@ -157,4 +157,7 @@ async fn settings_and_mapping_endpoints() {
 
     let (s, r) = call(&app, Method::GET, "/idx/_mapping", None).await;
     assert_eq!((s, r), (StatusCode::OK, json!({"idx": {"mappings": {}}})));
+
+    let (s, r) = call(&app, Method::GET, "/*/_mapping", None).await;
+    assert_eq!((s, r), (StatusCode::OK, json!({"idx": {"mappings": {}}})));
 }
