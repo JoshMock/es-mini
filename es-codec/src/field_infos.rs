@@ -67,8 +67,7 @@ pub fn read_field_infos(
         },
         g => {
             let suffix = radix36(g as u64);
-            let p = dir.join(format!("{}_{suffix}.fnm", seg.name));
-            owned = std::fs::read(&p).map_err(|e| crate::Error(format!("{}: {e}", p.display())))?;
+            owned = crate::read_file(&dir.join(format!("{}_{suffix}.fnm", seg.name)))?;
             (owned.as_slice(), suffix)
         }
     };

@@ -103,6 +103,11 @@ impl<'a> DataInput<'a> {
     }
 }
 
+/// Lucene's zig-zag decoding of a varint: `(v >>> 1) ^ -(v & 1)`.
+pub(crate) fn zigzag(v: u64) -> i64 {
+    (v >> 1) as i64 ^ -((v & 1) as i64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

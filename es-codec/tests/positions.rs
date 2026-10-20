@@ -1,12 +1,10 @@
 //! Positions, offsets, and payloads from an index written by real Lucene 10.5.1: see
 //! tests/gen/GenPositions.java (the doc text there must match `text` here).
 
-use es_codec::{
-    CompoundFile, SegmentInfos,
-    field_infos::read_field_infos,
-    terms::{Position, read_terms},
-};
-use std::{collections::BTreeMap, path::PathBuf};
+use es_codec::terms::Position;
+use std::collections::BTreeMap;
+
+mod common;
 
 const DOCS: usize = 600;
 
@@ -59,18 +57,14 @@ fn expected(offsets: bool, payloads: bool) -> BTreeMap<String, Vec<(u32, Vec<Pos
 
 #[test]
 fn reads_positions_offsets_and_payloads() {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/positions");
-    let infos = SegmentInfos::read_latest(&dir).unwrap();
-    let seg = &infos.segments[0];
-    let cfs = CompoundFile::open(&dir, &seg.name, &seg.info.id).unwrap();
-    let fields = read_field_infos(&dir, seg, &cfs).unwrap();
+    let seg = common::open("positions");
     for (field, offsets, payloads) in [
         ("plain", false, false),
         ("offsets", true, false),
         ("payloads", false, true),
         ("both", true, true),
     ] {
-        let got = read_terms(&cfs, seg, &fields, field).unwrap();
+        let got = seg.terms(field).unwrap();
         let want = expected(offsets, payloads);
         assert_eq!(got.len(), want.len(), "{field} terms");
         for (t, (term, docs)) in got.iter().zip(&want) {

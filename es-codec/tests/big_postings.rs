@@ -1,8 +1,7 @@
 //! Terms with 256+ docs (packed postings blocks), from an index written by real Lucene 10.5.1:
 //! see tests/gen/GenBigPostings.java, regenerate with tests/gen/gen.sh.
 
-use es_codec::{CompoundFile, SegmentInfos, field_infos::read_field_infos, terms::read_terms};
-use std::path::PathBuf;
+mod common;
 
 const DOCS: u32 = 8500;
 
@@ -33,14 +32,11 @@ fn expected(field: &str) -> Vec<(&'static str, Vec<(u32, u32)>)> {
 
 #[test]
 fn reads_postings_with_packed_blocks() {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/big-postings");
-    let infos = SegmentInfos::read_latest(&dir).unwrap();
-    let seg = &infos.segments[0];
-    assert_eq!(seg.info.max_doc, DOCS as i32);
-    let cfs = CompoundFile::open(&dir, &seg.name, &seg.info.id).unwrap();
-    let fields = read_field_infos(&dir, seg, &cfs).unwrap();
+    let seg = common::open("big-postings");
+    assert_eq!(seg.max_doc(), DOCS as usize);
     for field in ["text", "key"] {
-        let got: Vec<_> = read_terms(&cfs, seg, &fields, field)
+        let got: Vec<_> = seg
+            .terms(field)
             .unwrap()
             .into_iter()
             .map(|t| (String::from_utf8(t.term).unwrap(), t.docs))

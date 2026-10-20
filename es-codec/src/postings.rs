@@ -22,7 +22,8 @@ pub(crate) fn read_docs(
 ) -> Result<Vec<(u32, u32)>> {
     let input = &mut DataInput::new(file);
     input.pos = fp;
-    let mut out: Vec<(u32, u32)> = Vec::with_capacity(n);
+    // `n` comes from the file, so it is not trusted for a preallocation.
+    let mut out: Vec<(u32, u32)> = Vec::new();
     let mut prev = -1i64;
     let mut level1_last = if n >= LEVEL1_NUM_DOCS {
         -1
@@ -264,7 +265,7 @@ pub(crate) fn read_positions(f: &PositionFiles, freqs: &[u32]) -> Result<Vec<Vec
     pos.pos = f.pos_fp;
     let pay = &mut DataInput::new(f.pay);
     pay.pos = f.pay_fp;
-    let mut raw: Vec<Raw> = Vec::with_capacity(total);
+    let mut raw: Vec<Raw> = Vec::new();
     for _ in 0..total / BLOCK_SIZE {
         let mut block = vec![Raw::default(); BLOCK_SIZE];
         for (r, d) in block.iter_mut().zip(read_pfor(pos)?) {
@@ -303,7 +304,8 @@ pub(crate) fn read_positions(f: &PositionFiles, freqs: &[u32]) -> Result<Vec<Vec
         if f.offsets {
             let code = pos.read_vint()? as u32;
             if code & 1 != 0 {
-                offset_len = code_len(pos.read_vint()?)?;
+                offset_len =
+                    u32::try_from(pos.read_vint()?).or_else(|_| err("negative offset length"))?;
             }
             (r.start_delta, r.offset_len) = (code >> 1, offset_len);
         }
@@ -331,10 +333,6 @@ pub(crate) fn read_positions(f: &PositionFiles, freqs: &[u32]) -> Result<Vec<Vec
                 .collect()
         })
         .collect()
-}
-
-fn code_len(v: i32) -> Result<u32> {
-    u32::try_from(v).or_else(|_| err("negative offset length"))
 }
 
 /// `GroupVIntUtil.readGroupVInts`: groups of four ints behind a length byte, then plain vints.

@@ -3,8 +3,7 @@
 //! must match `terms` here). Doc d holds term d of field "t"; the 100 docs after them hold
 //! field "q".
 
-use es_codec::{CompoundFile, SegmentInfos, field_infos::read_field_infos, terms::read_terms};
-use std::path::PathBuf;
+mod common;
 
 fn base36(mut n: u32) -> String {
     let mut out = vec![];
@@ -37,14 +36,11 @@ fn terms() -> Vec<String> {
 
 #[test]
 fn reads_a_multi_block_terms_dictionary() {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/many-terms");
-    let infos = SegmentInfos::read_latest(&dir).unwrap();
-    let seg = &infos.segments[0];
-    let cfs = CompoundFile::open(&dir, &seg.name, &seg.info.id).unwrap();
-    let fields = read_field_infos(&dir, seg, &cfs).unwrap();
+    let seg = common::open("many-terms");
     let mut want: Vec<(String, u32)> = terms().into_iter().zip(0..).collect();
     want.sort();
-    let got: Vec<(String, Vec<(u32, u32)>)> = read_terms(&cfs, seg, &fields, "t")
+    let got: Vec<(String, Vec<(u32, u32)>)> = seg
+        .terms("t")
         .unwrap()
         .into_iter()
         .map(|t| (String::from_utf8(t.term).unwrap(), t.docs))
@@ -56,7 +52,7 @@ fn reads_a_multi_block_terms_dictionary() {
     }
 
     // Every "q" term starts with the same byte: the trie root has one child.
-    let q = read_terms(&cfs, seg, &fields, "q").unwrap();
+    let q = seg.terms("q").unwrap();
     let base = want.len() as u32;
     let q: Vec<_> = q.into_iter().map(|t| (t.term, t.docs)).collect();
     let want_q: Vec<_> = (0..100)

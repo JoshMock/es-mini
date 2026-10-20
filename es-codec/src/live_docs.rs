@@ -1,30 +1,10 @@
 //! Live docs: hard deletes (`.liv`) combined with soft deletes (the soft-deletes doc values field).
 use crate::{
-    CompoundFile, Result, SegmentCommitInfo, codec_util,
-    doc_values::{self, DocValues},
-    err,
-    field_infos::FieldInfo,
-    input::DataInput,
+    Result, SegmentReader, codec_util, doc_values::DocValues, err, input::DataInput,
     segment_infos::radix36,
 };
-use std::path::Path;
-
-fn read_file(dir: &Path, name: &str) -> Result<Vec<u8>> {
-    let p = dir.join(name);
-    std::fs::read(&p).map_err(|e| crate::Error(format!("{}: {e}", p.display())))
-}
 
 /// `Lucene90LiveDocsFormat`: a bit set of live docs; absent when the segment has no hard deletes.
-fn read_liv(file: &[u8], seg: &SegmentCommitInfo) -> Result<Vec<bool>> {
-    parse_liv(
-        file,
-        &seg.info.id,
-        seg.del_gen,
-        seg.info.max_doc as usize,
-        seg.del_count,
-    )
-}
-
 fn parse_liv(
     file: &[u8],
     id: &[u8; codec_util::ID_LEN],
@@ -49,25 +29,22 @@ fn parse_liv(
 }
 
 /// Whether each doc id is live: not hard-deleted and without a value in the soft-deletes field.
-pub fn read_live_docs(
-    dir: &Path,
-    seg: &SegmentCommitInfo,
-    cfs: &CompoundFile,
-    fields: &[FieldInfo],
-) -> Result<Vec<bool>> {
+pub(crate) fn read_live_docs(r: &SegmentReader) -> Result<Vec<bool>> {
+    let seg = &r.seg;
     let mut live = match seg.del_gen {
-        -1 => vec![true; seg.info.max_doc as usize],
-        g => read_liv(
-            &read_file(dir, &format!("{}_{}.liv", seg.name, radix36(g as u64)))?,
-            seg,
+        -1 => vec![true; r.max_doc()],
+        g => parse_liv(
+            &r.gen_file(&format!("_{}.liv", radix36(g as u64)))?,
+            &seg.info.id,
+            g,
+            r.max_doc(),
+            seg.del_count,
         )?,
     };
-    let Some(soft) = fields.iter().find(|f| f.soft_deletes) else {
+    let Some(soft) = r.fields.iter().find(|f| f.soft_deletes) else {
         return Ok(live);
     };
-    let DocValues::Numbers(values) =
-        doc_values::read_field_values(dir, seg, cfs, fields, &soft.name)?
-    else {
+    let DocValues::Numbers(values) = r.doc_values(&soft.name)? else {
         return err("soft deletes field is not numeric");
     };
     // One entry per doc, so the indexes line up with `live`.

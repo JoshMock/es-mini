@@ -5,12 +5,16 @@
 
 pub use crate::postings::Position;
 use crate::{
-    CompoundFile, Result, SegmentCommitInfo, codec_util, err,
+    Result, SegmentReader, codec_util, err,
     field_infos::{FieldInfo, IndexOptions},
-    input::DataInput,
-    postings,
-    stored_fields::{lz4, zigzag},
+    input::{DataInput, zigzag},
+    lz4, postings,
 };
+
+/// Deepest nesting of sub-blocks accepted before a `.tim` is called corrupt.
+// ponytail: a crafted index could otherwise recurse until the stack overflows; real block trees
+// are a handful of levels deep.
+const MAX_BLOCK_DEPTH: usize = 128;
 
 /// One term of a field and its postings. `freq` is 1 for every doc when the field omits freqs.
 #[derive(Debug, Clone, PartialEq)]
@@ -23,17 +27,8 @@ pub struct TermPostings {
     pub positions: Vec<Vec<Position>>,
 }
 
-/// Every term of `field` in term order with its postings.
-pub fn read_terms(
-    cfs: &CompoundFile,
-    seg: &SegmentCommitInfo,
-    fields: &[FieldInfo],
-    field: &str,
-) -> Result<Vec<TermPostings>> {
-    let info = fields
-        .iter()
-        .find(|f| f.name == field)
-        .ok_or_else(|| crate::Error(format!("no field {field}")))?;
+pub(crate) fn read_terms(r: &SegmentReader, field: &str) -> Result<Vec<TermPostings>> {
+    let info = r.field(field)?;
     let attr = |k: &str| info.attributes.get(&format!("PerFieldPostingsFormat.{k}"));
     let (Some(format), Some(suffix)) = (attr("format"), attr("suffix")) else {
         return err(format!("field {field} has no postings"));
@@ -42,16 +37,13 @@ pub fn read_terms(
         return err(format!("postings format {format} is not supported"));
     }
     let suffix = format!("{format}_{suffix}");
-    let file = |ext: &str| {
-        cfs.file(&format!("_{suffix}.{ext}"))
-            .ok_or_else(|| crate::Error(format!("{} has no .{ext} for {suffix}", seg.name)))
-    };
-    let id = &seg.info.id;
+    let file = |ext: &str| r.cfs_file(&format!("_{suffix}.{ext}"));
+    let id = &r.seg.info.id;
     let (tim, tip, tmd, doc) = (file("tim")?, file("tip")?, file("tmd")?, file("doc")?);
     // `.pos` and `.pay` exist only when some field has positions, or offsets or payloads.
     let (pos, pay) = (
-        cfs.file(&format!("_{suffix}.pos")).unwrap_or_default(),
-        cfs.file(&format!("_{suffix}.pay")).unwrap_or_default(),
+        file("pos").unwrap_or_default(),
+        file("pay").unwrap_or_default(),
     );
     for (name, f, codec) in [
         ("tim", tim, "BlockTreeTermsDict"),
@@ -79,11 +71,7 @@ pub fn read_terms(
         let number = meta.read_vint()?;
         let num_terms = meta.read_vlong()?;
         let sum_total_term_freq = meta.read_vlong()?;
-        let this = fields
-            .iter()
-            .find(|f| f.number == number)
-            .ok_or_else(|| crate::Error(format!("terms for unknown field {number}")))?;
-        if this.index_options != IndexOptions::Docs {
+        if r.field_by_number(number)?.index_options != IndexOptions::Docs {
             meta.read_vlong()?; // sumDocFreq
         }
         meta.read_vint()?; // docCount
@@ -110,7 +98,7 @@ pub fn read_terms(
             info,
             out: Vec::new(),
         };
-        walker.block(root_block as usize, &[])?;
+        walker.block(root_block as usize, &[], 0)?;
         let total: u64 = walker.out.iter().map(|t| t.total_term_freq).sum();
         if walker.out.len() as i64 != num_terms || total != sum_total_term_freq as u64 {
             return err(format!(
@@ -124,7 +112,9 @@ pub fn read_terms(
 
 /// `TrieReader.load` for the root node: the file pointer of the root block in `.tim`.
 fn trie_root_output_fp(tip: &[u8], start: usize, end: usize, root: usize) -> Result<u64> {
-    let node = start + root;
+    let Some(node) = start.checked_add(root) else {
+        return err("trie root extends past the index");
+    };
     let long_at = |pos: usize| -> Result<u64> {
         // Like Lucene, read 8 bytes at a node near the end of the index: they run into what follows.
         match tip.get(pos..pos + 8).filter(|_| pos <= end) {
@@ -196,7 +186,10 @@ struct TermState {
 
 impl Walker<'_> {
     /// Decodes the block at `fp` and its floor blocks, recursing into sub-blocks in term order.
-    fn block(&mut self, mut fp: usize, prefix: &[u8]) -> Result<()> {
+    fn block(&mut self, mut fp: usize, prefix: &[u8], depth: usize) -> Result<()> {
+        if depth > MAX_BLOCK_DEPTH {
+            return err("terms blocks nest too deeply");
+        }
         loop {
             let input = &mut DataInput::new(self.tim);
             input.pos = fp;
@@ -208,8 +201,8 @@ impl Walker<'_> {
                 0 => input.read_bytes(len)?.to_vec(),
                 1 => lowercase_ascii(input, len)?,
                 2 => {
-                    let mut out = Vec::with_capacity(len);
-                    lz4(input, len, &mut out)?;
+                    let mut out = Vec::new();
+                    lz4::decompress(input, len, &mut out)?;
                     out
                 }
                 a => return err(format!("unknown suffix compression {a}")),
@@ -244,8 +237,12 @@ impl Walker<'_> {
                 let mut term = prefix.to_vec();
                 term.extend_from_slice(suffixes.read_bytes(suffix_len)?);
                 if let Some(sub_code) = sub {
-                    let sub_fp = (fp as i64 - sub_code) as usize;
-                    self.block(sub_fp, &term)?;
+                    // Sub-blocks are written before their parent, so the delta is positive.
+                    let sub_fp = usize::try_from(fp as i64 - sub_code)
+                        .ok()
+                        .filter(|_| sub_code > 0)
+                        .ok_or_else(|| crate::Error("corrupt sub-block pointer".into()))?;
+                    self.block(sub_fp, &term, depth + 1)?;
                     continue;
                 }
                 self.decode_stats(stats, &mut state)?;

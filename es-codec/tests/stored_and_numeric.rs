@@ -2,14 +2,9 @@
 //! by real Lucene 10.5.1: see tests/gen/GenStoredAndNumeric.java (its value formulas must match
 //! the ones here).
 
-use es_codec::{
-    CompoundFile, SegmentCommitInfo, SegmentInfos,
-    doc_values::{DocValues, read_field_values},
-    field_infos::{FieldInfo, read_field_infos},
-    live_docs::read_live_docs,
-    stored_fields::{StoredValue, read_stored_fields},
-};
-use std::path::PathBuf;
+use es_codec::{doc_values::DocValues, stored_fields::StoredValue};
+
+mod common;
 
 const DOCS: usize = 70000;
 const STORED_DOCS: usize = 3000;
@@ -69,19 +64,11 @@ fn stored(d: usize) -> Vec<(&'static str, StoredValue)> {
     ]
 }
 
-fn open() -> (PathBuf, SegmentCommitInfo, CompoundFile, Vec<FieldInfo>) {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/stored-and-numeric");
-    let seg = SegmentInfos::read_latest(&dir).unwrap().segments.remove(0);
-    let cfs = CompoundFile::open(&dir, &seg.name, &seg.info.id).unwrap();
-    let fields = read_field_infos(&dir, &seg, &cfs).unwrap();
-    (dir, seg, cfs, fields)
-}
-
 #[test]
 fn reads_stored_fields_of_every_type() {
-    let (_, seg, cfs, fields) = open();
-    let name = |n: i32| fields.iter().find(|f| f.number == n).unwrap().name.as_str();
-    let docs = read_stored_fields(&cfs, &seg).unwrap();
+    let seg = common::open("stored-and-numeric");
+    let name = |n: i32| seg.field_by_number(n).unwrap().name.as_str();
+    let docs = seg.stored_fields().unwrap();
     assert_eq!(docs.len(), DOCS);
     for (d, doc) in docs.into_iter().enumerate() {
         let got: Vec<(&str, StoredValue)> = doc.into_iter().map(|(n, v)| (name(n), v)).collect();
@@ -91,9 +78,9 @@ fn reads_stored_fields_of_every_type() {
 
 #[test]
 fn reads_hard_deletes_from_liv() {
-    let (dir, seg, cfs, fields) = open();
-    assert_eq!((seg.del_gen, seg.del_count), (1, 70));
-    let live = read_live_docs(&dir, &seg, &cfs, &fields).unwrap();
+    let seg = common::open("stored-and-numeric");
+    assert_eq!((seg.seg.del_gen, seg.seg.del_count), (1, 70));
+    let live = seg.live_docs().unwrap();
     let dead: Vec<usize> = (0..DOCS).filter(|d| !live[*d]).collect();
     let want: Vec<usize> = (0..DOCS).filter(|d| d % 1000 == 7).collect();
     assert_eq!(dead, want);
@@ -101,8 +88,8 @@ fn reads_hard_deletes_from_liv() {
 
 #[test]
 fn reads_numeric_doc_values_across_disi_and_value_blocks() {
-    let (dir, seg, cfs, fields) = open();
-    let numbers = |field: &str| match read_field_values(&dir, &seg, &cfs, &fields, field).unwrap() {
+    let seg = common::open("stored-and-numeric");
+    let numbers = |field: &str| match seg.doc_values(field).unwrap() {
         DocValues::Numbers(n) => n,
         other => panic!("{field}: {other:?}"),
     };

@@ -16,10 +16,7 @@ pub struct CompoundFile {
 
 impl CompoundFile {
     pub fn open(dir: &Path, segment: &str, id: &[u8; ID_LEN]) -> Result<Self> {
-        let read = |ext: &str| {
-            let p = dir.join(format!("{segment}.{ext}"));
-            std::fs::read(&p).map_err(|e| crate::Error(format!("{}: {e}", p.display())))
-        };
+        let read = |ext: &str| crate::read_file(&dir.join(format!("{segment}.{ext}")));
         let cfe = read("cfe")?;
         codec_util::check_footer(&cfe)?;
         let input = &mut DataInput::new(&cfe);

@@ -4,15 +4,8 @@
 //! metadata is skipped over.
 
 use crate::{
-    CompoundFile, Result, SegmentCommitInfo,
-    codec_util::{self, ID_LEN},
-    err,
-    field_infos::FieldInfo,
-    input::DataInput,
-    segment_infos::radix36,
-    stored_fields::lz4,
+    Result, SegmentReader, codec_util, err, input::DataInput, lz4, segment_infos::radix36,
 };
-use std::path::Path;
 
 const VERSION_MAX: i32 = 2;
 /// Doc id block index of the IndexedDISI terminator block (`NO_MORE_DOCS >>> 16`).
@@ -24,60 +17,31 @@ const TERMS_DICT_BLOCK_LZ4_SHIFT: u32 = 6;
 pub enum DocValues {
     /// Numeric and sorted numeric fields; doubles are sortable-long encoded.
     Numbers(Vec<Vec<i64>>),
-    /// Sorted set fields, as terms in ordinal order.
-    Terms(Vec<Vec<Vec<u8>>>),
+    /// Sorted and sorted set fields: each doc's ordinals in ascending order, which index
+    /// `terms` (the field's distinct values in byte order).
+    Ordinals {
+        ords: Vec<Vec<usize>>,
+        terms: Vec<Vec<u8>>,
+    },
     /// Binary fields: one value per doc, `None` where the doc has none.
     Bytes(Vec<Option<Vec<u8>>>),
 }
 
 /// Decodes a field of a segment, from the field's latest doc values generation.
-pub fn read_field_values(
-    dir: &Path,
-    seg: &SegmentCommitInfo,
-    cfs: &CompoundFile,
-    fields: &[FieldInfo],
-    field: &str,
-) -> Result<DocValues> {
-    let info = fields
-        .iter()
-        .find(|f| f.name == field)
-        .ok_or_else(|| crate::Error(format!("no field {field}")))?;
-    let id = &seg.info.id;
-    let max_doc = seg.info.max_doc;
-    match info.dv_gen {
-        -1 => {
-            let file = |ext: &str| {
-                cfs.file(&format!("_Lucene90_0.{ext}"))
-                    .ok_or_else(|| crate::Error(format!("{} has no doc values .{ext}", seg.name)))
-            };
-            decode(
-                file("dvm")?,
-                file("dvd")?,
-                id,
-                "Lucene90_0",
-                fields,
-                max_doc,
-                info.number,
-            )
-        }
-        g => {
-            // Updated doc values live outside the compound file, named by generation.
-            let suffix = format!("{}_Lucene90_0", radix36(g as u64));
-            let file = |ext: &str| {
-                let p = dir.join(format!("{}_{suffix}.{ext}", seg.name));
-                std::fs::read(&p).map_err(|e| crate::Error(format!("{}: {e}", p.display())))
-            };
-            decode(
-                &file("dvm")?,
-                &file("dvd")?,
-                id,
-                &suffix,
-                fields,
-                max_doc,
-                info.number,
-            )
-        }
-    }
+pub(crate) fn read_field_values(r: &SegmentReader, field: &str) -> Result<DocValues> {
+    let info = r.field(field)?;
+    let owned;
+    let (meta, data, suffix): (&[u8], &[u8], String) = if info.dv_gen == -1 {
+        let name = |ext: &str| r.cfs_file(&format!("_Lucene90_0.{ext}"));
+        (name("dvm")?, name("dvd")?, "Lucene90_0".into())
+    } else {
+        // Updated doc values live outside the compound file, named by generation.
+        let suffix = format!("{}_Lucene90_0", radix36(info.dv_gen as u64));
+        let name = |ext: &str| r.gen_file(&format!("_{suffix}.{ext}"));
+        owned = (name("dvm")?, name("dvd")?);
+        (&owned.0, &owned.1, suffix)
+    };
+    decode(r, meta, data, &suffix, info.number)
 }
 
 /// Location of the `IndexedDISI` listing docs with a value; offset -2 is none, -1 is all docs.
@@ -129,8 +93,12 @@ impl DocsWithField {
                     docs.extend(base..base + (1 << 16));
                     continue;
                 }
-                if self.dense_rank_power != -1 {
-                    input.read_bytes(2 << (16 - self.dense_rank_power))?; // rank table
+                match self.dense_rank_power {
+                    -1 => {}
+                    p @ 7..=15 => {
+                        input.read_bytes(2 << (16 - p))?; // rank table
+                    }
+                    p => return err(format!("invalid dense rank power {p}")),
                 }
                 for word in 0..1024 {
                     let bits = input.read_long()? as u64;
@@ -181,8 +149,10 @@ fn read_direct_monotonic(
 
 /// `DirectReader.get`: LSB-first bit-packed value `index` of `bits` bits, starting at byte 0.
 fn direct_get(bytes: &[u8], bits: u8, index: u64) -> Result<i64> {
-    if bits == 0 {
-        return Ok(0);
+    match bits {
+        0 => return Ok(0),
+        1..=64 => {}
+        _ => return err(format!("invalid bits per value {bits}")),
     }
     let bit = index * bits as u64;
     let (byte, shift) = ((bit >> 3) as usize, bit & 7);
@@ -243,6 +213,9 @@ fn read_numeric(meta: &mut DataInput) -> Result<Numeric> {
         })
         .transpose()?;
     let block_shift = if table_size < -1 { -2 - table_size } else { -1 };
+    if block_shift > 30 {
+        return err(format!("invalid numeric block shift {block_shift}"));
+    }
     let n = Numeric {
         docs,
         num_values,
@@ -268,7 +241,7 @@ impl Numeric {
         if self.block_shift >= 0 {
             // Blocks of varying bits per value: `bpv, delta[, length, packed values]`.
             let input = &mut DataInput::new(bytes);
-            let mut out = Vec::with_capacity(n as usize);
+            let mut out = Vec::new();
             while (out.len() as u64) < n {
                 let bits = input.read_byte()?;
                 let delta = input.read_long()?;
@@ -305,24 +278,60 @@ impl Numeric {
     }
 }
 
-/// `SortedNumericEntry`: values plus per-doc value counts.
+/// Per-doc start offsets into a values or bytes slice, `DirectMonotonic`-packed in `.dvd`.
+struct Addresses {
+    offset: i64,
+    mono: DirectMonotonic,
+    length: i64,
+}
+
+/// `num_docs + 1` addresses: the start of each doc's values and the end of the last.
+fn read_addresses(meta: &mut DataInput, num_docs: u64) -> Result<Addresses> {
+    let offset = meta.read_long()?;
+    let block_shift = meta.read_vint()?;
+    let mono = read_direct_monotonic(meta, num_docs + 1, block_shift)?;
+    Ok(Addresses {
+        offset,
+        mono,
+        length: meta.read_long()?,
+    })
+}
+
+impl Addresses {
+    fn values(&self, data: &[u8], num_docs: u64) -> Result<Vec<usize>> {
+        Ok(self
+            .mono
+            .values(slice(data, self.offset, self.length)?, num_docs + 1)?
+            .into_iter()
+            .map(|a| a as usize)
+            .collect())
+    }
+}
+
+/// `SortedNumericEntry`: values plus per-doc value counts. A plain `NumericEntry` is the
+/// one-value-per-doc case without addresses.
 struct SortedNumeric {
     numeric: Numeric,
     num_docs_with_field: u64,
-    addresses: Option<(i64, DirectMonotonic, i64)>,
+    addresses: Option<Addresses>,
+}
+
+impl From<Numeric> for SortedNumeric {
+    fn from(numeric: Numeric) -> Self {
+        SortedNumeric {
+            num_docs_with_field: numeric.num_values,
+            numeric,
+            addresses: None,
+        }
+    }
 }
 
 fn read_sorted_numeric(meta: &mut DataInput) -> Result<SortedNumeric> {
     let numeric = read_numeric(meta)?;
     let num_docs_with_field = meta.read_int()? as u64;
-    let addresses = if num_docs_with_field != numeric.num_values {
-        let offset = meta.read_long()?;
-        let block_shift = meta.read_vint()?;
-        let mono = read_direct_monotonic(meta, num_docs_with_field + 1, block_shift)?;
-        Some((offset, mono, meta.read_long()?))
-    } else {
-        None
-    };
+    let addresses = (num_docs_with_field != numeric.num_values)
+        .then(|| read_addresses(meta, num_docs_with_field))
+        .transpose()?;
     Ok(SortedNumeric {
         numeric,
         num_docs_with_field,
@@ -339,12 +348,7 @@ impl SortedNumeric {
         let values = self.numeric.values(data)?;
         let ends: Vec<usize> = match &self.addresses {
             None => (1..=docs.len()).collect(),
-            Some((offset, mono, length)) => mono
-                .values(slice(data, *offset, *length)?, self.num_docs_with_field + 1)?
-                .into_iter()
-                .skip(1)
-                .map(|a| a as usize)
-                .collect(),
+            Some(a) => a.values(data, self.num_docs_with_field)?[1..].to_vec(),
         };
         let mut out = vec![vec![]; max_doc as usize];
         let mut start = 0;
@@ -367,7 +371,7 @@ struct Binary {
     docs: DocsWithField,
     num_docs_with_field: u64,
     length: usize,
-    addresses: Option<(i64, DirectMonotonic, i64)>,
+    addresses: Option<Addresses>,
 }
 
 fn read_binary(meta: &mut DataInput) -> Result<Binary> {
@@ -375,14 +379,9 @@ fn read_binary(meta: &mut DataInput) -> Result<Binary> {
     let docs = read_docs_with_field(meta)?;
     let num_docs_with_field = meta.read_int()? as u64;
     let (min_length, max_length) = (meta.read_int()? as usize, meta.read_int()? as usize);
-    let addresses = if min_length < max_length {
-        let offset = meta.read_long()?;
-        let block_shift = meta.read_vint()?;
-        let mono = read_direct_monotonic(meta, num_docs_with_field + 1, block_shift)?;
-        Some((offset, mono, meta.read_long()?))
-    } else {
-        None
-    };
+    let addresses = (min_length < max_length)
+        .then(|| read_addresses(meta, num_docs_with_field))
+        .transpose()?;
     Ok(Binary {
         data_offset,
         data_length,
@@ -402,18 +401,15 @@ impl Binary {
         let bytes = slice(data, self.data_offset, self.data_length)?;
         let starts: Vec<usize> = match &self.addresses {
             None => (0..=docs.len()).map(|i| i * self.length).collect(),
-            Some((offset, mono, length)) => mono
-                .values(slice(data, *offset, *length)?, self.num_docs_with_field + 1)?
-                .into_iter()
-                .map(|a| a as usize)
-                .collect(),
+            Some(a) => a.values(data, self.num_docs_with_field)?,
         };
         let mut out = vec![None; max_doc as usize];
         for (i, doc) in docs.into_iter().enumerate() {
             let value = bytes
                 .get(starts[i]..starts[i + 1])
                 .ok_or_else(|| crate::Error("bad binary value address".into()))?;
-            out[doc as usize] = Some(value.to_vec());
+            *out.get_mut(doc as usize)
+                .ok_or_else(|| crate::Error("doc id out of range".into()))? = Some(value.to_vec());
         }
         Ok(out)
     }
@@ -438,6 +434,9 @@ fn read_terms_dict(meta: &mut DataInput) -> Result<TermsDict> {
     let (data_offset, data_length) = (meta.read_long()?, meta.read_long()?);
     meta.read_bytes(16)?; // termsAddresses{Offset,Length}
     let index_shift = meta.read_int()?;
+    if !(0..=30).contains(&index_shift) {
+        return err(format!("invalid terms index shift {index_shift}"));
+    }
     read_direct_monotonic(meta, 1 + size.div_ceil(1 << index_shift), block_shift)?;
     meta.read_bytes(32)?; // termsIndex{Offset,Length}, termsIndexAddresses{Offset,Length}
     Ok(TermsDict {
@@ -453,7 +452,7 @@ impl TermsDict {
     fn terms(&self, data: &[u8]) -> Result<Vec<Vec<u8>>> {
         let bytes = slice(data, self.data_offset, self.data_length)?;
         let input = &mut DataInput::new(bytes);
-        let mut out: Vec<Vec<u8>> = Vec::with_capacity(self.size as usize);
+        let mut out: Vec<Vec<u8>> = Vec::new();
         while (out.len() as u64) < self.size {
             let len = input.read_len()?;
             let first = input.read_bytes(len)?.to_vec();
@@ -462,7 +461,7 @@ impl TermsDict {
             if input.pos < bytes.len() - 1 {
                 let block_len = input.read_len()?;
                 let mut buffer = first;
-                lz4(input, block_len, &mut buffer)?;
+                lz4::decompress(input, block_len, &mut buffer)?;
                 self.decode_rest(&mut DataInput::new(&buffer[len..]), &mut out)?;
             } else if (out.len() as u64) < self.size {
                 return err("terms block ended early");
@@ -498,48 +497,41 @@ impl TermsDict {
 }
 
 enum Entry {
-    Numeric(Numeric),
-    SortedNumeric(SortedNumeric),
-    /// Multi-valued sorted set: ordinals as sorted numeric.
+    Numeric(SortedNumeric),
+    /// Sorted and sorted set: ordinals as (sorted) numeric.
     SortedSet(SortedNumeric, TermsDict),
-    /// Single-valued sorted set (or sorted): one ordinal per doc.
-    SortedSetSingle(Numeric, TermsDict),
     Binary(Binary),
 }
 
 fn read_entry(meta: &mut DataInput, kind: u8) -> Result<Entry> {
     Ok(match kind {
-        0 => Entry::Numeric(read_numeric(meta)?),
+        0 => Entry::Numeric(read_numeric(meta)?.into()),
         1 => Entry::Binary(read_binary(meta)?),
         2 => {
-            let ords = read_numeric(meta)?;
-            Entry::SortedSetSingle(ords, read_terms_dict(meta)?)
+            let ords = read_numeric(meta)?.into();
+            Entry::SortedSet(ords, read_terms_dict(meta)?)
         }
-        3 => match meta.read_byte()? {
-            0 => {
-                let ords = read_numeric(meta)?;
-                Entry::SortedSetSingle(ords, read_terms_dict(meta)?)
-            }
-            1 => {
-                let ords = read_sorted_numeric(meta)?;
-                Entry::SortedSet(ords, read_terms_dict(meta)?)
-            }
-            b => return err(format!("invalid multiValued flag {b}")),
-        },
-        4 => Entry::SortedNumeric(read_sorted_numeric(meta)?),
+        3 => {
+            let ords = match meta.read_byte()? {
+                0 => read_numeric(meta)?.into(),
+                1 => read_sorted_numeric(meta)?,
+                b => return err(format!("invalid multiValued flag {b}")),
+            };
+            Entry::SortedSet(ords, read_terms_dict(meta)?)
+        }
+        4 => Entry::Numeric(read_sorted_numeric(meta)?),
         t => return err(format!("invalid doc values type {t}")),
     })
 }
 
 fn decode(
+    r: &SegmentReader,
     meta: &[u8],
     data: &[u8],
-    id: &[u8; ID_LEN],
     suffix: &str,
-    fields: &[FieldInfo],
-    max_doc: i32,
     field_number: i32,
 ) -> Result<DocValues> {
+    let (id, max_doc) = (&r.seg.info.id, r.seg.info.max_doc);
     codec_util::check_footer(meta)?;
     let m = &mut DataInput::new(meta);
     let version =
@@ -556,12 +548,8 @@ fn decode(
         if number == -1 {
             return err(format!("no doc values for field {field_number}"));
         }
-        let info = fields
-            .iter()
-            .find(|f| f.number == number)
-            .ok_or_else(|| crate::Error(format!("doc values for unknown field {number}")))?;
         let kind = m.read_byte()?;
-        if info.doc_values_skip_index {
+        if r.field_by_number(number)?.doc_values_skip_index {
             // offset, length, maxValue, minValue, docCount, maxDocID[, maxValueCount]
             m.read_bytes(if version >= 2 { 36 } else { 32 })?;
         }
@@ -570,50 +558,26 @@ fn decode(
             continue;
         }
         return match entry {
-            Entry::Numeric(n) => {
-                let values = n.values(data)?;
-                let docs = n.docs.doc_ids(data, max_doc)?;
-                if docs.len() != values.len() {
-                    return err("numeric doc count disagrees with value count");
-                }
-                let mut out = vec![vec![]; max_doc as usize];
-                for (doc, v) in docs.into_iter().zip(values) {
-                    out[doc as usize] = vec![v];
-                }
-                Ok(DocValues::Numbers(out))
-            }
-            Entry::SortedNumeric(s) => Ok(DocValues::Numbers(s.per_doc(data, max_doc)?)),
-            Entry::SortedSet(ords, terms) => Ok(DocValues::Terms(resolve(
-                ords.per_doc(data, max_doc)?,
-                terms.terms(data)?,
-            )?)),
-            Entry::SortedSetSingle(ords, terms) => {
-                let single = SortedNumeric {
-                    num_docs_with_field: ords.num_values,
-                    numeric: ords,
-                    addresses: None,
-                };
-                Ok(DocValues::Terms(resolve(
-                    single.per_doc(data, max_doc)?,
-                    terms.terms(data)?,
-                )?))
+            Entry::Numeric(n) => Ok(DocValues::Numbers(n.per_doc(data, max_doc)?)),
+            Entry::SortedSet(ords, dict) => {
+                let terms = dict.terms(data)?;
+                let ords = ords
+                    .per_doc(data, max_doc)?
+                    .into_iter()
+                    .map(|doc| {
+                        doc.into_iter()
+                            .map(|o| {
+                                usize::try_from(o)
+                                    .ok()
+                                    .filter(|o| *o < terms.len())
+                                    .ok_or_else(|| crate::Error("ordinal out of range".into()))
+                            })
+                            .collect()
+                    })
+                    .collect::<Result<_>>()?;
+                Ok(DocValues::Ordinals { ords, terms })
             }
             Entry::Binary(b) => Ok(DocValues::Bytes(b.per_doc(data, max_doc)?)),
         };
     }
-}
-
-fn resolve(ords: Vec<Vec<i64>>, terms: Vec<Vec<u8>>) -> Result<Vec<Vec<Vec<u8>>>> {
-    ords.into_iter()
-        .map(|doc| {
-            doc.into_iter()
-                .map(|o| {
-                    terms
-                        .get(o as usize)
-                        .cloned()
-                        .ok_or_else(|| crate::Error("ordinal out of range".into()))
-                })
-                .collect()
-        })
-        .collect()
 }

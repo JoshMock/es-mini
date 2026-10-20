@@ -179,9 +179,7 @@ impl SegmentInfos {
 }
 
 fn read_si(dir: &Path, name: &str, id: &[u8; ID_LEN]) -> Result<SegmentInfo> {
-    let path = dir.join(format!("{name}.si"));
-    let file =
-        std::fs::read(&path).map_err(|e| crate::Error(format!("{}: {e}", path.display())))?;
+    let file = crate::read_file(&dir.join(format!("{name}.si")))?;
     codec_util::check_footer(&file)?;
     let input = &mut DataInput::new(&file);
     codec_util::check_index_header(input, "Lucene90SegmentInfo", 0, 0, id, "")?;

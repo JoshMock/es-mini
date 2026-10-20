@@ -1,12 +1,9 @@
 //! Binary doc values from an index written by real Lucene 10.5.1: see
 //! tests/gen/GenBinaryDocValues.java (the values there must match `value` here).
 
-use es_codec::{
-    CompoundFile, SegmentInfos,
-    doc_values::{DocValues, read_field_values},
-    field_infos::read_field_infos,
-};
-use std::path::PathBuf;
+use es_codec::doc_values::DocValues;
+
+mod common;
 
 const DOCS: usize = 300;
 
@@ -26,14 +23,9 @@ fn value(field: &str, d: usize) -> Option<Vec<u8>> {
 
 #[test]
 fn reads_binary_doc_values() {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/binary-doc-values");
-    let infos = SegmentInfos::read_latest(&dir).unwrap();
-    let seg = &infos.segments[0];
-    let cfs = CompoundFile::open(&dir, &seg.name, &seg.info.id).unwrap();
-    let fields = read_field_infos(&dir, seg, &cfs).unwrap();
+    let seg = common::open("binary-doc-values");
     for field in ["fixed", "sparse_fixed", "varlen", "dense_varlen"] {
-        let DocValues::Bytes(got) = read_field_values(&dir, seg, &cfs, &fields, field).unwrap()
-        else {
+        let DocValues::Bytes(got) = seg.doc_values(field).unwrap() else {
             panic!("{field} is not binary");
         };
         let want: Vec<_> = (0..DOCS).map(|d| value(field, d)).collect();

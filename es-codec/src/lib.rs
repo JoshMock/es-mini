@@ -8,12 +8,15 @@ pub mod doc_values;
 pub mod field_infos;
 pub mod input;
 pub mod live_docs;
+mod lz4;
 pub mod postings;
+pub mod segment;
 pub mod segment_infos;
 pub mod stored_fields;
 pub mod terms;
 
 pub use compound::CompoundFile;
+pub use segment::SegmentReader;
 pub use segment_infos::{SegmentCommitInfo, SegmentInfo, SegmentInfos};
 
 /// A corrupt, truncated, or unsupported index file.
@@ -32,4 +35,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 fn err<T>(msg: impl Into<String>) -> Result<T> {
     Err(Error(msg.into()))
+}
+
+fn read_file(path: &std::path::Path) -> Result<Vec<u8>> {
+    std::fs::read(path).map_err(|e| Error(format!("{}: {e}", path.display())))
 }

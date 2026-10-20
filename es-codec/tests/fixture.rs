@@ -1,6 +1,9 @@
 //! Decodes the Elasticsearch 9.5.5 fixture (fixtures/generate.sh).
 
-use es_codec::{CompoundFile, SegmentInfos, input::DataInput};
+use es_codec::{
+    CompoundFile, SegmentInfos, SegmentReader, doc_values::DocValues, input::DataInput,
+    stored_fields::StoredValue,
+};
 use std::path::PathBuf;
 
 fn shard_index_dir() -> PathBuf {
@@ -67,20 +70,23 @@ fn rejects_corrupt_checksums() {
     assert!(es_codec::codec_util::check_footer(&bytes).is_err());
 }
 
+/// Every segment of the fixture's latest commit, opened.
+fn segments() -> Vec<SegmentReader> {
+    let dir = shard_index_dir();
+    SegmentInfos::read_latest(&dir)
+        .unwrap()
+        .segments
+        .into_iter()
+        .map(|seg| SegmentReader::open(&dir, seg).unwrap())
+        .collect()
+}
+
 #[test]
 fn reads_field_infos_including_updated_generation() {
-    use es_codec::field_infos::{DocValuesType, IndexOptions, read_field_infos};
-    let dir = shard_index_dir();
-    let infos = SegmentInfos::read_latest(&dir).unwrap();
-    for seg in &infos.segments {
-        let cfs = CompoundFile::open(&dir, &seg.name, &seg.info.id).unwrap();
-        let fields = read_field_infos(&dir, seg, &cfs).unwrap();
-        let get = |n: &str| {
-            fields
-                .iter()
-                .find(|f| f.name == n)
-                .unwrap_or_else(|| panic!("{} lacks {n}", seg.name))
-        };
+    use es_codec::field_infos::{DocValuesType, IndexOptions};
+    for seg in &segments() {
+        let fields = &seg.fields;
+        let get = |n: &str| seg.field(n).unwrap();
         let title = get("title");
         assert_eq!(title.index_options, IndexOptions::DocsAndFreqsAndPositions);
         assert!(!title.omit_norms);
@@ -101,13 +107,9 @@ fn reads_field_infos_including_updated_generation() {
 }
 
 /// `(_id, _source)` per doc id; the delete tombstone has no `_source`.
-fn stored_docs(seg: &es_codec::SegmentCommitInfo) -> Vec<(Vec<u8>, Option<String>)> {
-    use es_codec::{field_infos::read_field_infos, stored_fields::*};
-    let dir = shard_index_dir();
-    let cfs = CompoundFile::open(&dir, &seg.name, &seg.info.id).unwrap();
-    let names = read_field_infos(&dir, seg, &cfs).unwrap();
-    let name = |n: i32| names.iter().find(|f| f.number == n).unwrap().name.clone();
-    read_stored_fields(&cfs, seg)
+fn stored_docs(seg: &SegmentReader) -> Vec<(Vec<u8>, Option<String>)> {
+    let name = |n: i32| &seg.field_by_number(n).unwrap().name;
+    seg.stored_fields()
         .unwrap()
         .into_iter()
         .map(|doc| {
@@ -145,8 +147,7 @@ fn title(source: &str) -> &str {
 
 #[test]
 fn reads_stored_fields() {
-    let infos = SegmentInfos::read_latest(&shard_index_dir()).unwrap();
-    let docs: Vec<_> = infos.segments.iter().map(stored_docs).collect();
+    let docs: Vec<_> = segments().iter().map(stored_docs).collect();
     let ids = |s: usize| -> Vec<String> {
         docs[s]
             .iter()
@@ -173,13 +174,9 @@ fn reads_stored_fields() {
 
 #[test]
 fn reads_live_docs_from_soft_deletes() {
-    use es_codec::{field_infos::read_field_infos, live_docs::read_live_docs};
-    let dir = shard_index_dir();
-    let infos = SegmentInfos::read_latest(&dir).unwrap();
-    let live_ids = |seg: &es_codec::SegmentCommitInfo| -> Vec<String> {
-        let cfs = CompoundFile::open(&dir, &seg.name, &seg.info.id).unwrap();
-        let fields = read_field_infos(&dir, seg, &cfs).unwrap();
-        let live = read_live_docs(&dir, seg, &cfs, &fields).unwrap();
+    let segments = segments();
+    let live_ids = |seg: &SegmentReader| -> Vec<String> {
+        let live = seg.live_docs().unwrap();
         let ids: Vec<_> = stored_docs(seg)
             .iter()
             .map(|(id, _)| decode_numeric_id(id))
@@ -192,16 +189,13 @@ fn reads_live_docs_from_soft_deletes() {
             .collect()
     };
     // Doc 2 is superseded and doc 5 deleted; _1 holds the new doc 2, doc 6 and doc 5's tombstone.
-    assert_eq!(live_ids(&infos.segments[0]), ["1", "3", "4"]);
-    assert_eq!(live_ids(&infos.segments[1]), ["6", "2"]);
+    assert_eq!(live_ids(&segments[0]), ["1", "3", "4"]);
+    assert_eq!(live_ids(&segments[1]), ["6", "2"]);
 }
 
 /// `(term, [(doc, freq)])` for a field of a segment.
-fn terms_of(seg: &es_codec::SegmentCommitInfo, field: &str) -> Vec<(String, Vec<(u32, u32)>)> {
-    let dir = shard_index_dir();
-    let cfs = CompoundFile::open(&dir, &seg.name, &seg.info.id).unwrap();
-    let fields = es_codec::field_infos::read_field_infos(&dir, seg, &cfs).unwrap();
-    es_codec::terms::read_terms(&cfs, seg, &fields, field)
+fn terms_of(seg: &SegmentReader, field: &str) -> Vec<(String, Vec<(u32, u32)>)> {
+    seg.terms(field)
         .unwrap()
         .into_iter()
         .map(|t| (String::from_utf8(t.term).unwrap(), t.docs))
@@ -214,8 +208,8 @@ fn postings(terms: &[(String, Vec<(u32, u32)>)], term: &str) -> Vec<(u32, u32)> 
 
 #[test]
 fn reads_terms_and_postings() {
-    let infos = SegmentInfos::read_latest(&shard_index_dir()).unwrap();
-    let (s0, s1) = (&infos.segments[0], &infos.segments[1]);
+    let segments = segments();
+    let (s0, s1) = (&segments[0], &segments[1]);
 
     let tag = terms_of(s0, "tag");
     let names: Vec<_> = tag.iter().map(|(t, _)| t.as_str()).collect();
@@ -261,19 +255,9 @@ fn reads_terms_and_postings() {
     assert_eq!(postings(&title, "quick"), [(1, 2)]);
 }
 
-fn doc_values_of(
-    seg: &es_codec::SegmentCommitInfo,
-    field: &str,
-) -> es_codec::doc_values::DocValues {
-    let dir = shard_index_dir();
-    let cfs = CompoundFile::open(&dir, &seg.name, &seg.info.id).unwrap();
-    let fields = es_codec::field_infos::read_field_infos(&dir, seg, &cfs).unwrap();
-    es_codec::doc_values::read_field_values(&dir, seg, &cfs, &fields, field).unwrap()
-}
-
-fn numbers(seg: &es_codec::SegmentCommitInfo, field: &str) -> Vec<Vec<i64>> {
-    match doc_values_of(seg, field) {
-        es_codec::doc_values::DocValues::Numbers(n) => n,
+fn numbers(seg: &SegmentReader, field: &str) -> Vec<Vec<i64>> {
+    match seg.doc_values(field).unwrap() {
+        DocValues::Numbers(n) => n,
         other => panic!("{other:?}"),
     }
 }
@@ -296,8 +280,8 @@ fn millis(date: &str) -> i64 {
 
 #[test]
 fn reads_numeric_doc_values() {
-    let infos = SegmentInfos::read_latest(&shard_index_dir()).unwrap();
-    let (s0, s1) = (&infos.segments[0], &infos.segments[1]);
+    let segments = segments();
+    let (s0, s1) = (&segments[0], &segments[1]);
     let flat = |v: Vec<Vec<i64>>| -> Vec<i64> { v.into_iter().flatten().collect() };
 
     assert_eq!(flat(numbers(s0, "views")), [10, 25, 3, 7, 0]);
@@ -321,16 +305,15 @@ fn reads_numeric_doc_values() {
 
 #[test]
 fn reads_sorted_set_doc_values() {
-    use es_codec::doc_values::DocValues;
-    let infos = SegmentInfos::read_latest(&shard_index_dir()).unwrap();
+    let segments = segments();
     let tags = |s: usize| -> Vec<Vec<String>> {
-        let DocValues::Terms(t) = doc_values_of(&infos.segments[s], "tag") else {
-            panic!("not terms")
+        let DocValues::Ordinals { ords, terms } = segments[s].doc_values("tag").unwrap() else {
+            panic!("not sorted")
         };
-        t.into_iter()
+        ords.into_iter()
             .map(|d| {
                 d.into_iter()
-                    .map(|b| String::from_utf8(b).unwrap())
+                    .map(|o| String::from_utf8(terms[o].clone()).unwrap())
                     .collect()
             })
             .collect()
