@@ -12,4 +12,15 @@ node ralph.ts --target 'bulk/10_basic.yml/Array of objects'
 node ralph.ts --dry-run          # show the next target and prompt; no agent
 ```
 
-Suites: `yaml` (tests/yaml-xfail.txt). Later phases add suites to `SUITES` in `ralph.ts`.
+Suites: `yaml` (tests/yaml-xfail.txt), `parity` (fixtures/parity-xfail.txt), and `goals`
+(ralph/goals.txt, ordered multi-iteration tasks).
+
+## Overnight
+
+```sh
+node ralph.ts --suites yaml,goals,parity --until 07:00 --review-every 10
+```
+
+Each suite ends after 3 rejections in a row; a review iteration runs after every 10 accepted
+ones. Progress goes to `ralph/REPORT.md`, escalations to `ralph/NEEDS_HUMAN.md` (both
+git-ignored), and a notification is sent at the end. Standing orders are in AGENTS.md.
