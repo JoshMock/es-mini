@@ -140,6 +140,22 @@ pub fn put_or_create(
     Ok(reply(&index, id, w, total))
 }
 
+fn force_refresh(
+    state: &AppState,
+    params: &HashMap<String, String>,
+    index: &str,
+    reply: &mut (StatusCode, Json<Value>),
+) -> Result<(), AppError> {
+    if params
+        .get("refresh")
+        .is_some_and(|v| v.is_empty() || v == "true")
+    {
+        write(state, index, Index::refresh)?;
+        reply.1.0["forced_refresh"] = true.into();
+    }
+    Ok(())
+}
+
 fn require_alias(
     state: &AppState,
     params: &HashMap<String, String>,
@@ -161,13 +177,7 @@ pub async fn index_with_id(
     require_alias(&state, &params, &index)?;
     let create = params.get("op_type").is_some_and(|o| o == "create");
     let mut reply = put_or_create(&state, &index, &id, parse_json(&body)?, create)?;
-    if params
-        .get("refresh")
-        .is_some_and(|v| v.is_empty() || v == "true")
-    {
-        write(&state, &index, Index::refresh)?;
-        reply.1.0["forced_refresh"] = true.into();
-    }
+    force_refresh(&state, &params, &index, &mut reply)?;
     Ok(reply)
 }
 
@@ -236,13 +246,7 @@ pub async fn update(
 ) -> Reply {
     require_alias(&state, &params, &index)?;
     let mut reply = update_doc(&state, &index, &id, &parse_json(&body)?)?;
-    if params
-        .get("refresh")
-        .is_some_and(|v| v.is_empty() || v == "true")
-    {
-        write(&state, &index, Index::refresh)?;
-        reply.1.0["forced_refresh"] = true.into();
-    }
+    force_refresh(&state, &params, &index, &mut reply)?;
     Ok(reply)
 }
 
