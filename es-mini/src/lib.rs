@@ -76,6 +76,14 @@ pub fn app() -> Router {
             "/{index}/_settings",
             put(indices::put_settings).get(indices::get_settings),
         )
+        .route(
+            "/{index}/_alias/{name}",
+            put(indices::put_alias).post(indices::put_alias),
+        )
+        .route(
+            "/{index}/_aliases/{name}",
+            put(indices::put_alias).post(indices::put_alias),
+        )
         .route("/{index}/_mapping", get(indices::get_mapping))
         .route("/_query", post(search::esql))
         .route("/_bulk", post(bulk::bulk).put(bulk::bulk))

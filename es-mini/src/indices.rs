@@ -109,3 +109,11 @@ pub async fn get_mapping(
     let mappings = with_index(&state, name.clone(), |i| json!(i.mappings))?;
     Ok(Json(json!({ name: {"mappings": mappings} })))
 }
+
+pub async fn put_alias(
+    State(state): State<AppState>,
+    Path((index, name)): Path<(String, String)>,
+) -> Result<Json<Value>, AppError> {
+    with_index(&state, index, |i| i.aliases.insert(name))?;
+    Ok(Json(json!({"acknowledged": true})))
+}

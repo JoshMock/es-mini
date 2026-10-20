@@ -74,17 +74,37 @@ fn parse(body: &[u8], default_index: Option<&str>) -> Result<Vec<Action>, AppErr
     Ok(actions)
 }
 
+/// Resolves a write target that names an alias (and no index) to its single index.
+// ponytail: no is_write_index support; multi-index aliases always fail
+fn resolve_alias(state: &AppState, name: &str) -> Result<String, AppError> {
+    let indices = state.read().expect("lock poisoned");
+    if indices.contains_key(name) {
+        return Ok(name.to_owned());
+    }
+    let mut targets = indices.iter().filter(|(_, i)| i.aliases.contains(name));
+    match (targets.next(), targets.next()) {
+        (Some((n, _)), None) => Ok(n.clone()),
+        (Some(_), Some(_)) => Err(AppError::IllegalArgument(format!(
+            "no write index is defined for alias [{name}]. The write index may be explicitly disabled using is_write_index=false or the alias points to multiple indices without one being designated as a write index"
+        ))),
+        _ => Ok(name.to_owned()),
+    }
+}
+
 fn execute(state: &AppState, a: Action) -> Value {
+    let resolved = resolve_alias(state, &a.index);
+    let target = resolved.as_deref().unwrap_or(&a.index).to_owned();
     let id = a.id.unwrap_or_else(auto_id);
     let body = a.body.unwrap_or(Value::Null);
     let result = match a.op.as_str() {
+        _ if resolved.is_err() => resolved.map(|_| unreachable!()),
         _ if id.is_empty() => Err(AppError::IllegalArgument(
             "if _id is specified it must not be empty".into(),
         )),
-        "index" => put_or_create(state, &a.index, &id, body, false),
-        "create" => put_or_create(state, &a.index, &id, body, true),
-        "update" => update_doc(state, &a.index, &id, &body),
-        _ => delete_doc(state, &a.index, &id),
+        "index" => put_or_create(state, &target, &id, body, false),
+        "create" => put_or_create(state, &target, &id, body, true),
+        "update" => update_doc(state, &target, &id, &body),
+        _ => delete_doc(state, &target, &id),
     };
     let item = match result {
         Ok((status, Json(mut v))) => {

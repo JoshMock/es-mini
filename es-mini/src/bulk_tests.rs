@@ -93,3 +93,23 @@ async fn malformed_lines_are_request_errors() {
         assert_eq!(r["status"], 400, "{body}");
     }
 }
+
+#[tokio::test]
+async fn alias_over_multiple_indices_is_item_error() {
+    let app = app();
+    for i in ["a", "b"] {
+        call(&app, Method::PUT, &format!("/{i}"), None).await;
+        call(&app, Method::PUT, &format!("/{i}/_aliases/al"), None).await;
+    }
+    let (_, r) = bulk(
+        &app,
+        "/_bulk",
+        "{\"index\":{\"_index\":\"al\"}}\n{\"f\":1}\n",
+    )
+    .await;
+    assert_eq!(r["items"][0]["index"]["status"], 400);
+    assert_eq!(
+        r["items"][0]["index"]["error"]["type"],
+        "illegal_argument_exception"
+    );
+}
