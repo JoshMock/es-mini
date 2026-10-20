@@ -167,19 +167,6 @@ pub async fn delete(
     Ok(Json(json!({"acknowledged": true})))
 }
 
-/// Runs `f` against the named index, or fails with `index_not_found_exception`.
-fn with_index<T>(
-    state: &AppState,
-    name: String,
-    f: impl FnOnce(&mut Index) -> T,
-) -> Result<T, AppError> {
-    let mut indices = state.write().expect("lock poisoned");
-    match indices.get_mut(&name) {
-        Some(index) => Ok(f(index)),
-        None => Err(AppError::IndexNotFound(name)),
-    }
-}
-
 /// Concrete indices a read expression names, as GET index/_mapping/_settings resolve them:
 /// comma lists, wildcards, `_all`, and aliases, with `ignore_unavailable`/`allow_no_indices`.
 fn read_indices(
@@ -232,8 +219,15 @@ pub async fn head(State(state): State<AppState>, Path(name): Path<String>) -> St
 pub async fn refresh(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, AppError> {
-    with_index(&state, name, Index::refresh)?;
+    let mut indices = state.write().expect("lock poisoned");
+    for n in read_indices(&indices, &name, &params)? {
+        indices
+            .get_mut(&n)
+            .expect("resolved index exists")
+            .refresh();
+    }
     Ok(Json(
         json!({"_shards": {"total": 1, "successful": 1, "failed": 0}}),
     ))

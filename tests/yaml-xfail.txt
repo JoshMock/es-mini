@@ -1,6 +1,5 @@
 # Known-failing YAML tests. Fix one, then delete its line.
 indices.put_settings/10_basic.yml/Test preserve_existing settings
-search/20_default_values.yml/Basic search
 search/20_default_values.yml/Search body without query element
 search/20_default_values.yml/Search with new response format
 search/220_total_hits_object.yml/hits.total as an object
