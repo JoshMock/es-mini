@@ -329,7 +329,7 @@ fn columns(index: &Index) -> BTreeMap<String, String> {
             FieldMapping::Integer | FieldMapping::Short | FieldMapping::Byte => "integer",
             FieldMapping::Double | FieldMapping::Float => "double",
             FieldMapping::Boolean => "boolean",
-            FieldMapping::Date => "date",
+            FieldMapping::Date { .. } => "date",
         };
         cols.insert(name.clone(), t.to_owned());
         cols.remove(&format!("{name}.keyword"));

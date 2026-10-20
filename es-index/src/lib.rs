@@ -25,7 +25,12 @@ pub enum FieldMapping {
     Double,
     Float,
     Boolean,
-    Date,
+    Date {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        format: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        locale: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]

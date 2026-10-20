@@ -1,6 +1,5 @@
 # Known-failing YAML tests. Fix one, then delete its line.
 indices.put_settings/10_basic.yml/Test preserve_existing settings
-search/180_locale_dependent_mapping.yml/Test Index and Search locale dependent mappings / dates
 search/20_default_values.yml/Basic search
 search/20_default_values.yml/Search body without query element
 search/20_default_values.yml/Search with new response format

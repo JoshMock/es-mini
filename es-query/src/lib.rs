@@ -202,7 +202,7 @@ fn resolve(index: &Index, field: &str, sample: impl Fn(&str) -> Option<Value>) -
         Some(FieldMapping::Keyword) => Kind::Keyword,
         Some(FieldMapping::Boolean) => Kind::Bool,
         // ponytail: dates compare as their JSON values (ISO strings sort correctly); no date math
-        Some(FieldMapping::Date) => Kind::Keyword,
+        Some(FieldMapping::Date { .. }) => Kind::Keyword,
         Some(_) => Kind::Number,
         None if field.ends_with(".keyword") => Kind::Keyword,
         // ponytail: unmapped fields are typed from their first value, mimicking ES dynamic mapping
@@ -256,6 +256,45 @@ fn terms(kind: Kind, vals: &[&Value]) -> Vec<String> {
 
 fn num(v: &Value) -> Option<f64> {
     v.as_f64().or_else(|| v.as_str()?.parse().ok())
+}
+
+const MONTHS: [(&str, [&str; 12]); 2] = [
+    (
+        "fr",
+        [
+            "janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.",
+            "nov.", "déc.",
+        ],
+    ),
+    (
+        "en",
+        [
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        ],
+    ),
+];
+
+/// Epoch seconds of `"E, d MMM yyyy HH:mm:ss Z"` with localized month names.
+// ponytail: only this one custom format; generalize to a token-driven parser when another is needed.
+fn parse_dated(v: &Value, locale: &str) -> Option<i64> {
+    let months = MONTHS.iter().find(|(l, _)| *l == locale)?.1;
+    let mut p = v.as_str()?.split_once(", ")?.1.split(' ');
+    let d: i64 = p.next()?.parse().ok()?;
+    let name = p.next()?;
+    let m = months.iter().position(|n| *n == name)? as i64 + 1;
+    let y: i64 = p.next()?.parse().ok()?;
+    let mut t = p.next()?.split(':').map(|x| x.parse::<i64>());
+    let secs = t.next()?.ok()? * 3600 + t.next()?.ok()? * 60 + t.next()?.ok()?;
+    let z = p.next()?;
+    let off = (z[1..3].parse::<i64>().ok()? * 3600 + z[3..5].parse::<i64>().ok()? * 60)
+        * if z.starts_with('-') { -1 } else { 1 };
+    // days from civil (Howard Hinnant)
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some((era * 146097 + doe - 719468) * 86400 + secs - off)
 }
 
 fn scalar_cmp(a: &Value, b: &Value) -> Ordering {
@@ -395,6 +434,21 @@ impl<'a> Searcher<'a> {
                 lte,
             } => {
                 let (_, path) = self.kind(field);
+                let locale = match self.index.mappings.properties.get(field) {
+                    Some(FieldMapping::Date {
+                        format: Some(_),
+                        locale,
+                    }) => Some(locale.as_deref().unwrap_or("en")),
+                    _ => None,
+                };
+                let cmp = |a: &Value, b: &Value| match locale {
+                    Some(l) => match (parse_dated(a, l), parse_dated(b, l)) {
+                        (Some(x), Some(y)) => x.cmp(&y),
+                        _ => Ordering::Less,
+                    },
+                    None => scalar_cmp(a, b),
+                };
+                let scalar_cmp = cmp;
                 let ok = |v: &Value| {
                     gt.as_ref().is_none_or(|b| scalar_cmp(v, b).is_gt())
                         && gte.as_ref().is_none_or(|b| scalar_cmp(v, b).is_ge())
