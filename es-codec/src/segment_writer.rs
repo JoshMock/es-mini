@@ -5,7 +5,7 @@ use crate::{
     codec_util::ID_LEN,
     compound::write_compound,
     doc_values::write_numeric_doc_values,
-    field_infos::{FieldInfo, write_field_infos},
+    field_infos::{DocValuesType, FieldInfo, IndexOptions, write_field_infos},
     stored_fields::{StoredValue, write_stored_fields},
     terms::{TermPostings, write_terms},
 };
@@ -80,6 +80,62 @@ pub fn write_segment(dir: &Path, s: &NewSegment) -> Result<SegmentCommitInfo> {
         field_infos_files: Default::default(),
         dv_update_files: Default::default(),
     })
+}
+
+/// The metadata fields every ES 9.5.5 shard segment has, numbered 0..=5 in this order: `_id`,
+/// `_source`, `_version`, `_seq_no`, `_primary_term`, `__soft_deletes`. `_id` uses the
+/// `Lucene104` postings format (the reader keys off the attribute), not ES's bloom filter.
+pub fn es_meta_fields() -> Vec<FieldInfo> {
+    let attrs = |k: &str, v: &str| {
+        BTreeMap::from([
+            (format!("PerField{k}Format.format"), v.to_string()),
+            (format!("PerField{k}Format.suffix"), "0".to_string()),
+        ])
+    };
+    let base = |name: &str, number: i32| FieldInfo {
+        name: name.into(),
+        number,
+        store_term_vector: false,
+        omit_norms: false,
+        store_payloads: false,
+        soft_deletes: false,
+        parent: false,
+        index_options: IndexOptions::None,
+        doc_values: DocValuesType::None,
+        doc_values_skip_index: false,
+        dv_gen: -1,
+        attributes: BTreeMap::new(),
+        point_dimensions: 0,
+        point_index_dimensions: 0,
+        point_num_bytes: 0,
+        vector_dimension: 0,
+    };
+    let numeric = |name: &str, number: i32| FieldInfo {
+        doc_values: DocValuesType::Numeric,
+        attributes: attrs("DocValues", "Lucene90"),
+        ..base(name, number)
+    };
+    vec![
+        FieldInfo {
+            omit_norms: true,
+            index_options: IndexOptions::Docs,
+            attributes: attrs("Postings", "Lucene104"),
+            ..base("_id", 0)
+        },
+        base("_source", 1),
+        numeric("_version", 2),
+        FieldInfo {
+            point_dimensions: 1,
+            point_index_dimensions: 1,
+            point_num_bytes: 8,
+            ..numeric("_seq_no", 3)
+        },
+        numeric("_primary_term", 4),
+        FieldInfo {
+            soft_deletes: true,
+            ..numeric("__soft_deletes", 5)
+        },
+    ]
 }
 
 #[cfg(test)]
@@ -164,5 +220,35 @@ mod tests {
         let want = DocValues::Numbers(numeric[0].1.iter().map(|v| vec![*v]).collect());
         assert_eq!(r.doc_values("n").unwrap(), want);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn meta_fields_match_the_es_fixture() {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../fixtures/es-9.5.5/data/indices");
+        let mut checked = 0;
+        for e in std::fs::read_dir(dir).unwrap() {
+            let idx = e.unwrap().path().join("0/index");
+            let si = SegmentInfos::read_latest(&idx).unwrap();
+            let seg = SegmentReader::open(&idx, si.segments[0].clone()).unwrap();
+            for ours in es_meta_fields() {
+                let Ok(real) = seg.field(&ours.name) else {
+                    continue; // only one fixture index has soft deletes
+                };
+                let key = |f: &FieldInfo| {
+                    (
+                        f.omit_norms,
+                        f.soft_deletes,
+                        f.index_options,
+                        f.doc_values,
+                        f.point_dimensions,
+                        f.point_num_bytes,
+                    )
+                };
+                assert_eq!(key(real), key(&ours), "{}", ours.name);
+                checked += 1;
+            }
+        }
+        assert!(checked >= 11);
     }
 }
