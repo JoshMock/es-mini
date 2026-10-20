@@ -104,7 +104,22 @@ pub fn parse_query(v: &Value) -> Result<Query, String> {
             {
                 return Err(format!("[range] query does not support [{k}]"));
             }
-            let get = |k| p.get(k).cloned();
+            // ponytail: `uuuu` bounds become ISO strings (compared lexicographically); upper bounds
+            // round up to the end of Jan 1 as ES does. Real date parsing would replace this.
+            let year = p.get("format").and_then(Value::as_str) == Some("uuuu");
+            let get = |k: &str| {
+                let v = p.get(k)?;
+                let Some(y) = v.as_i64().filter(|_| year) else {
+                    return Some(v.clone());
+                };
+                let end = matches!(k, "gt" | "lte");
+                let t = if end {
+                    "23:59:59.999999999Z"
+                } else {
+                    "00:00:00"
+                };
+                Some(Value::String(format!("{y:04}-01-01T{t}")))
+            };
             if p.get("format").and_then(Value::as_str) == Some("date_optional_time") {
                 // ponytail: only bare-number years are checked; ES's max year is 292278993
                 if let Some(n) = ["gt", "gte", "lt", "lte"]

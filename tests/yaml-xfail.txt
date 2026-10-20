@@ -1,6 +1,5 @@
 # Known-failing YAML tests. Fix one, then delete its line.
 indices.put_settings/10_basic.yml/Test preserve_existing settings
-search/500_date_range.yml/test match query gte and lt for single result with year uuuu
 search/60_query_string.yml/search with query_string parameters
 search/70_response_filtering.yml/Search results filtered using both includes and excludes filters
 search/70_response_filtering.yml/Search with response filtering
