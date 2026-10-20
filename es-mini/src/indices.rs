@@ -3,7 +3,7 @@ use crate::{AppState, error::AppError};
 use axum::{
     Json,
     body::Bytes,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
 };
 use es_index::{FieldMapping, Index, Mappings};
@@ -179,9 +179,26 @@ pub async fn refresh(
 pub async fn get_settings(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Value>, AppError> {
-    let settings = with_index(&state, name.clone(), |i| i.settings.to_json())?;
-    Ok(Json(json!({ name: {"settings": settings} })))
+    let (settings, auto_text) = with_index(&state, name.clone(), |i| {
+        (
+            i.settings.to_json(),
+            i.settings
+                .get("index.mapping.dynamic_strings.auto_text")
+                .is_none(),
+        )
+    })?;
+    let mut out = json!({"settings": settings});
+    if params.get("include_defaults").is_some_and(|v| v == "true") {
+        // ponytail: only defaults for settings we model; add more as tests need them
+        let mut defaults = json!({});
+        if auto_text {
+            defaults = json!({"index": {"mapping": {"dynamic_strings": {"auto_text": "true"}}}});
+        }
+        out["defaults"] = defaults;
+    }
+    Ok(Json(json!({ name: out })))
 }
 
 pub async fn put_settings(
