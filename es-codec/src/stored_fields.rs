@@ -64,14 +64,14 @@ pub(crate) fn lz4(inp: &mut DataInput, len: usize, out: &mut Vec<u8>) -> Result<
 }
 
 /// One `LZ4WithPresetDictDecompressor.decompress` over a whole `len`-byte piece.
+///
+/// Chunks of only empty docs are compressed too (to an empty dictionary), so this reads a
+/// header even when `len` is 0.
 fn decompress(inp: &mut DataInput, len: usize) -> Result<Vec<u8>> {
-    if len == 0 {
-        return Ok(vec![]);
-    }
     let dict_len = inp.read_len()?;
     let block_len = inp.read_len()?;
     inp.read_vint()?; // compressed length of the dictionary
-    if block_len == 0 {
+    if block_len == 0 && len > dict_len {
         return err("zero LZ4 block length");
     }
     let mut total = dict_len;
