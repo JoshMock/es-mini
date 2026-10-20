@@ -13,7 +13,9 @@ TAG = "v9.5.5"
 API = "repos/elastic/elasticsearch/contents/rest-api-spec/src/yamlRestTest/resources/rest-api-spec/test"
 DIRS = ["bulk", "cluster.health", "count", "create", "delete", "exists", "get", "get_source", "index",
         "indices.create", "indices.delete", "indices.exists", "indices.get", "indices.get_mapping",
-        "indices.get_settings", "indices.put_settings", "search", "update"]
+        "indices.get_settings", "indices.put_settings", "search", "update",
+        "indices.put_alias", "indices.delete_alias", "indices.get_alias", "indices.exists_alias",
+        "indices.update_aliases"]
 # Core files kept despite matching a rule; their out-of-scope sections are xfailed per test.
 ALLOW = {"bulk/10_basic.yml", "cluster.health/10_basic.yml", "count/10_basic.yml", "exists/10_basic.yml",
          "indices.create/10_basic.yml", "indices.delete/10_basic.yml", "indices.exists/10_basic.yml",
@@ -21,7 +23,6 @@ ALLOW = {"bulk/10_basic.yml", "cluster.health/10_basic.yml", "count/10_basic.yml
          "search/20_default_values.yml", "update/10_doc.yml"}
 OUT_OF_SCOPE = {
     "aggregations": r"\baggs\b|\baggregations\b",
-    "aliases": r"\baliases\b|put_alias|\balias\b",
     "highlighting": r"\bhighlight\b",
     "suggesters": r"\bsuggest\b",
     "scripting": r"\bscript\b|\bpainless\b",
@@ -40,7 +41,7 @@ OUT_OF_SCOPE = {
     "out-of-scope field types": r"type: *\"?(object|flattened|ip|geo_point|geo_shape|wildcard|match_only_text|constant_keyword|unsigned_long|half_float|scaled_float|binary|\w+_range|date_nanos|completion|search_as_you_type|token_count|alias|version|histogram|aggregate_metric_double|counted_keyword|rank_features?|percolator|shape|point)\b",
     "index modes / synthetic source": r"index\.mode|time_series|logsdb|synthetic",
     "analysis config": r"\banalyzer\b|\btokenizer\b|char_filter|normalizer|dynamic_templates",
-    "data streams": r"data_stream|require_alias",
+    "data streams": r"data_stream",
     "merge settings": r"merge\.scheduler",
 }
 

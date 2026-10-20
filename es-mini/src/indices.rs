@@ -5,7 +5,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
-use es_index::{Index, Mappings};
+use es_index::{Index, Mappings, aliases::Alias};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -28,8 +28,11 @@ pub async fn create(
         index.mappings = Mappings::deserialize(&body["mappings"])
             .map_err(|e| AppError::MapperParsing(e.to_string()))?;
     }
-    if let Some(aliases) = body["aliases"].as_object() {
-        index.aliases.extend(aliases.keys().cloned());
+    for (alias, meta) in body["aliases"].as_object().into_iter().flatten() {
+        index.aliases.insert(
+            alias.clone(),
+            Alias::parse(meta).map_err(AppError::IllegalArgument)?,
+        );
     }
     let mut indices = state.write().expect("lock poisoned");
     if indices.contains_key(&name) {
@@ -127,6 +130,6 @@ pub async fn put_alias(
     State(state): State<AppState>,
     Path((index, name)): Path<(String, String)>,
 ) -> Result<Json<Value>, AppError> {
-    with_index(&state, index, |i| i.aliases.insert(name))?;
+    with_index(&state, index, |i| i.aliases.insert(name, Alias::default()))?;
     Ok(Json(json!({"acknowledged": true})))
 }

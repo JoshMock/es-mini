@@ -1,5 +1,6 @@
 //! Index/document model, mappings, analysis, storage glue.
 
+pub mod aliases;
 pub mod analysis;
 
 use serde::{Deserialize, Serialize};
@@ -144,7 +145,7 @@ pub struct WriteResult {
 pub struct Index {
     pub settings: Settings,
     pub mappings: Mappings,
-    pub aliases: std::collections::BTreeSet<String>,
+    pub aliases: BTreeMap<String, aliases::Alias>,
     docs: HashMap<String, Document>,
     // ponytail: tombstones are never pruned; ES drops them after index.gc_deletes (60s)
     deleted_versions: HashMap<String, u64>,

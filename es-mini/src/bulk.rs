@@ -8,6 +8,7 @@ use axum::{
     body::Bytes,
     extract::{Path, Query, State},
 };
+use es_index::aliases;
 use serde_json::{Value, json};
 use std::{collections::HashMap, time::Instant};
 
@@ -87,26 +88,12 @@ fn parse(
     Ok(actions)
 }
 
-/// Resolves a write target that names an alias (and no index) to its single index.
-// ponytail: no is_write_index support; multi-index aliases always fail
 fn resolve_alias(state: &AppState, name: &str) -> Result<String, AppError> {
-    let indices = state.read().expect("lock poisoned");
-    if indices.contains_key(name) {
-        return Ok(name.to_owned());
-    }
-    let mut targets = indices.iter().filter(|(_, i)| i.aliases.contains(name));
-    match (targets.next(), targets.next()) {
-        (Some((n, _)), None) => Ok(n.clone()),
-        (Some(_), Some(_)) => Err(AppError::IllegalArgument(format!(
-            "no write index is defined for alias [{name}]. The write index may be explicitly disabled using is_write_index=false or the alias points to multiple indices without one being designated as a write index"
-        ))),
-        _ => Ok(name.to_owned()),
-    }
+    aliases::resolve_write(&state.read().expect("lock poisoned"), name).map_err(AppError::from)
 }
 
 fn is_alias(state: &AppState, name: &str) -> bool {
-    let indices = state.read().expect("lock poisoned");
-    indices.values().any(|i| i.aliases.contains(name))
+    aliases::is_alias(&state.read().expect("lock poisoned"), name)
 }
 
 fn execute(state: &AppState, a: Action) -> Value {
