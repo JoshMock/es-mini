@@ -346,7 +346,8 @@ pub async fn put_all_settings(
     put_settings_on(state, "_all".into(), params, body)
 }
 
-const TOP_LEVEL_SETTINGS: [&str; 5] = [
+const TOP_LEVEL_SETTINGS: [&str; 6] = [
+    "codec",
     "number_of_shards",
     "number_of_replicas",
     "refresh_interval",
@@ -371,6 +372,12 @@ fn put_settings_on(
         if !key.contains('.') && !TOP_LEVEL_SETTINGS.contains(&key) {
             return Err(AppError::IllegalArgument(format!(
                 "unknown setting [index.{key}] please check that any required plugins are installed, or check the breaking changes documentation for removed settings"
+            )));
+        }
+        // ponytail: codec is the only static setting modelled; it needs reopen=true
+        if key == "codec" && params.get("reopen").map(String::as_str) != Some("true") {
+            return Err(AppError::IllegalArgument(format!(
+                "Can't update non dynamic settings [[index.{key}]] for open indices [{name}]"
             )));
         }
     }
