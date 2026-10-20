@@ -38,12 +38,44 @@ pub(crate) fn read_terms(r: &SegmentReader, field: &str) -> Result<Vec<TermPosti
     }
     let suffix = format!("{format}_{suffix}");
     let file = |ext: &str| r.cfs_file(&format!("_{suffix}.{ext}"));
-    let id = &r.seg.info.id;
-    let (tim, tip, tmd, doc) = (file("tim")?, file("tip")?, file("tmd")?, file("doc")?);
     // `.pos` and `.pay` exist only when some field has positions, or offsets or payloads.
-    let (pos, pay) = (
-        file("pos").unwrap_or_default(),
-        file("pay").unwrap_or_default(),
+    let files = TermFiles {
+        tim: file("tim")?.to_vec(),
+        tip: file("tip")?.to_vec(),
+        tmd: file("tmd")?.to_vec(),
+        doc: file("doc")?.to_vec(),
+        pos: file("pos").unwrap_or_default().to_vec(),
+        pay: file("pay").unwrap_or_default().to_vec(),
+    };
+    decode_terms(&files, &r.seg.info.id, &suffix, &r.fields, info)
+}
+
+/// The postings files of one segment's postings format instance.
+#[derive(Default)]
+pub struct TermFiles {
+    pub tim: Vec<u8>,
+    pub tip: Vec<u8>,
+    pub tmd: Vec<u8>,
+    pub doc: Vec<u8>,
+    pub pos: Vec<u8>,
+    pub pay: Vec<u8>,
+}
+
+fn decode_terms(
+    files: &TermFiles,
+    id: &[u8; codec_util::ID_LEN],
+    suffix: &str,
+    fields: &[FieldInfo],
+    info: &FieldInfo,
+) -> Result<Vec<TermPostings>> {
+    let field = info.name.as_str();
+    let (tim, tip, tmd, doc, pos, pay) = (
+        &files.tim[..],
+        &files.tip[..],
+        &files.tmd[..],
+        &files.doc[..],
+        &files.pos[..],
+        &files.pay[..],
     );
     for (name, f, codec) in [
         ("tim", tim, "BlockTreeTermsDict"),
@@ -56,14 +88,14 @@ pub(crate) fn read_terms(r: &SegmentReader, field: &str) -> Result<Vec<TermPosti
             continue;
         }
         codec_util::check_footer(f)?;
-        codec_util::check_index_header(&mut DataInput::new(f), codec, 0, 0, id, &suffix)
+        codec_util::check_index_header(&mut DataInput::new(f), codec, 0, 0, id, suffix)
             .map_err(|e| crate::Error(format!(".{name}: {e}")))?;
     }
 
     codec_util::check_footer(tmd)?;
     let meta = &mut DataInput::new(tmd);
-    codec_util::check_index_header(meta, "BlockTreeTermsMeta", 0, 0, id, &suffix)?;
-    codec_util::check_index_header(meta, "Lucene104PostingsWriterTerms", 0, 0, id, &suffix)?;
+    codec_util::check_index_header(meta, "BlockTreeTermsMeta", 0, 0, id, suffix)?;
+    codec_util::check_index_header(meta, "Lucene104PostingsWriterTerms", 0, 0, id, suffix)?;
     if meta.read_vint()? as u64 != postings::BLOCK_SIZE as u64 {
         return err("unexpected postings block size");
     }
@@ -71,7 +103,10 @@ pub(crate) fn read_terms(r: &SegmentReader, field: &str) -> Result<Vec<TermPosti
         let number = meta.read_vint()?;
         let num_terms = meta.read_vlong()?;
         let sum_total_term_freq = meta.read_vlong()?;
-        if r.field_by_number(number)?.index_options != IndexOptions::Docs {
+        let Some(f) = fields.iter().find(|f| f.number == number) else {
+            return err(format!("no field {number}"));
+        };
+        if f.index_options != IndexOptions::Docs {
             meta.read_vlong()?; // sumDocFreq
         }
         meta.read_vint()?; // docCount
@@ -111,6 +146,104 @@ pub(crate) fn read_terms(r: &SegmentReader, field: &str) -> Result<Vec<TermPosti
 }
 
 /// `TrieReader.load` for the root node: the file pointer of the root block in `.tim`.
+/// Writes the terms dictionary and docs-only/freqs postings of `fields` (each with at most
+/// 48 terms of fewer than 128 docs, no positions): one leaf block per field.
+///
+/// ponytail: no floor blocks, prefix sharing, suffix compression, singleton runs, or `.pos`/`.pay`;
+/// add them when index size or cross-engine compatibility (task 20) demands.
+pub fn write_terms(
+    fields: &[(&FieldInfo, &[TermPostings])],
+    id: &[u8; codec_util::ID_LEN],
+    suffix: &str,
+) -> TermFiles {
+    use crate::output::Output;
+    let (mut tim, mut tip, mut tmd, mut doc) = (
+        Output::default(),
+        Output::default(),
+        Output::default(),
+        Output::default(),
+    );
+    tim.index_header("BlockTreeTermsDict", 0, id, suffix);
+    tip.index_header("BlockTreeTermsIndex", 0, id, suffix);
+    doc.index_header("Lucene104PostingsWriterDoc", 0, id, suffix);
+    tmd.index_header("BlockTreeTermsMeta", 0, id, suffix);
+    tmd.index_header("Lucene104PostingsWriterTerms", 0, id, suffix);
+    tmd.vint(postings::BLOCK_SIZE as i32);
+    tmd.vint(fields.len() as i32);
+    for (info, terms) in fields {
+        assert!(terms.len() <= MAX_BLOCK_TERMS && !terms.is_empty());
+        let options = info.index_options;
+        assert!(options == IndexOptions::Docs || options == IndexOptions::DocsAndFreqs);
+        let has_freqs = options != IndexOptions::Docs;
+        let (mut suffixes, mut lengths, mut stats, mut metas) = (
+            Output::default(),
+            Output::default(),
+            Output::default(),
+            Output::default(),
+        );
+        let (mut last_fp, mut sum_df, mut docs_seen) =
+            (0u64, 0u64, std::collections::BTreeSet::new());
+        for t in *terms {
+            suffixes.bytes(&t.term);
+            lengths.vint(t.term.len() as i32);
+            let df = t.docs.len() as u64;
+            sum_df += df;
+            docs_seen.extend(t.docs.iter().map(|d| d.0));
+            stats.vint((df << 1) as i32);
+            if has_freqs {
+                stats.vlong((t.total_term_freq - df) as i64);
+            }
+            if df == 1 {
+                metas.vlong(0);
+                metas.vint(t.docs[0].0 as i32);
+            } else {
+                let fp = doc.0.len() as u64;
+                metas.vlong(((fp - last_fp) << 1) as i64);
+                last_fp = fp;
+                postings::write_docs_tail(&mut doc, &t.docs, has_freqs);
+            }
+        }
+        let block_fp = tim.0.len() as i64;
+        tim.vint(((terms.len() << 1) | 1) as i32);
+        tim.vlong(((suffixes.0.len() << 3) | 4) as i64); // leaf, uncompressed
+        tim.bytes(&suffixes.0);
+        tim.vint((lengths.0.len() << 1) as i32);
+        tim.bytes(&lengths.0);
+        for part in [&stats, &metas] {
+            tim.vint(part.0.len() as i32);
+            tim.bytes(&part.0);
+        }
+        let index_start = tip.0.len() as i64;
+        let fp_bytes = (8 - (block_fp as u64).leading_zeros() as usize / 8).max(1);
+        tip.byte((((fp_bytes - 1) << 2) | 0x20) as u8); // leaf node with terms
+        tip.bytes(&(block_fp as u64).to_le_bytes()[..fp_bytes]);
+        tmd.vint(info.number);
+        tmd.vlong(terms.len() as i64);
+        tmd.vlong(terms.iter().map(|t| t.total_term_freq).sum::<u64>() as i64);
+        if has_freqs {
+            tmd.vlong(sum_df as i64);
+        }
+        tmd.vint(docs_seen.len() as i32);
+        for t in [&terms[0], &terms[terms.len() - 1]] {
+            tmd.vint(t.term.len() as i32);
+            tmd.bytes(&t.term);
+        }
+        tmd.vlong(index_start);
+        tmd.vlong(0);
+        tmd.vlong(tip.0.len() as i64);
+    }
+    TermFiles {
+        tim: tim.finish(),
+        tip: tip.finish(),
+        tmd: tmd.finish(),
+        doc: doc.finish(),
+        ..Default::default()
+    }
+}
+
+/// Lucene's `maxItemsInBlock`: more terms than this need floor blocks.
+const MAX_BLOCK_TERMS: usize = 48;
+
 fn trie_root_output_fp(tip: &[u8], start: usize, end: usize, root: usize) -> Result<u64> {
     let Some(node) = start.checked_add(root) else {
         return err("trie root extends past the index");
@@ -378,4 +511,59 @@ fn lowercase_ascii(input: &mut DataInput, len: usize) -> Result<Vec<u8>> {
             input.read_byte()?;
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::field_infos::DocValuesType;
+
+    fn field(name: &str, number: i32, index_options: IndexOptions) -> FieldInfo {
+        FieldInfo {
+            name: name.into(),
+            number,
+            store_term_vector: false,
+            omit_norms: true,
+            store_payloads: false,
+            soft_deletes: false,
+            parent: false,
+            index_options,
+            doc_values: DocValuesType::None,
+            doc_values_skip_index: false,
+            dv_gen: -1,
+            attributes: Default::default(),
+            point_dimensions: 0,
+            point_index_dimensions: 0,
+            point_num_bytes: 0,
+            vector_dimension: 0,
+        }
+    }
+
+    #[test]
+    fn write_then_read_terms_round_trips() {
+        let term = |t: &str, docs: &[(u32, u32)]| TermPostings {
+            term: t.into(),
+            total_term_freq: docs.iter().map(|d| d.1 as u64).sum(),
+            docs: docs.to_vec(),
+            positions: vec![],
+        };
+        let a = [
+            term("apple", &[(0, 2), (3, 1), (9, 5)]),
+            term("banana", &[(4, 1)]),
+            term("cherry", &[(1, 1), (2, 3)]),
+        ];
+        let b: Vec<_> = (0..48u32)
+            .map(|i| term(&format!("k{i:02}"), &[(i, 1), (i + 100, 1)]))
+            .collect();
+        let (fa, fb) = (
+            field("a", 0, IndexOptions::DocsAndFreqs),
+            field("b", 1, IndexOptions::Docs),
+        );
+        let id = [5u8; 16];
+        let files = write_terms(&[(&fa, &a), (&fb, &b)], &id, "Lucene104_0");
+        let fields = [fa.clone(), fb.clone()];
+        let read = |f| decode_terms(&files, &id, "Lucene104_0", &fields, f).unwrap();
+        assert_eq!(read(&fa), a);
+        assert_eq!(read(&fb), b);
+    }
 }
