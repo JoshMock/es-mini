@@ -318,6 +318,34 @@ pub async fn put_settings(
     put_settings_on(state, name, params, body)
 }
 
+// ponytail: closed state isn't modelled; this only validates the target and acknowledges
+pub async fn close(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, AppError> {
+    let indices = state.read().expect("lock poisoned");
+    let closed: Map<String, Value> = read_indices(&indices, &name, &params)?
+        .into_iter()
+        .map(|n| (n, json!({"closed": true})))
+        .collect();
+    Ok(Json(
+        json!({"acknowledged": true, "shards_acknowledged": true, "indices": closed}),
+    ))
+}
+
+pub async fn open(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, AppError> {
+    let indices = state.read().expect("lock poisoned");
+    read_indices(&indices, &name, &params)?;
+    Ok(Json(
+        json!({"acknowledged": true, "shards_acknowledged": true}),
+    ))
+}
+
 pub async fn put_all_settings(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
@@ -365,7 +393,10 @@ fn put_settings_on(
             .get_mut(&n)
             .expect("resolved index exists")
             .settings
-            .merge(settings);
+            .merge_with(
+                settings,
+                params.get("preserve_existing").map(String::as_str) == Some("true"),
+            );
     }
     Ok(Json(json!({"acknowledged": true})))
 }

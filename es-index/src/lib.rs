@@ -63,12 +63,20 @@ impl Settings {
     /// Merges user-supplied settings (nested or dotted keys, `index.` prefix optional).
     /// A `null` value resets the key to its default.
     pub fn merge(&mut self, json: &Value) {
+        self.merge_with(json, false);
+    }
+
+    /// Like [`merge`](Self::merge); with `preserve_existing`, already-set keys are kept.
+    pub fn merge_with(&mut self, json: &Value, preserve_existing: bool) {
         for (key, value) in flatten_settings(json) {
             let key = if key.starts_with("index.") {
                 key
             } else {
                 format!("index.{key}")
             };
+            if preserve_existing && self.0.contains_key(&key) {
+                continue;
+            }
             match value {
                 Value::Null => match DEFAULT_SETTINGS.iter().find(|(k, _)| *k == key) {
                     Some((_, v)) => self.0.insert(key, v.to_string()),

@@ -178,3 +178,55 @@ async fn put_settings_rejects_unknown_setting() {
     .await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn put_settings_preserve_existing_keeps_set_keys() {
+    let app = app();
+    call(&app, Method::PUT, "/idx", None).await;
+    call(
+        &app,
+        Method::PUT,
+        "/idx/_settings",
+        Some(json!({"number_of_replicas": 0})),
+    )
+    .await;
+    call(
+        &app,
+        Method::PUT,
+        "/idx/_settings?preserve_existing=true",
+        Some(json!({"number_of_replicas": 1, "index.translog.durability": "async"})),
+    )
+    .await;
+    let (_, r) = call(&app, Method::GET, "/idx/_settings", None).await;
+    assert_eq!(r["idx"]["settings"]["index"]["number_of_replicas"], "0");
+    assert_eq!(
+        r["idx"]["settings"]["index"]["translog"]["durability"],
+        "async"
+    );
+}
+
+#[tokio::test]
+async fn close_acknowledges_existing_index() {
+    let app = app();
+    call(&app, Method::PUT, "/idx", None).await;
+    let (s, r) = call(&app, Method::POST, "/idx/_close", None).await;
+    assert_eq!(
+        (s, r["acknowledged"].clone()),
+        (StatusCode::OK, json!(true))
+    );
+    let (s, _) = call(&app, Method::POST, "/nope/_close", None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn open_acknowledges_existing_index() {
+    let app = app();
+    call(&app, Method::PUT, "/idx", None).await;
+    let (s, r) = call(&app, Method::POST, "/idx/_open", None).await;
+    assert_eq!(
+        (s, r["acknowledged"].clone()),
+        (StatusCode::OK, json!(true))
+    );
+    let (s, _) = call(&app, Method::POST, "/nope/_open", None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}
