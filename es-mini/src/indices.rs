@@ -332,12 +332,37 @@ fn flatten_settings(prefix: &str, v: &Value, out: &mut Map<String, Value>) {
 pub async fn put_settings(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+    body: Bytes,
+) -> Result<Json<Value>, AppError> {
+    put_settings_on(state, name, params, body)
+}
+
+pub async fn put_all_settings(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+    body: Bytes,
+) -> Result<Json<Value>, AppError> {
+    put_settings_on(state, "_all".into(), params, body)
+}
+
+fn put_settings_on(
+    state: AppState,
+    name: String,
+    params: HashMap<String, String>,
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
     let body = parse_body(&body)?;
     // ponytail: no static-vs-dynamic setting checks; ES rejects e.g. number_of_shards on an open index
     let settings = body.get("settings").unwrap_or(&body);
-    with_index(&state, name, |i| i.settings.merge(settings))?;
+    let mut indices = state.write().expect("lock poisoned");
+    for n in read_indices(&indices, &name, &params)? {
+        indices
+            .get_mut(&n)
+            .expect("resolved index exists")
+            .settings
+            .merge(settings);
+    }
     Ok(Json(json!({"acknowledged": true})))
 }
 

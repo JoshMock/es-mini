@@ -1,15 +1,7 @@
 # Known-failing YAML tests. Fix one, then delete its line.
-indices.put_settings/10_basic.yml/Test indices settings
-indices.put_settings/10_basic.yml/Test indices settings allow_no_indices
-indices.put_settings/10_basic.yml/Test indices settings ignore_unavailable
 indices.put_settings/10_basic.yml/Test preserve_existing settings
 indices.put_settings/10_basic.yml/put unsupported setting
-indices.put_settings/11_reset.yml/Test reset index settings
 indices.put_settings/20_update_non_dynamic_settings.yml/Test update non dynamic settings
-indices.put_settings/all_path_options.yml/put settings in * index
-indices.put_settings/all_path_options.yml/put settings in _all index
-indices.put_settings/all_path_options.yml/put settings in blank index
-indices.put_settings/all_path_options.yml/put settings in prefix* index
 indices.update_aliases/30_remove_index_and_replace_with_alias.yml/Remove an index and replace it with an alias
 indices.update_aliases/40_must_exist.yml/Alias must_exist only on remove
 indices.update_aliases/40_must_exist.yml/Partial success with must_exist == false
