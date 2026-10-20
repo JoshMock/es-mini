@@ -172,3 +172,110 @@ pub fn decode(data: &[u8]) -> Result<Value> {
     }
     .value()
 }
+
+fn put_vint(out: &mut Vec<u8>, v: u64) {
+    let mut groups = vec![0x80 | (v & 0x3F) as u8];
+    let mut rest = v >> 6;
+    while rest > 0 {
+        groups.push((rest & 0x7F) as u8);
+        rest >>= 7;
+    }
+    out.extend(groups.iter().rev());
+}
+
+fn put_key(out: &mut Vec<u8>, k: &str) {
+    if k.is_ascii() && (1..=64).contains(&k.len()) {
+        out.push(0x80 + k.len() as u8 - 1);
+        out.extend(k.as_bytes());
+    } else if k.is_empty() {
+        out.push(0x20);
+    } else {
+        out.push(0x34);
+        out.extend(k.as_bytes());
+        out.push(0xFC);
+    }
+}
+
+fn put_value(out: &mut Vec<u8>, v: &Value) {
+    match v {
+        Value::Null => out.push(0x21),
+        Value::Bool(b) => out.push(0x22 + u8::from(*b)),
+        Value::Int(i) => {
+            out.push(0x25);
+            put_vint(out, ((i << 1) ^ (i >> 63)) as u64);
+        }
+        Value::Float(f) => {
+            out.push(0x29);
+            let bits = f.to_bits();
+            out.extend(
+                (0..10)
+                    .rev()
+                    .map(|i| ((u128::from(bits) >> (7 * i)) & 0x7F) as u8),
+            );
+        }
+        Value::String(s) if s.is_empty() => out.push(0x20),
+        Value::String(s) if s.is_ascii() && s.len() <= 64 => {
+            out.push(if s.len() <= 32 {
+                0x40 + s.len() as u8 - 1
+            } else {
+                0x60 + s.len() as u8 - 33
+            });
+            out.extend(s.as_bytes());
+        }
+        Value::String(s) => {
+            out.push(if s.is_ascii() { 0xE0 } else { 0xE4 });
+            out.extend(s.as_bytes());
+            out.push(0xFC);
+        }
+        Value::Bytes(b) => {
+            out.push(0xFD);
+            put_vint(out, b.len() as u64);
+            out.extend(b);
+        }
+        Value::Array(items) => {
+            out.push(0xF8);
+            items.iter().for_each(|i| put_value(out, i));
+            out.push(0xF9);
+        }
+        Value::Object(fields) => {
+            out.push(0xFA);
+            for (k, v) in fields {
+                put_key(out, k);
+                put_value(out, v);
+            }
+            out.push(0xFB);
+        }
+    }
+}
+
+/// Encodes one SMILE document (no shared names or values, raw binary).
+pub fn encode(v: &Value) -> Vec<u8> {
+    let mut out = b":)\n\x04".to_vec();
+    put_value(&mut out, v);
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encode_round_trips() {
+        let v = Value::Object(vec![
+            ("a".into(), Value::Int(-70000)),
+            ("long".into(), Value::String("x".repeat(40))),
+            ("uni".into(), Value::String("héllo".into())),
+            ("f".into(), Value::Float(1.5)),
+            ("b".into(), Value::Bytes(vec![1, 2, 3])),
+            (
+                "arr".into(),
+                Value::Array(vec![Value::Null, Value::Bool(true), Value::Int(0)]),
+            ),
+            (
+                "o".into(),
+                Value::Object(vec![("".into(), Value::String(String::new()))]),
+            ),
+        ]);
+        assert_eq!(decode(&encode(&v)).unwrap(), v);
+    }
+}
