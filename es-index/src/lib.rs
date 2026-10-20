@@ -2,6 +2,7 @@
 
 pub mod aliases;
 pub mod analysis;
+pub mod disk;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -169,8 +170,19 @@ pub struct WriteResult {
     pub seq_no: u64,
 }
 
+/// Lucene term statistics read from disk. They keep counting documents that were updated or
+/// deleted but not yet merged away, which BM25 scores depend on.
+#[derive(Debug, Default)]
+pub struct TermStats {
+    /// Per indexed field: (docs with the field, sum of term frequencies).
+    pub fields: HashMap<String, (f64, f64)>,
+    pub doc_freq: HashMap<(String, String), f64>,
+}
+
 #[derive(Debug, Default)]
 pub struct Index {
+    /// Set for indices opened from disk; scoring uses it instead of counting live documents.
+    pub stats: Option<TermStats>,
     pub settings: Settings,
     pub mappings: Mappings,
     pub aliases: BTreeMap<String, aliases::Alias>,
@@ -249,6 +261,11 @@ impl Index {
             Some(doc) => Err(doc.version),
             None => Ok(self.put(id, source)),
         }
+    }
+
+    pub(crate) fn insert_loaded(&mut self, id: String, doc: Document) {
+        self.next_seq_no = self.next_seq_no.max(doc.seq_no + 1);
+        self.docs.insert(id, doc);
     }
 
     /// Makes all writes so far visible to search.

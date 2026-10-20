@@ -414,6 +414,18 @@ impl<'a> Searcher<'a> {
                 df.get(w.as_str()).copied().unwrap_or(0.0),
             );
         }
+        if let Some((docs, ttf)) = self.index.stats.as_ref().and_then(|s| s.fields.get(field)) {
+            self.field_stats.insert(field.clone(), (*docs, ttf / docs));
+            for w in &wanted {
+                let df = self
+                    .index
+                    .stats
+                    .as_ref()
+                    .and_then(|s| s.doc_freq.get(&(field.clone(), w.clone())));
+                self.doc_freq
+                    .insert((field.clone(), w.clone()), df.copied().unwrap_or(0.0));
+            }
+        }
     }
 
     // ponytail: exact field lengths; Lucene quantizes norms to one byte, so scores differ slightly

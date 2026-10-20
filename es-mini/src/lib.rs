@@ -108,6 +108,11 @@ fn index_health(shards: bool) -> Value {
 
 /// The full HTTP API over a fresh, empty in-memory store.
 pub fn app() -> Router {
+    app_with(Indices::new())
+}
+
+/// The full HTTP API over `indices`, e.g. ones opened with [`es_index::disk::open`].
+pub fn app_with(indices: Indices) -> Router {
     Router::new()
         .route("/", get(info))
         .route("/_cluster/health", get(health))
@@ -183,7 +188,7 @@ pub fn app() -> Router {
             put(docs::create).post(docs::create),
         )
         .route("/{index}/_update/{id}", post(docs::update))
-        .with_state(AppState::default())
+        .with_state(Arc::new(RwLock::new(indices)))
 }
 
 #[cfg(test)]
