@@ -262,11 +262,12 @@ fn settings_response(
         out
     };
     // ponytail: single wildcard pattern only; no comma lists
-    if name.contains('*') {
+    if name == "_all" || name.contains('*') {
         let indices = state.read().expect("lock poisoned");
+        let pat = if name == "_all" { "*" } else { &name };
         let out: serde_json::Map<String, Value> = indices
             .iter()
-            .filter(|(k, _)| es_index::aliases::glob(&name, k))
+            .filter(|(k, _)| es_index::aliases::glob(pat, k))
             .map(|(k, i)| (k.clone(), render(i)))
             .collect();
         return Ok(Json(Value::Object(out)));
