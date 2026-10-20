@@ -11,6 +11,7 @@ pub mod inflate;
 pub mod input;
 pub mod live_docs;
 mod lz4;
+pub mod output;
 pub mod postings;
 pub mod segment;
 pub mod segment_infos;

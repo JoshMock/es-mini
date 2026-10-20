@@ -1,7 +1,7 @@
 //! Field metadata (`.fnm`, Lucene94FieldInfosFormat).
 
 use crate::{
-    CompoundFile, Result, SegmentCommitInfo, codec_util, err, input::DataInput,
+    CompoundFile, Result, SegmentCommitInfo, codec_util, err, input::DataInput, output::Output,
     segment_infos::radix36,
 };
 use std::{collections::BTreeMap, path::Path};
@@ -71,6 +71,10 @@ pub fn read_field_infos(
             (owned.as_slice(), suffix)
         }
     };
+    parse_field_infos(file, &seg.info.id, &suffix)
+}
+
+fn parse_field_infos(file: &[u8], id: &[u8; 16], suffix: &str) -> Result<Vec<FieldInfo>> {
     codec_util::check_footer(file)?;
     let input = &mut DataInput::new(file);
     let format = codec_util::check_index_header(
@@ -78,8 +82,8 @@ pub fn read_field_infos(
         "Lucene94FieldInfos",
         0,
         FORMAT_DOCVALUE_SKIPPER,
-        &seg.info.id,
-        &suffix,
+        id,
+        suffix,
     )?;
     let mut fields = Vec::new();
     for _ in 0..input.read_len()? {
@@ -141,4 +145,84 @@ pub fn read_field_infos(
         });
     }
     Ok(fields)
+}
+
+/// Serializes field infos as a `.fnm` file (inverse of [`read_field_infos`]).
+pub fn write_field_infos(fields: &[FieldInfo], id: &[u8; 16], suffix: &str) -> Vec<u8> {
+    let mut o = Output::default();
+    o.index_header("Lucene94FieldInfos", FORMAT_DOCVALUE_SKIPPER, id, suffix);
+    o.vint(fields.len() as i32);
+    for f in fields {
+        o.string(&f.name);
+        o.vint(f.number);
+        o.byte(
+            f.store_term_vector as u8
+                | (f.omit_norms as u8) << 1
+                | (f.store_payloads as u8) << 2
+                | (f.soft_deletes as u8) << 3
+                | (f.parent as u8) << 4,
+        );
+        o.byte(f.index_options as u8);
+        o.byte(f.doc_values as u8);
+        o.byte(f.doc_values_skip_index as u8);
+        o.long(f.dv_gen);
+        o.map_of_strings(&f.attributes);
+        o.vint(f.point_dimensions);
+        if f.point_dimensions != 0 {
+            o.vint(f.point_index_dimensions);
+            o.vint(f.point_num_bytes);
+        }
+        o.vint(f.vector_dimension);
+        o.byte(0); // vector encoding
+        o.byte(0); // vector similarity
+    }
+    o.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_then_read_round_trips() {
+        let field = |name: &str, number, index_options, doc_values| FieldInfo {
+            name: name.into(),
+            number,
+            store_term_vector: false,
+            omit_norms: true,
+            store_payloads: false,
+            soft_deletes: false,
+            parent: false,
+            index_options,
+            doc_values,
+            doc_values_skip_index: false,
+            dv_gen: -1,
+            attributes: BTreeMap::from([("k".into(), "v".into())]),
+            point_dimensions: 0,
+            point_index_dimensions: 0,
+            point_num_bytes: 0,
+            vector_dimension: 0,
+        };
+        let mut with_points = field("p", 2, IndexOptions::None, DocValuesType::SortedNumeric);
+        (
+            with_points.point_dimensions,
+            with_points.point_index_dimensions,
+        ) = (1, 1);
+        with_points.point_num_bytes = 8;
+        let fields = vec![
+            field(
+                "t",
+                0,
+                IndexOptions::DocsAndFreqsAndPositions,
+                DocValuesType::None,
+            ),
+            field("s", 1, IndexOptions::Docs, DocValuesType::SortedSet),
+            with_points,
+        ];
+        let id = [7u8; 16];
+        let bytes = write_field_infos(&fields, &id, "");
+        let back = parse_field_infos(&bytes, &id, "").unwrap();
+        assert_eq!(format!("{fields:?}"), format!("{back:?}"));
+        assert!(parse_field_infos(&bytes, &[8u8; 16], "").is_err());
+    }
 }
