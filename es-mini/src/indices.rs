@@ -276,3 +276,7 @@ pub async fn get_mapping(
     let mappings = with_index(&state, name.clone(), |i| json!(i.mappings))?;
     Ok(Json(json!({ name: {"mappings": mappings} })))
 }
+
+pub async fn get_all_mappings(state: State<AppState>) -> Result<Json<Value>, AppError> {
+    get_mapping(state, Path("_all".to_string())).await
+}

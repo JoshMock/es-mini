@@ -147,6 +147,7 @@ pub fn app() -> Router {
             get(indices::refresh).post(indices::refresh),
         )
         .route("/{index}/_mapping", get(indices::get_mapping))
+        .route("/_mapping", get(indices::get_all_mappings))
         .route("/_query", post(search::esql))
         .route("/_bulk", post(bulk::bulk).put(bulk::bulk))
         .route(
