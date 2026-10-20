@@ -24,6 +24,7 @@ pub enum AppError {
     },
     Parse(String),
     MapperParsing(String),
+    DocumentParsing(String),
     VersionConflict {
         id: String,
         current_version: u64,
@@ -81,6 +82,12 @@ impl AppError {
             Self::MapperParsing(r) => {
                 (StatusCode::BAD_REQUEST, "mapper_parsing_exception", r, None)
             }
+            Self::DocumentParsing(r) => (
+                StatusCode::BAD_REQUEST,
+                "document_parsing_exception",
+                r,
+                None,
+            ),
             Self::VersionConflict {
                 id,
                 current_version,

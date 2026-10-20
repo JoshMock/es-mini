@@ -28,6 +28,17 @@ fn check_source(v: Value) -> Result<Value, AppError> {
     Ok(v)
 }
 
+/// Counts objects held in arrays, at any depth.
+fn array_objects(v: &Value, in_array: bool) -> usize {
+    match v {
+        Value::Object(m) => {
+            usize::from(in_array) + m.values().map(|v| array_objects(v, false)).sum::<usize>()
+        }
+        Value::Array(a) => a.iter().map(|v| array_objects(v, true)).sum(),
+        _ => 0,
+    }
+}
+
 // ponytail: time+counter hex ids; ES uses base64 time-based UUIDs, same length
 pub fn auto_id() -> String {
     static COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -105,11 +116,23 @@ pub fn put_or_create(
         )));
     }
     let source = check_source(source)?;
-    let (w, total, index) = write(state, index, |i| match create {
-        true => i.create(id, source),
-        false => Ok(i.put(id, source)),
+    let (w, total, index) = write(state, index, |i| {
+        let limit = i
+            .settings
+            .get("index.mapping.array_objects.limit")
+            .and_then(|l| l.parse().ok())
+            .unwrap_or(10000);
+        if array_objects(&source, false) > limit {
+            return Err(AppError::DocumentParsing(format!(
+                "failed to parse: The total number of objects across all arrays in a document has exceeded the allowed limit of [{limit}]."
+            )));
+        }
+        Ok(match create {
+            true => i.create(id, source),
+            false => Ok(i.put(id, source)),
+        })
     })?;
-    let w = w.map_err(|current_version| AppError::VersionConflict {
+    let w = w?.map_err(|current_version| AppError::VersionConflict {
         id: id.to_owned(),
         current_version,
     })?;
