@@ -242,7 +242,10 @@ pub fn update_doc(state: &AppState, index: &str, id: &str, body: &Value) -> Repl
         true => Some(partial.clone()),
         false => body.get("upsert").cloned(),
     };
-    let (w, total, index) = write(state, index, |i| i.update(id, &partial, upsert))?;
+    let detect_noop = body["detect_noop"].as_bool() != Some(false);
+    let (w, total, index) = write(state, index, |i| {
+        i.update(id, &partial, upsert, detect_noop)
+    })?;
     let w = w.ok_or_else(|| AppError::DocumentMissing(id.to_owned()))?;
     Ok(reply(&index, id, w, total))
 }

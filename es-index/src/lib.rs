@@ -294,13 +294,14 @@ impl Index {
         id: &str,
         partial: &Value,
         upsert: Option<Value>,
+        detect_noop: bool,
     ) -> Option<WriteResult> {
         let Some(doc) = self.docs.get(id) else {
             return upsert.map(|source| self.put(id, source));
         };
         let mut source = doc.source.clone();
         merge(&mut source, partial);
-        if source == doc.source {
+        if detect_noop && source == doc.source {
             let (version, seq_no) = (doc.version, doc.seq_no);
             return Some(WriteResult {
                 result: DocResult::Noop,
@@ -437,7 +438,7 @@ mod tests {
     fn update_merges_recursively() {
         let mut idx = Index::default();
         idx.put("1", json!({"a": 1, "o": {"x": 1, "y": 1}}));
-        let r = idx.update("1", &json!({"b": 2, "o": {"y": 2}}), None);
+        let r = idx.update("1", &json!({"b": 2, "o": {"y": 2}}), None, true);
         assert_eq!(r, Some(w(DocResult::Updated, 2, 1)));
         assert_eq!(
             idx.get("1").unwrap().source,
@@ -450,16 +451,24 @@ mod tests {
         let mut idx = Index::default();
         idx.put("1", json!({"a": 1}));
         assert_eq!(
-            idx.update("1", &json!({"a": 1}), None),
+            idx.update("1", &json!({"a": 1}), None, true),
             Some(w(DocResult::Noop, 1, 0))
         );
     }
 
     #[test]
+    fn update_without_detect_noop_bumps_version() {
+        let mut idx = Index::default();
+        idx.put("1", json!({"a": 1}));
+        let r = idx.update("1", &json!({"a": 1}), None, false).unwrap();
+        assert_eq!((r.result, r.version), (DocResult::Updated, 2));
+    }
+
+    #[test]
     fn update_missing_doc() {
         let mut idx = Index::default();
-        assert_eq!(idx.update("1", &json!({"a": 1}), None), None);
-        let r = idx.update("1", &json!({"a": 1}), Some(json!({"u": 1})));
+        assert_eq!(idx.update("1", &json!({"a": 1}), None, true), None);
+        let r = idx.update("1", &json!({"a": 1}), Some(json!({"u": 1})), true);
         assert_eq!(r, Some(w(DocResult::Created, 1, 0)));
         assert_eq!(idx.get("1").unwrap().source, json!({"u": 1}));
     }
