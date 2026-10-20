@@ -1,6 +1,4 @@
 # Known-failing YAML tests. Fix one, then delete its line.
-indices.delete/10_basic.yml/Delete index against wildcard matching alias
-indices.delete/10_basic.yml/Delete index against wildcard matching alias - multiple indices
 indices.get_alias/30_wildcards.yml/Exclusion of non wildcarded aliases
 indices.get_alias/30_wildcards.yml/Get aliases and wildcard exclusion
 indices.get_alias/30_wildcards.yml/Get aliases wildcard and simple exclusion

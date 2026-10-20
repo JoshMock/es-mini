@@ -133,8 +133,22 @@ pub async fn delete(
     let mut indices = state.write().expect("lock poisoned");
     let mut to_remove = Vec::new();
     for n in name.split(',') {
-        if indices.contains_key(n) {
-            to_remove.push(n);
+        if n.contains('*') {
+            // Wildcards match concrete indices only, never aliases.
+            let before = to_remove.len();
+            to_remove.extend(
+                indices
+                    .keys()
+                    .filter(|k| es_index::aliases::glob(n, k))
+                    .cloned(),
+            );
+            if to_remove.len() == before
+                && params.get("allow_no_indices").is_some_and(|v| v == "false")
+            {
+                return Err(AppError::IndexNotFound(n.to_string()));
+            }
+        } else if indices.contains_key(n) {
+            to_remove.push(n.to_string());
         } else if ignore {
             continue;
         } else if es_index::aliases::is_alias(&indices, n) {
@@ -146,7 +160,7 @@ pub async fn delete(
         }
     }
     for n in to_remove {
-        indices.remove(n);
+        indices.remove(&n);
     }
     Ok(Json(json!({"acknowledged": true})))
 }
