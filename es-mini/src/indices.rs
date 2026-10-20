@@ -151,12 +151,16 @@ pub async fn get(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<Value>, AppError> {
-    let body = with_index(
-        &state,
-        name.clone(),
-        |i| json!({"aliases": i.aliases, "mappings": i.mappings, "settings": i.settings.to_json()}),
-    )?;
-    Ok(Json(json!({ name: body })))
+    let indices = state.read().expect("lock poisoned");
+    let body: serde_json::Map<String, Value> = es_index::aliases::resolve_read(&indices, &name)?
+        .into_iter()
+        .map(|t| {
+            let i = &indices[&t.index];
+            let body = json!({"aliases": i.aliases, "mappings": i.mappings, "settings": i.settings.to_json()});
+            (t.index, body)
+        })
+        .collect();
+    Ok(Json(Value::Object(body)))
 }
 
 pub async fn head(State(state): State<AppState>, Path(name): Path<String>) -> StatusCode {
