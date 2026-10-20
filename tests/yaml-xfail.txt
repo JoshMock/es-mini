@@ -1,5 +1,4 @@
 # Known-failing YAML tests. Fix one, then delete its line.
-create/15_without_id.yml/Create without ID
 get/60_realtime_refresh.yml/Realtime Refresh
 get_source/15_default_values.yml/Default values
 get_source/60_realtime_refresh.yml/Realtime

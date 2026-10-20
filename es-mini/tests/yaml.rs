@@ -183,7 +183,6 @@ fn catch_ok(catch: &str, status: u16, body: &Value) -> bool {
                 && Regex::new(&format!("(?s){inner}"))
                     .is_ok_and(|re| re.is_match(&body.to_string()))
         }
-        // "param" means the client rejects the request before sending it.
         _ => false,
     }
 }
@@ -261,7 +260,12 @@ impl Ctx<'_> {
             .iter()
             .filter(|p| p.parts.iter().all(|x| params.contains_key(x)))
             .max_by_key(|p| p.parts.len())
-            .ok_or(format!("no [{api}] path for the given params"))?;
+            .ok_or(format!("no [{api}] path for the given params"));
+        // "param" means the client rejects the request before sending it.
+        let path = match (path, step.get("catch").and_then(Value::as_str)) {
+            (Err(_), Some("param")) => return Ok(()),
+            (p, _) => p?,
+        };
         let body = params.get("body");
         let has = |m: &str| path.methods.iter().any(|x| x == m);
         let method = match body {
