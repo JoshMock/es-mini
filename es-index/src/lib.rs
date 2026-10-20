@@ -83,8 +83,13 @@ impl Settings {
 
     /// Renders as nested JSON, e.g. `{"index": {"number_of_shards": "1"}}`.
     pub fn to_json(&self) -> Value {
+        self.to_json_where(|_| true)
+    }
+
+    /// Like [`Settings::to_json`], keeping only keys for which `keep` is true.
+    pub fn to_json_where(&self, keep: impl Fn(&str) -> bool) -> Value {
         let mut out = Value::Object(Default::default());
-        for (key, value) in &self.0 {
+        for (key, value) in self.0.iter().filter(|(k, _)| keep(k)) {
             let mut node = &mut out;
             for part in key.split('.') {
                 // ponytail: a leaf that is also a branch (`a` and `a.b`) loses the leaf; ES rejects this

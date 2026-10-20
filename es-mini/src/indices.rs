@@ -222,27 +222,56 @@ pub async fn refresh(
 }
 
 pub async fn get_settings(
-    State(state): State<AppState>,
+    state: State<AppState>,
     Path(name): Path<String>,
+    params: Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Value>, AppError> {
+    settings_response(state, name, "*", params)
+}
+
+pub async fn get_settings_named(
+    state: State<AppState>,
+    Path((name, filter)): Path<(String, String)>,
+    params: Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Value>, AppError> {
+    settings_response(state, name, &filter, params)
+}
+
+fn settings_response(
+    State(state): State<AppState>,
+    name: String,
+    filter: &str,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Value>, AppError> {
-    let (settings, auto_text) = with_index(&state, name.clone(), |i| {
-        (
-            i.settings.to_json(),
-            i.settings
+    let include_defaults = params.get("include_defaults").is_some_and(|v| v == "true");
+    let render = |i: &Index| {
+        let mut out =
+            json!({"settings": i.settings.to_json_where(|k| es_index::aliases::glob(filter, k))});
+        if include_defaults {
+            // ponytail: only defaults for settings we model; add more as tests need them
+            let mut defaults = json!({});
+            if i.settings
                 .get("index.mapping.dynamic_strings.auto_text")
-                .is_none(),
-        )
-    })?;
-    let mut out = json!({"settings": settings});
-    if params.get("include_defaults").is_some_and(|v| v == "true") {
-        // ponytail: only defaults for settings we model; add more as tests need them
-        let mut defaults = json!({});
-        if auto_text {
-            defaults = json!({"index": {"mapping": {"dynamic_strings": {"auto_text": "true"}}}});
+                .is_none()
+            {
+                defaults =
+                    json!({"index": {"mapping": {"dynamic_strings": {"auto_text": "true"}}}});
+            }
+            out["defaults"] = defaults;
         }
-        out["defaults"] = defaults;
+        out
+    };
+    // ponytail: single wildcard pattern only; no comma lists
+    if name.contains('*') {
+        let indices = state.read().expect("lock poisoned");
+        let out: serde_json::Map<String, Value> = indices
+            .iter()
+            .filter(|(k, _)| es_index::aliases::glob(&name, k))
+            .map(|(k, i)| (k.clone(), render(i)))
+            .collect();
+        return Ok(Json(Value::Object(out)));
     }
+    let out = with_index(&state, name.clone(), |i| render(i))?;
     Ok(Json(json!({ name: out })))
 }
 

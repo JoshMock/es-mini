@@ -122,6 +122,10 @@ pub fn app() -> Router {
             "/{index}/_settings",
             put(indices::put_settings).get(indices::get_settings),
         )
+        .route(
+            "/{index}/_settings/{name}",
+            get(indices::get_settings_named),
+        )
         .route("/_alias", get(aliases::get_all))
         .route("/_aliases", get(aliases::get_all).post(aliases::update))
         .route(
