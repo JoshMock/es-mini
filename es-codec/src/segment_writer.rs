@@ -4,7 +4,7 @@ use crate::{
     Result, SegmentCommitInfo, SegmentInfo,
     codec_util::ID_LEN,
     compound::write_compound,
-    doc_values::write_numeric_doc_values,
+    doc_values::write_doc_values,
     field_infos::{DocValuesType, FieldInfo, IndexOptions, write_field_infos},
     stored_fields::{StoredValue, write_stored_fields},
     terms::{TermPostings, write_terms},
@@ -29,7 +29,7 @@ pub struct NewSegment<'a> {
 /// to a [`crate::SegmentInfos`] and writes that (which writes the `.si`).
 pub fn write_segment(dir: &Path, s: &NewSegment) -> Result<SegmentCommitInfo> {
     let (fdm, fdt) = write_stored_fields(s.stored, &s.id)?;
-    let (dvm, dvd) = write_numeric_doc_values(s.numeric, &s.id, "Lucene90_0");
+    let (dvm, dvd) = write_doc_values(s.numeric, &[], &s.id, "Lucene90_0");
     let by_number = |n: &i32| {
         s.fields
             .iter()
