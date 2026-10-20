@@ -6,6 +6,7 @@ use crate::{
     compound::write_compound,
     doc_values::write_doc_values,
     field_infos::{DocValuesType, FieldInfo, IndexOptions, write_field_infos},
+    norms::write_norms,
     stored_fields::{StoredValue, write_stored_fields},
     terms::{TermPostings, write_terms},
 };
@@ -21,6 +22,10 @@ pub struct NewSegment<'a> {
     pub stored: &'a [Vec<(i32, StoredValue)>],
     /// `(field number, value per doc)`
     pub numeric: &'a [(i32, Vec<i64>)],
+    /// `(field number, term per doc)` for single-valued keyword fields
+    pub keyword: &'a [(i32, Vec<Vec<u8>>)],
+    /// `(field number, one norm per doc)`
+    pub norms: &'a [(i32, Vec<i8>)],
     /// `(field number, terms)`
     pub terms: &'a [(i32, Vec<TermPostings>)],
 }
@@ -29,7 +34,7 @@ pub struct NewSegment<'a> {
 /// to a [`crate::SegmentInfos`] and writes that (which writes the `.si`).
 pub fn write_segment(dir: &Path, s: &NewSegment) -> Result<SegmentCommitInfo> {
     let (fdm, fdt) = write_stored_fields(s.stored, &s.id)?;
-    let (dvm, dvd) = write_doc_values(s.numeric, &[], &s.id, "Lucene90_0");
+    let (dvm, dvd) = write_doc_values(s.numeric, s.keyword, &s.id, "Lucene90_0");
     let by_number = |n: &i32| {
         s.fields
             .iter()
@@ -42,8 +47,12 @@ pub fn write_segment(dir: &Path, s: &NewSegment) -> Result<SegmentCommitInfo> {
         .map(|(n, t)| (by_number(n), &t[..]))
         .collect();
     let t = write_terms(&term_fields, &s.id, "Lucene104_0");
+    let norm_fields: Vec<_> = s.norms.iter().map(|(n, v)| (*n, &v[..])).collect();
+    let (nvm, nvd) = write_norms(&s.id, &norm_fields);
     let mut files = vec![
-        (".fnm".to_string(), write_field_infos(s.fields, &s.id, "")),
+        (".nvm".to_string(), nvm),
+        (".nvd".into(), nvd),
+        (".fnm".into(), write_field_infos(s.fields, &s.id, "")),
         (".fdm".into(), fdm),
         (".fdt".into(), fdt),
         ("_Lucene90_0.dvm".into(), dvm),
@@ -174,11 +183,15 @@ mod tests {
     fn written_segment_reads_back() {
         let dir = std::env::temp_dir().join(format!("esm-seg-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let fields = [field("title", 0), field("n", 1)];
+        let fields = [field("title", 0), field("n", 1), field("tag", 2)];
         let stored: Vec<_> = (0..5)
             .map(|i| vec![(0, StoredValue::String(format!("doc {i}")))])
             .collect();
         let numeric = [(1, vec![10, 20, 30, 40, 50])];
+        let keyword = [(
+            2,
+            (0..5).map(|i| format!("k{}", i % 2).into_bytes()).collect(),
+        )];
         let terms = [(
             0,
             vec![TermPostings {
@@ -197,6 +210,8 @@ mod tests {
                 fields: &fields,
                 stored: &stored,
                 numeric: &numeric,
+                keyword: &keyword,
+                norms: &[],
                 terms: &terms,
             },
         )
@@ -219,6 +234,11 @@ mod tests {
         assert_eq!(r.terms("title").unwrap(), terms[0].1);
         let want = DocValues::Numbers(numeric[0].1.iter().map(|v| vec![*v]).collect());
         assert_eq!(r.doc_values("n").unwrap(), want);
+        let DocValues::Ordinals { ords, terms } = r.doc_values("tag").unwrap() else {
+            panic!("tag should be ordinals")
+        };
+        assert_eq!(terms, [b"k0".to_vec(), b"k1".to_vec()]);
+        assert_eq!(ords, [[0], [1], [0], [1], [0]]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

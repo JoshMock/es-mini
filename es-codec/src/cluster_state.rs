@@ -263,6 +263,8 @@ pub fn write_state(
             fields: &fields,
             stored: &stored,
             numeric: &[],
+            keyword: &[],
+            norms: &[],
             terms: &[(4, terms)],
         },
     )?;
