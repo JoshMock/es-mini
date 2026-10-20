@@ -1,6 +1,5 @@
 # Known-failing YAML tests. Fix one, then delete its line.
 indices.put_settings/10_basic.yml/Test preserve_existing settings
-indices.update_aliases/40_must_exist.yml/Partial success with must_exist == false
 indices.update_aliases/40_must_exist.yml/Partial success with must_exist == null (default)
 indices.update_aliases/40_must_exist.yml/Single result per input action
 search/180_locale_dependent_mapping.yml/Test Index and Search locale dependent mappings / dates

@@ -296,6 +296,7 @@ pub async fn update(State(state): State<AppState>, body: Bytes) -> Result<Json<V
         .collect();
     let mut drop = BTreeSet::new();
     let mut added = Vec::new();
+    let mut results = Vec::new();
     for action in actions {
         let Some((kind, a)) = action
             .as_object()
@@ -320,6 +321,11 @@ pub async fn update(State(state): State<AppState>, body: Bytes) -> Result<Json<V
             return Err(AppError::IllegalArgument(format!(
                 "[must_exist] is only valid for [remove] actions, not [{kind}]"
             )));
+        }
+        let mut failure = None;
+        let mut result_action = json!({"type": kind, "indices": targets});
+        if kind != "remove_index" {
+            result_action["aliases"] = json!(names_of(a, "alias", "aliases"));
         }
         match kind.as_str() {
             "add" => {
@@ -347,8 +353,12 @@ pub async fn update(State(state): State<AppState>, body: Bytes) -> Result<Json<V
                         m.retain(|name, _| !alias_glob(&pattern, name));
                         hit |= m.len() != before;
                     }
-                    if !hit && must_exist {
-                        return Err(AppError::AliasesNotFound(vec![pattern]));
+                    if !hit {
+                        let e = AppError::AliasesNotFound(vec![pattern]);
+                        if must_exist {
+                            return Err(e);
+                        }
+                        failure.get_or_insert(e);
                     }
                 }
             }
@@ -359,6 +369,13 @@ pub async fn update(State(state): State<AppState>, body: Bytes) -> Result<Json<V
                 )));
             }
         }
+        results.push(match failure {
+            None => json!({"action": result_action, "status": 200, "error": null}),
+            Some(e) => {
+                let (status, error) = e.parts();
+                json!({"action": result_action, "status": status.as_u16(), "error": error})
+            }
+        });
     }
     // Checked after the loop so a later remove_index may free the name.
     for alias in &added {
@@ -372,5 +389,10 @@ pub async fn update(State(state): State<AppState>, body: Bytes) -> Result<Json<V
         }
     }
     indices.retain(|n, _| !drop.contains(n));
-    Ok(Json(json!({"acknowledged": true, "errors": false})))
+    let errors = results.iter().any(|r| r["status"] != 200);
+    let mut body = json!({"acknowledged": true, "errors": errors});
+    if errors {
+        body["action_results"] = json!(results);
+    }
+    Ok(Json(body))
 }
