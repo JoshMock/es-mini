@@ -52,7 +52,7 @@ Goal: make exactly one known-failing test pass: \`${id}\`
 
 Rules:
 1. Do not modify anything under ${suite.frozen.map((p) => `\`${p}\``).join(", ")}. Fix the implementation, not the test or its runner. If a runner bug blocks the test, stop and explain it instead.
-2. Fix only this test. Keep the change minimal and follow AGENTS.md.
+2. Fix only this test. Keep the change minimal and follow AGENTS.md. Before writing new parsing or resolution logic, search for an existing helper (e.g. es_index::aliases::resolve_read for index expressions) and extend it instead of duplicating it.
 3. Reproduce first: \`${suite.runOne(id)}\`
 4. Delete exactly the line \`${id}\` from \`${suite.xfail}\`. If other listed tests now pass too, delete their lines as well; never add lines.
 5. Run \`scripts/check.sh\` until it passes. If the sandbox blocks ~/.cargo, prefix commands with CARGO_HOME=/tmp/esm-cargo.
