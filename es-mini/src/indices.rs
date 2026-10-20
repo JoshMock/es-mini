@@ -276,6 +276,7 @@ fn settings_response(
     filter: &str,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, AppError> {
+    let filter = if filter == "_all" { "*" } else { filter };
     let include_defaults = params.get("include_defaults").is_some_and(|v| v == "true");
     let render = |i: &Index| {
         let mut out =

@@ -1,5 +1,4 @@
 # Known-failing YAML tests. Fix one, then delete its line.
-indices.get_settings/10_basic.yml/Get /{index}/_settings/_all
 indices.get_settings/10_basic.yml/Get /{index}/_settings/{name,name}
 indices.get_settings/30_defaults.yml/Test retrieval of default settings
 indices.put_settings/10_basic.yml/Test indices settings
