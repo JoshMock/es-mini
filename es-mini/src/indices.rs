@@ -17,6 +17,20 @@ pub fn parse_body(body: &Bytes) -> Result<Value, AppError> {
     serde_json::from_slice(body).map_err(|e| AppError::Parse(e.to_string()))
 }
 
+fn check_field_type(field: &str, spec: &Value) -> Result<(), AppError> {
+    if FieldMapping::deserialize(spec).is_err()
+        && let Some(t) = spec["type"].as_str()
+    {
+        return Err(AppError::MapperParsing(format!(
+            "Failed to parse mapping: The mapper type [{t}] declared on field [{field}] does not exist. It might have been created within a future version or requires a plugin to be installed. Check the documentation."
+        )));
+    }
+    for (sub, sub_spec) in spec["fields"].as_object().into_iter().flatten() {
+        check_field_type(sub, sub_spec)?;
+    }
+    Ok(())
+}
+
 pub async fn create(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -43,13 +57,7 @@ pub async fn create(
                     "field name cannot be an empty string".into(),
                 ));
             }
-            if FieldMapping::deserialize(spec).is_err()
-                && let Some(t) = spec["type"].as_str()
-            {
-                return Err(AppError::MapperParsing(format!(
-                    "Failed to parse mapping: The mapper type [{t}] declared on field [{field}] does not exist. It might have been created within a future version or requires a plugin to be installed. Check the documentation."
-                )));
-            }
+            check_field_type(field, spec)?;
         }
         index.mappings = Mappings::deserialize(&body["mappings"])
             .map_err(|e| AppError::MapperParsing(e.to_string()))?;

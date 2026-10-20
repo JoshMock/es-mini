@@ -1,5 +1,4 @@
 # Known-failing YAML tests. Fix one, then delete its line.
-indices.create/10_basic.yml/Create index with invalid multi-field type
 indices.create/10_basic.yml/Create index with invalid runtime field type
 indices.create/10_basic.yml/Create index without soft deletes
 indices.create/10_basic.yml/Create with alias containing date math
