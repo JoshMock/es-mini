@@ -111,7 +111,7 @@ pub async fn refresh(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<Value>, AppError> {
-    with_index(&state, name, |_| ())?;
+    with_index(&state, name, Index::refresh)?;
     Ok(Json(
         json!({"_shards": {"total": 1, "successful": 1, "failed": 0}}),
     ))

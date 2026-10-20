@@ -363,7 +363,7 @@ impl<'a> Searcher<'a> {
     }
 
     /// `None` if the document does not match; otherwise its score.
-    fn score(&self, q: &Query, d: &Document) -> Option<f64> {
+    fn score(&self, q: &Query, id: &str, d: &Document) -> Option<f64> {
         match q {
             Query::MatchAll => Some(1.0),
             Query::Match { field, query, and } => {
@@ -374,6 +374,7 @@ impl<'a> Searcher<'a> {
                 };
                 self.score_terms(field, kind, path, &wanted, *and, d)
             }
+            Query::Term { field, value } if field == "_id" => (text(value) == id).then_some(1.0),
             Query::Term { field, value } => {
                 let (kind, path) = self.kind(field);
                 self.score_terms(field, kind, path, &[text(value)], true, d)
@@ -408,16 +409,16 @@ impl<'a> Searcher<'a> {
                 filter,
                 min_should,
             } => {
-                if must_not.iter().any(|c| self.score(c, d).is_some())
-                    || filter.iter().any(|c| self.score(c, d).is_none())
+                if must_not.iter().any(|c| self.score(c, id, d).is_some())
+                    || filter.iter().any(|c| self.score(c, id, d).is_none())
                 {
                     return None;
                 }
                 let mut total = 0.0;
                 for c in must {
-                    total += self.score(c, d)?;
+                    total += self.score(c, id, d)?;
                 }
-                let hits: Vec<f64> = should.iter().filter_map(|c| self.score(c, d)).collect();
+                let hits: Vec<f64> = should.iter().filter_map(|c| self.score(c, id, d)).collect();
                 (hits.len() >= *min_should).then(|| total + hits.iter().sum::<f64>())
             }
         }
@@ -574,8 +575,8 @@ pub fn search_many<'a>(
     for (pos, (name, index, filter)) in targets.iter().enumerate() {
         let query = with_filter(&req.query, *filter)?;
         let s = Searcher::new(index, &query);
-        for (id, doc) in index.docs() {
-            let Some(score) = s.score(&query, doc) else {
+        for (id, doc) in index.docs().filter(|(_, d)| index.searchable(d)) {
+            let Some(score) = s.score(&query, id, doc) else {
                 continue;
             };
             let sort: Vec<Value> = req
@@ -658,7 +659,7 @@ pub fn count_many(targets: &[Target], q: &Query) -> Result<usize, String> {
         let s = Searcher::new(index, &q);
         n += index
             .docs()
-            .filter(|(_, d)| s.score(&q, d).is_some())
+            .filter(|(id, d)| s.score(&q, id, d).is_some())
             .count();
     }
     Ok(n)

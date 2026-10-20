@@ -1,7 +1,4 @@
 # Known-failing YAML tests. Fix one, then delete its line.
-index/60_refresh.yml/Refresh
-index/60_refresh.yml/When refresh url parameter is an empty string that means "refresh immediately"
-index/60_refresh.yml/refresh=wait_for waits until changes are visible in search
 index/70_require_alias.yml/Set require_alias flag
 indices.create/10_basic.yml/Create index with invalid field type
 indices.create/10_basic.yml/Create index with invalid mappings
@@ -64,7 +61,6 @@ indices.update_aliases/40_must_exist.yml/Alias must_exist only on remove
 indices.update_aliases/40_must_exist.yml/Partial success with must_exist == false
 indices.update_aliases/40_must_exist.yml/Partial success with must_exist == null (default)
 indices.update_aliases/40_must_exist.yml/Single result per input action
-search/171_term_query.yml/case insensitive term query on blank keyword is consistent
 search/180_locale_dependent_mapping.yml/Test Index and Search locale dependent mappings / dates
 search/20_default_values.yml/Basic search
 search/20_default_values.yml/Search body without query element
@@ -74,9 +70,6 @@ search/220_total_hits_object.yml/track_total_hits with rest_total_hits_as_int
 search/500_date_range.yml/test bad dates in range - future
 search/500_date_range.yml/test bad dates in range - past
 search/500_date_range.yml/test match query gte and lt for single result with year uuuu
-search/500_date_range.yml/test match query gte and lte with year uuuu
-search/500_date_range.yml/test match query with year uuuu
-search/500_date_range.yml/test range query for all docs with year uuuu
 search/60_query_string.yml/search with query_string parameters
 search/70_response_filtering.yml/Search results filtered using both includes and excludes filters
 search/70_response_filtering.yml/Search with response filtering
@@ -84,6 +77,5 @@ update/12_result.yml/Update result field
 update/16_noop.yml/Noop
 update/60_refresh.yml/Refresh
 update/60_refresh.yml/When refresh url parameter is an empty string that means "refresh immediately"
-update/60_refresh.yml/refresh=wait_for waits until changes are visible in search
 update/90_error.yml/Misspelled fields get "did you mean"
 update/95_require_alias.yml/Set require_alias flag

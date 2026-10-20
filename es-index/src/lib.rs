@@ -150,6 +150,7 @@ pub struct Index {
     // ponytail: tombstones are never pruned; ES drops them after index.gc_deletes (60s)
     deleted_versions: HashMap<String, u64>,
     next_seq_no: u64,
+    refreshed_seq_no: u64,
 }
 
 impl Index {
@@ -197,6 +198,17 @@ impl Index {
             Some(doc) => Err(doc.version),
             None => Ok(self.put(id, source)),
         }
+    }
+
+    /// Makes all writes so far visible to search.
+    pub fn refresh(&mut self) {
+        self.refreshed_seq_no = self.next_seq_no;
+    }
+
+    // ponytail: only refresh_interval -1 delays visibility; otherwise writes are searchable at once
+    pub fn searchable(&self, d: &Document) -> bool {
+        self.settings.get("index.refresh_interval") != Some("-1")
+            || d.seq_no < self.refreshed_seq_no
     }
 
     pub fn get(&self, id: &str) -> Option<&Document> {

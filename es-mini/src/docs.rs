@@ -146,7 +146,15 @@ pub async fn index_with_id(
     body: Bytes,
 ) -> Reply {
     let create = params.get("op_type").is_some_and(|o| o == "create");
-    put_or_create(&state, &index, &id, parse_json(&body)?, create)
+    let mut reply = put_or_create(&state, &index, &id, parse_json(&body)?, create)?;
+    if params
+        .get("refresh")
+        .is_some_and(|v| v.is_empty() || v == "true")
+    {
+        write(&state, &index, Index::refresh)?;
+        reply.1.0["forced_refresh"] = true.into();
+    }
+    Ok(reply)
 }
 
 pub async fn index_auto_id(

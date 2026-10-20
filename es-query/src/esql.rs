@@ -509,12 +509,12 @@ pub fn run(indices: &BTreeMap<String, Index>, query: &str) -> Result<Response, E
         let searcher = filter.as_ref().map(|f| (crate::Searcher::new(index, f), f));
         let mut mine: Vec<_> = index
             .docs()
-            .map(|(_, d)| d)
-            .filter(|d| {
+            .filter(|(id, d)| {
                 searcher
                     .as_ref()
-                    .is_none_or(|(s, f)| s.score(f, d).is_some())
+                    .is_none_or(|(s, f)| s.score(f, id, d).is_some())
             })
+            .map(|(_, d)| d)
             .collect();
         mine.sort_by_key(|d| d.seq_no);
         docs.extend(mine);

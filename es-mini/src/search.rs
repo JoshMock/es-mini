@@ -28,6 +28,7 @@ fn shards() -> Value {
 pub async fn search(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
     let start = Instant::now();
@@ -48,11 +49,19 @@ pub async fn search(
             hit
         })
         .collect();
+    let total = if params
+        .get("rest_total_hits_as_int")
+        .is_some_and(|v| v == "true")
+    {
+        json!(r.total)
+    } else {
+        json!({"value": r.total, "relation": "eq"})
+    };
     Ok(Json(json!({
         "took": start.elapsed().as_millis() as u64,
         "timed_out": false,
         "_shards": shards(),
-        "hits": {"total": {"value": r.total, "relation": "eq"}, "max_score": r.max_score, "hits": hits}
+        "hits": {"total": total, "max_score": r.max_score, "hits": hits}
     })))
 }
 
