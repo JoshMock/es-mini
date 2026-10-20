@@ -1,6 +1,4 @@
 # Known-failing YAML tests. Fix one, then delete its line.
-indices.create/40_dynamic_strings_auto_keyword.yml/Dynamic string with auto text later disabled omits text subfield
-indices.create/40_dynamic_strings_auto_keyword.yml/Dynamic string without auto text omits text field
 indices.delete/10_basic.yml/Delete index against alias
 indices.delete/10_basic.yml/Delete index against alias -  ignore unavailable - multiple indices
 indices.delete/10_basic.yml/Delete index against alias -  multiple indices

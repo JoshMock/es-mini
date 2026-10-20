@@ -175,15 +175,21 @@ impl Index {
     /// Adds dynamic mappings for fields of `source` not yet mapped.
     pub fn map_dynamic(&mut self, source: &Value) {
         // ponytail: top-level string fields only; no other dynamic types or nested objects
-        if self.settings.get("index.mapping.dynamic_strings.auto_text") != Some("false")
-            && let Some(obj) = source.as_object()
-        {
+        let auto_text =
+            self.settings.get("index.mapping.dynamic_strings.auto_text") != Some("false");
+        if let Some(obj) = source.as_object() {
             for k in obj.iter().filter(|(_, v)| v.is_string()).map(|(k, _)| k) {
                 self.mappings
                     .properties
                     .entry(k.clone())
-                    .or_insert_with(|| FieldMapping::TextKeyword {
-                        fields: [("keyword".to_owned(), FieldMapping::Keyword)].into(),
+                    .or_insert_with(|| {
+                        if auto_text {
+                            FieldMapping::TextKeyword {
+                                fields: [("keyword".to_owned(), FieldMapping::Keyword)].into(),
+                            }
+                        } else {
+                            FieldMapping::Keyword
+                        }
                     });
             }
         }
