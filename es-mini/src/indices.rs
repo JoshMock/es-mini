@@ -59,6 +59,30 @@ pub async fn create(
             }
             check_field_type(field, spec)?;
         }
+        for (field, spec) in body["mappings"]["runtime"]
+            .as_object()
+            .into_iter()
+            .flatten()
+        {
+            const TYPES: [&str; 9] = [
+                "boolean",
+                "composite",
+                "date",
+                "double",
+                "geo_point",
+                "ip",
+                "keyword",
+                "long",
+                "lookup",
+            ];
+            if let Some(t) = spec["type"].as_str()
+                && !TYPES.contains(&t)
+            {
+                return Err(AppError::MapperParsing(format!(
+                    "Failed to parse mapping: The mapper type [{t}] declared on runtime field [{field}] does not exist. It might have been created within a future version or requires a plugin to be installed. Check the documentation."
+                )));
+            }
+        }
         index.mappings = Mappings::deserialize(&body["mappings"])
             .map_err(|e| AppError::MapperParsing(e.to_string()))?;
     }
