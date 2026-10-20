@@ -5,7 +5,8 @@ import org.apache.lucene.document.*;
 import org.apache.lucene.index.*;
 import org.apache.lucene.store.*;
 
-/** Writes the index read by tests/many_terms.rs; `terms()` must match the test's. Doc d holds term d. */
+/** Writes the index read by tests/many_terms.rs; `terms()` must match the test's. Doc d holds term d of
+ * field "t"; the 100 docs after them hold field "q". */
 public class GenManyTerms {
   static List<String> terms() {
     List<String> out = new ArrayList<>();
@@ -34,6 +35,12 @@ public class GenManyTerms {
       for (String t : terms()) {
         Document doc = new Document();
         doc.add(new StringField("t", t, Field.Store.NO));
+        w.addDocument(doc);
+      }
+      // Field "q": 100 terms that all start with 'q', so the trie root has a single child.
+      for (int i = 0; i < 100; i++) {
+        Document doc = new Document();
+        doc.add(new StringField("q", String.format("q%03d", i), Field.Store.NO));
         w.addDocument(doc);
       }
       w.forceMerge(1);

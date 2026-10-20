@@ -147,15 +147,15 @@ fn trie_root_output_fp(tip: &[u8], start: usize, end: usize, root: usize) -> Res
                 long_at(node + 1)?
             })
         }
-        // SIGN_SINGLE_CHILD_WITHOUT_OUTPUT
-        1 => err("trie root has no output"),
         // SIGN_SINGLE_CHILD_WITH_OUTPUT
-        2 => {
+        1 => {
             let child_delta_bytes_minus_1 = (flags >> 2) & 7;
             let n = (flags >> 5) & 7;
             let at = node + child_delta_bytes_minus_1 as usize + 3;
             Ok((long_at(at)? & mask(n)) >> 2)
         }
+        // SIGN_SINGLE_CHILD_WITHOUT_OUTPUT
+        2 => err("trie root has no output"),
         // SIGN_MULTI_CHILDREN
         _ => {
             if flags & 0x20 == 0 {

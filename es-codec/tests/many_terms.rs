@@ -1,6 +1,7 @@
 //! A terms dictionary big enough for sub-blocks, floor blocks, and both suffix compressions,
 //! from an index written by real Lucene 10.5.1: see tests/gen/GenManyTerms.java (`terms()` there
-//! must match `terms` here). Doc d holds term d.
+//! must match `terms` here). Doc d holds term d of field "t"; the 100 docs after them hold
+//! field "q".
 
 use es_codec::{CompoundFile, SegmentInfos, field_infos::read_field_infos, terms::read_terms};
 use std::path::PathBuf;
@@ -53,4 +54,13 @@ fn reads_a_multi_block_terms_dictionary() {
         assert_eq!(term, want_term);
         assert_eq!(docs, &[(*doc, 1)], "{term}");
     }
+
+    // Every "q" term starts with the same byte: the trie root has one child.
+    let q = read_terms(&cfs, seg, &fields, "q").unwrap();
+    let base = want.len() as u32;
+    let q: Vec<_> = q.into_iter().map(|t| (t.term, t.docs)).collect();
+    let want_q: Vec<_> = (0..100)
+        .map(|i| (format!("q{i:03}").into_bytes(), vec![(base + i, 1)]))
+        .collect();
+    assert_eq!(q, want_q);
 }
