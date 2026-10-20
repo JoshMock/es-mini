@@ -1,4 +1,3 @@
 # Ordered goals for the Ralph loop's `goals` suite. One line each; an iteration deletes a line
 # only when that goal's done-criteria hold. Later goals assume earlier ones are done.
-task-19: Lucene 10 segment writer in es-codec (EXECUTION.md task 19): es-mini writes segments, field infos, stored fields, postings, doc values, and segments_N for its indices; done when a Rust-writes, Rust-reads round-trip test passes.
 task-20: Cross-engine write compatibility (EXECUTION.md task 20): a script copies a Rust-written data directory, boots Elasticsearch 9.5.5 on it in Docker (1 CPU, 1 GB, requests via docker exec, container always removed), and checks a fixed query set; done when that check passes.
