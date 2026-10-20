@@ -231,9 +231,18 @@ pub fn delete_doc(state: &AppState, index: &str, id: &str) -> Reply {
 pub async fn update(
     State(state): State<AppState>,
     Path((index, id)): Path<(String, String)>,
+    Query(params): Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Reply {
-    update_doc(&state, &index, &id, &parse_json(&body)?)
+    let mut reply = update_doc(&state, &index, &id, &parse_json(&body)?)?;
+    if params
+        .get("refresh")
+        .is_some_and(|v| v.is_empty() || v == "true")
+    {
+        write(&state, &index, Index::refresh)?;
+        reply.1.0["forced_refresh"] = true.into();
+    }
+    Ok(reply)
 }
 
 pub fn update_doc(state: &AppState, index: &str, id: &str, body: &Value) -> Reply {
