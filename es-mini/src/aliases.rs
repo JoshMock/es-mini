@@ -344,7 +344,7 @@ pub async fn update(State(state): State<AppState>, body: Bytes) -> Result<Json<V
                 }
             }
             "remove" => {
-                let must_exist = a["must_exist"].as_bool() != Some(false);
+                let must_exist = a["must_exist"].as_bool() == Some(true);
                 for pattern in names_of(a, "alias", "aliases") {
                     let mut hit = false;
                     for t in &targets {

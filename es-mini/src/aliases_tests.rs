@@ -196,7 +196,7 @@ async fn update_aliases_actions_are_atomic() {
     );
 
     // A failing action applies nothing.
-    let body = json!({"actions": [{"add": {"index": "a", "alias": "y"}}, {"remove": {"index": "a", "alias": "nope"}}]});
+    let body = json!({"actions": [{"add": {"index": "a", "alias": "y"}}, {"remove": {"index": "a", "alias": "nope", "must_exist": true}}]});
     let (s, r) = call(&app, Method::POST, "/_aliases", Some(body)).await;
     assert_eq!(
         (s, &r["error"]["type"]),
