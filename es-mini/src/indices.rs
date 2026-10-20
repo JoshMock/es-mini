@@ -273,8 +273,12 @@ pub async fn get_mapping(
             .collect();
         return Ok(Json(Value::Object(out)));
     }
-    let mappings = with_index(&state, name.clone(), |i| json!(i.mappings))?;
-    Ok(Json(json!({ name: {"mappings": mappings} })))
+    let mut out = serde_json::Map::new();
+    for n in name.split(',') {
+        let m = with_index(&state, n.to_string(), |i| json!(i.mappings))?;
+        out.insert(n.to_string(), json!({"mappings": m}));
+    }
+    Ok(Json(Value::Object(out)))
 }
 
 pub async fn get_all_mappings(state: State<AppState>) -> Result<Json<Value>, AppError> {
