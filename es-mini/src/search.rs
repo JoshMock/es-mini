@@ -57,19 +57,43 @@ pub async fn search(
             hit
         })
         .collect();
-    let total = if params
+    let as_int = params
         .get("rest_total_hits_as_int")
-        .is_some_and(|v| v == "true")
-    {
-        json!(r.total)
-    } else {
-        json!({"value": r.total, "relation": "eq"})
+        .is_some_and(|v| v == "true");
+    let track = params.get("track_total_hits").map(String::as_str);
+    let limit = match track {
+        Some("true" | "-1") | None => None,
+        Some("false") => Some(None),
+        Some(n) => match n.parse::<u64>() {
+            Ok(n) if as_int => {
+                return Err(AppError::IllegalArgument(format!(
+                    "[rest_total_hits_as_int] cannot be used if the tracking of total hits is not accurate, got {n}"
+                )));
+            }
+            Ok(n) => Some(Some(n)),
+            Err(_) => {
+                return Err(AppError::IllegalArgument(format!(
+                    "[track_total_hits] parameter must be positive or equals to -1, got {n}"
+                )));
+            }
+        },
     };
+    let total = match limit {
+        Some(None) if as_int => json!(-1),
+        Some(None) => Value::Null,
+        Some(Some(n)) if r.total as u64 > n => json!({"value": n, "relation": "gte"}),
+        _ if as_int => json!(r.total),
+        _ => json!({"value": r.total, "relation": "eq"}),
+    };
+    let mut hits = json!({"total": total, "max_score": r.max_score, "hits": hits});
+    if total.is_null() {
+        hits.as_object_mut().unwrap().remove("total");
+    }
     Ok(Json(json!({
         "took": start.elapsed().as_millis() as u64,
         "timed_out": false,
         "_shards": shards(),
-        "hits": {"total": total, "max_score": r.max_score, "hits": hits}
+        "hits": hits
     })))
 }
 
