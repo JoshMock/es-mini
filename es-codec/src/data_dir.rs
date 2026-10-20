@@ -2,7 +2,7 @@
 
 use crate::{
     Error, Result, SegmentInfos,
-    cluster_state::{GlobalMetadata, IndexMetadata, write_state},
+    cluster_state::{ALLOCATION_ID, GlobalMetadata, IndexMetadata, write_state},
     segment_infos::shard_user_data,
     state_file::{self, manifest_doc, node_doc, retention_leases_doc, shard_state_doc},
     translog::{Checkpoint, write_empty},
@@ -14,7 +14,6 @@ const INDEX_VERSION: i64 = 9_111_000;
 // Fixed 22-char ids; ES only requires uniqueness per shard.
 const HISTORY_UUID: &str = "esminiHistoryUuid0000A";
 const TRANSLOG_UUID: &str = "esminiTranslogUuid000A";
-const ALLOCATION_ID: &str = "esminiAllocationId00A";
 
 fn io(path: &Path) -> impl Fn(std::io::Error) -> Error + '_ {
     move |e| Error(format!("{}: {e}", path.display()))
@@ -119,7 +118,7 @@ mod tests {
             (0, StoredValue::Bytes(encode_id("1"))),
             (1, StoredValue::Bytes(src.to_vec())),
         ]];
-        let numeric = [(2, vec![1]), (3, vec![0]), (4, vec![1])];
+        let numeric = [(2, vec![1]), (3, vec![0]), (4, vec![1]), (5, vec![])];
         let terms = [(
             0,
             vec![TermPostings {

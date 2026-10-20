@@ -7,10 +7,18 @@ use crate::{
     doc_values::write_doc_values,
     field_infos::{DocValuesType, FieldInfo, IndexOptions, write_field_infos},
     norms::write_norms,
+    output::Output,
     stored_fields::{StoredValue, write_stored_fields},
     terms::{TermPostings, write_terms},
 };
 use std::{collections::BTreeMap, path::Path};
+
+/// Elasticsearch opens `.dvs` for every doc values file set, even when no field has a skip index.
+fn empty_skip_index(id: &[u8; ID_LEN]) -> Vec<u8> {
+    let mut o = Output::default();
+    o.index_header("Lucene90DocValuesSkipIndex", 2, id, "Lucene90_0");
+    o.finish()
+}
 
 /// Everything in a new segment. `fields` must carry the `PerFieldPostingsFormat.format` =
 /// `Lucene104` and `.suffix` = `0` attributes on indexed fields.
@@ -58,6 +66,7 @@ pub fn write_segment(dir: &Path, s: &NewSegment) -> Result<SegmentCommitInfo> {
         (".fdt".into(), fdt),
         ("_Lucene90_0.dvm".into(), dvm),
         ("_Lucene90_0.dvd".into(), dvd),
+        ("_Lucene90_0.dvs".into(), empty_skip_index(&s.id)),
     ];
     for (ext, bytes) in [
         ("tim", t.tim),
@@ -80,7 +89,9 @@ pub fn write_segment(dir: &Path, s: &NewSegment) -> Result<SegmentCommitInfo> {
             is_compound: true,
             has_blocks: false,
             diagnostics: BTreeMap::new(),
-            files: ["cfs", "cfe"].map(|e| format!("{}.{e}", s.name)).into(),
+            files: ["cfs", "cfe", "si"]
+                .map(|e| format!("{}.{e}", s.name))
+                .into(),
             attributes: BTreeMap::from([(
                 "Lucene90StoredFieldsFormat.mode".into(),
                 "BEST_SPEED".into(),

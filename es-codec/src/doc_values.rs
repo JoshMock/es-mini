@@ -656,7 +656,7 @@ fn write_numeric_entry(dvm: &mut Output, dvd: &mut Output, values: &[i64]) {
         .iter()
         .fold(0, |m, v| m.max(v.wrapping_sub(min) as u64));
     let bits = direct_bits(range);
-    dvm.long(-1); // all docs have a value
+    dvm.long(if values.is_empty() { -2 } else { -1 }); // no docs / all docs have a value
     dvm.long(0);
     dvm.bytes(&(-1i16).to_le_bytes());
     dvm.byte(0xff);
