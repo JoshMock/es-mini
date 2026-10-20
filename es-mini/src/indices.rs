@@ -254,6 +254,14 @@ pub async fn get_all_settings(
     settings_response(state, "_all".into(), "*", params)
 }
 
+pub async fn get_all_settings_named(
+    state: State<AppState>,
+    Path(filter): Path<String>,
+    params: Query<HashMap<String, String>>,
+) -> Result<Json<Value>, AppError> {
+    settings_response(state, "_all".into(), &filter, params)
+}
+
 pub async fn get_settings_named(
     state: State<AppState>,
     Path((name, filter)): Path<(String, String)>,
