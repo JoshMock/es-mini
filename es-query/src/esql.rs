@@ -3,7 +3,10 @@
 //! WHERE supports comparisons (`== != < <= > >=`), `AND`/`OR`/`NOT`, parentheses, and
 //! `IS [NOT] NULL` over field names and literals. Anything else is a parse error.
 
-use es_index::{FieldMapping, Index};
+use es_index::{
+    FieldMapping, Index,
+    aliases::{self, ResolveError},
+};
 use serde::Serialize;
 use serde_json::Value;
 use std::{cmp::Ordering, collections::BTreeMap};
@@ -477,20 +480,46 @@ pub fn run(indices: &BTreeMap<String, Index>, query: &str) -> Result<Response, E
         pos: 0,
     }
     .query()?;
-    // ponytail: no wildcard or multi-index sources
-    let [source] = sources.as_slice() else {
-        return Err(EsqlError::Verification(
-            "only a single index source is supported".into(),
-        ));
+    let unknown_index = |e| match e {
+        ResolveError::IndexNotFound(i) | ResolveError::NoWriteIndex(i) => {
+            EsqlError::Verification(format!("Unknown index [{i}]"))
+        }
     };
-    let index = indices
-        .get(source)
-        .ok_or_else(|| EsqlError::Verification(format!("Unknown index [{source}]")))?;
-    let types = columns(index);
+    let targets = aliases::resolve_read(indices, &sources.join(",")).map_err(unknown_index)?;
+    if targets.is_empty() {
+        return Err(EsqlError::Verification(format!(
+            "Unknown index [{}]",
+            sources.join(",")
+        )));
+    }
+    // ponytail: conflicting types across indices keep the first index's type; ES reports `unsupported`
+    let mut types = BTreeMap::new();
+    let mut docs = Vec::new();
+    for t in &targets {
+        let index = &indices[&t.index];
+        for (c, ty) in columns(index) {
+            types.entry(c).or_insert(ty);
+        }
+        let filter = t
+            .filter
+            .as_ref()
+            .map(crate::parse_query)
+            .transpose()
+            .map_err(EsqlError::Verification)?;
+        let searcher = filter.as_ref().map(|f| (crate::Searcher::new(index, f), f));
+        let mut mine: Vec<_> = index
+            .docs()
+            .map(|(_, d)| d)
+            .filter(|d| {
+                searcher
+                    .as_ref()
+                    .is_none_or(|(s, f)| s.score(f, d).is_some())
+            })
+            .collect();
+        mine.sort_by_key(|d| d.seq_no);
+        docs.extend(mine);
+    }
     let mut cols: Vec<String> = types.keys().cloned().collect();
-
-    let mut docs: Vec<_> = index.docs().map(|(_, d)| d).collect();
-    docs.sort_by_key(|d| d.seq_no);
     let mut rows: Vec<BTreeMap<&str, Value>> = docs
         .iter()
         .map(|d| {

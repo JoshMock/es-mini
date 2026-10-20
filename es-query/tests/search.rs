@@ -179,3 +179,46 @@ fn bad_queries_are_errors() {
         assert!(parse_query(&q).is_err(), "{q}");
     }
 }
+
+mod many {
+    use super::*;
+    use es_query::{count_many, search_many};
+
+    fn two() -> (Index, Index) {
+        let mut a = Index::default();
+        a.put("1", json!({"t": "fox", "n": 3}));
+        a.put("2", json!({"t": "dog", "n": 1}));
+        let mut b = Index::default();
+        b.put("1", json!({"t": "fox fox", "n": 2}));
+        (a, b)
+    }
+
+    #[test]
+    fn merges_hits_across_indices_in_sort_order() {
+        let (a, b) = two();
+        let req = SearchRequest::parse(&json!({"sort": ["n"]})).unwrap();
+        let targets = [("a", &a, None), ("b", &b, None)];
+        let r = search_many(&targets, &req).unwrap();
+        let got: Vec<(&str, &str)> = r.hits.iter().map(|h| (h.index, h.id)).collect();
+        assert_eq!(got, [("a", "2"), ("b", "1"), ("a", "1")]);
+        assert_eq!(r.total, 3);
+    }
+
+    #[test]
+    fn applies_per_target_filters_and_pagination() {
+        let (a, b) = two();
+        let req =
+            SearchRequest::parse(&json!({"query": {"match": {"t": "fox"}}, "size": 1})).unwrap();
+        let only_n3 = json!({"term": {"n": 3}});
+        let r = search_many(&[("a", &a, Some(&only_n3)), ("b", &b, None)], &req).unwrap();
+        assert_eq!(r.total, 2);
+        assert_eq!(r.hits.len(), 1);
+        let q = parse_query(&json!({"match_all": {}})).unwrap();
+        assert_eq!(
+            count_many(&[("a", &a, Some(&only_n3)), ("b", &b, None)], &q).unwrap(),
+            2
+        );
+        let bad = json!({"bogus": {}});
+        assert!(search_many(&[("a", &a, Some(&bad))], &req).is_err());
+    }
+}

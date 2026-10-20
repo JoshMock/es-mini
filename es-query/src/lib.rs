@@ -525,6 +525,8 @@ fn parse_sort(v: &Value) -> Result<SortField, String> {
 
 #[derive(Debug)]
 pub struct Hit<'a> {
+    /// The concrete index the hit came from.
+    pub index: &'a str,
     pub id: &'a str,
     pub doc: &'a Document,
     /// `None` when sorting by a field (ES reports `_score: null`).
@@ -539,37 +541,77 @@ pub struct SearchResult<'a> {
     pub hits: Vec<Hit<'a>>,
 }
 
+/// One index to search, with the filter of the alias it was reached through.
+pub type Target<'a> = (&'a str, &'a Index, Option<&'a Value>);
+
+/// The request query, narrowed by an alias filter.
+fn with_filter(q: &Query, filter: Option<&Value>) -> Result<Query, String> {
+    Ok(match filter {
+        None => q.clone(),
+        Some(f) => Query::Bool {
+            must: vec![q.clone()],
+            should: vec![],
+            must_not: vec![],
+            filter: vec![parse_query(f)?],
+            min_should: 0,
+        },
+    })
+}
+
 pub fn search<'a>(index: &'a Index, req: &SearchRequest) -> SearchResult<'a> {
-    let s = Searcher::new(index, &req.query);
-    let mut hits: Vec<(&str, &Document, f64)> = index
-        .docs()
-        .filter_map(|(id, d)| Some((id, d, s.score(&req.query, d)?)))
-        .collect();
+    search_many(&[("", index, None)], req).expect("no alias filter to parse")
+}
+
+/// Searches several indices and merges the hits. Each index is scored with its own statistics,
+/// like ES's default query_then_fetch over one shard per index.
+pub fn search_many<'a>(
+    targets: &[Target<'a>],
+    req: &SearchRequest,
+) -> Result<SearchResult<'a>, String> {
     let by_score = req.sort.is_empty() || req.sort.iter().any(|f| f.field == "_score");
-    let sort_values = |d: &Document, score: f64| -> Vec<Value> {
-        req.sort
-            .iter()
-            .map(|f| match f.field.as_str() {
-                "_score" => Value::from(score as f32),
-                field => {
-                    let (_, path) = s.kind(field);
-                    let mut v = values(&d.source, path);
-                    v.sort_by(|a, b| scalar_cmp(a, b));
-                    let pick = if f.desc { v.last() } else { v.first() };
-                    pick.map_or(Value::Null, |v| (*v).clone())
-                }
-            })
-            .collect()
-    };
-    let cmp = |a: &(&str, &Document, f64), b: &(&str, &Document, f64)| {
-        let fields = if req.sort.is_empty() {
-            b.2.total_cmp(&a.2)
-        } else {
-            let (va, vb) = (sort_values(a.1, a.2), sort_values(b.1, b.2));
-            req.sort
+    // (target position, hit, score, sort values)
+    let mut hits = Vec::new();
+    for (pos, (name, index, filter)) in targets.iter().enumerate() {
+        let query = with_filter(&req.query, *filter)?;
+        let s = Searcher::new(index, &query);
+        for (id, doc) in index.docs() {
+            let Some(score) = s.score(&query, doc) else {
+                continue;
+            };
+            let sort: Vec<Value> = req
+                .sort
                 .iter()
-                .zip(va.iter().zip(&vb))
-                .fold(Ordering::Equal, |acc, (f, (x, y))| {
+                .map(|f| match f.field.as_str() {
+                    "_score" => Value::from(score as f32),
+                    field => {
+                        let (_, path) = s.kind(field);
+                        let mut v = values(&doc.source, path);
+                        v.sort_by(|a, b| scalar_cmp(a, b));
+                        let pick = if f.desc { v.last() } else { v.first() };
+                        pick.map_or(Value::Null, |v| (*v).clone())
+                    }
+                })
+                .collect();
+            hits.push((
+                pos,
+                Hit {
+                    index: name,
+                    id,
+                    doc,
+                    score: Some(score as f32),
+                    sort,
+                },
+                score,
+            ));
+        }
+    }
+    hits.sort_by(|(pa, a, sa), (pb, b, sb)| {
+        let fields = if req.sort.is_empty() {
+            sb.total_cmp(sa)
+        } else {
+            req.sort.iter().zip(a.sort.iter().zip(&b.sort)).fold(
+                Ordering::Equal,
+                |acc, (f, (x, y))| {
                     acc.then_with(|| match (x.is_null(), y.is_null()) {
                         // Missing values sort last in both directions.
                         (true, false) => Ordering::Greater,
@@ -577,40 +619,47 @@ pub fn search<'a>(index: &'a Index, req: &SearchRequest) -> SearchResult<'a> {
                         _ if f.desc => scalar_cmp(y, x),
                         _ => scalar_cmp(x, y),
                     })
-                })
+                },
+            )
         };
-        // ponytail: ties fall back to write order (seq_no), standing in for Lucene doc order
-        fields.then(a.1.seq_no.cmp(&b.1.seq_no))
-    };
-    hits.sort_by(cmp);
+        // ponytail: ties fall back to index order then write order, standing in for shard/doc order
+        fields
+            .then(pa.cmp(pb))
+            .then(a.doc.seq_no.cmp(&b.doc.seq_no))
+    });
     let max_score = by_score
         .then(|| hits.iter().map(|h| h.2 as f32).reduce(f32::max))
         .flatten();
-    SearchResult {
+    Ok(SearchResult {
         total: hits.len(),
         max_score,
         hits: hits
             .into_iter()
             .skip(req.from)
             .take(req.size)
-            .map(|(id, doc, score)| Hit {
-                id,
-                doc,
-                score: by_score.then_some(score as f32),
-                sort: if req.sort.is_empty() {
-                    vec![]
-                } else {
-                    sort_values(doc, score)
-                },
+            .map(|(_, mut h, _)| {
+                if !by_score {
+                    h.score = None;
+                }
+                h
             })
             .collect(),
-    }
+    })
 }
 
 pub fn count(index: &Index, q: &Query) -> usize {
-    let s = Searcher::new(index, q);
-    index
-        .docs()
-        .filter(|(_, d)| s.score(q, d).is_some())
-        .count()
+    count_many(&[("", index, None)], q).expect("no alias filter to parse")
+}
+
+pub fn count_many(targets: &[Target], q: &Query) -> Result<usize, String> {
+    let mut n = 0;
+    for (_, index, filter) in targets {
+        let q = with_filter(q, *filter)?;
+        let s = Searcher::new(index, &q);
+        n += index
+            .docs()
+            .filter(|(_, d)| s.score(&q, d).is_some())
+            .count();
+    }
+    Ok(n)
 }

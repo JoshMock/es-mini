@@ -126,3 +126,40 @@ fn errors() {
         Err(EsqlError::Verification(_))
     ));
 }
+
+#[test]
+fn from_aliases_and_multiple_sources_with_filters() {
+    use es_index::aliases::Alias;
+    let mut all = indices();
+    let mut more = Index::default();
+    more.put("9", json!({"name": "dee", "age": 50}));
+    more.aliases.insert(
+        "crowd".into(),
+        Alias::parse(&json!({"filter": {"range": {"age": {"gte": 45}}}})).unwrap(),
+    );
+    all.get_mut("people")
+        .unwrap()
+        .aliases
+        .insert("crowd".into(), Alias::default());
+    all.insert("more".into(), more);
+    let names = |q: &str| -> Vec<Value> {
+        run(&all, q)
+            .unwrap()
+            .values
+            .into_iter()
+            .map(|r| r[0].clone())
+            .collect()
+    };
+    assert_eq!(
+        names("FROM crowd | KEEP name | SORT name"),
+        [json!("ann"), json!("bob"), json!("cid"), json!("dee")]
+    );
+    assert_eq!(
+        names("FROM people, more | WHERE age > 40 | KEEP name | SORT name"),
+        [json!("cid"), json!("dee")]
+    );
+    assert!(matches!(
+        run(&all, "FROM nope*"),
+        Err(EsqlError::Verification(_))
+    ));
+}
