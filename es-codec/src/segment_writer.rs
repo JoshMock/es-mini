@@ -33,7 +33,7 @@ pub struct NewSegment<'a> {
 /// Writes the segment's compound file into `dir` and returns its commit info; the caller adds it
 /// to a [`crate::SegmentInfos`] and writes that (which writes the `.si`).
 pub fn write_segment(dir: &Path, s: &NewSegment) -> Result<SegmentCommitInfo> {
-    let (fdm, fdt) = write_stored_fields(s.stored, &s.id)?;
+    let (fdm, fdt, fdx) = write_stored_fields(s.stored, &s.id)?;
     let (dvm, dvd) = write_doc_values(s.numeric, s.keyword, &s.id, "Lucene90_0");
     let by_number = |n: &i32| {
         s.fields
@@ -54,6 +54,7 @@ pub fn write_segment(dir: &Path, s: &NewSegment) -> Result<SegmentCommitInfo> {
         (".nvd".into(), nvd),
         (".fnm".into(), write_field_infos(s.fields, &s.id, "")),
         (".fdm".into(), fdm),
+        (".fdx".into(), fdx),
         (".fdt".into(), fdt),
         ("_Lucene90_0.dvm".into(), dvm),
         ("_Lucene90_0.dvd".into(), dvd),
@@ -63,6 +64,7 @@ pub fn write_segment(dir: &Path, s: &NewSegment) -> Result<SegmentCommitInfo> {
         ("tip", t.tip),
         ("tmd", t.tmd),
         ("doc", t.doc),
+        ("psm", t.psm),
     ] {
         files.push((format!("_Lucene104_0.{ext}"), bytes));
     }
@@ -79,7 +81,10 @@ pub fn write_segment(dir: &Path, s: &NewSegment) -> Result<SegmentCommitInfo> {
             has_blocks: false,
             diagnostics: BTreeMap::new(),
             files: ["cfs", "cfe"].map(|e| format!("{}.{e}", s.name)).into(),
-            attributes: BTreeMap::new(),
+            attributes: BTreeMap::from([(
+                "Lucene90StoredFieldsFormat.mode".into(),
+                "BEST_SPEED".into(),
+            )]),
         },
         del_gen: -1,
         del_count: 0,

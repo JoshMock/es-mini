@@ -46,6 +46,7 @@ pub(crate) fn read_terms(r: &SegmentReader, field: &str) -> Result<Vec<TermPosti
         doc: file("doc")?.to_vec(),
         pos: file("pos").unwrap_or_default().to_vec(),
         pay: file("pay").unwrap_or_default().to_vec(),
+        psm: Vec::new(),
     };
     decode_terms(&files, &r.seg.info.id, &suffix, &r.fields, info)
 }
@@ -59,6 +60,8 @@ pub struct TermFiles {
     pub doc: Vec<u8>,
     pub pos: Vec<u8>,
     pub pay: Vec<u8>,
+    /// Postings metadata (`.psm`), written but not read.
+    pub psm: Vec<u8>,
 }
 
 fn decode_terms(
@@ -217,6 +220,7 @@ pub fn write_terms(
         let fp_bytes = (8 - (block_fp as u64).leading_zeros() as usize / 8).max(1);
         tip.byte((((fp_bytes - 1) << 2) | 0x20) as u8); // leaf node with terms
         tip.bytes(&(block_fp as u64).to_le_bytes()[..fp_bytes]);
+        tip.bytes(&[0; 8]); // Lucene's TrieReader reads a long at the node, possibly past its end
         tmd.vint(info.number);
         tmd.vlong(terms.len() as i64);
         tmd.vlong(terms.iter().map(|t| t.total_term_freq).sum::<u64>() as i64);
@@ -232,14 +236,26 @@ pub fn write_terms(
         tmd.vlong(0);
         tmd.vlong(tip.0.len() as i64);
     }
+    // Full file lengths (footers included): `.tip` first, then `.tim`.
+    tmd.long(tip.0.len() as i64 + FOOTER_LEN);
+    tmd.long(tim.0.len() as i64 + FOOTER_LEN);
+    let doc = doc.finish();
+    // No skip data is written, so both impact maxima are zero; then the final `.doc` length.
+    let mut psm = Output::default();
+    psm.index_header("Lucene104PostingsWriterMeta", 0, id, suffix);
+    psm.bytes(&[0; 16]);
+    psm.long(doc.len() as i64);
     TermFiles {
         tim: tim.finish(),
         tip: tip.finish(),
         tmd: tmd.finish(),
-        doc: doc.finish(),
+        psm: psm.finish(),
+        doc,
         ..Default::default()
     }
 }
+
+const FOOTER_LEN: i64 = 16;
 
 /// Lucene's `maxItemsInBlock`: more terms than this need floor blocks.
 const MAX_BLOCK_TERMS: usize = 48;

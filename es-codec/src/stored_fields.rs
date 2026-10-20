@@ -1,6 +1,8 @@
 //! Stored fields (`.fdt`, Lucene90StoredFieldsFormat BEST_SPEED: LZ4 with preset dictionary).
 use crate::{
-    Result, SegmentReader, codec_util, err,
+    Result, SegmentReader, codec_util,
+    doc_values::write_direct_monotonic,
+    err,
     input::{DataInput, zigzag},
     lz4,
     output::Output,
@@ -198,6 +200,7 @@ fn read_stored_fields_files(
     Ok(docs)
 }
 
+const BLOCK_SHIFT: i32 = 10;
 const CHUNK_SIZE: usize = 80 * 1024;
 const MAX_DOCS_PER_CHUNK: usize = 1024;
 
@@ -283,18 +286,17 @@ fn compress(out: &mut Output, data: &[u8]) {
     out.bytes(&block.0);
 }
 
-/// Returns `(.fdm, .fdt)`.
-///
-/// ponytail: `.fdm` carries only the chunk size; the `.fdx` doc-to-chunk index Lucene itself needs
-/// is added with cross-engine compatibility (task 20). Each doc is `(field number, value)`.
+/// Returns `(.fdm, .fdt, .fdx)`. Each doc is `(field number, value)`.
 pub fn write_stored_fields(
     docs: &[Vec<(i32, StoredValue)>],
     id: &[u8; codec_util::ID_LEN],
-) -> Result<(Vec<u8>, Vec<u8>)> {
+) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
     let mut fdt = Output::default();
     fdt.index_header("Lucene90StoredFieldsFastData", 1, id, "");
-    let mut base = 0;
+    let (mut base, mut chunk_docs, mut chunk_ptrs) = (0, vec![], vec![]);
     while base < docs.len() {
+        chunk_docs.push(base as i64);
+        chunk_ptrs.push(fdt.0.len() as i64);
         let (mut data, mut counts, mut lens) = (Output::default(), vec![], vec![]);
         while base + counts.len() < docs.len()
             && counts.len() < MAX_DOCS_PER_CHUNK
@@ -321,10 +323,37 @@ pub fn write_stored_fields(
         compress(&mut fdt, &data.0);
         base += counts.len();
     }
+    // The doc-to-chunk and chunk-to-pointer indexes (DirectMonotonic) live in `.fdx`; `.fdm` holds
+    // their metadata. Only the final chunk is dirty (force-flushed when the segment finishes).
+    let max_pointer = fdt.0.len() as i64;
+    chunk_docs.push(docs.len() as i64);
+    chunk_ptrs.push(max_pointer);
+    let mut fdx = Output::default();
+    fdx.index_header("Lucene90FieldsIndexIdx", 0, id, "");
     let mut fdm = Output::default();
     fdm.index_header("Lucene90FieldsIndexMeta", 1, id, "");
     fdm.vint(CHUNK_SIZE as i32);
-    Ok((fdm.finish(), fdt.finish()))
+    let num_chunks = chunk_docs.len() as i32 - 1;
+    for v in [docs.len() as i32, BLOCK_SHIFT, num_chunks + 1] {
+        fdm.bytes(&v.to_le_bytes());
+    }
+    for values in [&chunk_docs, &chunk_ptrs] {
+        fdm.long(fdx.0.len() as i64);
+        let packed = write_direct_monotonic(&mut fdm, values, BLOCK_SHIFT);
+        fdx.bytes(&packed);
+    }
+    fdm.long(fdx.0.len() as i64);
+    fdm.long(max_pointer);
+    fdm.vlong(num_chunks as i64);
+    fdm.vlong((num_chunks > 0) as i64);
+    fdm.vlong(
+        chunk_docs
+            .iter()
+            .rev()
+            .nth(1)
+            .map_or(0, |last| docs.len() as i64 - last),
+    );
+    Ok((fdm.finish(), fdt.finish(), fdx.finish()))
 }
 
 #[cfg(test)]
@@ -347,12 +376,12 @@ mod tests {
             })
             .collect();
         let id = [7u8; 16];
-        let (fdm, fdt) = write_stored_fields(&docs, &id).unwrap();
+        let (fdm, fdt, _) = write_stored_fields(&docs, &id).unwrap();
         assert_eq!(
             read_stored_fields_files(&fdm, &fdt, &id, 3000).unwrap(),
             docs
         );
-        let (fdm, fdt) = write_stored_fields(&docs[..1], &id).unwrap();
+        let (fdm, fdt, _) = write_stored_fields(&docs[..1], &id).unwrap();
         assert_eq!(
             read_stored_fields_files(&fdm, &fdt, &id, 1).unwrap(),
             docs[..1]

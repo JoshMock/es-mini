@@ -201,8 +201,13 @@ fn put_value(out: &mut Vec<u8>, v: &Value) {
         Value::Null => out.push(0x21),
         Value::Bool(b) => out.push(0x22 + u8::from(*b)),
         Value::Int(i) => {
-            out.push(0x25);
-            put_vint(out, ((i << 1) ^ (i >> 63)) as u64);
+            let zigzag = ((i << 1) ^ (i >> 63)) as u64;
+            out.push(if zigzag <= u64::from(u32::MAX) {
+                0x24
+            } else {
+                0x25
+            });
+            put_vint(out, zigzag);
         }
         Value::Float(f) => {
             out.push(0x29);

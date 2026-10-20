@@ -607,7 +607,11 @@ fn pack(values: &[u64], bits: u8) -> Vec<u8> {
 }
 
 /// `DirectMonotonicWriter`: block metadata to `meta`, packed deltas returned.
-fn write_direct_monotonic(meta: &mut Output, values: &[i64], block_shift: i32) -> Vec<u8> {
+pub(crate) fn write_direct_monotonic(
+    meta: &mut Output,
+    values: &[i64],
+    block_shift: i32,
+) -> Vec<u8> {
     let mut data = Vec::new();
     for chunk in values.chunks(1 << block_shift) {
         let avg =
