@@ -9,10 +9,15 @@ use serde_json::{Value, json};
 #[derive(Debug)]
 pub enum AppError {
     IndexNotFound(String),
+    /// Write to a non-alias with `require_alias` set.
+    RequireAlias(String),
     IndexExists(String),
     Parse(String),
     MapperParsing(String),
-    VersionConflict { id: String, current_version: u64 },
+    VersionConflict {
+        id: String,
+        current_version: u64,
+    },
     DocumentMissing(String),
     ActionRequestValidation(String),
     IllegalArgument(String),
@@ -28,6 +33,14 @@ impl AppError {
                 StatusCode::NOT_FOUND,
                 "index_not_found_exception",
                 format!("no such index [{i}]"),
+                Some(i),
+            ),
+            Self::RequireAlias(i) => (
+                StatusCode::NOT_FOUND,
+                "index_not_found_exception",
+                format!(
+                    "no such index [{i}] and [require_alias] request flag is [true] and [{i}] is not an alias"
+                ),
                 Some(i),
             ),
             Self::IndexExists(i) => (

@@ -1,6 +1,4 @@
 # Known-failing YAML tests. Fix one, then delete its line.
-bulk/10_basic.yml/When setting require_alias flag
-bulk/10_basic.yml/When setting require_alias flag per request
 bulk/10_basic.yml/empty action
 cluster.health/10_basic.yml/cluster health levels
 count/10_basic.yml/count body without query element

@@ -6,20 +6,25 @@ use crate::{
 use axum::{
     Json,
     body::Bytes,
-    extract::{Path, State},
+    extract::{Path, Query, State},
 };
 use serde_json::{Value, json};
-use std::time::Instant;
+use std::{collections::HashMap, time::Instant};
 
 struct Action {
     op: String,
     index: String,
     id: Option<String>,
     body: Option<Value>,
+    require_alias: bool,
 }
 
 /// Parses the whole NDJSON body up front, so a malformed request executes nothing.
-fn parse(body: &[u8], default_index: Option<&str>) -> Result<Vec<Action>, AppError> {
+fn parse(
+    body: &[u8],
+    default_index: Option<&str>,
+    require_alias: bool,
+) -> Result<Vec<Action>, AppError> {
     let mut lines = body
         .split(|b| *b == b'\n')
         .filter(|l| !l.trim_ascii().is_empty());
@@ -69,6 +74,7 @@ fn parse(body: &[u8], default_index: Option<&str>) -> Result<Vec<Action>, AppErr
             index: index.to_owned(),
             id,
             body,
+            require_alias: meta["require_alias"].as_bool().unwrap_or(require_alias),
         });
     }
     Ok(actions)
@@ -91,8 +97,17 @@ fn resolve_alias(state: &AppState, name: &str) -> Result<String, AppError> {
     }
 }
 
+fn is_alias(state: &AppState, name: &str) -> bool {
+    let indices = state.read().expect("lock poisoned");
+    indices.values().any(|i| i.aliases.contains(name))
+}
+
 fn execute(state: &AppState, a: Action) -> Value {
-    let resolved = resolve_alias(state, &a.index);
+    let resolved = if a.require_alias && !is_alias(state, &a.index) {
+        Err(AppError::RequireAlias(a.index.clone()))
+    } else {
+        resolve_alias(state, &a.index)
+    };
     let target = resolved.as_deref().unwrap_or(&a.index).to_owned();
     let id = a.id.unwrap_or_else(auto_id);
     let body = a.body.unwrap_or(Value::Null);
@@ -125,10 +140,11 @@ fn execute(state: &AppState, a: Action) -> Value {
 async fn run(
     state: AppState,
     default_index: Option<&str>,
+    require_alias: bool,
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
     let start = Instant::now();
-    let items: Vec<Value> = parse(&body, default_index)?
+    let items: Vec<Value> = parse(&body, default_index, require_alias)?
         .into_iter()
         .map(|a| execute(&state, a))
         .collect();
@@ -142,14 +158,23 @@ async fn run(
     ))
 }
 
-pub async fn bulk(State(state): State<AppState>, body: Bytes) -> Result<Json<Value>, AppError> {
-    run(state, None, body).await
+fn flag(params: &HashMap<String, String>) -> bool {
+    params.get("require_alias").is_some_and(|v| v == "true")
+}
+
+pub async fn bulk(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+    body: Bytes,
+) -> Result<Json<Value>, AppError> {
+    run(state, None, flag(&params), body).await
 }
 
 pub async fn bulk_index(
     State(state): State<AppState>,
     Path(index): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
-    run(state, Some(&index), body).await
+    run(state, Some(&index), flag(&params), body).await
 }

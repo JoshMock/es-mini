@@ -28,6 +28,9 @@ pub async fn create(
         index.mappings = Mappings::deserialize(&body["mappings"])
             .map_err(|e| AppError::MapperParsing(e.to_string()))?;
     }
+    if let Some(aliases) = body["aliases"].as_object() {
+        index.aliases.extend(aliases.keys().cloned());
+    }
     let mut indices = state.write().expect("lock poisoned");
     if indices.contains_key(&name) {
         return Err(AppError::IndexExists(name));
