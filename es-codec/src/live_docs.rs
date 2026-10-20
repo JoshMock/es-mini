@@ -1,7 +1,11 @@
 //! Live docs: hard deletes (`.liv`) combined with soft deletes (the soft-deletes doc values field).
 use crate::{
-    CompoundFile, Result, SegmentCommitInfo, codec_util, doc_values, err, field_infos::FieldInfo,
-    input::DataInput, segment_infos::radix36,
+    CompoundFile, Result, SegmentCommitInfo, codec_util,
+    doc_values::{self, DocValues},
+    err,
+    field_infos::FieldInfo,
+    input::DataInput,
+    segment_infos::radix36,
 };
 use std::path::Path;
 
@@ -61,42 +65,14 @@ pub fn read_live_docs(
     let Some(soft) = fields.iter().find(|f| f.soft_deletes) else {
         return Ok(live);
     };
-    let id = &seg.info.id;
-    let deleted = match soft.dv_gen {
-        -1 => {
-            let file = |ext: &str| {
-                cfs.file(&format!("_Lucene90_0.{ext}"))
-                    .ok_or_else(|| crate::Error(format!("{} has no doc values .{ext}", seg.name)))
-            };
-            doc_values::docs_with_field(
-                file("dvm")?,
-                file("dvd")?,
-                id,
-                "Lucene90_0",
-                fields,
-                seg.info.max_doc,
-                soft.number,
-            )?
-        }
-        g => {
-            // Updated doc values live outside the compound file, named by generation.
-            let suffix = format!("{}_Lucene90_0", radix36(g as u64));
-            let file = |ext: &str| read_file(dir, &format!("{}_{suffix}.{ext}", seg.name));
-            doc_values::docs_with_field(
-                &file("dvm")?,
-                &file("dvd")?,
-                id,
-                &suffix,
-                fields,
-                seg.info.max_doc,
-                soft.number,
-            )?
-        }
+    let DocValues::Numbers(values) =
+        doc_values::read_field_values(dir, seg, cfs, fields, &soft.name)?
+    else {
+        return err("soft deletes field is not numeric");
     };
-    for doc in deleted {
-        *live
-            .get_mut(doc as usize)
-            .ok_or_else(|| crate::Error("soft-deleted doc out of range".into()))? = false;
+    // One entry per doc, so the indexes line up with `live`.
+    for (live, value) in live.iter_mut().zip(&values) {
+        *live &= value.is_empty();
     }
     Ok(live)
 }

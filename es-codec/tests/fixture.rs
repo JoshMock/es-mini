@@ -260,3 +260,91 @@ fn reads_terms_and_postings() {
     assert_eq!(postings(&title, "fox"), [(0, 1)]);
     assert_eq!(postings(&title, "quick"), [(1, 2)]);
 }
+
+fn doc_values_of(
+    seg: &es_codec::SegmentCommitInfo,
+    field: &str,
+) -> es_codec::doc_values::DocValues {
+    let dir = shard_index_dir();
+    let cfs = CompoundFile::open(&dir, &seg.name, &seg.info.id).unwrap();
+    let fields = es_codec::field_infos::read_field_infos(&dir, seg, &cfs).unwrap();
+    es_codec::doc_values::read_field_values(&dir, seg, &cfs, &fields, field).unwrap()
+}
+
+fn numbers(seg: &es_codec::SegmentCommitInfo, field: &str) -> Vec<Vec<i64>> {
+    match doc_values_of(seg, field) {
+        es_codec::doc_values::DocValues::Numbers(n) => n,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// `NumericUtils.sortableLongToDouble`.
+fn sortable_double(bits: i64) -> f64 {
+    f64::from_bits((bits ^ ((bits >> 63) & i64::MAX)) as u64)
+}
+
+fn millis(date: &str) -> i64 {
+    let ymd: Vec<i64> = date.split('-').map(|p| p.parse().unwrap()).collect();
+    // days from civil (Howard Hinnant)
+    let (y, m, d) = (ymd[0] - (ymd[1] <= 2) as i64, ymd[1], ymd[2]);
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    (era * 146_097 + doe - 719_468) * 86_400_000
+}
+
+#[test]
+fn reads_numeric_doc_values() {
+    let infos = SegmentInfos::read_latest(&shard_index_dir()).unwrap();
+    let (s0, s1) = (&infos.segments[0], &infos.segments[1]);
+    let flat = |v: Vec<Vec<i64>>| -> Vec<i64> { v.into_iter().flatten().collect() };
+
+    assert_eq!(flat(numbers(s0, "views")), [10, 25, 3, 7, 0]);
+    // The tombstone (doc 2 of _1) has no field values.
+    assert_eq!(numbers(s1, "views"), [vec![42], vec![26], vec![]]);
+    let ratings: Vec<f64> = flat(numbers(s0, "rating"))
+        .into_iter()
+        .map(sortable_double)
+        .collect();
+    assert_eq!(ratings, [4.5, 3.0, 2.5, 5.0, 1.0]);
+    assert_eq!(flat(numbers(s0, "published")), [1, 0, 1, 1, 0]);
+    let dates = [
+        "2024-01-01",
+        "2024-02-15",
+        "2023-12-31",
+        "2024-03-10",
+        "2024-04-01",
+    ];
+    assert_eq!(flat(numbers(s0, "date")), dates.map(millis));
+}
+
+#[test]
+fn reads_sorted_set_doc_values() {
+    use es_codec::doc_values::DocValues;
+    let infos = SegmentInfos::read_latest(&shard_index_dir()).unwrap();
+    let tags = |s: usize| -> Vec<Vec<String>> {
+        let DocValues::Terms(t) = doc_values_of(&infos.segments[s], "tag") else {
+            panic!("not terms")
+        };
+        t.into_iter()
+            .map(|d| {
+                d.into_iter()
+                    .map(|b| String::from_utf8(b).unwrap())
+                    .collect()
+            })
+            .collect()
+    };
+    let one = |t: &str| vec![t.to_string()];
+    assert_eq!(
+        tags(0),
+        [
+            one("animal"),
+            one("animal"),
+            one("pet"),
+            one("pet"),
+            one("misc")
+        ]
+    );
+    assert_eq!(tags(1), [one("news"), one("animal"), vec![]]);
+}
