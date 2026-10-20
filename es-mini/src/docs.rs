@@ -234,6 +234,7 @@ pub async fn update(
     Query(params): Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Reply {
+    require_alias(&state, &params, &index)?;
     let mut reply = update_doc(&state, &index, &id, &parse_json(&body)?)?;
     if params
         .get("refresh")

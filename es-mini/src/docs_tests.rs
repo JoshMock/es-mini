@@ -171,3 +171,19 @@ async fn id_over_512_bytes_is_rejected() {
     let (s, _) = call(&app(), Method::POST, &uri, Some(json!({"a": 1}))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn update_require_alias_rejects_non_alias() {
+    let app = app();
+    let (s, r) = call(
+        &app,
+        Method::POST,
+        "/idx/_update/1?require_alias=true",
+        Some(json!({"doc": {"a": 1}, "doc_as_upsert": true})),
+    )
+    .await;
+    assert_eq!(
+        (s, &r["error"]["type"]),
+        (StatusCode::NOT_FOUND, &json!("index_not_found_exception"))
+    );
+}
