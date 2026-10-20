@@ -45,7 +45,7 @@ const xfail = () =>
     .split("\n")
     .filter((l) => l.trim() && !l.startsWith("#"));
 
-function prompt(id: string): string {
+function prompt(id: string, model: string): string {
   return `You are one iteration of a Ralph loop in the es-mini repository (an Elasticsearch-compatible server in Rust).
 
 Goal: make exactly one known-failing test pass: \`${id}\`
@@ -56,14 +56,18 @@ Rules:
 3. Reproduce first: \`${suite.runOne(id)}\`
 4. Delete exactly the line \`${id}\` from \`${suite.xfail}\`. If other listed tests now pass too, delete their lines as well; never add lines.
 5. Run \`scripts/check.sh\` until it passes. If the sandbox blocks ~/.cargo, prefix commands with CARGO_HOME=/tmp/esm-cargo.
-6. Make one git commit with a message describing the behavior fixed, ending with the trailer \`Assisted-by: Pi Coding Agent (<model name>)\`.
+6. Make one git commit with a message describing the behavior fixed, ending with the trailer \`${trailer(model)}\`.
 7. If the fix needs work far outside this test's scope, stop without committing and explain why.`;
 }
 
+const trailer = (model: string) => `Assisted-by: Pi Coding Agent (${model})`;
+
 /** Returns the reason the iteration is rejected, or undefined if it holds. */
-function verify(start: string, id: string, before: string[]): string | undefined {
+function verify(start: string, id: string, before: string[], model: string): string | undefined {
   if (git("status", "--porcelain")) return "uncommitted changes left behind";
   if (git("rev-parse", "HEAD") === start) return "no commit made";
+  const messages = git("log", "--format=%B%x00", `${start}..HEAD`).split("\0").filter((m) => m.trim());
+  if (messages.some((m) => !m.includes(trailer(model)))) return `commit lacks trailer "${trailer(model)}"`;
   const frozen = git("diff", "--name-only", start, "HEAD", "--", ...suite.frozen);
   if (frozen) return `modified frozen paths: ${frozen}`;
   const after = new Set(xfail());
@@ -75,20 +79,23 @@ function verify(start: string, id: string, before: string[]): string | undefined
   return undefined;
 }
 
-async function runAgent(id: string): Promise<void> {
+/** Runs one agent session; returns the model name it used. */
+async function runAgent(id: string): Promise<string> {
   // Imported lazily so --dry-run works without installing the SDK.
   const { createAgentSession, SessionManager } = await import("@earendil-works/pi-coding-agent");
   const { session } = await createAgentSession({ cwd: repo, sessionManager: SessionManager.inMemory() });
+  const model = session.model?.name ?? session.model?.id ?? "unknown model";
   session.subscribe((event) => {
     if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
       process.stdout.write(event.assistantMessageEvent.delta);
     }
   });
   try {
-    await session.prompt(prompt(id));
+    await session.prompt(prompt(id, model));
   } finally {
     session.dispose();
   }
+  return model;
 }
 
 if (git("status", "--porcelain")) throw new Error("working tree must be clean before starting");
@@ -103,12 +110,13 @@ for (let i = 1; i <= max; i++) {
   const start = git("rev-parse", "HEAD");
   console.log(`\nralph: iteration ${i}/${max}: ${id}`);
   if (dryRun) {
-    console.log(prompt(id));
-    console.log(`ralph: dry run; verification would report: ${verify(start, id, before) ?? "ok"}`);
+    const model = "<model from the session>";
+    console.log(prompt(id, model));
+    console.log(`ralph: dry run; verification would report: ${verify(start, id, before, model) ?? "ok"}`);
     break;
   }
-  await runAgent(id);
-  const failure = verify(start, id, before);
+  const model = await runAgent(id);
+  const failure = verify(start, id, before, model);
   if (failure) {
     console.log(`ralph: rejected (${failure}); resetting to ${start.slice(0, 8)}`);
     // Only discards this iteration's own commits and edits; the tree was clean at start.
