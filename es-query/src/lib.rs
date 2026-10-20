@@ -21,6 +21,10 @@ pub enum Query {
         field: String,
         value: Value,
     },
+    Prefix {
+        field: String,
+        prefix: String,
+    },
     Range {
         field: String,
         gt: Option<Value>,
@@ -131,6 +135,40 @@ pub fn parse_query(v: &Value) -> Result<Query, String> {
             })
         }
         other => Err(format!("unknown query [{other}]")),
+    }
+}
+
+/// `q=` URI search: whitespace-separated `[field:]term` clauses, `term*` is a prefix.
+// ponytail: no quoting, ranges, boolean operators or escapes
+pub fn parse_query_string(q: &str, df: &str, and: bool) -> Query {
+    let clauses: Vec<Query> = q
+        .split_whitespace()
+        .map(|t| {
+            let (field, t) = t.split_once(':').unwrap_or((df, t));
+            match t.strip_suffix('*') {
+                Some(p) => Query::Prefix {
+                    field: field.to_owned(),
+                    prefix: p.to_lowercase(),
+                },
+                None => Query::Match {
+                    field: field.to_owned(),
+                    query: t.to_owned(),
+                    and: false,
+                },
+            }
+        })
+        .collect();
+    let (must, should) = if and {
+        (clauses, vec![])
+    } else {
+        (vec![], clauses)
+    };
+    Query::Bool {
+        min_should: usize::from(must.is_empty()),
+        must,
+        should,
+        must_not: vec![],
+        filter: vec![],
     }
 }
 
@@ -339,6 +377,13 @@ impl<'a> Searcher<'a> {
             Query::Term { field, value } => {
                 let (kind, path) = self.kind(field);
                 self.score_terms(field, kind, path, &[text(value)], true, d)
+            }
+            Query::Prefix { field, prefix } => {
+                let (kind, path) = self.kind(field);
+                terms(kind, &values(&d.source, path))
+                    .iter()
+                    .any(|t| t.starts_with(prefix.as_str()))
+                    .then_some(1.0)
             }
             Query::Range {
                 field,

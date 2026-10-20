@@ -1,6 +1,4 @@
 # Known-failing YAML tests. Fix one, then delete its line.
-count/20_query_string.yml/count with query_string parameters
-count/40_stats.yml/count with stats parameter and query string
 create/15_without_id.yml/Create without ID
 get/60_realtime_refresh.yml/Realtime Refresh
 get_source/15_default_values.yml/Default values

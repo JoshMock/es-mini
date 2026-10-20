@@ -72,10 +72,19 @@ pub async fn count(
             "request does not support [{k}]"
         )));
     }
-    let query = body
-        .get("query")
-        .map_or(Ok(es_query::Query::MatchAll), parse_query)
-        .map_err(AppError::ParsingException)?;
+    let query = match params.get("q") {
+        Some(q) => es_query::parse_query_string(
+            q,
+            params.get("df").map_or("_all", String::as_str),
+            params
+                .get("default_operator")
+                .is_some_and(|o| o.eq_ignore_ascii_case("and")),
+        ),
+        None => body
+            .get("query")
+            .map_or(Ok(es_query::Query::MatchAll), parse_query)
+            .map_err(AppError::ParsingException)?,
+    };
     let indices = state.read().expect("lock poisoned");
     let index = indices
         .get(&name)
