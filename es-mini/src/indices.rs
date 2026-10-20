@@ -298,8 +298,10 @@ fn settings_response(
         }
         if flat {
             for v in out.as_object_mut().expect("object").values_mut() {
-                let mut flat = Map::new();
-                flatten_settings("", v, &mut flat);
+                let flat = es_index::flatten_settings(v)
+                    .into_iter()
+                    .map(|(k, x)| (k, x.clone()))
+                    .collect();
                 *v = Value::Object(flat);
             }
         }
@@ -311,22 +313,6 @@ fn settings_response(
         .map(|n| (n.clone(), render(&indices[&n])))
         .collect();
     Ok(Json(Value::Object(out)))
-}
-
-fn flatten_settings(prefix: &str, v: &Value, out: &mut Map<String, Value>) {
-    match v {
-        Value::Object(m) => m.iter().for_each(|(k, v)| {
-            let key = if prefix.is_empty() {
-                k.clone()
-            } else {
-                format!("{prefix}.{k}")
-            };
-            flatten_settings(&key, v, out);
-        }),
-        _ => {
-            out.insert(prefix.to_string(), v.clone());
-        }
-    }
 }
 
 pub async fn put_settings(
@@ -362,13 +348,11 @@ fn put_settings_on(
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
     let body = parse_body(&body)?;
-    // ponytail: no static-vs-dynamic setting checks; ES rejects e.g. number_of_shards on an open index
+    // ponytail: index.codec is the only static setting checked; ES also rejects e.g. number_of_shards
     let settings = body.get("settings").unwrap_or(&body);
     // ponytail: only rejects unknown top-level index.* names; nested groups (index.mapping.*) pass
-    let mut flat = Map::new();
-    flatten_settings("", settings, &mut flat);
-    for key in flat.keys() {
-        let key = key.strip_prefix("index.").unwrap_or(key);
+    for (key, _) in es_index::flatten_settings(settings) {
+        let key = key.strip_prefix("index.").unwrap_or(&key);
         if !key.contains('.') && !TOP_LEVEL_SETTINGS.contains(&key) {
             return Err(AppError::IllegalArgument(format!(
                 "unknown setting [index.{key}] please check that any required plugins are installed, or check the breaking changes documentation for removed settings"

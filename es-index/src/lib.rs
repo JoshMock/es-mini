@@ -58,9 +58,7 @@ impl Settings {
     /// Merges user-supplied settings (nested or dotted keys, `index.` prefix optional).
     /// A `null` value resets the key to its default.
     pub fn merge(&mut self, json: &Value) {
-        let mut flat = Vec::new();
-        flatten("", json, &mut flat);
-        for (key, value) in flat {
+        for (key, value) in flatten_settings(json) {
             let key = if key.starts_with("index.") {
                 key
             } else {
@@ -107,6 +105,13 @@ impl Settings {
         }
         out
     }
+}
+
+/// Leaf values of nested settings JSON under dotted keys (`{"a": {"b": 1}}` → `a.b`).
+pub fn flatten_settings(json: &Value) -> Vec<(String, &Value)> {
+    let mut out = Vec::new();
+    flatten("", json, &mut out);
+    out
 }
 
 fn flatten<'a>(prefix: &str, json: &'a Value, out: &mut Vec<(String, &'a Value)>) {
