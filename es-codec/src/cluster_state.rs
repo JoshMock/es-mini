@@ -5,11 +5,18 @@
 //! blobs hold a SMILE `{"content": <binary>}` wrapping deflated JSON.
 
 use crate::{
-    Result, SegmentInfos, SegmentReader, err, inflate,
+    Result, SegmentInfos, SegmentReader, err,
+    field_infos::{DocValuesType, FieldInfo, IndexOptions},
+    inflate,
+    segment_writer::{NewSegment, write_segment},
     smile::{self, Value},
     stored_fields::StoredValue,
 };
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::{BTreeMap, hash_map::DefaultHasher},
+    hash::{Hash, Hasher},
+    path::Path,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct IndexMetadata {
@@ -108,4 +115,116 @@ pub fn read_indices(data_dir: &Path) -> Result<Vec<IndexMetadata>> {
     }
     indices.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(indices)
+}
+
+/// Writes `indices` as a fresh `<data>/_state` Lucene index (inverse of [`read_indices`]): one
+/// single-page document per index and per distinct mapping. No global document yet.
+pub fn write_indices(data_dir: &Path, indices: &[IndexMetadata]) -> Result<()> {
+    let dir = data_dir.join("_state");
+    std::fs::create_dir_all(&dir).map_err(|e| crate::Error(format!("{}: {e}", dir.display())))?;
+    let names = ["index_uuid", "mapping_hash", "page", "data"];
+    let fields: Vec<_> = (0..4)
+        .map(|n| FieldInfo {
+            name: names[n as usize].into(),
+            number: n,
+            store_term_vector: false,
+            omit_norms: true,
+            store_payloads: false,
+            soft_deletes: false,
+            parent: false,
+            index_options: IndexOptions::None,
+            doc_values: DocValuesType::None,
+            doc_values_skip_index: false,
+            dv_gen: -1,
+            attributes: BTreeMap::new(),
+            point_dimensions: 0,
+            point_index_dimensions: 0,
+            point_num_bytes: 0,
+            vector_dimension: 0,
+        })
+        .collect();
+    let doc = |key_field: i32, key: String, blob: Vec<u8>| {
+        vec![
+            (key_field, StoredValue::String(key)),
+            (2, StoredValue::Int(0)),
+            (3, StoredValue::Bytes(inflate::frame(&blob))),
+        ]
+    };
+    let mut stored = Vec::new();
+    let mut mapping_docs = BTreeMap::new();
+    for ix in indices {
+        let mut meta = vec![(
+            "settings".to_string(),
+            Value::Object(
+                ix.settings
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                    .collect(),
+            ),
+        )];
+        if let Some(json) = &ix.mappings {
+            let mut h = DefaultHasher::new();
+            json.hash(&mut h);
+            let hash = format!("{:016x}", h.finish());
+            let content = Value::Bytes(inflate::frame(json.as_bytes()));
+            let wrapper = Value::Object(vec![("content".into(), content)]);
+            mapping_docs.insert(hash.clone(), smile::encode(&wrapper));
+            meta.push(("mappings_hash".into(), Value::String(hash)));
+        }
+        let top = Value::Object(vec![(ix.name.clone(), Value::Object(meta))]);
+        stored.push(doc(0, ix.uuid.clone(), smile::encode(&top)));
+    }
+    for (hash, blob) in mapping_docs {
+        stored.push(doc(1, hash, blob));
+    }
+    let seg = write_segment(
+        &dir,
+        &NewSegment {
+            name: "_0",
+            id: [1; 16],
+            max_doc: stored.len() as i32,
+            fields: &fields,
+            stored: &stored,
+            numeric: &[],
+            terms: &[],
+        },
+    )?;
+    SegmentInfos {
+        id: [2; 16],
+        generation: 1,
+        lucene_version: (10, 0, 0),
+        index_created_major: 10,
+        version: 1,
+        counter: 1,
+        segments: vec![seg],
+        user_data: BTreeMap::new(),
+    }
+    .write(&dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn written_indices_read_back() {
+        let data = std::env::temp_dir().join(format!("esm-cs-{}", std::process::id()));
+        let indices = vec![
+            IndexMetadata {
+                name: "a".into(),
+                uuid: "uuid-a".into(),
+                settings: [("index.number_of_shards".to_string(), "1".to_string())].into(),
+                mappings: Some(r#"{"_doc":{"properties":{"t":{"type":"text"}}}}"#.into()),
+            },
+            IndexMetadata {
+                name: "b".into(),
+                uuid: "uuid-b".into(),
+                settings: BTreeMap::new(),
+                mappings: None,
+            },
+        ];
+        write_indices(&data, &indices).unwrap();
+        assert_eq!(read_indices(&data).unwrap(), indices);
+        std::fs::remove_dir_all(&data).unwrap();
+    }
 }
