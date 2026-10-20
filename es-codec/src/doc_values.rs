@@ -1,7 +1,7 @@
 //! Lucene90 doc values (`.dvm` metadata, `.dvd` data).
 //!
-//! Fields are decoded eagerly into per-doc vectors. Binary and (single-valued) sorted fields,
-//! and the `.dvs` skip index, are not supported: skip-index metadata is skipped over.
+//! Fields are decoded eagerly into per-doc vectors. The `.dvs` skip index is not used: its
+//! metadata is skipped over.
 
 use crate::{
     CompoundFile, Result, SegmentCommitInfo,
@@ -26,6 +26,8 @@ pub enum DocValues {
     Numbers(Vec<Vec<i64>>),
     /// Sorted set fields, as terms in ordinal order.
     Terms(Vec<Vec<Vec<u8>>>),
+    /// Binary fields: one value per doc, `None` where the doc has none.
+    Bytes(Vec<Option<Vec<u8>>>),
 }
 
 /// Decodes a field of a segment, from the field's latest doc values generation.
@@ -357,6 +359,65 @@ impl SortedNumeric {
     }
 }
 
+/// `BinaryEntry`: values are concatenated; fixed-length unless `min_length < max_length`.
+struct Binary {
+    data_offset: i64,
+    data_length: i64,
+    docs: DocsWithField,
+    num_docs_with_field: u64,
+    length: usize,
+    addresses: Option<(i64, DirectMonotonic, i64)>,
+}
+
+fn read_binary(meta: &mut DataInput) -> Result<Binary> {
+    let (data_offset, data_length) = (meta.read_long()?, meta.read_long()?);
+    let docs = read_docs_with_field(meta)?;
+    let num_docs_with_field = meta.read_int()? as u64;
+    let (min_length, max_length) = (meta.read_int()? as usize, meta.read_int()? as usize);
+    let addresses = if min_length < max_length {
+        let offset = meta.read_long()?;
+        let block_shift = meta.read_vint()?;
+        let mono = read_direct_monotonic(meta, num_docs_with_field + 1, block_shift)?;
+        Some((offset, mono, meta.read_long()?))
+    } else {
+        None
+    };
+    Ok(Binary {
+        data_offset,
+        data_length,
+        docs,
+        num_docs_with_field,
+        length: max_length,
+        addresses,
+    })
+}
+
+impl Binary {
+    fn per_doc(&self, data: &[u8], max_doc: i32) -> Result<Vec<Option<Vec<u8>>>> {
+        let docs = self.docs.doc_ids(data, max_doc)?;
+        if docs.len() as u64 != self.num_docs_with_field {
+            return err("doc count disagrees with the doc ids");
+        }
+        let bytes = slice(data, self.data_offset, self.data_length)?;
+        let starts: Vec<usize> = match &self.addresses {
+            None => (0..=docs.len()).map(|i| i * self.length).collect(),
+            Some((offset, mono, length)) => mono
+                .values(slice(data, *offset, *length)?, self.num_docs_with_field + 1)?
+                .into_iter()
+                .map(|a| a as usize)
+                .collect(),
+        };
+        let mut out = vec![None; max_doc as usize];
+        for (i, doc) in docs.into_iter().enumerate() {
+            let value = bytes
+                .get(starts[i]..starts[i + 1])
+                .ok_or_else(|| crate::Error("bad binary value address".into()))?;
+            out[doc as usize] = Some(value.to_vec());
+        }
+        Ok(out)
+    }
+}
+
 /// `TermsDictEntry`: where the LZ4-blocked terms live.
 struct TermsDict {
     size: u64,
@@ -442,25 +503,13 @@ enum Entry {
     SortedSet(SortedNumeric, TermsDict),
     /// Single-valued sorted set (or sorted): one ordinal per doc.
     SortedSetSingle(Numeric, TermsDict),
-    Unsupported(&'static str),
+    Binary(Binary),
 }
 
 fn read_entry(meta: &mut DataInput, kind: u8) -> Result<Entry> {
     Ok(match kind {
         0 => Entry::Numeric(read_numeric(meta)?),
-        1 => {
-            meta.read_bytes(16)?; // dataOffset, dataLength
-            read_docs_with_field(meta)?;
-            let num_docs_with_field = meta.read_int()? as u64;
-            let (min_len, max_len) = (meta.read_int()?, meta.read_int()?);
-            if min_len < max_len {
-                meta.read_long()?; // addressesOffset
-                let block_shift = meta.read_vint()?;
-                read_direct_monotonic(meta, 1 + num_docs_with_field, block_shift)?;
-                meta.read_long()?; // addressesLength
-            }
-            Entry::Unsupported("binary")
-        }
+        1 => Entry::Binary(read_binary(meta)?),
         2 => {
             let ords = read_numeric(meta)?;
             Entry::SortedSetSingle(ords, read_terms_dict(meta)?)
@@ -548,7 +597,7 @@ fn decode(
                     terms.terms(data)?,
                 )?))
             }
-            Entry::Unsupported(what) => err(format!("{what} doc values are not supported")),
+            Entry::Binary(b) => Ok(DocValues::Bytes(b.per_doc(data, max_doc)?)),
         };
     }
 }
