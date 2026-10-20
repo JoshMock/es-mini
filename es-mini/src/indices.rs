@@ -25,6 +25,13 @@ pub async fn create(
     let body = parse_body(&body)?;
     let mut index = Index::default();
     index.settings.merge(&body["settings"]);
+    if let Some(l) = index.settings.get("index.mapping.array_objects.limit")
+        && !l.parse::<u64>().is_ok_and(|n| n > 0)
+    {
+        return Err(AppError::IllegalArgument(format!(
+            "Failed to parse value [{l}] for setting [index.mapping.array_objects.limit] must be >= 1"
+        )));
+    }
     if !body["mappings"].is_null() {
         index.mappings = Mappings::deserialize(&body["mappings"])
             .map_err(|e| AppError::MapperParsing(e.to_string()))?;

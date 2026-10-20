@@ -1,5 +1,4 @@
 # Known-failing YAML tests. Fix one, then delete its line.
-index/110_array_objects_limit.yml/Test array objects limit rejects non-positive values
 index/60_refresh.yml/Refresh
 index/60_refresh.yml/When refresh url parameter is an empty string that means "refresh immediately"
 index/60_refresh.yml/refresh=wait_for waits until changes are visible in search
