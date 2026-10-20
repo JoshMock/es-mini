@@ -182,20 +182,21 @@ fn lookup(
             out.insert(name, json!({"aliases": aliases}));
         }
     }
-    // Exclusions only count as missing when no positive pattern was given.
-    let has_positive = patterns.iter().flatten().any(|p| !p.starts_with('-'));
-    let missing = patterns
+    // An exclusion before any positive pattern is a literal name, so it is missing.
+    let mut has_positive = false;
+    let mut missing: Vec<String> = patterns
         .into_iter()
         .flatten()
         .filter(|p| {
-            let name = p.strip_prefix('-').unwrap_or(p);
-            !(has_positive && p.starts_with('-'))
-                && !p.contains('*')
-                && *p != "_all"
-                && !seen.contains(name)
+            if p.starts_with('-') {
+                return !has_positive;
+            }
+            has_positive = true;
+            !p.contains('*') && *p != "_all" && !seen.contains(*p)
         })
         .map(str::to_owned)
         .collect();
+    missing.sort();
     Ok((Value::Object(out), missing))
 }
 
