@@ -529,6 +529,12 @@ pub struct SearchRequest {
 
 impl SearchRequest {
     pub fn parse(body: &Value) -> Result<Self, String> {
+        if let Some(k) = body.as_object().and_then(|o| {
+            o.keys()
+                .find(|k| !["query", "from", "size", "sort"].contains(&k.as_str()))
+        }) {
+            return Err(format!("Unknown key for a START_OBJECT in [{k}]."));
+        }
         let query = body.get("query").map_or(Ok(Query::MatchAll), parse_query)?;
         let usize_of = |k: &str, d| {
             body.get(k)
