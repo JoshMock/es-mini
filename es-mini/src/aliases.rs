@@ -159,15 +159,24 @@ fn lookup(
         let aliases: Map<String, Value> = indices[&name]
             .aliases
             .iter()
+            .inspect(|(a, _)| {
+                if let Some(ps) = &patterns {
+                    let hit = |p: &&str| !p.starts_with('-') && alias_glob(p, a);
+                    if ps.iter().any(hit) {
+                        seen.insert((*a).clone());
+                    }
+                }
+            })
             .filter(|(a, _)| {
-                patterns
-                    .as_ref()
-                    .is_none_or(|ps| ps.iter().any(|p| alias_glob(p, a)))
+                patterns.as_ref().is_none_or(|ps| {
+                    // Later `-x` patterns remove what earlier patterns matched.
+                    ps.iter().fold(false, |acc, p| match p.strip_prefix('-') {
+                        Some(r) => acc && !alias_glob(r, a),
+                        None => acc || alias_glob(p, a),
+                    })
+                })
             })
-            .map(|(a, meta)| {
-                seen.insert(a.clone());
-                (a.clone(), json!(meta))
-            })
+            .map(|(a, meta)| (a.clone(), json!(meta)))
             .collect();
         if patterns.is_none() || !aliases.is_empty() {
             out.insert(name, json!({"aliases": aliases}));
@@ -176,7 +185,10 @@ fn lookup(
     let missing = patterns
         .into_iter()
         .flatten()
-        .filter(|p| !p.contains('*') && *p != "_all" && !seen.contains(*p))
+        .filter(|p| {
+            let name = p.strip_prefix('-').unwrap_or(p);
+            !p.contains('*') && *p != "_all" && !seen.contains(name)
+        })
         .map(str::to_owned)
         .collect();
     Ok((Value::Object(out), missing))
