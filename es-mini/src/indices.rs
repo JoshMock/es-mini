@@ -6,7 +6,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
-use es_index::{Index, Mappings};
+use es_index::{FieldMapping, Index, Mappings};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -33,6 +33,19 @@ pub async fn create(
         )));
     }
     if !body["mappings"].is_null() {
+        for (field, spec) in body["mappings"]["properties"]
+            .as_object()
+            .into_iter()
+            .flatten()
+        {
+            if FieldMapping::deserialize(spec).is_err()
+                && let Some(t) = spec["type"].as_str()
+            {
+                return Err(AppError::MapperParsing(format!(
+                    "Failed to parse mapping: The mapper type [{t}] declared on field [{field}] does not exist. It might have been created within a future version or requires a plugin to be installed. Check the documentation."
+                )));
+            }
+        }
         index.mappings = Mappings::deserialize(&body["mappings"])
             .map_err(|e| AppError::MapperParsing(e.to_string()))?;
     }
