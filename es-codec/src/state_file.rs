@@ -21,6 +21,45 @@ pub fn write(dir: &Path, prefix: &str, generation: i64, doc: &Value) -> Result<(
         .map_err(|e| crate::Error(format!("{}: {e}", path.display())))
 }
 
+fn obj(fields: Vec<(&str, Value)>) -> Value {
+    Value::Object(
+        fields
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
+    )
+}
+
+/// `node-N.st` document.
+pub fn node_doc(node_id: &str, node_version: i64, oldest_index_version: i64) -> Value {
+    obj(vec![
+        ("node_id", Value::String(node_id.into())),
+        ("node_version", Value::Int(node_version)),
+        ("oldest_index_version", Value::Int(oldest_index_version)),
+    ])
+}
+
+/// Shard `state-N.st` document for a primary.
+pub fn shard_state_doc(index_uuid: &str, allocation_id: &str) -> Value {
+    obj(vec![
+        ("primary", Value::Bool(true)),
+        ("index_uuid", Value::String(index_uuid.into())),
+        (
+            "allocation_id",
+            obj(vec![("id", Value::String(allocation_id.into()))]),
+        ),
+    ])
+}
+
+/// Shard `retention-leases-N.st` document with no leases.
+pub fn retention_leases_doc(primary_term: i64) -> Value {
+    obj(vec![
+        ("primary_term", Value::Int(primary_term)),
+        ("version", Value::Int(0)),
+        ("leases", Value::Array(vec![])),
+    ])
+}
+
 pub fn read(path: &Path) -> Result<Value> {
     let file = std::fs::read(path).map_err(|e| crate::Error(format!("{}: {e}", path.display())))?;
     check_footer(&file)?;
@@ -49,6 +88,18 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("esm-sf-{}", std::process::id()));
         write(&dir, "manifest", 3, &manifest).unwrap();
         assert_eq!(read(&dir.join("manifest-3.st")).unwrap(), manifest);
+
+        let data = fixture.parent().unwrap();
+        let shard = data.join("indices/D9r2xux8T1aNWB7zpBLShg/0/_state");
+        assert_eq!(node_doc("rQYqacfoQ7uXdXc7tkJ9vQ", 9050599, 9111000), node);
+        assert_eq!(
+            shard_state_doc("D9r2xux8T1aNWB7zpBLShg", "LZN8helzS5G-ZGRov0Geww"),
+            read(&shard.join("state-0.st")).unwrap()
+        );
+        assert_eq!(
+            retention_leases_doc(1),
+            read(&shard.join("retention-leases-0.st")).unwrap()
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
