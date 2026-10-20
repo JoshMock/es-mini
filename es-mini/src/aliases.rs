@@ -196,6 +196,10 @@ fn lookup(
         })
         .map(str::to_owned)
         .collect();
+    // With only exclusions, just the first one acts as a literal name.
+    if !has_positive {
+        missing.truncate(1);
+    }
     missing.sort();
     Ok((Value::Object(out), missing))
 }
