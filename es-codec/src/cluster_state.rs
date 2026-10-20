@@ -11,6 +11,7 @@ use crate::{
     segment_writer::{NewSegment, write_segment},
     smile::{self, Value},
     stored_fields::StoredValue,
+    terms::TermPostings,
 };
 use std::{
     collections::{BTreeMap, hash_map::DefaultHasher},
@@ -117,13 +118,34 @@ pub fn read_indices(data_dir: &Path) -> Result<Vec<IndexMetadata>> {
     Ok(indices)
 }
 
-/// Writes `indices` as a fresh `<data>/_state` Lucene index (inverse of [`read_indices`]): one
-/// single-page document per index and per distinct mapping. No global document yet.
-pub fn write_indices(data_dir: &Path, indices: &[IndexMetadata]) -> Result<()> {
+/// Cluster-wide identity written into the global document and the commit user data.
+pub struct GlobalMetadata {
+    pub cluster_uuid: String,
+    pub node_id: String,
+    pub term: i32,
+}
+
+/// Writes a fresh `<data>/_state` Lucene index (inverse of [`read_indices`]): one single-page
+/// document for the global metadata, one per index and one per distinct mapping. The `type`
+/// field is indexed (not stored), as Elasticsearch finds each kind of document through it.
+pub fn write_state(
+    data_dir: &Path,
+    global: &GlobalMetadata,
+    indices: &[IndexMetadata],
+) -> Result<()> {
     let dir = data_dir.join("_state");
     std::fs::create_dir_all(&dir).map_err(|e| crate::Error(format!("{}: {e}", dir.display())))?;
-    let names = ["index_uuid", "mapping_hash", "page", "data"];
-    let fields: Vec<_> = (0..4)
+    let names = [
+        "index_uuid",
+        "mapping_hash",
+        "page",
+        "data",
+        "type",
+        "last_page",
+    ];
+    let postings = [("format", "Lucene104"), ("suffix", "0")]
+        .map(|(k, v)| (format!("PerFieldPostingsFormat.{k}"), v.to_string()));
+    let fields: Vec<_> = (0..6)
         .map(|n| FieldInfo {
             name: names[n as usize].into(),
             number: n,
@@ -132,11 +154,19 @@ pub fn write_indices(data_dir: &Path, indices: &[IndexMetadata]) -> Result<()> {
             store_payloads: false,
             soft_deletes: false,
             parent: false,
-            index_options: IndexOptions::None,
+            index_options: if n == 4 {
+                IndexOptions::Docs
+            } else {
+                IndexOptions::None
+            },
             doc_values: DocValuesType::None,
             doc_values_skip_index: false,
             dv_gen: -1,
-            attributes: BTreeMap::new(),
+            attributes: if n == 4 {
+                postings.iter().cloned().collect()
+            } else {
+                BTreeMap::new()
+            },
             point_dimensions: 0,
             point_index_dimensions: 0,
             point_num_bytes: 0,
@@ -148,9 +178,39 @@ pub fn write_indices(data_dir: &Path, indices: &[IndexMetadata]) -> Result<()> {
             (key_field, StoredValue::String(key)),
             (2, StoredValue::Int(0)),
             (3, StoredValue::Bytes(inflate::frame(&blob))),
+            (5, StoredValue::Int(1)),
         ]
     };
-    let mut stored = Vec::new();
+    let object = |fields: Vec<(&str, Value)>| {
+        Value::Object(fields.into_iter().map(|(k, v)| (k.into(), v)).collect())
+    };
+    let node = || Value::Array(vec![Value::String(global.node_id.clone())]);
+    let meta = object(vec![
+        ("version", Value::Int(1)),
+        ("cluster_uuid", Value::String(global.cluster_uuid.clone())),
+        ("cluster_uuid_committed", Value::Bool(true)),
+        (
+            "cluster_coordination",
+            object(vec![
+                ("term", Value::Int(global.term as i64)),
+                ("last_committed_config", node()),
+                ("last_accepted_config", node()),
+                ("voting_config_exclusions", Value::Array(vec![])),
+            ]),
+        ),
+    ]);
+    let mut stored = vec![vec![
+        (2, StoredValue::Int(0)),
+        (
+            3,
+            StoredValue::Bytes(inflate::frame(&smile::encode(&object(vec![(
+                "meta-data",
+                meta,
+            )])))),
+        ),
+        (5, StoredValue::Int(1)),
+    ]];
+    let mut kinds = vec!["global"];
     let mut mapping_docs = BTreeMap::new();
     for ix in indices {
         let mut meta = vec![(
@@ -173,10 +233,27 @@ pub fn write_indices(data_dir: &Path, indices: &[IndexMetadata]) -> Result<()> {
         }
         let top = Value::Object(vec![(ix.name.clone(), Value::Object(meta))]);
         stored.push(doc(0, ix.uuid.clone(), smile::encode(&top)));
+        kinds.push("index");
     }
     for (hash, blob) in mapping_docs {
         stored.push(doc(1, hash, blob));
+        kinds.push("mapping");
     }
+    let terms: Vec<_> = ["global", "index", "mapping"]
+        .iter()
+        .filter_map(|kind| {
+            let docs: Vec<_> = (0..kinds.len() as u32)
+                .filter(|d| kinds[*d as usize] == *kind)
+                .map(|d| (d, 1))
+                .collect();
+            (!docs.is_empty()).then(|| TermPostings {
+                term: kind.as_bytes().to_vec(),
+                total_term_freq: docs.len() as u64,
+                docs,
+                positions: vec![],
+            })
+        })
+        .collect();
     let seg = write_segment(
         &dir,
         &NewSegment {
@@ -186,7 +263,7 @@ pub fn write_indices(data_dir: &Path, indices: &[IndexMetadata]) -> Result<()> {
             fields: &fields,
             stored: &stored,
             numeric: &[],
-            terms: &[],
+            terms: &[(4, terms)],
         },
     )?;
     SegmentInfos {
@@ -197,7 +274,17 @@ pub fn write_indices(data_dir: &Path, indices: &[IndexMetadata]) -> Result<()> {
         version: 1,
         counter: 1,
         segments: vec![seg],
-        user_data: BTreeMap::new(),
+        user_data: [
+            ("current_term", global.term.to_string()),
+            ("last_accepted_version", "1".into()),
+            ("node_id", global.node_id.clone()),
+            ("node_version", "9050599".into()),
+            ("oldest_index_version", "9111000".into()),
+            ("cluster_uuid", global.cluster_uuid.clone()),
+            ("cluster_uuid_committed", "true".into()),
+        ]
+        .map(|(k, v)| (k.to_string(), v))
+        .into(),
     }
     .write(&dir)
 }
@@ -223,8 +310,22 @@ mod tests {
                 mappings: None,
             },
         ];
-        write_indices(&data, &indices).unwrap();
+        let global = GlobalMetadata {
+            cluster_uuid: "cu".into(),
+            node_id: "n".into(),
+            term: 1,
+        };
+        write_state(&data, &global, &indices).unwrap();
         assert_eq!(read_indices(&data).unwrap(), indices);
+        // the global doc is findable through the indexed `type` term
+        let dir = data.join("_state");
+        let seg = SegmentInfos::read_latest(&dir).unwrap().segments.remove(0);
+        let terms = SegmentReader::open(&dir, seg)
+            .unwrap()
+            .terms("type")
+            .unwrap();
+        let global_term = terms.iter().find(|t| t.term == b"global").unwrap();
+        assert_eq!(global_term.docs, vec![(0, 1)]);
         std::fs::remove_dir_all(&data).unwrap();
     }
 }
