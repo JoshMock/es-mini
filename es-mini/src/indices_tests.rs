@@ -113,6 +113,14 @@ async fn bad_mapping_is_400() {
 }
 
 #[tokio::test]
+async fn empty_field_name_is_illegal_argument() {
+    let body = json!({"mappings": {"properties": {"": {"type": "keyword"}}}});
+    let (s, r) = call(&app(), Method::PUT, "/idx", Some(body)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(r["error"]["type"], "illegal_argument_exception");
+}
+
+#[tokio::test]
 async fn malformed_json_is_400() {
     let req = Request::builder()
         .method(Method::PUT)

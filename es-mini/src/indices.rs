@@ -38,6 +38,11 @@ pub async fn create(
             .into_iter()
             .flatten()
         {
+            if field.is_empty() {
+                return Err(AppError::IllegalArgument(
+                    "field name cannot be an empty string".into(),
+                ));
+            }
             if FieldMapping::deserialize(spec).is_err()
                 && let Some(t) = spec["type"].as_str()
             {
