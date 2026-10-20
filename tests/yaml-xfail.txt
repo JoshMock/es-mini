@@ -1,6 +1,4 @@
 # Known-failing YAML tests. Fix one, then delete its line.
-indices.get_settings/10_basic.yml/Get /_settings
-indices.get_settings/10_basic.yml/Get /_settings with local flag
 indices.get_settings/10_basic.yml/Get /_settings/{name}
 indices.get_settings/10_basic.yml/Get /index,index/_settings/{name}
 indices.get_settings/10_basic.yml/Get /{index}/_settings/_all
@@ -17,7 +15,6 @@ indices.put_settings/all_path_options.yml/put settings in * index
 indices.put_settings/all_path_options.yml/put settings in _all index
 indices.put_settings/all_path_options.yml/put settings in blank index
 indices.put_settings/all_path_options.yml/put settings in prefix* index
-indices.put_settings/all_path_options.yml/put settings per index
 indices.update_aliases/30_remove_index_and_replace_with_alias.yml/Remove an index and replace it with an alias
 indices.update_aliases/40_must_exist.yml/Alias must_exist only on remove
 indices.update_aliases/40_must_exist.yml/Partial success with must_exist == false

@@ -155,6 +155,9 @@ async fn settings_and_mapping_endpoints() {
     let (_, r) = call(&app, Method::GET, "/idx/_settings", None).await;
     assert_eq!(r["idx"]["settings"]["index"]["number_of_replicas"], "0");
 
+    let (_, r) = call(&app, Method::GET, "/_settings", None).await;
+    assert_eq!(r["idx"]["settings"]["index"]["number_of_replicas"], "0");
+
     let (s, r) = call(&app, Method::GET, "/idx/_mapping", None).await;
     assert_eq!((s, r), (StatusCode::OK, json!({"idx": {"mappings": {}}})));
 

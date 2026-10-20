@@ -118,6 +118,7 @@ pub fn app() -> Router {
                 .head(indices::head)
                 .delete(indices::delete),
         )
+        .route("/_settings", get(indices::get_all_settings))
         .route(
             "/{index}/_settings",
             put(indices::put_settings).get(indices::get_settings),
