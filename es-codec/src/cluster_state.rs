@@ -9,15 +9,12 @@ use crate::{
     field_infos::{DocValuesType, FieldInfo, IndexOptions},
     inflate,
     segment_writer::{NewSegment, write_segment},
+    sha256::sha256_base64,
     smile::{self, Value},
     stored_fields::StoredValue,
     terms::TermPostings,
 };
-use std::{
-    collections::{BTreeMap, hash_map::DefaultHasher},
-    hash::{Hash, Hasher},
-    path::Path,
-};
+use std::{collections::BTreeMap, path::Path};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct IndexMetadata {
@@ -135,17 +132,21 @@ pub fn write_state(
 ) -> Result<()> {
     let dir = data_dir.join("_state");
     std::fs::create_dir_all(&dir).map_err(|e| crate::Error(format!("{}: {e}", dir.display())))?;
+    // Same field numbering as Elasticsearch; `type`, `mapping_hash`, `project_id` and `index_uuid`
+    // are indexed (Elasticsearch finds each kind of document through them).
     let names = [
-        "index_uuid",
-        "mapping_hash",
-        "page",
-        "data",
         "type",
+        "page",
         "last_page",
+        "data",
+        "mapping_hash",
+        "project_id",
+        "index_uuid",
     ];
+    let indexed = [0, 4, 5, 6];
     let postings = [("format", "Lucene104"), ("suffix", "0")]
         .map(|(k, v)| (format!("PerFieldPostingsFormat.{k}"), v.to_string()));
-    let fields: Vec<_> = (0..6)
+    let fields: Vec<_> = (0..7)
         .map(|n| FieldInfo {
             name: names[n as usize].into(),
             number: n,
@@ -154,7 +155,7 @@ pub fn write_state(
             store_payloads: false,
             soft_deletes: false,
             parent: false,
-            index_options: if n == 4 {
+            index_options: if indexed.contains(&n) {
                 IndexOptions::Docs
             } else {
                 IndexOptions::None
@@ -162,7 +163,7 @@ pub fn write_state(
             doc_values: DocValuesType::None,
             doc_values_skip_index: false,
             dv_gen: -1,
-            attributes: if n == 4 {
+            attributes: if indexed.contains(&n) {
                 postings.iter().cloned().collect()
             } else {
                 BTreeMap::new()
@@ -176,9 +177,10 @@ pub fn write_state(
     let doc = |key_field: i32, key: String, blob: Vec<u8>| {
         vec![
             (key_field, StoredValue::String(key)),
-            (2, StoredValue::Int(0)),
+            (1, StoredValue::Int(0)),
             (3, StoredValue::Bytes(inflate::frame(&blob))),
-            (5, StoredValue::Int(1)),
+            (5, StoredValue::String("default".into())),
+            (2, StoredValue::Int(1)),
         ]
     };
     let object = |fields: Vec<(&str, Value)>| {
@@ -200,7 +202,7 @@ pub fn write_state(
         ),
     ]);
     let mut stored = vec![vec![
-        (2, StoredValue::Int(0)),
+        (1, StoredValue::Int(0)),
         (
             3,
             StoredValue::Bytes(inflate::frame(&smile::encode(&object(vec![(
@@ -208,7 +210,7 @@ pub fn write_state(
                 meta,
             )])))),
         ),
-        (5, StoredValue::Int(1)),
+        (2, StoredValue::Int(1)),
     ]];
     let mut kinds = vec!["global"];
     let mut mapping_docs = BTreeMap::new();
@@ -223,37 +225,62 @@ pub fn write_state(
             ),
         )];
         if let Some(json) = &ix.mappings {
-            let mut h = DefaultHasher::new();
-            json.hash(&mut h);
-            let hash = format!("{:016x}", h.finish());
+            let hash = sha256_base64(json.as_bytes());
             let content = Value::Bytes(inflate::frame(json.as_bytes()));
             let wrapper = Value::Object(vec![("content".into(), content)]);
             mapping_docs.insert(hash.clone(), smile::encode(&wrapper));
             meta.push(("mappings_hash".into(), Value::String(hash)));
         }
         let top = Value::Object(vec![(ix.name.clone(), Value::Object(meta))]);
-        stored.push(doc(0, ix.uuid.clone(), smile::encode(&top)));
+        stored.push(doc(6, ix.uuid.clone(), smile::encode(&top)));
         kinds.push("index");
     }
     for (hash, blob) in mapping_docs {
-        stored.push(doc(1, hash, blob));
+        stored.push(doc(4, hash, blob));
         kinds.push("mapping");
     }
-    let terms: Vec<_> = ["global", "index", "mapping"]
-        .iter()
-        .filter_map(|kind| {
-            let docs: Vec<_> = (0..kinds.len() as u32)
-                .filter(|d| kinds[*d as usize] == *kind)
-                .map(|d| (d, 1))
-                .collect();
-            (!docs.is_empty()).then(|| TermPostings {
-                term: kind.as_bytes().to_vec(),
-                total_term_freq: docs.len() as u64,
-                docs,
-                positions: vec![],
-            })
-        })
+    // Terms per indexed field, fields ordered by name; `keyed` maps a field to its stored values.
+    let keyed = |field: i32| -> Vec<(String, u32)> {
+        let mut v: Vec<_> = (0..stored.len() as u32)
+            .filter_map(
+                |d| match stored[d as usize].iter().find(|f| f.0 == field)? {
+                    (_, StoredValue::String(k)) => Some((k.clone(), d)),
+                    _ => None,
+                },
+            )
+            .collect();
+        v.sort();
+        v
+    };
+    let postings = |entries: Vec<(String, u32)>| -> Vec<TermPostings> {
+        let mut terms: Vec<TermPostings> = vec![];
+        for (term, doc) in entries {
+            match terms.last_mut() {
+                Some(t) if t.term == term.as_bytes() => {
+                    t.docs.push((doc, 1));
+                    t.total_term_freq += 1;
+                }
+                _ => terms.push(TermPostings {
+                    term: term.into_bytes(),
+                    total_term_freq: 1,
+                    docs: vec![(doc, 1)],
+                    positions: vec![],
+                }),
+            }
+        }
+        terms
+    };
+    let mut type_entries: Vec<_> = (0..kinds.len())
+        .map(|d| (kinds[d].to_string(), d as u32))
         .collect();
+    type_entries.sort();
+    let mut terms = vec![
+        (6, postings(keyed(6))),
+        (4, postings(keyed(4))),
+        (5, postings(keyed(5))),
+        (0, postings(type_entries)),
+    ];
+    terms.retain(|(_, t)| !t.is_empty());
     let seg = write_segment(
         &dir,
         &NewSegment {
@@ -265,7 +292,7 @@ pub fn write_state(
             numeric: &[],
             keyword: &[],
             norms: &[],
-            terms: &[(4, terms)],
+            terms: &terms,
         },
     )?;
     SegmentInfos {

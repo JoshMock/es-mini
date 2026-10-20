@@ -5,6 +5,7 @@
 pub mod cluster_state;
 pub mod codec_util;
 pub mod compound;
+pub mod data_dir;
 pub mod doc_values;
 pub mod field_infos;
 pub mod inflate;
@@ -17,6 +18,7 @@ pub mod postings;
 pub mod segment;
 pub mod segment_infos;
 pub mod segment_writer;
+pub mod sha256;
 pub mod smile;
 pub mod state_file;
 pub mod stored_fields;
