@@ -316,6 +316,11 @@ pub async fn update(State(state): State<AppState>, body: Bytes) -> Result<Json<V
                 "One of [index] or [indices] is required".into(),
             ));
         }
+        if kind != "remove" && a.get("must_exist").is_some() {
+            return Err(AppError::IllegalArgument(format!(
+                "[must_exist] is only valid for [remove] actions, not [{kind}]"
+            )));
+        }
         match kind.as_str() {
             "add" => {
                 let mut meta = a.clone();
