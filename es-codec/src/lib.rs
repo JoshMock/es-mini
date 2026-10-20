@@ -21,6 +21,7 @@ pub mod state_file;
 pub mod stored_fields;
 pub mod terms;
 pub mod translog;
+pub mod uid;
 
 pub use compound::CompoundFile;
 pub use segment::SegmentReader;
