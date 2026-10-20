@@ -1,5 +1,4 @@
 # Known-failing YAML tests. Fix one, then delete its line.
-index/70_require_alias.yml/Set require_alias flag
 indices.create/10_basic.yml/Create index with invalid field type
 indices.create/10_basic.yml/Create index with invalid mappings
 indices.create/10_basic.yml/Create index with invalid multi-field type

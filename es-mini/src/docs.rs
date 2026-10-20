@@ -139,12 +139,25 @@ pub fn put_or_create(
     Ok(reply(&index, id, w, total))
 }
 
+fn require_alias(
+    state: &AppState,
+    params: &HashMap<String, String>,
+    index: &str,
+) -> Result<(), AppError> {
+    let flagged = params.get("require_alias").is_some_and(|v| v == "true");
+    match flagged && !aliases::is_alias(&state.read().expect("lock poisoned"), index) {
+        true => Err(AppError::RequireAlias(index.to_owned())),
+        false => Ok(()),
+    }
+}
+
 pub async fn index_with_id(
     State(state): State<AppState>,
     Path((index, id)): Path<(String, String)>,
     Query(params): Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Reply {
+    require_alias(&state, &params, &index)?;
     let create = params.get("op_type").is_some_and(|o| o == "create");
     let mut reply = put_or_create(&state, &index, &id, parse_json(&body)?, create)?;
     if params
@@ -160,8 +173,10 @@ pub async fn index_with_id(
 pub async fn index_auto_id(
     State(state): State<AppState>,
     Path(index): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Reply {
+    require_alias(&state, &params, &index)?;
     put_or_create(&state, &index, &auto_id(), parse_json(&body)?, true)
 }
 
