@@ -15,6 +15,32 @@ use es_index::{
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Resolves `<static{anchor||/d{yyyy-MM-dd}}>` date math; other names pass through.
+// ponytail: only `anchor||/d{fmt}` with yyyy/MM/dd; `now` and other rounding units unsupported.
+pub fn resolve_date_math(name: &str) -> String {
+    let Some(inner) = name.strip_prefix('<').and_then(|n| n.strip_suffix('>')) else {
+        return name.to_string();
+    };
+    let mut out = String::new();
+    let mut rest = inner;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let Some(close) = rest.find("}}") else { break };
+        let expr = &rest[open + 1..close + 1];
+        rest = &rest[close + 2..];
+        let (anchor, fmt) = expr.split_once("||/d{").unwrap_or((expr, "yyyy-MM-dd}"));
+        let mut d = anchor.splitn(3, '-');
+        let (y, m, day) = (d.next(), d.next(), d.next());
+        out.push_str(
+            &fmt.trim_end_matches('}')
+                .replace("yyyy", y.unwrap_or(""))
+                .replace("MM", m.unwrap_or(""))
+                .replace("dd", day.unwrap_or("")),
+        );
+    }
+    out + rest
+}
+
 /// Parses alias metadata, validating its filter as a query.
 pub fn parse_alias(v: &Value) -> Result<Alias, AppError> {
     let alias = Alias::parse(v).map_err(AppError::IllegalArgument)?;

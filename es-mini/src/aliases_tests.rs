@@ -248,3 +248,18 @@ async fn name_conflicts_and_bad_filters() {
         (StatusCode::NOT_FOUND, &json!("index_not_found_exception"))
     );
 }
+
+#[tokio::test]
+async fn create_resolves_date_math_alias_names() {
+    let app = app();
+    let (s, _) = call(
+        &app,
+        Method::PUT,
+        "/a",
+        Some(json!({"aliases": {"<logs_{2022-12-31||/d{yyyy-MM-dd}}>": {}}})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = call(&app, Method::HEAD, "/_alias/logs_2022-12-31", None).await;
+    assert_eq!(s, StatusCode::OK);
+}

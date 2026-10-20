@@ -1,4 +1,4 @@
-use crate::aliases::parse_alias;
+use crate::aliases::{parse_alias, resolve_date_math};
 use crate::{AppState, error::AppError};
 use axum::{
     Json,
@@ -93,7 +93,9 @@ pub async fn create(
             .map_err(|e| AppError::MapperParsing(e.to_string()))?;
     }
     for (alias, meta) in body["aliases"].as_object().into_iter().flatten() {
-        index.aliases.insert(alias.clone(), parse_alias(meta)?);
+        index
+            .aliases
+            .insert(resolve_date_math(alias), parse_alias(meta)?);
     }
     let mut indices = state.write().expect("lock poisoned");
     if indices.contains_key(&name) {
