@@ -8,6 +8,7 @@ pub mod doc_values;
 pub mod field_infos;
 pub mod input;
 pub mod live_docs;
+pub mod postings;
 pub mod segment_infos;
 pub mod stored_fields;
 pub mod terms;

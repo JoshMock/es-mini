@@ -1,19 +1,15 @@
 //! Terms dictionary and postings (Lucene103 block tree + Lucene104 postings).
 //!
 //! Terms are enumerated by walking blocks from the root, so the `.tip` trie is only consulted
-//! for the root block's file pointer. Postings are decoded for terms with fewer than
-//! [`BLOCK_SIZE`] docs (singleton or group-varint tail); larger terms use packed blocks, which
-//! are not ported yet. Positions, offsets, payloads, and impacts are skipped.
+//! for the root block's file pointer. Positions, offsets, payloads, and impacts are skipped.
 
 use crate::{
     CompoundFile, Result, SegmentCommitInfo, codec_util, err,
     field_infos::{FieldInfo, IndexOptions},
     input::DataInput,
+    postings,
     stored_fields::{lz4, zigzag},
 };
-
-/// Doc count at which postings switch from group-varint to packed blocks.
-pub const BLOCK_SIZE: u64 = 256;
 
 /// One term of a field and its postings. `freq` is 1 for every doc when the field omits freqs.
 #[derive(Debug, Clone, PartialEq)]
@@ -63,7 +59,7 @@ pub fn read_terms(
     let meta = &mut DataInput::new(tmd);
     codec_util::check_index_header(meta, "BlockTreeTermsMeta", 0, 0, id, &suffix)?;
     codec_util::check_index_header(meta, "Lucene104PostingsWriterTerms", 0, 0, id, &suffix)?;
-    if meta.read_vint()? as u64 != BLOCK_SIZE {
+    if meta.read_vint()? as u64 != postings::BLOCK_SIZE as u64 {
         return err("unexpected postings block size");
     }
     for _ in 0..meta.read_len()? {
@@ -301,7 +297,7 @@ impl Walker<'_> {
             {
                 metas.read_vlong()?; // payStartFP
             }
-            if s.total_term_freq > BLOCK_SIZE {
+            if s.total_term_freq > postings::BLOCK_SIZE as u64 {
                 metas.read_vlong()?; // lastPosBlockOffset
             }
         }
@@ -312,53 +308,14 @@ impl Walker<'_> {
         if s.doc_freq == 1 {
             return Ok(vec![(s.singleton_doc_id as u32, s.total_term_freq as u32)]);
         }
-        if s.doc_freq >= BLOCK_SIZE {
-            return err("terms with 256 or more docs use packed postings blocks, not ported yet");
-        }
-        let n = s.doc_freq as usize;
-        let input = &mut DataInput::new(self.doc);
-        input.pos = s.doc_start_fp as usize;
-        let mut docs = read_group_vints(input, n)?;
         let has_freqs = self.info.index_options != IndexOptions::Docs;
-        let mut freqs = vec![1; n];
-        if has_freqs {
-            for (d, f) in docs.iter_mut().zip(&mut freqs) {
-                *f = if *d & 1 == 1 {
-                    1
-                } else {
-                    input.read_vint()? as u32
-                };
-                *d >>= 1;
-            }
-        }
-        let mut doc = -1i64;
-        Ok(docs
-            .into_iter()
-            .zip(freqs)
-            .map(|(delta, freq)| {
-                doc += delta as i64;
-                (doc as u32, freq)
-            })
-            .collect())
+        postings::read_docs(
+            self.doc,
+            s.doc_start_fp as usize,
+            s.doc_freq as usize,
+            has_freqs,
+        )
     }
-}
-
-/// `GroupVIntUtil.readGroupVInts`: groups of four ints behind a length byte, then plain vints.
-fn read_group_vints(input: &mut DataInput, n: usize) -> Result<Vec<u32>> {
-    let mut out = Vec::with_capacity(n);
-    while out.len() + 4 <= n {
-        let flag = input.read_byte()?;
-        for shift in [6, 4, 2, 0] {
-            let bytes = ((flag >> shift) & 3) as usize + 1;
-            let mut v = [0u8; 4];
-            v[..bytes].copy_from_slice(input.read_bytes(bytes)?);
-            out.push(u32::from_le_bytes(v));
-        }
-    }
-    while out.len() < n {
-        out.push(input.read_vint()? as u32);
-    }
-    Ok(out)
 }
 
 /// `LowercaseAsciiCompression.decompress`.
@@ -383,30 +340,4 @@ fn lowercase_ascii(input: &mut DataInput, len: usize) -> Result<Vec<u8>> {
             input.read_byte()?;
     }
     Ok(out)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn group_varints_then_plain_vints() {
-        // Lengths 1, 2, 3, 4 bytes (flag 0b00_01_10_11), then the tail as vints 5 and 200.
-        let mut b = vec![
-            0b0001_1011,
-            1,
-            0x2c,
-            0x01,
-            0x70,
-            0x11,
-            0x01,
-            0xff,
-            0xff,
-            0xff,
-            0x7f,
-        ];
-        b.extend([5, 0xc8, 0x01]);
-        let got = read_group_vints(&mut DataInput::new(&b), 6).unwrap();
-        assert_eq!(got, [1, 300, 70000, 0x7fff_ffff, 5, 200]);
-    }
 }
