@@ -56,7 +56,7 @@ Rules:
 3. Reproduce first: \`${suite.runOne(id)}\`
 4. Delete exactly the line \`${id}\` from \`${suite.xfail}\`. If other listed tests now pass too, delete their lines as well; never add lines.
 5. Run \`scripts/check.sh\` until it passes. If the sandbox blocks ~/.cargo, prefix commands with CARGO_HOME=/tmp/esm-cargo.
-6. Make one git commit with a message describing the behavior fixed, ending with the trailer \`${trailer(model)}\`.
+6. Commit atomically: one commit per distinct behavior (e.g. a refresh model and a new query parameter are two commits), each describing the behavior it adds and ending with the trailer \`${trailer(model)}\`.
 7. If the fix needs work far outside this test's scope, stop without committing and explain why.`;
 }
 
