@@ -263,3 +263,33 @@ async fn create_resolves_date_math_alias_names() {
     let (s, _) = call(&app, Method::HEAD, "/_alias/logs_2022-12-31", None).await;
     assert_eq!(s, StatusCode::OK);
 }
+
+#[tokio::test]
+async fn mapping_and_settings_resolve_expressions_like_get_index() {
+    let app = setup().await;
+    for path in ["_mapping", "_settings"] {
+        let (s, r) = call(&app, Method::GET, &format!("/fa/{path}"), None).await;
+        assert_eq!(s, StatusCode::OK, "{path}");
+        assert_eq!(
+            r.as_object().unwrap().keys().collect::<Vec<_>>(),
+            ["a"],
+            "{path}"
+        );
+        let (_, r) = call(&app, Method::GET, &format!("/a,b/{path}"), None).await;
+        assert_eq!(r.as_object().unwrap().len(), 2, "{path}");
+        let (s, _) = call(&app, Method::GET, &format!("/a,nope/{path}"), None).await;
+        assert_eq!(s, StatusCode::NOT_FOUND, "{path}");
+        let (s, r) = call(
+            &app,
+            Method::GET,
+            &format!("/a,nope/{path}?ignore_unavailable=true"),
+            None,
+        )
+        .await;
+        assert_eq!(
+            (s, r.as_object().unwrap().len()),
+            (StatusCode::OK, 1),
+            "{path}"
+        );
+    }
+}

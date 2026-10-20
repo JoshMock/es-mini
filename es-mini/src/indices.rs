@@ -7,8 +7,10 @@ use axum::{
     http::StatusCode,
 };
 use es_index::{FieldMapping, Index, Mappings};
+use es_index::{Indices, aliases};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
+use std::collections::HashMap;
 
 pub fn parse_body(body: &Bytes) -> Result<Value, AppError> {
     if body.is_empty() {
@@ -125,7 +127,7 @@ pub async fn create(
 pub async fn delete(
     State(state): State<AppState>,
     Path(name): Path<String>,
-    Query(params): Query<std::collections::HashMap<String, String>>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, AppError> {
     let ignore = params
         .get("ignore_unavailable")
@@ -178,27 +180,43 @@ fn with_index<T>(
     }
 }
 
+/// Concrete indices a read expression names, as GET index/_mapping/_settings resolve them:
+/// comma lists, wildcards, `_all`, and aliases, with `ignore_unavailable`/`allow_no_indices`.
+fn read_indices(
+    indices: &Indices,
+    expr: &str,
+    params: &HashMap<String, String>,
+) -> Result<Vec<String>, AppError> {
+    let flag = |k: &str| params.get(k).map(String::as_str);
+    let expr = match flag("ignore_unavailable") {
+        Some("true") => expr
+            .split(',')
+            .filter(|p| aliases::resolve_read(indices, p).is_ok())
+            .collect::<Vec<_>>()
+            .join(","),
+        _ => expr.to_owned(),
+    };
+    let names: Vec<String> = aliases::resolve_read(indices, &expr)?
+        .into_iter()
+        .map(|t| t.index)
+        .collect();
+    if names.is_empty() && flag("allow_no_indices") == Some("false") {
+        return Err(AppError::IndexNotFound(expr));
+    }
+    Ok(names)
+}
+
 pub async fn get(
     State(state): State<AppState>,
     Path(name): Path<String>,
-    Query(params): Query<std::collections::HashMap<String, String>>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, AppError> {
     let indices = state.read().expect("lock poisoned");
-    let name = if params
-        .get("ignore_unavailable")
-        .is_some_and(|v| v == "true")
-    {
-        let found = |p: &&str| es_index::aliases::resolve_read(&indices, p).is_ok();
-        name.split(',').filter(found).collect::<Vec<_>>().join(",")
-    } else {
-        name
-    };
-    let body: serde_json::Map<String, Value> = es_index::aliases::resolve_read(&indices, &name)?
+    let body: Map<String, Value> = read_indices(&indices, &name, &params)?
         .into_iter()
-        .map(|t| {
-            let i = &indices[&t.index];
-            let body = json!({"aliases": i.aliases, "mappings": i.mappings, "settings": i.settings.to_json()});
-            (t.index, body)
+        .map(|n| {
+            let i = &indices[&n];
+            (n, json!({"aliases": i.aliases, "mappings": i.mappings, "settings": i.settings.to_json()}))
         })
         .collect();
     Ok(Json(Value::Object(body)))
@@ -224,14 +242,14 @@ pub async fn refresh(
 pub async fn get_settings(
     state: State<AppState>,
     Path(name): Path<String>,
-    params: Query<std::collections::HashMap<String, String>>,
+    params: Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, AppError> {
     settings_response(state, name, "*", params)
 }
 
 pub async fn get_all_settings(
     state: State<AppState>,
-    params: Query<std::collections::HashMap<String, String>>,
+    params: Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, AppError> {
     settings_response(state, "_all".into(), "*", params)
 }
@@ -239,7 +257,7 @@ pub async fn get_all_settings(
 pub async fn get_settings_named(
     state: State<AppState>,
     Path((name, filter)): Path<(String, String)>,
-    params: Query<std::collections::HashMap<String, String>>,
+    params: Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, AppError> {
     settings_response(state, name, &filter, params)
 }
@@ -248,7 +266,7 @@ fn settings_response(
     State(state): State<AppState>,
     name: String,
     filter: &str,
-    Query(params): Query<std::collections::HashMap<String, String>>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, AppError> {
     let include_defaults = params.get("include_defaults").is_some_and(|v| v == "true");
     let render = |i: &Index| {
@@ -268,19 +286,12 @@ fn settings_response(
         }
         out
     };
-    // ponytail: single wildcard pattern only; no comma lists
-    if name == "_all" || name.contains('*') {
-        let indices = state.read().expect("lock poisoned");
-        let pat = if name == "_all" { "*" } else { &name };
-        let out: serde_json::Map<String, Value> = indices
-            .iter()
-            .filter(|(k, _)| es_index::aliases::glob(pat, k))
-            .map(|(k, i)| (k.clone(), render(i)))
-            .collect();
-        return Ok(Json(Value::Object(out)));
-    }
-    let out = with_index(&state, name.clone(), |i| render(i))?;
-    Ok(Json(json!({ name: out })))
+    let indices = state.read().expect("lock poisoned");
+    let out: Map<String, Value> = read_indices(&indices, &name, &params)?
+        .into_iter()
+        .map(|n| (n.clone(), render(&indices[&n])))
+        .collect();
+    Ok(Json(Value::Object(out)))
 }
 
 pub async fn put_settings(
@@ -298,30 +309,13 @@ pub async fn put_settings(
 pub async fn get_mapping(
     State(state): State<AppState>,
     Path(name): Path<String>,
-    Query(params): Query<std::collections::HashMap<String, String>>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, AppError> {
-    let ignore = params
-        .get("ignore_unavailable")
-        .is_some_and(|v| v == "true");
-    if name == "_all" || name.contains('*') {
-        let name = if name == "_all" { "*" } else { &name };
-        // ponytail: single wildcard pattern only; no comma lists
-        let indices = state.read().expect("lock poisoned");
-        let out: serde_json::Map<String, Value> = indices
-            .iter()
-            .filter(|(k, _)| es_index::aliases::glob(name, k))
-            .map(|(k, i)| (k.clone(), json!({"mappings": i.mappings})))
-            .collect();
-        return Ok(Json(Value::Object(out)));
-    }
-    let mut out = serde_json::Map::new();
-    for n in name.split(',') {
-        match with_index(&state, n.to_string(), |i| json!(i.mappings)) {
-            Ok(m) => out.insert(n.to_string(), json!({"mappings": m})),
-            Err(_) if ignore && params.get("allow_no_indices").is_none_or(|v| v != "false") => None,
-            Err(e) => return Err(e),
-        };
-    }
+    let indices = state.read().expect("lock poisoned");
+    let out: Map<String, Value> = read_indices(&indices, &name, &params)?
+        .into_iter()
+        .map(|n| (n.clone(), json!({"mappings": indices[&n].mappings})))
+        .collect();
     Ok(Json(Value::Object(out)))
 }
 
