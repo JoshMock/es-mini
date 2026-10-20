@@ -48,6 +48,11 @@ fn parse(body: &[u8], default_index: Option<&str>) -> Result<Vec<Action>, AppErr
         if id.is_none() && (op == "update" || op == "delete") {
             return Err(AppError::ActionRequestValidation("id is missing".into()));
         }
+        let op = if op == "index" && meta["op_type"] == "create" {
+            &"create".to_owned()
+        } else {
+            op
+        };
         let body = match op.as_str() {
             "delete" => None,
             _ => {
