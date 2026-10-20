@@ -8,7 +8,7 @@ use crate::{
     CompoundFile, Result, SegmentCommitInfo, codec_util, err,
     field_infos::{FieldInfo, IndexOptions},
     input::DataInput,
-    postings::{self},
+    postings,
     stored_fields::{lz4, zigzag},
 };
 
@@ -126,7 +126,8 @@ pub fn read_terms(
 fn trie_root_output_fp(tip: &[u8], start: usize, end: usize, root: usize) -> Result<u64> {
     let node = start + root;
     let long_at = |pos: usize| -> Result<u64> {
-        match tip.get(pos..pos + 8).filter(|_| pos + 8 <= end + 8) {
+        // Like Lucene, read 8 bytes at a node near the end of the index: they run into what follows.
+        match tip.get(pos..pos + 8).filter(|_| pos <= end) {
             Some(b) => Ok(u64::from_le_bytes(b.try_into().unwrap())),
             None => err("trie node extends past the index"),
         }

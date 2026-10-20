@@ -103,7 +103,8 @@ fn decompress(inp: &mut DataInput, len: usize) -> Result<Vec<u8>> {
 fn read_ints(inp: &mut DataInput, count: usize) -> Result<Vec<u64>> {
     match inp.read_byte()? {
         0 => Ok(vec![inp.read_vint()? as u64; count]),
-        // ponytail: the writer packs 128-value blocks by transposing longs; decode that shape.
+        // A 128-value block is n longs: value k is the (k / n)-th bpv-bit slot, from the top, of
+        // long k % n. The values after the last full block are plain bytes, shorts, or ints.
         bpv @ (8 | 16 | 32) => {
             let per_long = 64 / bpv as usize;
             let mut out = Vec::with_capacity(count);
