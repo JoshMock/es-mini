@@ -163,6 +163,7 @@ pub fn app() -> Router {
             "/{index}/_bulk",
             post(bulk::bulk_index).put(bulk::bulk_index),
         )
+        .route("/_search", get(search::search_all).post(search::search_all))
         .route("/{index}/_search", get(search::search).post(search::search))
         .route("/{index}/_count", get(search::count).post(search::count))
         .route("/{index}/_doc", post(docs::index_auto_id))

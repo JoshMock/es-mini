@@ -25,6 +25,14 @@ fn shards() -> Value {
     json!({"total": 1, "successful": 1, "skipped": 0, "failed": 0})
 }
 
+pub async fn search_all(
+    state: State<AppState>,
+    params: Query<HashMap<String, String>>,
+    body: Bytes,
+) -> Result<Json<Value>, AppError> {
+    search(state, Path("_all".into()), params, body).await
+}
+
 pub async fn search(
     State(state): State<AppState>,
     Path(name): Path<String>,
