@@ -164,3 +164,17 @@ async fn settings_and_mapping_endpoints() {
     let (s, r) = call(&app, Method::GET, "/*/_mapping", None).await;
     assert_eq!((s, r), (StatusCode::OK, json!({"idx": {"mappings": {}}})));
 }
+
+#[tokio::test]
+async fn put_settings_rejects_unknown_setting() {
+    let app = app();
+    call(&app, Method::PUT, "/idx", None).await;
+    let (s, _) = call(
+        &app,
+        Method::PUT,
+        "/idx/_settings",
+        Some(json!({"garbage": "garbage"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+}

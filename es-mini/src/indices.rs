@@ -346,6 +346,14 @@ pub async fn put_all_settings(
     put_settings_on(state, "_all".into(), params, body)
 }
 
+const TOP_LEVEL_SETTINGS: [&str; 5] = [
+    "number_of_shards",
+    "number_of_replicas",
+    "refresh_interval",
+    "hidden",
+    "max_result_window",
+];
+
 fn put_settings_on(
     state: AppState,
     name: String,
@@ -355,6 +363,17 @@ fn put_settings_on(
     let body = parse_body(&body)?;
     // ponytail: no static-vs-dynamic setting checks; ES rejects e.g. number_of_shards on an open index
     let settings = body.get("settings").unwrap_or(&body);
+    // ponytail: only rejects unknown top-level index.* names; nested groups (index.mapping.*) pass
+    let mut flat = Map::new();
+    flatten_settings("", settings, &mut flat);
+    for key in flat.keys() {
+        let key = key.strip_prefix("index.").unwrap_or(key);
+        if !key.contains('.') && !TOP_LEVEL_SETTINGS.contains(&key) {
+            return Err(AppError::IllegalArgument(format!(
+                "unknown setting [index.{key}] please check that any required plugins are installed, or check the breaking changes documentation for removed settings"
+            )));
+        }
+    }
     let mut indices = state.write().expect("lock poisoned");
     for n in read_indices(&indices, &name, &params)? {
         indices
