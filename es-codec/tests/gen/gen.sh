@@ -9,7 +9,7 @@ for m in core analysis-common; do
   [ -f "$jar" ] || curl -sfL -o "$jar" https://repo1.maven.org/maven2/org/apache/lucene/lucene-$m/10.5.1/lucene-$m-10.5.1.jar
   cp="$cp:$jar"
 done
-for gen in BigPostings:big-postings Positions:positions BinaryDocValues:binary-doc-values SortedDocValues:sorted-doc-values; do
+for gen in BigPostings:big-postings Positions:positions BinaryDocValues:binary-doc-values SortedDocValues:sorted-doc-values ManyTerms:many-terms; do
   out=../data/${gen#*:}
   [ $# -eq 0 ] || [[ " $* " == *" ${gen#*:} "* ]] || continue
   rm -rf "$out"
