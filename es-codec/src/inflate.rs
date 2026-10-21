@@ -33,12 +33,23 @@ struct Huffman {
 }
 
 impl Huffman {
-    fn new(lengths: &[u8]) -> Self {
+    fn new(lengths: &[u8]) -> Result<Self> {
         let mut counts = [0u16; 16];
         for &l in lengths {
             counts[usize::from(l)] += 1;
         }
         counts[0] = 0;
+        // Kraft check: reject over-subscribed sets, and incomplete ones except the lone-code case.
+        let mut left = 1i32;
+        for &c in &counts[1..] {
+            left = (left << 1) - i32::from(c);
+            if left < 0 {
+                return err("over-subscribed huffman code");
+            }
+        }
+        if left > 0 && counts[1..].iter().sum::<u16>() > 1 {
+            return err("incomplete huffman code");
+        }
         let mut symbols = Vec::new();
         for len in 1..16u8 {
             for (s, &l) in lengths.iter().enumerate() {
@@ -47,7 +58,7 @@ impl Huffman {
                 }
             }
         }
-        Self { counts, symbols }
+        Ok(Self { counts, symbols })
     }
 
     fn decode(&self, bits: &mut Bits) -> Result<usize> {
@@ -56,7 +67,10 @@ impl Huffman {
             code |= bits.read(1)? as i32;
             let count = i32::from(self.counts[len]);
             if code - count < first {
-                return Ok(usize::from(self.symbols[(index + code - first) as usize]));
+                let Some(&sym) = self.symbols.get((index + code - first) as usize) else {
+                    return err("bad huffman code");
+                };
+                return Ok(usize::from(sym));
             }
             index += count;
             first = (first + count) << 1;
@@ -130,6 +144,9 @@ pub fn inflate(data: &[u8]) -> Result<Vec<u8>> {
                     return err("truncated deflate stored block");
                 };
                 let len = usize::from(u16::from_le_bytes([h[0], h[1]]));
+                if u16::from_le_bytes([h[2], h[3]]) != !(len as u16) {
+                    return err("deflate stored block length mismatch");
+                }
                 let Some(body) = data.get(bits.pos + 4..bits.pos + 4 + len) else {
                     return err("truncated deflate stored block");
                 };
@@ -143,8 +160,8 @@ pub fn inflate(data: &[u8]) -> Result<Vec<u8>> {
                 codes(
                     &mut bits,
                     &mut out,
-                    &Huffman::new(&l),
-                    &Huffman::new(&[5; 30]),
+                    &Huffman::new(&l)?,
+                    &Huffman::new(&[5; 32])?,
                 )?;
             }
             2 => {
@@ -158,7 +175,7 @@ pub fn inflate(data: &[u8]) -> Result<Vec<u8>> {
                 for &o in &ORDER[..hclen] {
                     cl[o] = bits.read(3)? as u8;
                 }
-                let clh = Huffman::new(&cl);
+                let clh = Huffman::new(&cl)?;
                 let mut lengths = Vec::new();
                 while lengths.len() < hlit + hdist {
                     let sym = clh.decode(&mut bits)?;
@@ -175,7 +192,7 @@ pub fn inflate(data: &[u8]) -> Result<Vec<u8>> {
                 }
                 lengths.truncate(hlit + hdist);
                 let (l, d) = lengths.split_at(hlit);
-                codes(&mut bits, &mut out, &Huffman::new(l), &Huffman::new(d))?;
+                codes(&mut bits, &mut out, &Huffman::new(l)?, &Huffman::new(d)?)?;
             }
             _ => return err("bad deflate block type"),
         }
@@ -206,6 +223,22 @@ pub fn frame(data: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod frame_tests {
     use super::*;
+
+    #[test]
+    fn malformed_input_errors() {
+        // stored block with wrong NLEN
+        assert!(inflate(&[1, 1, 0, 0, 0, 0]).is_err());
+        // dynamic block with all-zero-length-1 code lengths (over-subscribed)
+        assert!(Huffman::new(&[1, 1, 1]).is_err());
+        assert!(Huffman::new(&[2, 2]).is_err());
+        assert!(Huffman::new(&[1]).is_ok());
+        for seed in 0..2000u32 {
+            let d: Vec<u8> = (0..40)
+                .map(|i| (seed.wrapping_mul(2654435761).wrapping_add(i * 97) >> 7) as u8)
+                .collect();
+            let _ = inflate(&d);
+        }
+    }
 
     #[test]
     fn frame_round_trips() {

@@ -33,10 +33,13 @@ impl Value {
     }
 }
 
+const MAX_DEPTH: usize = 512;
+
 struct Reader<'a> {
     data: &'a [u8],
     pos: usize,
     names: Vec<String>,
+    depth: usize,
 }
 
 impl Reader<'_> {
@@ -47,8 +50,11 @@ impl Reader<'_> {
     }
 
     fn take(&mut self, n: usize) -> Result<&[u8]> {
-        let s = self.data.get(self.pos..self.pos + n);
-        self.pos += n;
+        let s = self
+            .pos
+            .checked_add(n)
+            .and_then(|end| self.data.get(self.pos..end));
+        self.pos = self.pos.saturating_add(n);
         s.map_or_else(|| err("truncated smile"), Ok)
     }
 
@@ -119,6 +125,16 @@ impl Reader<'_> {
     }
 
     fn value(&mut self) -> Result<Value> {
+        if self.depth >= MAX_DEPTH {
+            return err("smile nested too deeply");
+        }
+        self.depth += 1;
+        let v = self.value_inner();
+        self.depth -= 1;
+        v
+    }
+
+    fn value_inner(&mut self) -> Result<Value> {
         let b = self.byte()?;
         Ok(match b {
             0x20 => Value::String(String::new()),
@@ -165,12 +181,20 @@ pub fn decode(data: &[u8]) -> Result<Value> {
     if data.get(..3) != Some(b":)\n") || data.get(3).is_none_or(|f| f & 0x02 != 0) {
         return err("not a smile document, or uses shared string values");
     }
-    Reader {
+    let mut r = Reader {
         data,
         pos: 4,
         names: Vec::new(),
+        depth: 0,
+    };
+    let v = r.value()?;
+    if r.data
+        .get(r.pos..)
+        .is_some_and(|t| !t.is_empty() && t != [0xFF])
+    {
+        return err("trailing bytes after smile value");
     }
-    .value()
+    Ok(v)
 }
 
 fn put_vint(out: &mut Vec<u8>, v: u64) {
@@ -263,6 +287,22 @@ pub fn encode(v: &Value) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn malformed_input_errors() {
+        let hdr = b":)\n\x00";
+        let mut huge = hdr.to_vec();
+        huge.push(0xFD);
+        huge.extend([0x7F; 9]);
+        huge.push(0xBF);
+        assert!(decode(&huge).is_err());
+        let mut deep = hdr.to_vec();
+        deep.extend(std::iter::repeat_n(0xF8, 100_000));
+        assert!(decode(&deep).is_err());
+        let mut trailing = hdr.to_vec();
+        trailing.extend([0x21, 0x21]);
+        assert!(decode(&trailing).is_err());
+    }
 
     #[test]
     fn encode_round_trips() {
