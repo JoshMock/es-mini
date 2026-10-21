@@ -233,3 +233,36 @@ fn bm25_matches_elasticsearch_legacy_scaling() {
     let score = search(&idx, &req).hits[0].score.unwrap();
     assert!((score - 0.287_682_1).abs() < 1e-6, "{score}");
 }
+
+#[test]
+fn leaf_and_bool_queries_validate_parameters() {
+    for (q, msg) in [
+        (
+            json!({"match": {"title": {"query": "a", "x": 1}}}),
+            "[match] query does not support [x]",
+        ),
+        (
+            json!({"match": {"title": {"query": "a", "operator": "xor"}}}),
+            "Unsupported defaultOperator [xor], can either be 'and' or 'or'",
+        ),
+        (
+            json!({"term": {"tag": {"value": "a", "x": 1}}}),
+            "[term] query does not support [x]",
+        ),
+        (
+            json!({"bool": {"must": [], "x": 1}}),
+            "[bool] query does not support [x]",
+        ),
+        (
+            json!({"bool": {"should": [], "minimum_should_match": "abc"}}),
+            "abc",
+        ),
+    ] {
+        let err = parse_query(&q).unwrap_err();
+        assert!(err.contains(msg), "{q}: {err}");
+    }
+    assert!(parse_query(&json!({"match": {"title": {"query": "a", "operator": "AND", "boost": 2, "_name": "n"}}})).is_ok());
+    assert!(
+        parse_query(&json!({"term": {"tag": {"value": "a", "case_insensitive": true}}})).is_ok()
+    );
+}

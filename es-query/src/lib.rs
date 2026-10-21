@@ -53,6 +53,36 @@ fn single_field<'a>(kind: &str, v: &'a Value) -> Result<(&'a String, &'a Value),
     }
 }
 
+const MATCH_KEYS: &[&str] = &[
+    "query",
+    "operator",
+    "minimum_should_match",
+    "analyzer",
+    "fuzziness",
+    "prefix_length",
+    "max_expansions",
+    "fuzzy_transpositions",
+    "fuzzy_rewrite",
+    "lenient",
+    "zero_terms_query",
+    "auto_generate_synonyms_phrase_query",
+    "cutoff_frequency",
+    "boost",
+    "_name",
+];
+
+/// ES rejects parameters a query does not know: `[kind] query does not support [k]`.
+fn check_keys(
+    kind: &str,
+    o: &serde_json::Map<String, Value>,
+    known: &[&str],
+) -> Result<(), String> {
+    match o.keys().find(|k| !known.contains(&k.as_str())) {
+        Some(k) => Err(format!("[{kind}] query does not support [{k}]")),
+        None => Ok(()),
+    }
+}
+
 fn clauses(v: Option<&Value>) -> Result<Vec<Query>, String> {
     match v {
         None => Ok(vec![]),
@@ -69,15 +99,25 @@ pub fn parse_query(v: &Value) -> Result<Query, String> {
         "match" => {
             let (field, p) = single_field(kind, body)?;
             let (query, op) = match p {
-                Value::Object(o) => (
-                    o.get("query").ok_or("[match] requires query")?,
-                    o.get("operator"),
-                ),
+                Value::Object(o) => {
+                    check_keys("match", o, MATCH_KEYS)?;
+                    (
+                        o.get("query").ok_or("[match] requires query")?,
+                        o.get("operator"),
+                    )
+                }
                 q => (q, None),
             };
-            let and = op
-                .and_then(Value::as_str)
-                .is_some_and(|o| o.eq_ignore_ascii_case("and"));
+            let and = match op.and_then(Value::as_str) {
+                None => false,
+                Some(o) if o.eq_ignore_ascii_case("and") => true,
+                Some(o) if o.eq_ignore_ascii_case("or") => false,
+                Some(o) => {
+                    return Err(format!(
+                        "Unsupported defaultOperator [{o}], can either be 'and' or 'or'"
+                    ));
+                }
+            };
             Ok(Query::Match {
                 field: field.clone(),
                 query: text(query),
@@ -87,7 +127,10 @@ pub fn parse_query(v: &Value) -> Result<Query, String> {
         "term" => {
             let (field, p) = single_field(kind, body)?;
             let value = match p {
-                Value::Object(o) => o.get("value").ok_or("[term] requires value")?.clone(),
+                Value::Object(o) => {
+                    check_keys("term", o, &["value", "boost", "_name", "case_insensitive"])?;
+                    o.get("value").ok_or("[term] requires value")?.clone()
+                }
                 v => v.clone(),
             };
             Ok(Query::Term {
@@ -141,6 +184,21 @@ pub fn parse_query(v: &Value) -> Result<Query, String> {
             })
         }
         "bool" => {
+            let o = body.as_object().ok_or("[bool] query malformed")?;
+            check_keys(
+                "bool",
+                o,
+                &[
+                    "must",
+                    "should",
+                    "filter",
+                    "must_not",
+                    "minimum_should_match",
+                    "boost",
+                    "_name",
+                    "adjust_pure_negative",
+                ],
+            )?;
             let must = clauses(body.get("must"))?;
             let should = clauses(body.get("should"))?;
             let filter = clauses(body.get("filter"))?;
@@ -150,9 +208,15 @@ pub fn parse_query(v: &Value) -> Result<Query, String> {
                 0
             };
             // ponytail: integer minimum_should_match only; no percentages
-            let min_should = body
-                .get("minimum_should_match")
-                .and_then(|m| m.as_u64().or_else(|| m.as_str()?.parse().ok()));
+            let min_should = match body.get("minimum_should_match") {
+                None => None,
+                Some(Value::String(s)) if s.ends_with('%') => None,
+                Some(m) => Some(
+                    m.as_u64()
+                        .or_else(|| m.as_str()?.parse().ok())
+                        .ok_or_else(|| format!("failed to parse minimum_should_match [{m}]"))?,
+                ),
+            };
             Ok(Query::Bool {
                 must,
                 should,
