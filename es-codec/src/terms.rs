@@ -176,6 +176,91 @@ fn decode_terms(
     err(format!("field {field} has no terms"))
 }
 
+/// Appends one field's terms, stats and postings to the shared output files.
+fn write_field(
+    info: &FieldInfo,
+    terms: &[TermPostings],
+    field_norms: Option<&[i8]>,
+    files: &mut FieldOutputs,
+    max: &mut postings::ImpactMax,
+) -> crate::Result<()> {
+    use crate::output::Output;
+    let FieldOutputs { tim, tip, tmd, doc } = files;
+    let options = info.index_options;
+    if terms.is_empty() || !matches!(options, IndexOptions::Docs | IndexOptions::DocsAndFreqs) {
+        return crate::err(format!(
+            "field {} needs terms and docs-only or freqs postings",
+            info.name
+        ));
+    }
+    let has_freqs = options != IndexOptions::Docs;
+    let (mut suffixes, mut lengths, mut stats, mut metas) = (
+        Output::default(),
+        Output::default(),
+        Output::default(),
+        Output::default(),
+    );
+    let (mut last_fp, mut sum_df, mut docs_seen) = (0u64, 0u64, std::collections::BTreeSet::new());
+    for t in terms {
+        suffixes.bytes(&t.term);
+        lengths.vint(t.term.len() as i32);
+        let df = t.docs.len() as u64;
+        sum_df += df;
+        docs_seen.extend(t.docs.iter().map(|d| d.0));
+        stats.vint((df << 1) as i32);
+        if has_freqs {
+            stats.vlong((t.total_term_freq - df) as i64);
+        }
+        if df == 1 {
+            metas.vlong(0);
+            metas.vint(t.docs[0].0 as i32);
+        } else {
+            let fp = doc.0.len() as u64;
+            metas.vlong(((fp - last_fp) << 1) as i64);
+            last_fp = fp;
+            postings::write_docs(doc, &t.docs, has_freqs, field_norms, max);
+        }
+    }
+    let block_fp = tim.0.len() as i64;
+    tim.vint(((terms.len() << 1) | 1) as i32);
+    tim.vlong(((suffixes.0.len() << 3) | 4) as i64); // leaf, uncompressed
+    tim.bytes(&suffixes.0);
+    tim.vint((lengths.0.len() << 1) as i32);
+    tim.bytes(&lengths.0);
+    for part in [&stats, &metas] {
+        tim.vint(part.0.len() as i32);
+        tim.bytes(&part.0);
+    }
+    let index_start = tip.0.len() as i64;
+    let fp_bytes = (8 - (block_fp as u64).leading_zeros() as usize / 8).max(1);
+    tip.byte((((fp_bytes - 1) << 2) | 0x20) as u8); // leaf node with terms
+    tip.bytes(&(block_fp as u64).to_le_bytes()[..fp_bytes]);
+    tip.bytes(&[0; 8]); // Lucene's TrieReader reads a long at the node, possibly past its end
+    tmd.vint(info.number);
+    tmd.vlong(terms.len() as i64);
+    tmd.vlong(terms.iter().map(|t| t.total_term_freq).sum::<u64>() as i64);
+    if has_freqs {
+        tmd.vlong(sum_df as i64);
+    }
+    tmd.vint(docs_seen.len() as i32);
+    for t in [&terms[0], &terms[terms.len() - 1]] {
+        tmd.vint(t.term.len() as i32);
+        tmd.bytes(&t.term);
+    }
+    tmd.vlong(index_start);
+    tmd.vlong(0);
+    tmd.vlong(tip.0.len() as i64);
+    Ok(())
+}
+
+/// The shared `.tim`, `.tip`, `.tmd` and `.doc` outputs.
+struct FieldOutputs {
+    tim: crate::output::Output,
+    tip: crate::output::Output,
+    tmd: crate::output::Output,
+    doc: crate::output::Output,
+}
+
 /// Writes the terms dictionary and docs-only/freqs postings of `fields` (no positions): one leaf block per field. Lucene's writer caps
 /// leaf blocks at 48 terms for lookup speed; its reader accepts any count.
 ///
@@ -202,75 +287,18 @@ pub fn write_terms(
     tmd.index_header("Lucene104PostingsWriterTerms", 0, id, suffix);
     tmd.vint(postings::BLOCK_SIZE as i32);
     tmd.vint(fields.len() as i32);
+    let mut files = FieldOutputs { tim, tip, tmd, doc };
     let mut max = postings::ImpactMax::default();
     for (info, terms) in fields {
         let field_norms = norms.iter().find(|n| n.0 == info.number).map(|n| n.1);
-        let options = info.index_options;
-        if terms.is_empty() || !matches!(options, IndexOptions::Docs | IndexOptions::DocsAndFreqs) {
-            return crate::err(format!(
-                "field {} needs terms and docs-only or freqs postings",
-                info.name
-            ));
-        }
-        let has_freqs = options != IndexOptions::Docs;
-        let (mut suffixes, mut lengths, mut stats, mut metas) = (
-            Output::default(),
-            Output::default(),
-            Output::default(),
-            Output::default(),
-        );
-        let (mut last_fp, mut sum_df, mut docs_seen) =
-            (0u64, 0u64, std::collections::BTreeSet::new());
-        for t in *terms {
-            suffixes.bytes(&t.term);
-            lengths.vint(t.term.len() as i32);
-            let df = t.docs.len() as u64;
-            sum_df += df;
-            docs_seen.extend(t.docs.iter().map(|d| d.0));
-            stats.vint((df << 1) as i32);
-            if has_freqs {
-                stats.vlong((t.total_term_freq - df) as i64);
-            }
-            if df == 1 {
-                metas.vlong(0);
-                metas.vint(t.docs[0].0 as i32);
-            } else {
-                let fp = doc.0.len() as u64;
-                metas.vlong(((fp - last_fp) << 1) as i64);
-                last_fp = fp;
-                postings::write_docs(&mut doc, &t.docs, has_freqs, field_norms, &mut max);
-            }
-        }
-        let block_fp = tim.0.len() as i64;
-        tim.vint(((terms.len() << 1) | 1) as i32);
-        tim.vlong(((suffixes.0.len() << 3) | 4) as i64); // leaf, uncompressed
-        tim.bytes(&suffixes.0);
-        tim.vint((lengths.0.len() << 1) as i32);
-        tim.bytes(&lengths.0);
-        for part in [&stats, &metas] {
-            tim.vint(part.0.len() as i32);
-            tim.bytes(&part.0);
-        }
-        let index_start = tip.0.len() as i64;
-        let fp_bytes = (8 - (block_fp as u64).leading_zeros() as usize / 8).max(1);
-        tip.byte((((fp_bytes - 1) << 2) | 0x20) as u8); // leaf node with terms
-        tip.bytes(&(block_fp as u64).to_le_bytes()[..fp_bytes]);
-        tip.bytes(&[0; 8]); // Lucene's TrieReader reads a long at the node, possibly past its end
-        tmd.vint(info.number);
-        tmd.vlong(terms.len() as i64);
-        tmd.vlong(terms.iter().map(|t| t.total_term_freq).sum::<u64>() as i64);
-        if has_freqs {
-            tmd.vlong(sum_df as i64);
-        }
-        tmd.vint(docs_seen.len() as i32);
-        for t in [&terms[0], &terms[terms.len() - 1]] {
-            tmd.vint(t.term.len() as i32);
-            tmd.bytes(&t.term);
-        }
-        tmd.vlong(index_start);
-        tmd.vlong(0);
-        tmd.vlong(tip.0.len() as i64);
+        write_field(info, terms, field_norms, &mut files, &mut max)?;
     }
+    let FieldOutputs {
+        tim,
+        tip,
+        mut tmd,
+        doc,
+    } = files;
     // Full file lengths (footers included): `.tip` first, then `.tim`.
     tmd.long(tip.0.len() as i64 + FOOTER_LEN);
     tmd.long(tim.0.len() as i64 + FOOTER_LEN);
