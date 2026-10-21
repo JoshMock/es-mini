@@ -13,6 +13,8 @@ use std::{cmp::Ordering, collections::BTreeMap};
 
 /// ES applies an implicit `LIMIT 1000`.
 const DEFAULT_LIMIT: usize = 1000;
+/// `esql.query.result_truncation_max_size`: the cap on an explicit `LIMIT`.
+const MAX_LIMIT: usize = 10000;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum EsqlError {
@@ -542,7 +544,7 @@ pub fn run(indices: &BTreeMap<String, Index>, query: &str) -> Result<Response, E
                 .collect()
         })
         .collect();
-    let mut limit = DEFAULT_LIMIT;
+    let mut explicit_limit = false;
 
     for cmd in cmds {
         match cmd {
@@ -555,8 +557,8 @@ pub fn run(indices: &BTreeMap<String, Index>, query: &str) -> Result<Response, E
                 rows.retain(|r| eval(&e, r) == Some(Value::Bool(true)));
             }
             Command::Limit(n) => {
-                rows.truncate(n);
-                limit = limit.min(n);
+                rows.truncate(n.min(MAX_LIMIT));
+                explicit_limit = true;
             }
             Command::Keep(patterns) => {
                 let mut kept = Vec::new();
@@ -616,7 +618,9 @@ pub fn run(indices: &BTreeMap<String, Index>, query: &str) -> Result<Response, E
             }
         }
     }
-    rows.truncate(limit);
+    if !explicit_limit {
+        rows.truncate(DEFAULT_LIMIT);
+    }
     // ponytail: assumes top-N pushdown, so only returned rows are loaded; ES's real counts vary by plan
     let (documents_found, values_loaded) = (rows.len(), rows.len() * cols.len());
     Ok(Response {

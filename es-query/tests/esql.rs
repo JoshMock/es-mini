@@ -182,3 +182,21 @@ fn reports_documents_found_and_values_loaded() {
     assert_eq!(r.documents_found, 2);
     assert_eq!(r.values_loaded, 2);
 }
+
+#[test]
+fn implicit_limit_is_1000_and_explicit_limit_up_to_10000() {
+    let mut i = Index::default();
+    for n in 0..12000 {
+        i.put(&n.to_string(), json!({"n": n}));
+    }
+    let idx = BTreeMap::from([("big".to_owned(), i)]);
+    assert_eq!(run(&idx, "FROM big").unwrap().values.len(), 1000);
+    assert_eq!(
+        run(&idx, "FROM big | LIMIT 5000").unwrap().values.len(),
+        5000
+    );
+    assert_eq!(
+        run(&idx, "FROM big | LIMIT 20000").unwrap().values.len(),
+        10000
+    );
+}
