@@ -16,9 +16,8 @@ pub fn write(dir: &Path, prefix: &str, generation: i64, doc: &Value) -> Result<(
     out.bytes(&1i32.to_le_bytes());
     out.bytes(&smile::encode(doc));
     let path = dir.join(format!("{prefix}-{generation}.st"));
-    std::fs::create_dir_all(dir)
-        .and_then(|()| std::fs::write(&path, out.finish()))
-        .map_err(|e| crate::Error(format!("{}: {e}", path.display())))
+    std::fs::create_dir_all(dir).map_err(|e| crate::Error(format!("{}: {e}", path.display())))?;
+    crate::write_file_atomic(&path, &out.finish())
 }
 
 fn obj(fields: Vec<(&str, Value)>) -> Value {

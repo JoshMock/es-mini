@@ -52,3 +52,39 @@ fn err<T>(msg: impl Into<String>) -> Result<T> {
 fn read_file(path: &std::path::Path) -> Result<Vec<u8>> {
     std::fs::read(path).map_err(|e| Error(format!("{}: {e}", path.display())))
 }
+
+/// Writes `bytes` to `path` crash-safely: to a `.tmp` sibling, fsynced, renamed over `path`, then
+/// the directory is fsynced (as Java `MetadataStateFormat.write` does).
+pub fn write_file_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    let fail = |e: std::io::Error| Error(format!("{}: {e}", path.display()));
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = std::path::PathBuf::from(tmp);
+    let write = || -> std::io::Result<()> {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, path)?;
+        match path.parent() {
+            Some(dir) if !dir.as_os_str().is_empty() => std::fs::File::open(dir)?.sync_all(),
+            _ => Ok(()),
+        }
+    };
+    write().map_err(fail)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn write_file_atomic_replaces_and_leaves_no_tmp() {
+        let dir = std::env::temp_dir().join(format!("esm-atomic-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("f");
+        super::write_file_atomic(&path, b"one").unwrap();
+        super::write_file_atomic(&path, b"two").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"two");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}

@@ -157,8 +157,7 @@ impl SegmentInfos {
         }
         out.map_of_strings(&self.user_data);
         let path = dir.join(format!("segments_{}", radix36(self.generation)));
-        std::fs::write(&path, out.finish())
-            .map_err(|e| crate::Error(format!("{}: {e}", path.display())))
+        crate::write_file_atomic(&path, &out.finish())
     }
 
     fn parse(dir: &Path, file: &[u8], generation: u64) -> Result<Self> {
@@ -269,8 +268,7 @@ fn write_si(dir: &Path, name: &str, si: &SegmentInfo) -> Result<()> {
     out.map_of_strings(&si.attributes);
     out.vint(0); // no index sort
     let path = dir.join(format!("{name}.si"));
-    std::fs::write(&path, out.finish())
-        .map_err(|e| crate::Error(format!("{}: {e}", path.display())))
+    crate::write_file_atomic(&path, &out.finish())
 }
 
 fn read_si(dir: &Path, name: &str, id: &[u8; ID_LEN]) -> Result<SegmentInfo> {
