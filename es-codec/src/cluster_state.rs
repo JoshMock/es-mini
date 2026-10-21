@@ -311,7 +311,7 @@ pub fn write_state(
     SegmentInfos {
         id: [2; 16],
         generation: 1,
-        lucene_version: (10, 0, 0),
+        lucene_version: crate::segment_infos::LUCENE_VERSION,
         index_created_major: 10,
         version: 1,
         counter: 1,

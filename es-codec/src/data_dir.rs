@@ -48,7 +48,7 @@ pub fn write_empty_data_dir(
         SegmentInfos {
             id: [1; 16],
             generation: 1,
-            lucene_version: (10, 0, 0),
+            lucene_version: crate::segment_infos::LUCENE_VERSION,
             index_created_major: 10,
             version: 1,
             counter: 0,
@@ -333,7 +333,7 @@ mod tests {
         SegmentInfos {
             id: [1; 16],
             generation: 2,
-            lucene_version: (10, 0, 0),
+            lucene_version: crate::segment_infos::LUCENE_VERSION,
             index_created_major: 10,
             version: 2,
             counter: 1,

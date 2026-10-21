@@ -20,6 +20,9 @@ const MIN_SUPPORTED_MAJOR: i32 = 10;
 /// (major, minor, bugfix)
 pub type Version = (i32, i32, i32);
 
+/// Lucene version stamped on everything es-mini writes (the 10.5.1 fixture).
+pub const LUCENE_VERSION: Version = (10, 5, 1);
+
 #[derive(Debug, Clone)]
 pub struct SegmentInfo {
     pub id: [u8; ID_LEN],

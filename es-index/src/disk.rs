@@ -517,7 +517,7 @@ fn write_snapshot(data_dir: &Path, indices: &Indices) -> es_codec::Result<()> {
         SegmentInfos {
             id: [1; 16],
             generation: 2,
-            lucene_version: (10, 0, 0),
+            lucene_version: es_codec::segment_infos::LUCENE_VERSION,
             index_created_major: 10,
             version: 2,
             counter: 1,

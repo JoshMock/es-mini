@@ -95,12 +95,15 @@ pub fn write_segment(dir: &Path, s: &NewSegment) -> Result<SegmentCommitInfo> {
         codec: "Lucene104".into(),
         info: SegmentInfo {
             id: s.id,
-            version: (10, 0, 0),
-            min_version: Some((10, 0, 0)),
+            version: crate::segment_infos::LUCENE_VERSION,
+            min_version: Some(crate::segment_infos::LUCENE_VERSION),
             max_doc: s.max_doc,
             is_compound: true,
             has_blocks: false,
-            diagnostics: BTreeMap::new(),
+            diagnostics: BTreeMap::from([
+                ("source".into(), "flush".into()),
+                ("lucene.version".into(), "10.5.1".into()),
+            ]),
             files: ["cfs", "cfe", "si"]
                 .map(|e| format!("{}.{e}", s.name))
                 .into(),
@@ -251,7 +254,7 @@ mod tests {
         let infos = SegmentInfos {
             id: [8; 16],
             generation: 1,
-            lucene_version: (10, 0, 0),
+            lucene_version: crate::segment_infos::LUCENE_VERSION,
             index_created_major: 10,
             version: 1,
             counter: 1,
@@ -262,6 +265,10 @@ mod tests {
         let read = SegmentInfos::read_latest(&dir).unwrap();
         let r = SegmentReader::open(&dir, read.segments[0].clone()).unwrap();
         assert_eq!(r.max_doc(), 5);
+        let info = &read.segments[0].info;
+        assert_eq!(info.version, (10, 5, 1));
+        assert_eq!(info.diagnostics["source"], "flush");
+        assert_eq!(info.diagnostics["lucene.version"], "10.5.1");
         assert_eq!(r.stored_fields().unwrap(), stored);
         assert_eq!(r.terms("title").unwrap(), terms[0].1);
         let want = DocValues::Numbers(numeric[0].1.iter().map(|v| vec![*v]).collect());
