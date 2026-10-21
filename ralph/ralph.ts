@@ -52,7 +52,8 @@ const SUITES: Record<string, Suite> = {
       "from ralph/goals.txt only when its done-criteria hold, verified by a test you ran.",
   },
 };
-const ALL_FROZEN = Object.values(SUITES).flatMap((s) => s.frozen);
+/** Planning docs: scope changes are reserved for a human (see AGENTS.md "Unattended runs"). */
+const ALL_FROZEN = ["z_old", ...Object.values(SUITES).flatMap((s) => s.frozen)];
 const LISTS = Object.values(SUITES).map((s) => s.list);
 const MAX_CONSECUTIVE_REJECTIONS = 3;
 
