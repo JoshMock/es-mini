@@ -567,7 +567,8 @@ struct Searcher<'a> {
     field_stats: HashMap<String, (f64, f64)>,
     doc_freq: HashMap<(String, String), f64>,
     /// Resolved field types, so unmapped fields are sampled once per search.
-    kinds: RefCell<HashMap<String, Kind>>,
+    /// Per field: its kind, and whether a literal `x.keyword` source key overrides `x`.
+    kinds: RefCell<HashMap<String, (Kind, bool)>>,
 }
 
 const K1: f64 = 1.2;
@@ -586,27 +587,29 @@ impl<'a> Searcher<'a> {
     }
 
     fn kind<'f>(&self, field: &'f str) -> (Kind, &'f str) {
-        let mut path = source_path(self.index, field);
+        let path = |literal| match literal {
+            true => field,
+            false => source_path(self.index, field),
+        };
+        if let Some(&(k, literal)) = self.kinds.borrow().get(field) {
+            return (k, path(literal));
+        }
         // a literal `x.keyword` source key wins over the multi-field fallback
-        if path != field
+        let literal = source_path(self.index, field) != field
             && self
                 .index
                 .docs()
-                .any(|(_, d)| d.source.get(field).is_some())
-        {
-            path = field;
-        }
-        if let Some(k) = self.kinds.borrow().get(field) {
-            return (*k, path);
-        }
+                .any(|(_, d)| d.source.get(field).is_some());
         let sample = |f: &str| {
             self.index
                 .docs()
                 .find_map(|(_, d)| values(&d.source, f).first().map(|v| (*v).clone()))
         };
         let kind = resolve(self.index, field, sample);
-        self.kinds.borrow_mut().insert(field.to_owned(), kind);
-        (kind, path)
+        self.kinds
+            .borrow_mut()
+            .insert(field.to_owned(), (kind, literal));
+        (kind, path(literal))
     }
 
     /// Precomputes BM25 statistics for every scored (field, term) in the query.
