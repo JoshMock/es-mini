@@ -27,6 +27,34 @@ pub struct TermPostings {
     pub positions: Vec<Vec<Position>>,
 }
 
+impl TermPostings {
+    /// A term with docs-and-freqs postings and no positions.
+    pub fn new(term: Vec<u8>, docs: Vec<(u32, u32)>) -> Self {
+        let total_term_freq = docs.iter().map(|d| u64::from(d.1)).sum();
+        Self {
+            term,
+            total_term_freq,
+            docs,
+            positions: vec![],
+        }
+    }
+
+    /// Groups `(term, doc)` entries, sorted by term then doc, into one freq-1 posting per entry.
+    pub fn from_sorted(entries: impl IntoIterator<Item = (Vec<u8>, u32)>) -> Vec<Self> {
+        let mut terms: Vec<Self> = vec![];
+        for (term, doc) in entries {
+            match terms.last_mut() {
+                Some(t) if t.term == term => {
+                    t.docs.push((doc, 1));
+                    t.total_term_freq += 1;
+                }
+                _ => terms.push(Self::new(term, vec![(doc, 1)])),
+            }
+        }
+        terms
+    }
+}
+
 pub(crate) fn read_terms(r: &SegmentReader, field: &str) -> Result<Vec<TermPostings>> {
     let info = r.field(field)?;
     let attr = |k: &str| info.attributes.get(&format!("PerFieldPostingsFormat.{k}"));

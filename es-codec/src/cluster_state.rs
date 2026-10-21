@@ -277,23 +277,8 @@ pub fn write_state(
         v.sort();
         v
     };
-    let postings = |entries: Vec<(String, u32)>| -> Vec<TermPostings> {
-        let mut terms: Vec<TermPostings> = vec![];
-        for (term, doc) in entries {
-            match terms.last_mut() {
-                Some(t) if t.term == term.as_bytes() => {
-                    t.docs.push((doc, 1));
-                    t.total_term_freq += 1;
-                }
-                _ => terms.push(TermPostings {
-                    term: term.into_bytes(),
-                    total_term_freq: 1,
-                    docs: vec![(doc, 1)],
-                    positions: vec![],
-                }),
-            }
-        }
-        terms
+    let postings = |entries: Vec<(String, u32)>| {
+        TermPostings::from_sorted(entries.into_iter().map(|(t, d)| (t.into_bytes(), d)))
     };
     let mut type_entries: Vec<_> = (0..kinds.len())
         .map(|d| (kinds[d].to_string(), d as u32))

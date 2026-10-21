@@ -193,12 +193,7 @@ fn user_fields(
                 }
             }
             m.into_iter()
-                .map(|(term, docs)| TermPostings {
-                    term,
-                    total_term_freq: docs.iter().map(|d| u64::from(d.1)).sum(),
-                    docs,
-                    positions: vec![],
-                })
+                .map(|(term, docs)| TermPostings::new(term, docs))
                 .collect()
         };
         // Docs index a term once however often it repeats (docs-only postings have no freqs).
@@ -497,15 +492,7 @@ fn write_snapshot(data_dir: &Path, indices: &Indices) -> es_codec::Result<()> {
             .map(|(i, (id, _))| (encode_id(id), i as u32))
             .collect();
         ids.sort();
-        let ids: Vec<_> = ids
-            .into_iter()
-            .map(|(term, doc)| TermPostings {
-                term,
-                total_term_freq: 1,
-                docs: vec![(doc, 1)],
-                positions: vec![],
-            })
-            .collect();
+        let ids = TermPostings::from_sorted(ids);
         let user = user_fields(&ix.mappings, &docs, &fields);
         let mut all_fields = fields.clone();
         all_fields.extend(user.fields);

@@ -273,12 +273,7 @@ mod tests {
         let postings = |mut m: BTreeMap<Vec<u8>, Vec<(u32, u32)>>| -> Vec<TermPostings> {
             std::mem::take(&mut m)
                 .into_iter()
-                .map(|(term, docs)| TermPostings {
-                    term,
-                    total_term_freq: docs.iter().map(|d| u64::from(d.1)).sum(),
-                    docs,
-                    positions: vec![],
-                })
+                .map(|(term, docs)| TermPostings::new(term, docs))
                 .collect()
         };
         let mut ids = BTreeMap::new();
