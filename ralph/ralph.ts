@@ -49,7 +49,8 @@ const SUITES: Record<string, Suite> = {
     howTo: () =>
       "Read z_old/EXECUTION.md for the task's full definition of done. Make one coherent, verified step " +
       "of progress per iteration (it is fine if the goal needs several iterations). Delete the goal's line " +
-      "from ralph/goals.txt only when its done-criteria hold, verified by a test you ran.",
+      "from ralph/goals.txt only when its done-criteria hold. The loop then runs the goal's Done-check " +
+      "command itself and rejects the iteration if it fails, so run that command yourself first.",
   },
 };
 /** Planning docs: scope changes are reserved for a human (see AGENTS.md "Unattended runs"). */
@@ -137,7 +138,11 @@ Rules:${COMMON_RULES(model)}`;
 }
 
 /** Returns the reason an iteration is rejected, or undefined if it holds. */
-function verify(start: string, model: string, opts: { requireCommit: boolean; mustRemove?: [string, string] }) {
+function verify(
+  start: string,
+  model: string,
+  opts: { requireCommit: boolean; mustRemove?: [string, string]; goal?: [string, string] },
+) {
   if (git("status", "--porcelain")) return "uncommitted changes left behind";
   const head = git("rev-parse", "HEAD");
   if (head === start) return opts.requireCommit ? "no commit made" : undefined;
@@ -151,6 +156,12 @@ function verify(start: string, model: string, opts: { requireCommit: boolean; mu
     if (added.length) return `added entries to ${list}: ${added.join(", ")}`;
   }
   if (opts.mustRemove && lines(opts.mustRemove[0]).includes(opts.mustRemove[1])) return "target still listed";
+  // A goal whose line was deleted must pass its own done-check, run here rather than trusted.
+  if (opts.goal && !lines(opts.goal[0]).includes(opts.goal[1])) {
+    const cmd = opts.goal[1].match(/Done-check: `([^`]+)`/)?.[1];
+    if (!cmd) return "goal removed, but it has no Done-check to verify it";
+    if (spawnSync("sh", ["-c", cmd], { cwd: repo, stdio: "inherit" }).status !== 0) return `goal removed, but its Done-check failed: ${cmd}`;
+  }
   const check = spawnSync("scripts/check.sh", [], { cwd: repo, stdio: "inherit" });
   if (check.status !== 0) return "scripts/check.sh failed";
   return undefined;
@@ -224,6 +235,7 @@ outer: for (const name of suiteNames) {
     const ok = await iterate(`${name}: ${id}`, (m) => prompt(suite, id, m), {
       requireCommit: true,
       mustRemove: suite.kind === "xfail" ? [suite.list, id] : undefined,
+      goal: suite.kind === "goal" ? [suite.list, id] : undefined,
     });
     if (dryRun) break outer;
     if (ok) {
