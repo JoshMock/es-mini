@@ -146,7 +146,10 @@ pub async fn search(
     let as_int = params
         .get("rest_total_hits_as_int")
         .is_some_and(|v| v == "true");
-    let track = params.get("track_total_hits").map(String::as_str);
+    let track = params
+        .get("track_total_hits")
+        .or(req.track_total_hits.as_ref())
+        .map(String::as_str);
     let limit = match track {
         Some("true" | "-1") => None,
         None if as_int => None,

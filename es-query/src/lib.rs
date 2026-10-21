@@ -565,13 +565,16 @@ pub struct SearchRequest {
     pub from: usize,
     pub size: usize,
     pub sort: Vec<SortField>,
+    /// Body `track_total_hits` (`true`, `false` or a number) as the URL-parameter spelling.
+    pub track_total_hits: Option<String>,
 }
 
 impl SearchRequest {
     pub fn parse(body: &Value) -> Result<Self, String> {
         if let Some(k) = body.as_object().and_then(|o| {
-            o.keys()
-                .find(|k| !["query", "from", "size", "sort"].contains(&k.as_str()))
+            o.keys().find(|k| {
+                !["query", "from", "size", "sort", "track_total_hits"].contains(&k.as_str())
+            })
         }) {
             return Err(format!("Unknown key for a START_OBJECT in [{k}]."));
         }
@@ -586,8 +589,14 @@ impl SearchRequest {
             Some(Value::Array(a)) => a.iter().map(parse_sort).collect::<Result<_, _>>()?,
             Some(s) => vec![parse_sort(s)?],
         };
+        let track_total_hits = match body.get("track_total_hits") {
+            None => None,
+            Some(v) if v.is_boolean() || v.is_i64() => Some(v.to_string()),
+            Some(_) => return Err("[track_total_hits] must be a boolean or a number".into()),
+        };
         Ok(Self {
             query,
+            track_total_hits,
             from: usize_of("from", 0)?,
             size: usize_of("size", 10)?,
             sort,

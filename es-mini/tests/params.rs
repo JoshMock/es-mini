@@ -240,4 +240,28 @@ async fn total_hits_defaults_to_tracking_up_to_10000() {
     )
     .await;
     assert_eq!(r["hits"]["total"], json!(10001));
+    let r = send(
+        "POST",
+        "/big/_search?size=0",
+        r#"{"track_total_hits":true}"#.into(),
+    )
+    .await;
+    assert_eq!(
+        r["hits"]["total"],
+        json!({"value": 10001, "relation": "eq"})
+    );
+    let r = send(
+        "POST",
+        "/big/_search?size=0",
+        r#"{"track_total_hits":5}"#.into(),
+    )
+    .await;
+    assert_eq!(r["hits"]["total"], json!({"value": 5, "relation": "gte"}));
+    let r = send(
+        "POST",
+        "/big/_search?size=0&track_total_hits=true",
+        r#"{"track_total_hits":false}"#.into(),
+    )
+    .await;
+    assert_eq!(r["hits"]["total"]["value"], json!(10001));
 }
