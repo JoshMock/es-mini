@@ -1,21 +1,6 @@
 # YAML tests es-mini deliberately does not implement, grouped by reason.
 # The runner skips these. Changing this file requires a human decision; Ralph may not edit it.
 
-# Index open/close (POST /{index}/_close, _open) is not a supported endpoint; this file's setup closes an index.
-indices.get/10_basic.yml/Get index infos
-indices.get/10_basic.yml/Get index infos by default shouldn't return index creation date and version in readable format
-indices.get/10_basic.yml/Get index infos should work for wildcards
-indices.get/10_basic.yml/Get index infos with human settings should return index creation date and version in readable format
-indices.get/10_basic.yml/Missing index should return empty object if ignore_unavailable
-indices.get/10_basic.yml/Missing index should throw an Error
-indices.get/10_basic.yml/Should return an exception when querying invalid indices
-indices.get/10_basic.yml/Should return empty object if allow_no_indices
-indices.get/10_basic.yml/Should return only selected features
-indices.get/10_basic.yml/Should return test_index_2 and test_index_3 if expand_wildcards=open,closed
-indices.get/10_basic.yml/Should return test_index_2 if expand_wildcards=open
-indices.get/10_basic.yml/Should return test_index_3 if expand_wildcards=closed
-indices.get/10_basic.yml/Should throw error if allow_no_indices=false
-
 # GET /{index}/_source/{id} is not a supported endpoint.
 get_source/15_default_values.yml/Default values
 get_source/60_realtime_refresh.yml/Realtime

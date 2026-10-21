@@ -19,6 +19,7 @@ Indices:
 - `GET /{index}`, `HEAD /{index}`
 - `PUT /{index}/_settings`, `GET /{index}/_settings`
 - `GET /{index}/_mapping`
+- `POST /{index}/_close`, `POST /{index}/_open` (closed indices keep metadata and settings but reject document reads, writes, and searches)
 
 Aliases:
 - `PUT`/`POST`/`DELETE /{index}/_alias/{name}` (and `_aliases/{name}`)
