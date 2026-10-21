@@ -222,9 +222,11 @@ pub fn parse_query(v: &Value) -> Result<Query, String> {
             }
             Ok(Query::Range {
                 field: field.clone(),
-                gt: get("gt"),
+                // ES keeps the last of gt/gte (and lt/lte) parsed; serde_json sorts keys, so
+                // the inclusive bound stands in for "last". ponytail: enable preserve_order for true order.
+                gt: get("gte").map_or_else(|| get("gt"), |_| None),
                 gte: get("gte"),
-                lt: get("lt"),
+                lt: get("lte").map_or_else(|| get("lt"), |_| None),
                 lte: get("lte"),
             })
         }

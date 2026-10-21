@@ -109,6 +109,14 @@ fn range() {
 }
 
 #[test]
+fn range_gte_overrides_gt_and_lte_overrides_lt() {
+    let q = json!({"query": {"range": {"n": {"gt": 7, "gte": 5}}}});
+    assert_eq!(sorted(ids(q)), ["1", "2", "4"]);
+    let q = json!({"query": {"range": {"n": {"lt": 5, "lte": 5, "gte": 5}}}});
+    assert_eq!(ids(q), ["1"]);
+}
+
+#[test]
 fn bool_clauses() {
     let q = json!({"query": {"bool": {
         "must": [{"match": {"title": "dog"}}],
