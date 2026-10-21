@@ -88,15 +88,27 @@ pub fn check_footer(file: &[u8]) -> Result<()> {
     Ok(())
 }
 
+const CRC_TABLE: [u32; 256] = {
+    let mut t = [0u32; 256];
+    let mut i = 0;
+    while i < 256 {
+        let mut c = i as u32;
+        let mut k = 0;
+        while k < 8 {
+            c = (c >> 1) ^ (0xedb8_8320 & (c & 1).wrapping_neg());
+            k += 1;
+        }
+        t[i] = c;
+        i += 1;
+    }
+    t
+};
+
 /// CRC-32 (IEEE), as java.util.zip.CRC32.
 pub fn crc32(data: &[u8]) -> u32 {
-    // ponytail: bitwise CRC, about 8x slower than a table; fine for checksumming at open
     let mut crc = !0u32;
     for &b in data {
-        crc ^= b as u32;
-        for _ in 0..8 {
-            crc = (crc >> 1) ^ (0xedb8_8320 & (crc & 1).wrapping_neg());
-        }
+        crc = (crc >> 8) ^ CRC_TABLE[((crc ^ b as u32) & 0xff) as usize];
     }
     !crc
 }
