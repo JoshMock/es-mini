@@ -46,6 +46,7 @@ pub enum ResolveError {
     IndexNotFound(String),
     /// An alias over several indices without exactly one write index.
     NoWriteIndex(String),
+    IndexClosed(String),
 }
 
 /// One concrete index to read, with the filter of the alias it was reached through.
@@ -121,8 +122,33 @@ pub fn resolve_read<'a>(indices: &'a Indices, expr: &str) -> Result<Vec<Target>,
         .collect())
 }
 
+/// Resolves an expression for document reads and searches, which closed indices refuse: a
+/// closed index named directly (or through an alias) is an error, and wildcards skip closed
+/// indices, like ES's default `expand_wildcards=open`.
+// ponytail: a list mixing names and wildcards errors on any closed target, not only named ones
+pub fn resolve_data(indices: &Indices, expr: &str) -> Result<Vec<Target>, ResolveError> {
+    let targets = resolve_read(indices, expr)?;
+    let wildcards_only = expr
+        .split(',')
+        .map(str::trim)
+        .all(|p| p == "_all" || p.contains('*'));
+    let is_closed = |t: &Target| indices[&t.index].closed;
+    match targets.iter().find(|t| is_closed(t)) {
+        Some(t) if !wildcards_only => Err(ResolveError::IndexClosed(t.index.clone())),
+        _ => Ok(targets.into_iter().filter(|t| !is_closed(t)).collect()),
+    }
+}
+
 /// Resolves a write target: an index (existing or to be auto-created) or an alias's write index.
 pub fn resolve_write(indices: &Indices, name: &str) -> Result<String, ResolveError> {
+    let target = resolve_write_target(indices, name)?;
+    match indices.get(&target) {
+        Some(i) if i.closed => Err(ResolveError::IndexClosed(target)),
+        _ => Ok(target),
+    }
+}
+
+fn resolve_write_target(indices: &Indices, name: &str) -> Result<String, ResolveError> {
     if indices.contains_key(name) {
         return Ok(name.to_owned());
     }
@@ -249,6 +275,32 @@ mod tests {
         assert_eq!(
             resolve_write(&all, "filtered"),
             Err(ResolveError::NoWriteIndex("filtered".into()))
+        );
+    }
+
+    #[test]
+    fn data_resolution_rejects_named_closed_indices_and_skips_wildcard_ones() {
+        let mut all = indices();
+        all.get_mut("logs-1").unwrap().closed = true;
+        let closed = || Err(ResolveError::IndexClosed("logs-1".into()));
+        assert_eq!(resolve_data(&all, "logs-1"), closed());
+        assert_eq!(
+            resolve_data(&all, "logs"),
+            closed(),
+            "an alias names its indices"
+        );
+        assert_eq!(names(&resolve_data(&all, "logs-*").unwrap()), ["logs-2"]);
+        assert_eq!(resolve_data(&all, "_all").unwrap().len(), 2);
+        // Metadata reads still see closed indices.
+        assert_eq!(names(&resolve_read(&all, "logs-1").unwrap()), ["logs-1"]);
+        assert_eq!(
+            resolve_write(&all, "logs-1"),
+            Err(ResolveError::IndexClosed("logs-1".into()))
+        );
+        all.get_mut("logs-2").unwrap().closed = true;
+        assert_eq!(
+            resolve_write(&all, "logs"),
+            Err(ResolveError::IndexClosed("logs-2".into()))
         );
     }
 

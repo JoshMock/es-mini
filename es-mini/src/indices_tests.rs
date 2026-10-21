@@ -230,3 +230,72 @@ async fn open_acknowledges_existing_index() {
     let (s, _) = call(&app, Method::POST, "/nope/_open", None).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn closed_indices_reject_data_operations_but_keep_metadata() {
+    let app = app();
+    call(&app, Method::PUT, "/idx/_doc/1", Some(json!({"a": 1}))).await;
+    call(&app, Method::PUT, "/other/_doc/1", Some(json!({"a": 2}))).await;
+    let (s, r) = call(&app, Method::POST, "/idx/_close", None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(r["indices"], json!({"idx": {"closed": true}}));
+
+    for (m, uri, body) in [
+        (Method::GET, "/idx/_doc/1", None),
+        (Method::PUT, "/idx/_doc/2", Some(json!({}))),
+        (
+            Method::POST,
+            "/idx/_update/1",
+            Some(json!({"doc": {"b": 1}})),
+        ),
+        (Method::DELETE, "/idx/_doc/1", None),
+        (Method::POST, "/idx/_search", None),
+        (Method::POST, "/idx/_count", None),
+    ] {
+        let (s, r) = call(&app, m, uri, body).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{uri}");
+        assert_eq!(r["error"]["type"], "index_closed_exception", "{uri}");
+        assert_eq!(
+            (&r["error"]["reason"], &r["error"]["index"]),
+            (&json!("closed"), &json!("idx")),
+            "{uri}"
+        );
+    }
+    let (s, r) = call(
+        &app,
+        Method::POST,
+        "/_query",
+        Some(json!({"query": "FROM idx"})),
+    )
+    .await;
+    assert_eq!(
+        (s, &r["error"]["type"]),
+        (StatusCode::BAD_REQUEST, &json!("index_closed_exception"))
+    );
+
+    // Wildcards skip closed indices.
+    let (_, r) = call(&app, Method::POST, "/*/_count", None).await;
+    assert_eq!(r["count"], 1);
+
+    // Metadata and settings still work while closed.
+    assert_eq!(
+        call(&app, Method::GET, "/idx", None).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        call(&app, Method::GET, "/idx/_mapping", None).await.0,
+        StatusCode::OK
+    );
+    let (s, _) = call(
+        &app,
+        Method::PUT,
+        "/idx/_settings",
+        Some(json!({"index": {"number_of_replicas": 0}})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+
+    call(&app, Method::POST, "/idx/_open", None).await;
+    let (s, r) = call(&app, Method::GET, "/idx/_doc/1", None).await;
+    assert_eq!((s, &r["_source"]), (StatusCode::OK, &json!({"a": 1})));
+}

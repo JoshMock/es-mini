@@ -57,7 +57,7 @@ pub async fn search(
         );
     }
     let indices = state.read().expect("lock poisoned");
-    let resolved = aliases::resolve_read(&indices, &name)?;
+    let resolved = aliases::resolve_data(&indices, &name)?;
     let targets = targets(&indices, &resolved);
     let r = es_query::search_many(&targets, &req).map_err(AppError::ParsingException)?;
     let hits: Vec<Value> = r
@@ -162,7 +162,7 @@ pub async fn count(
             .map_err(AppError::ParsingException)?,
     };
     let indices = state.read().expect("lock poisoned");
-    let resolved = aliases::resolve_read(&indices, &name)?;
+    let resolved = aliases::resolve_data(&indices, &name)?;
     let n = es_query::count_many(&targets(&indices, &resolved), &query)
         .map_err(AppError::ParsingException)?;
     let resp = json!({"count": n, "_shards": shards()});
@@ -181,6 +181,7 @@ pub async fn esql(State(state): State<AppState>, body: Bytes) -> Result<Json<Val
     let r = esql::run(&state.read().expect("lock poisoned"), query).map_err(|e| match e {
         EsqlError::Parse(m) => AppError::ParsingException(m),
         EsqlError::Verification(m) => AppError::Verification(m),
+        EsqlError::IndexClosed(i) => AppError::IndexClosed(i),
     })?;
     Ok(Json(json!({
         "took": start.elapsed().as_millis() as u64,

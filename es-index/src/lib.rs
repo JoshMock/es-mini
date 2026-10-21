@@ -186,6 +186,8 @@ pub struct Index {
     pub settings: Settings,
     pub mappings: Mappings,
     pub aliases: BTreeMap<String, aliases::Alias>,
+    /// Closed indices keep their metadata but reject document reads, writes, and searches.
+    pub closed: bool,
     docs: HashMap<String, Document>,
     // ponytail: sources of updated/deleted docs, kept for BM25 stats like Lucene's unmerged
     // segments; real merges drop them, which this never does

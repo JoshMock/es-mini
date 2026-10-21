@@ -20,6 +20,8 @@ pub enum EsqlError {
     Parse(String),
     /// Rendered by ES as `verification_exception`.
     Verification(String),
+    /// A source names a closed index (`index_closed_exception`).
+    IndexClosed(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -489,11 +491,12 @@ pub fn run(indices: &BTreeMap<String, Index>, query: &str) -> Result<Response, E
     }
     .query()?;
     let unknown_index = |e| match e {
+        ResolveError::IndexClosed(i) => EsqlError::IndexClosed(i),
         ResolveError::IndexNotFound(i) | ResolveError::NoWriteIndex(i) => {
             EsqlError::Verification(format!("Unknown index [{i}]"))
         }
     };
-    let targets = aliases::resolve_read(indices, &sources.join(",")).map_err(unknown_index)?;
+    let targets = aliases::resolve_data(indices, &sources.join(",")).map_err(unknown_index)?;
     if targets.is_empty() {
         return Err(EsqlError::Verification(format!(
             "Unknown index [{}]",

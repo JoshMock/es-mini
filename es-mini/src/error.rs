@@ -12,6 +12,7 @@ pub enum AppError {
     /// Write to a non-alias with `require_alias` set.
     RequireAlias(String),
     IndexExists(String),
+    IndexClosed(String),
     /// Removing or reading aliases that do not exist.
     AliasesNotFound(Vec<String>),
     InvalidAliasName {
@@ -40,6 +41,12 @@ impl AppError {
     /// Status and the `error` object (with `root_cause`) of the ES envelope.
     pub fn parts(self) -> (StatusCode, Value) {
         let (status, kind, reason, index) = match self {
+            Self::IndexClosed(i) => (
+                StatusCode::BAD_REQUEST,
+                "index_closed_exception",
+                "closed".into(),
+                Some(i),
+            ),
             Self::AliasesNotFound(a) => (
                 StatusCode::NOT_FOUND,
                 "aliases_not_found_exception",
@@ -147,6 +154,7 @@ impl From<es_index::aliases::ResolveError> for AppError {
         use es_index::aliases::ResolveError;
         match e {
             ResolveError::IndexNotFound(i) => Self::IndexNotFound(i),
+            ResolveError::IndexClosed(i) => Self::IndexClosed(i),
             ResolveError::NoWriteIndex(a) => Self::IllegalArgument(format!(
                 "no write index is defined for alias [{a}]. The write index may be explicitly disabled using is_write_index=false or the alias points to multiple indices without one being designated as a write index"
             )),

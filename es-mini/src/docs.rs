@@ -73,7 +73,7 @@ fn write<T>(
 
 /// The one concrete index a single-document read targets.
 fn single_index(indices: &es_index::Indices, name: &str) -> Result<String, AppError> {
-    let targets = aliases::resolve_read(indices, name)?;
+    let targets = aliases::resolve_data(indices, name)?;
     match targets.as_slice() {
         [t] => Ok(t.index.clone()),
         [] => Err(AppError::IndexNotFound(name.to_owned())),

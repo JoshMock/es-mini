@@ -318,14 +318,27 @@ pub async fn put_settings(
     put_settings_on(state, name, params, body)
 }
 
-// ponytail: closed state isn't modelled; this only validates the target and acknowledges
+/// Marks indices closed (or open) and returns their names.
+fn set_closed(
+    state: &AppState,
+    name: &str,
+    params: &HashMap<String, String>,
+    closed: bool,
+) -> Result<Vec<String>, AppError> {
+    let mut indices = state.write().expect("lock poisoned");
+    let names = read_indices(&indices, name, params)?;
+    for n in &names {
+        indices.get_mut(n).expect("resolved index exists").closed = closed;
+    }
+    Ok(names)
+}
+
 pub async fn close(
     State(state): State<AppState>,
     Path(name): Path<String>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, AppError> {
-    let indices = state.read().expect("lock poisoned");
-    let closed: Map<String, Value> = read_indices(&indices, &name, &params)?
+    let closed: Map<String, Value> = set_closed(&state, &name, &params, true)?
         .into_iter()
         .map(|n| (n, json!({"closed": true})))
         .collect();
@@ -339,8 +352,7 @@ pub async fn open(
     Path(name): Path<String>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, AppError> {
-    let indices = state.read().expect("lock poisoned");
-    read_indices(&indices, &name, &params)?;
+    set_closed(&state, &name, &params, false)?;
     Ok(Json(
         json!({"acknowledged": true, "shards_acknowledged": true}),
     ))
