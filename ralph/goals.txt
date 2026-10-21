@@ -1,4 +1,3 @@
 # Ordered goals for the Ralph loop's `goals` suite. One line each; an iteration deletes a line
 # only when that goal's done-criteria hold. The loop then runs the line's Done-check itself and
 # rejects the iteration if it fails. Later goals assume earlier ones are done.
-debt-read-from-segments: indices opened from a data directory are served from their Lucene segments instead of copying every document into memory (es-index disk.rs), and term/match/range/bool queries on them use postings, doc values and points instead of scanning sources (es-query). Add es-index/tests/disk_memory.rs proving opening a 20000-doc directory does not load all _source values. Done-check: `cargo test -p es-index --test disk_memory && cargo test -p es-mini --test disk_parity && cargo test -p es-mini --test fixture_parity`
