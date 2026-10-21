@@ -136,12 +136,12 @@ pub struct GlobalMetadata {
     pub term: i32,
 }
 
-/// Writes a fresh `<data>/_state` Lucene index (inverse of [`read_indices`]): one single-page
-/// document for the global metadata, one per index and one per distinct mapping. The `type`
-/// field is indexed (not stored), as Elasticsearch finds each kind of document through it.
 /// Allocation id of every index's shard 0 in written data directories.
 pub const ALLOCATION_ID: &str = "esminiAllocationId00A";
 
+/// Writes a fresh `<data>/_state` Lucene index (inverse of [`read_indices`]): one single-page
+/// document for the global metadata, one per index and one per distinct mapping. The `type`
+/// field is indexed (not stored), as Elasticsearch finds each kind of document through it.
 pub fn write_state(
     data_dir: &Path,
     global: &GlobalMetadata,

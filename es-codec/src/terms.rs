@@ -176,7 +176,6 @@ fn decode_terms(
     err(format!("field {field} has no terms"))
 }
 
-/// `TrieReader.load` for the root node: the file pointer of the root block in `.tim`.
 /// Writes the terms dictionary and docs-only/freqs postings of `fields` (no positions): one leaf block per field. Lucene's writer caps
 /// leaf blocks at 48 terms for lookup speed; its reader accepts any count.
 ///
@@ -299,6 +298,7 @@ pub fn write_terms(
 
 const FOOTER_LEN: i64 = 16;
 
+/// `TrieReader.load` for the root node: the file pointer of the root block in `.tim`.
 fn trie_root_output_fp(tip: &[u8], start: usize, end: usize, root: usize) -> Result<u64> {
     let Some(node) = start.checked_add(root) else {
         return err("trie root extends past the index");
