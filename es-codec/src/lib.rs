@@ -7,6 +7,7 @@ pub mod cluster_state;
 pub mod codec_util;
 pub mod compound;
 pub mod data_dir;
+mod direct_monotonic;
 pub mod doc_values;
 pub mod field_infos;
 pub mod inflate;

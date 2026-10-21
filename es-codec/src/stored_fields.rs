@@ -1,7 +1,7 @@
 //! Stored fields (`.fdt`, Lucene90StoredFieldsFormat BEST_SPEED: LZ4 with preset dictionary).
 use crate::{
     Result, SegmentReader, codec_util,
-    doc_values::write_direct_monotonic,
+    direct_monotonic::write_direct_monotonic,
     err,
     input::{DataInput, zigzag},
     lz4,
