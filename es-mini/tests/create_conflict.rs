@@ -20,11 +20,12 @@ async fn call(app: &axum::Router, method: &str, uri: &str, body: Value) -> (u16,
 }
 
 #[tokio::test]
-async fn failed_create_leaves_mappings_alone() {
+async fn failed_create_still_maps_new_fields() {
+    // Elasticsearch 9.5.5 applies the dynamic mapping update before the version conflict.
     let app = es_mini::app();
     call(&app, "PUT", "/c/_doc/1", json!({"a": 1})).await;
     let (s, _) = call(&app, "PUT", "/c/_create/1", json!({"a": 1, "b": "x"})).await;
     assert_eq!(s, 409);
     let (_, m) = call(&app, "GET", "/c/_mapping", json!({})).await;
-    assert!(m["c"]["mappings"]["properties"].get("b").is_none());
+    assert_eq!(m["c"]["mappings"]["properties"]["b"]["type"], "text");
 }

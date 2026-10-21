@@ -146,9 +146,6 @@ pub fn put_or_create(
                 "failed to parse: The total number of objects across all arrays in a document has exceeded the allowed limit of [{limit}]."
             )));
         }
-        if create && let Err(v) = i.create_check(id) {
-            return Ok(Err(v));
-        }
         i.map_dynamic(&source);
         Ok(match create {
             true => i.create(id, source),
