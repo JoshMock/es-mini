@@ -4,26 +4,55 @@ use crate::{
     CompoundFile, Result, SegmentCommitInfo, codec_util, err, input::DataInput, output::Output,
     segment_infos::radix36,
 };
-use std::{collections::BTreeMap, path::Path};
+use std::{borrow::Cow, collections::BTreeMap, path::Path};
 
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub enum IndexOptions {
-    None,
-    Docs,
-    DocsAndFreqs,
-    DocsAndFreqsAndPositions,
-    DocsAndFreqsAndPositionsAndOffsets,
-    DocsAndCustomFreqs,
+    None = 0,
+    Docs = 1,
+    DocsAndFreqs = 2,
+    DocsAndFreqsAndPositions = 3,
+    DocsAndFreqsAndPositionsAndOffsets = 4,
+    DocsAndCustomFreqs = 5,
+}
+
+impl TryFrom<u8> for IndexOptions {
+    type Error = u8;
+    fn try_from(b: u8) -> std::result::Result<Self, u8> {
+        use IndexOptions::*;
+        [
+            None,
+            Docs,
+            DocsAndFreqs,
+            DocsAndFreqsAndPositions,
+            DocsAndFreqsAndPositionsAndOffsets,
+            DocsAndCustomFreqs,
+        ]
+        .get(b as usize)
+        .copied()
+        .ok_or(b)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DocValuesType {
-    None,
-    Numeric,
-    Binary,
-    Sorted,
-    SortedSet,
-    SortedNumeric,
+    None = 0,
+    Numeric = 1,
+    Binary = 2,
+    Sorted = 3,
+    SortedSet = 4,
+    SortedNumeric = 5,
+}
+
+impl TryFrom<u8> for DocValuesType {
+    type Error = u8;
+    fn try_from(b: u8) -> std::result::Result<Self, u8> {
+        use DocValuesType::*;
+        [None, Numeric, Binary, Sorted, SortedSet, SortedNumeric]
+            .get(b as usize)
+            .copied()
+            .ok_or(b)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -93,23 +122,20 @@ pub fn read_field_infos(
     seg: &SegmentCommitInfo,
     cfs: &CompoundFile,
 ) -> Result<Vec<FieldInfo>> {
-    let owned;
-    let (file, suffix) = match seg.field_infos_gen {
-        -1 => match seg.info.is_compound {
-            true => (
-                cfs.file(".fnm")
-                    .ok_or_else(|| crate::Error(format!("{} has no .fnm", seg.name)))?,
-                String::new(),
-            ),
-            false => return err("non-compound segments are not supported yet"),
-        },
-        g => {
-            let suffix = radix36(g as u64);
-            owned = crate::read_file(&dir.join(format!("{}_{suffix}.fnm", seg.name)))?;
-            (owned.as_slice(), suffix)
+    let (file, suffix): (Cow<[u8]>, String) = if seg.field_infos_gen == -1 {
+        if !seg.info.is_compound {
+            return err("non-compound segments are not supported yet");
         }
+        let file = cfs
+            .file(".fnm")
+            .ok_or_else(|| crate::Error(format!("{} has no .fnm", seg.name)))?;
+        (Cow::Borrowed(file), String::new())
+    } else {
+        let suffix = radix36(seg.field_infos_gen as u64);
+        let file = crate::read_file(&dir.join(format!("{}_{suffix}.fnm", seg.name)))?;
+        (Cow::Owned(file), suffix)
     };
-    parse_field_infos(file, &seg.info.id, &suffix)
+    parse_field_infos(&file, &seg.info.id, &suffix)
 }
 
 fn parse_field_infos(file: &[u8], id: &[u8; 16], suffix: &str) -> Result<Vec<FieldInfo>> {
@@ -134,24 +160,10 @@ fn parse_field_infos(file: &[u8], id: &[u8; 16], suffix: &str) -> Result<Vec<Fie
         if bits & 0xc0 != 0 || (format < FORMAT_PARENT_FIELD && bits & 0xf0 != 0) {
             return err(format!("invalid field bits {bits:#b} for {name}"));
         }
-        let index_options = match input.read_byte()? {
-            0 => IndexOptions::None,
-            1 => IndexOptions::Docs,
-            2 => IndexOptions::DocsAndFreqs,
-            3 => IndexOptions::DocsAndFreqsAndPositions,
-            4 => IndexOptions::DocsAndFreqsAndPositionsAndOffsets,
-            5 => IndexOptions::DocsAndCustomFreqs,
-            b => return err(format!("invalid index options {b} for {name}")),
-        };
-        let doc_values = match input.read_byte()? {
-            0 => DocValuesType::None,
-            1 => DocValuesType::Numeric,
-            2 => DocValuesType::Binary,
-            3 => DocValuesType::Sorted,
-            4 => DocValuesType::SortedSet,
-            5 => DocValuesType::SortedNumeric,
-            b => return err(format!("invalid doc values type {b} for {name}")),
-        };
+        let index_options = IndexOptions::try_from(input.read_byte()?)
+            .or_else(|b| err(format!("invalid index options {b} for {name}")))?;
+        let doc_values = DocValuesType::try_from(input.read_byte()?)
+            .or_else(|b| err(format!("invalid doc values type {b} for {name}")))?;
         let doc_values_skip_index = format >= FORMAT_DOCVALUE_SKIPPER && input.read_byte()? == 1;
         let dv_gen = input.read_long()?;
         let attributes = input.read_map_of_strings()?;
@@ -220,6 +232,16 @@ pub fn write_field_infos(fields: &[FieldInfo], id: &[u8; 16], suffix: &str) -> V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enum_discriminants_match_lucene_bytes() {
+        for b in 0..=5u8 {
+            assert_eq!(IndexOptions::try_from(b).unwrap() as u8, b);
+            assert_eq!(DocValuesType::try_from(b).unwrap() as u8, b);
+        }
+        assert_eq!(IndexOptions::try_from(6), Err(6));
+        assert_eq!(DocValuesType::try_from(6), Err(6));
+    }
 
     #[test]
     fn write_then_read_round_trips() {
