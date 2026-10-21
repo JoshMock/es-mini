@@ -109,11 +109,13 @@ mod tests {
         assert_eq!(read(&dir.join("manifest-3.st")).unwrap(), manifest);
 
         let data = fixture.parent().unwrap();
-        let shard = data.join("indices/D9r2xux8T1aNWB7zpBLShg/0/_state");
+        let uuid = std::fs::read_to_string(data.join("../../expected/index_uuid")).unwrap();
+        let uuid = uuid.trim();
+        let shard = data.join("indices").join(uuid).join("0/_state");
         assert_eq!(manifest_doc(0, 0, -1, &[]), manifest);
         assert_eq!(node_doc("rQYqacfoQ7uXdXc7tkJ9vQ", 9050599, 9111000), node);
         assert_eq!(
-            shard_state_doc("D9r2xux8T1aNWB7zpBLShg", "LZN8helzS5G-ZGRov0Geww"),
+            shard_state_doc(uuid, "LZN8helzS5G-ZGRov0Geww"),
             read(&shard.join("state-0.st")).unwrap()
         );
         assert_eq!(
