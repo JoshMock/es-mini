@@ -79,30 +79,41 @@ pub fn is_alias(indices: &Indices, name: &str) -> bool {
 
 /// Resolves a read expression to concrete indices, in name order. Missing literal names fail;
 /// wildcards may match nothing.
-// ponytail: no `-exclusion` patterns, hidden indices, or expand_wildcards options
-pub fn resolve_read<'a>(indices: &'a Indices, expr: &str) -> Result<Vec<Target>, ResolveError> {
+// ponytail: no hidden indices or expand_wildcards options
+pub fn resolve_read(indices: &Indices, expr: &str) -> Result<Vec<Target>, ResolveError> {
     // Per index: None once reached unfiltered, else the filters of the aliases that reached it.
     let mut hits: BTreeMap<&str, Option<Vec<Value>>> = BTreeMap::new();
-    let mut add = |index: &'a str, filter: Option<&Value>| {
+    fn add<'a>(
+        hits: &mut BTreeMap<&'a str, Option<Vec<Value>>>,
+        index: &'a str,
+        filter: Option<&Value>,
+    ) {
         let entry = hits.entry(index).or_insert_with(|| Some(vec![]));
         match (entry.as_mut(), filter) {
             (Some(fs), Some(f)) => fs.push(f.clone()),
             (_, None) => *entry = None,
             (None, Some(_)) => {}
         }
-    };
-    for part in expr.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+    }
+    let parts = expr.split(',').map(str::trim).filter(|p| !p.is_empty());
+    for (i, part) in parts.enumerate() {
+        if let (true, Some(excluded)) = (i > 0, part.strip_prefix('-')) {
+            hits.retain(|name, _| {
+                !glob(excluded, name) && !indices[*name].aliases.keys().any(|a| glob(excluded, a))
+            });
+            continue;
+        }
         let pattern = if part == "_all" { "*" } else { part };
         let wildcard = pattern.contains('*');
         let mut found = false;
         for (name, index) in indices {
             if glob(pattern, name) {
-                add(name, None);
+                add(&mut hits, name, None);
                 found = true;
             }
             for (alias, meta) in &index.aliases {
                 if glob(pattern, alias) {
-                    add(name, meta.filter.as_ref());
+                    add(&mut hits, name, meta.filter.as_ref());
                     found = true;
                 }
             }
@@ -208,6 +219,20 @@ mod tests {
 
     fn names(t: &[Target]) -> Vec<&str> {
         t.iter().map(|t| t.index.as_str()).collect()
+    }
+
+    #[test]
+    fn exclusion_removes_matching_indices() {
+        let all = indices();
+        let names = |e| -> Vec<String> {
+            resolve_read(&all, e)
+                .unwrap()
+                .into_iter()
+                .map(|t| t.index)
+                .collect()
+        };
+        assert_eq!(names("logs-*,-logs-1"), ["logs-2"]);
+        assert_eq!(names("*,-logs"), ["other"]);
     }
 
     #[test]
