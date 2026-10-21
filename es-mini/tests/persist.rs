@@ -74,3 +74,30 @@ async fn documents_survive_restart() {
     assert_eq!(call(&app, "HEAD", "/empty", json!({})).await, Value::Null);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn a_write_that_cannot_be_saved_fails() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = std::env::temp_dir().join(format!("esm-persist-ro-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let app = es_mini::app_persisted(&root.join("data")).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let req = Request::builder()
+        .method("PUT")
+        .uri("/idx")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(res.status(), 500);
+    let body: Value =
+        serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["status"], 500);
+    assert!(
+        body["error"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("not saved")
+    );
+}

@@ -343,12 +343,81 @@ fn meta_attr(field: &str, key: &str, meta: &[es_codec::field_infos::FieldInfo]) 
         .clone()
 }
 
-/// Replaces `data_dir` with a snapshot of `indices`: cluster metadata plus, per index, one
-/// segment holding every live document's `_id`, `_source`, `_version` and `_seq_no`.
-// ponytail: whole-directory rewrite per save and no postings for user fields (they are rebuilt
-// from `_source` on open); incremental segments and full field indexing when writes get large
-// or when Elasticsearch itself must search these files.
+/// The directory beside `data_dir` used while swapping snapshots (`<data_dir>.esmini-<kind>`).
+fn sibling(data_dir: &Path, kind: &str) -> std::path::PathBuf {
+    let name = data_dir
+        .file_name()
+        .map_or_else(Default::default, |n| n.to_string_lossy().into_owned());
+    data_dir.with_file_name(format!("{name}.esmini-{kind}"))
+}
+
+fn io(e: std::io::Error) -> es_codec::Error {
+    es_codec::Error(e.to_string())
+}
+
+fn remove_dir_if_exists(dir: &Path) -> es_codec::Result<()> {
+    match std::fs::remove_dir_all(dir) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(io(e)),
+        _ => Ok(()),
+    }
+}
+
+fn copy_recursive(from: &Path, to: &Path) -> es_codec::Result<()> {
+    if from.is_dir() {
+        std::fs::create_dir_all(to).map_err(io)?;
+        for entry in std::fs::read_dir(from).map_err(io)? {
+            let entry = entry.map_err(io)?;
+            copy_recursive(&entry.path(), &to.join(entry.file_name()))?;
+        }
+        return Ok(());
+    }
+    std::fs::copy(from, to).map(drop).map_err(io)
+}
+
+/// Finishes or undoes a [`save`] interrupted by a crash: restores the previous snapshot if it was
+/// moved aside but not replaced, and discards any half-written new one.
+pub fn recover(data_dir: &Path) -> es_codec::Result<()> {
+    let old = sibling(data_dir, "old");
+    if !data_dir.exists() && old.exists() {
+        std::fs::rename(&old, data_dir).map_err(io)?;
+    }
+    remove_dir_if_exists(&sibling(data_dir, "new"))?;
+    remove_dir_if_exists(&old)
+}
+
+/// Replaces `data_dir` with a snapshot of `indices` without ever leaving it half-written: the
+/// snapshot is built beside it, then swapped in by two renames that [`recover`] can complete.
+/// Other top-level entries (an Elasticsearch node's `nodes/`, `node.lock`, ...) carry over.
+/// Saves are serialized process-wide.
+// ponytail: rewrites every index on every save, O(total docs) per write; incremental segments
+// when write throughput matters
 pub fn save(data_dir: &Path, indices: &Indices) -> es_codec::Result<()> {
+    static SAVING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one_at_a_time = SAVING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (new, old) = (sibling(data_dir, "new"), sibling(data_dir, "old"));
+    remove_dir_if_exists(&new)?;
+    std::fs::create_dir_all(&new).map_err(io)?;
+    if data_dir.is_dir() {
+        for entry in std::fs::read_dir(data_dir).map_err(io)? {
+            let entry = entry.map_err(io)?;
+            if !matches!(entry.file_name().to_str(), Some("_state" | "indices")) {
+                copy_recursive(&entry.path(), &new.join(entry.file_name()))?;
+            }
+        }
+    }
+    write_snapshot(&new, indices)?;
+    if data_dir.exists() {
+        std::fs::rename(data_dir, &old).map_err(io)?;
+    }
+    std::fs::rename(&new, data_dir).map_err(io)?;
+    remove_dir_if_exists(&old)
+}
+
+/// Writes cluster metadata plus, per index, one segment holding every live document's `_id`,
+/// `_source`, `_version` and `_seq_no` into the empty directory `data_dir`.
+fn write_snapshot(data_dir: &Path, indices: &Indices) -> es_codec::Result<()> {
     use es_codec::{
         cluster_state::{GlobalMetadata, IndexMetadata},
         data_dir::write_empty_data_dir,
@@ -357,14 +426,6 @@ pub fn save(data_dir: &Path, indices: &Indices) -> es_codec::Result<()> {
         terms::TermPostings,
         uid::encode_id,
     };
-    for sub in ["_state", "indices"] {
-        match std::fs::remove_dir_all(data_dir.join(sub)) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                return Err(es_codec::Error(e.to_string()));
-            }
-            _ => {}
-        }
-    }
     let uuid = |name: &str| {
         let h = name.bytes().fold(0xcbf29ce484222325u64, |h, b| {
             (h ^ u64::from(b)).wrapping_mul(0x100000001b3)

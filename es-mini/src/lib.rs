@@ -11,6 +11,7 @@ mod search;
 use axum::{
     Json, Router,
     extract::{Query, State},
+    response::IntoResponse,
     routing::{get, post, put},
 };
 use es_index::Indices;
@@ -119,6 +120,7 @@ pub fn app_with(indices: Indices) -> Router {
 /// The full HTTP API over the data directory `dir` (created if missing): its indices are loaded
 /// now, and every successful write request saves them back before it is answered.
 pub fn app_persisted(dir: &std::path::Path) -> Result<Router, String> {
+    es_index::disk::recover(dir).map_err(|e| e.0)?;
     let indices = if dir.join("_state").is_dir() {
         es_index::disk::open(dir).map_err(|e| e.0)?
     } else {
@@ -136,14 +138,21 @@ pub fn app_persisted(dir: &std::path::Path) -> Result<Router, String> {
                         .iter()
                         .any(|r| path.ends_with(r));
                 let res = next.run(req).await;
-                if !reads && res.status().is_success() {
-                    // ponytail: saved while serving; a failed save is logged, not surfaced
-                    let state = state.read().unwrap();
-                    if let Err(e) = es_index::disk::save(&dir, &state) {
+                if reads || !res.status().is_success() {
+                    return res;
+                }
+                let saved = es_index::disk::save(&dir, &state.read().expect("lock poisoned"));
+                match saved {
+                    Ok(()) => res,
+                    // ponytail: the change stays applied in memory; a later successful save persists it
+                    Err(e) => {
                         tracing::error!("saving {}: {e}", dir.display());
+                        let reason = format!("the change was applied but not saved to {}: {e}", dir.display());
+                        let error = json!({"type": "io_exception", "reason": reason});
+                        let body = json!({"error": {"root_cause": [error.clone()], "type": "io_exception", "reason": error["reason"]}, "status": 500});
+                        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response()
                     }
                 }
-                res
             }
         },
     )))
