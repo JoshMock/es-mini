@@ -266,3 +266,13 @@ fn leaf_and_bool_queries_validate_parameters() {
         parse_query(&json!({"term": {"tag": {"value": "a", "case_insensitive": true}}})).is_ok()
     );
 }
+
+#[test]
+fn range_accepts_time_zone_and_relation() {
+    assert!(
+        parse_query(
+            &json!({"range": {"n": {"gte": 1, "time_zone": "+01:00", "relation": "within"}}})
+        )
+        .is_ok()
+    );
+}

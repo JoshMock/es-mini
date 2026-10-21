@@ -141,10 +141,21 @@ pub fn parse_query(v: &Value) -> Result<Query, String> {
         "range" => {
             let (field, p) = single_field(kind, body)?;
             let p = p.as_object().ok_or("[range] query malformed")?;
-            if let Some(k) = p
-                .keys()
-                .find(|k| !["gt", "gte", "lt", "lte", "format", "boost"].contains(&k.as_str()))
-            {
+            if let Some(k) = p.keys().find(|k| {
+                ![
+                    "gt",
+                    "gte",
+                    "lt",
+                    "lte",
+                    "format",
+                    "boost",
+                    "_name",
+                    // ponytail: accepted but ignored; dates compare without a time zone
+                    "time_zone",
+                    "relation",
+                ]
+                .contains(&k.as_str())
+            }) {
                 return Err(format!("[range] query does not support [{k}]"));
             }
             // ponytail: `uuuu` bounds become ISO strings (compared lexicographically); upper bounds
