@@ -126,41 +126,16 @@ pub fn write_segment(dir: &Path, s: &NewSegment) -> Result<SegmentCommitInfo> {
 /// `_source`, `_version`, `_seq_no`, `_primary_term`, `__soft_deletes`. `_id` uses the
 /// `Lucene104` postings format (the reader keys off the attribute), not ES's bloom filter.
 pub fn es_meta_fields() -> Vec<FieldInfo> {
-    let attrs = |k: &str, v: &str| {
-        BTreeMap::from([
-            (format!("PerField{k}Format.format"), v.to_string()),
-            (format!("PerField{k}Format.suffix"), "0".to_string()),
-        ])
-    };
-    let base = |name: &str, number: i32| FieldInfo {
-        name: name.into(),
-        number,
-        store_term_vector: false,
-        omit_norms: false,
-        store_payloads: false,
-        soft_deletes: false,
-        parent: false,
-        index_options: IndexOptions::None,
-        doc_values: DocValuesType::None,
-        doc_values_skip_index: false,
-        dv_gen: -1,
-        attributes: BTreeMap::new(),
-        point_dimensions: 0,
-        point_index_dimensions: 0,
-        point_num_bytes: 0,
-        vector_dimension: 0,
-    };
+    let base = FieldInfo::new;
     let numeric = |name: &str, number: i32| FieldInfo {
         doc_values: DocValuesType::Numeric,
-        attributes: attrs("DocValues", "Lucene90"),
-        ..base(name, number)
+        ..base(name, number).with_formats(None, Some("Lucene90"))
     };
     vec![
         FieldInfo {
             omit_norms: true,
             index_options: IndexOptions::Docs,
-            attributes: attrs("Postings", "Lucene104"),
-            ..base("_id", 0)
+            ..base("_id", 0).with_formats(Some("Lucene104"), None)
         },
         base("_source", 1),
         numeric("_version", 2),
@@ -188,25 +163,11 @@ mod tests {
     };
 
     fn field(name: &str, number: i32) -> FieldInfo {
-        let attributes = [("format", "Lucene104"), ("suffix", "0")]
-            .map(|(k, v)| (format!("PerFieldPostingsFormat.{k}"), v.to_string()));
         FieldInfo {
-            name: name.into(),
-            number,
-            store_term_vector: false,
             omit_norms: true,
-            store_payloads: false,
-            soft_deletes: false,
-            parent: false,
             index_options: IndexOptions::DocsAndFreqs,
             doc_values: DocValuesType::Numeric,
-            doc_values_skip_index: false,
-            dv_gen: -1,
-            attributes: attributes.into(),
-            point_dimensions: 0,
-            point_index_dimensions: 0,
-            point_num_bytes: 0,
-            vector_dimension: 0,
+            ..FieldInfo::new(name, number).with_formats(Some("Lucene104"), None)
         }
     }
 

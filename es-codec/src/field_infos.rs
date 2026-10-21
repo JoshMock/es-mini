@@ -46,6 +46,44 @@ pub struct FieldInfo {
     pub vector_dimension: i32,
 }
 
+impl FieldInfo {
+    /// A field with no indexing, doc values, points or vectors.
+    pub fn new(name: &str, number: i32) -> Self {
+        FieldInfo {
+            name: name.into(),
+            number,
+            store_term_vector: false,
+            omit_norms: false,
+            store_payloads: false,
+            soft_deletes: false,
+            parent: false,
+            index_options: IndexOptions::None,
+            doc_values: DocValuesType::None,
+            doc_values_skip_index: false,
+            dv_gen: -1,
+            attributes: BTreeMap::new(),
+            point_dimensions: 0,
+            point_index_dimensions: 0,
+            point_num_bytes: 0,
+            vector_dimension: 0,
+        }
+    }
+
+    /// Records the per-field postings and/or doc values format (suffix `0`) as Lucene's
+    /// `PerField*Format` attributes.
+    pub fn with_formats(mut self, postings: Option<&str>, doc_values: Option<&str>) -> Self {
+        for (kind, format) in [("Postings", postings), ("DocValues", doc_values)] {
+            if let Some(f) = format {
+                self.attributes
+                    .insert(format!("PerField{kind}Format.format"), f.into());
+                self.attributes
+                    .insert(format!("PerField{kind}Format.suffix"), "0".into());
+            }
+        }
+        self
+    }
+}
+
 const FORMAT_PARENT_FIELD: i32 = 1;
 const FORMAT_DOCVALUE_SKIPPER: i32 = 2;
 

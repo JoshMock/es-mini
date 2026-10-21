@@ -571,26 +571,12 @@ fn lowercase_ascii(input: &mut DataInput, len: usize) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::field_infos::DocValuesType;
 
     fn field(name: &str, number: i32, index_options: IndexOptions) -> FieldInfo {
         FieldInfo {
-            name: name.into(),
-            number,
-            store_term_vector: false,
             omit_norms: true,
-            store_payloads: false,
-            soft_deletes: false,
-            parent: false,
             index_options,
-            doc_values: DocValuesType::None,
-            doc_values_skip_index: false,
-            dv_gen: -1,
-            attributes: Default::default(),
-            point_dimensions: 0,
-            point_index_dimensions: 0,
-            point_num_bytes: 0,
-            vector_dimension: 0,
+            ..FieldInfo::new(name, number)
         }
     }
 
