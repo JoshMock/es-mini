@@ -47,6 +47,8 @@ pub enum ResolveError {
     /// An alias over several indices without exactly one write index.
     NoWriteIndex(String),
     IndexClosed(String),
+    /// A missing literal name that no index could have, e.g. one starting with `_`.
+    InvalidIndexName(String),
 }
 
 /// One concrete index to read, with the filter of the alias it was reached through.
@@ -106,6 +108,9 @@ pub fn resolve_read<'a>(indices: &'a Indices, expr: &str) -> Result<Vec<Target>,
             }
         }
         if !found && !wildcard {
+            if part.starts_with('_') {
+                return Err(ResolveError::InvalidIndexName(part.to_owned()));
+            }
             return Err(ResolveError::IndexNotFound(part.to_owned()));
         }
     }

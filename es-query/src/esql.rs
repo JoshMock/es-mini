@@ -492,7 +492,9 @@ pub fn run(indices: &BTreeMap<String, Index>, query: &str) -> Result<Response, E
     .query()?;
     let unknown_index = |e| match e {
         ResolveError::IndexClosed(i) => EsqlError::IndexClosed(i),
-        ResolveError::IndexNotFound(i) | ResolveError::NoWriteIndex(i) => {
+        ResolveError::IndexNotFound(i)
+        | ResolveError::NoWriteIndex(i)
+        | ResolveError::InvalidIndexName(i) => {
             EsqlError::Verification(format!("Unknown index [{i}]"))
         }
     };

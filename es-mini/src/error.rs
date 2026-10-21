@@ -155,6 +155,10 @@ impl From<es_index::aliases::ResolveError> for AppError {
         match e {
             ResolveError::IndexNotFound(i) => Self::IndexNotFound(i),
             ResolveError::IndexClosed(i) => Self::IndexClosed(i),
+            ResolveError::InvalidIndexName(index) => Self::InvalidIndexName {
+                index,
+                reason: "must not start with '_'.".into(),
+            },
             ResolveError::NoWriteIndex(a) => Self::IllegalArgument(format!(
                 "no write index is defined for alias [{a}]. The write index may be explicitly disabled using is_write_index=false or the alias points to multiple indices without one being designated as a write index"
             )),
