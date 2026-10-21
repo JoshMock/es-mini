@@ -404,3 +404,33 @@ fn date_range_compares_instants_not_strings() {
     assert_eq!(hits(json!({"gt": 1_717_200_000_000_i64})), ["c"]);
     assert_eq!(hits(json!({"lt": "2024-06-01T00:00:00Z"})), ["a"]);
 }
+
+#[test]
+fn terms_matches_any_value_with_constant_score() {
+    let q = json!({"query": {"terms": {"tag": ["animal", "Pet"]}}});
+    assert_eq!(sorted(ids(q.clone())), ["1", "2", "4"]);
+    let idx = index();
+    let r = search(&idx, &SearchRequest::parse(&q).unwrap());
+    assert!(r.hits.iter().all(|h| h.score == Some(1.0)));
+}
+
+#[test]
+fn ids_matches_document_ids() {
+    assert_eq!(
+        sorted(ids(json!({"query": {"ids": {"values": ["2", "3", "9"]}}}))),
+        ["2", "3"]
+    );
+}
+
+#[test]
+fn exists_matches_documents_with_a_value() {
+    assert_eq!(
+        sorted(ids(json!({"query": {"exists": {"field": "ok"}}}))),
+        ["1", "2"]
+    );
+    assert_eq!(
+        sorted(ids(json!({"query": {"exists": {"field": "nested"}}}))),
+        ["3"]
+    );
+    assert!(ids(json!({"query": {"exists": {"field": "nope"}}})).is_empty());
+}

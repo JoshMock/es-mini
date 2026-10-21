@@ -25,6 +25,9 @@ pub enum Query {
         field: String,
         prefix: String,
     },
+    Exists {
+        field: String,
+    },
     Range {
         field: String,
         gt: Option<Value>,
@@ -126,6 +129,27 @@ fn clauses(v: Option<&Value>) -> Result<Vec<Query>, String> {
     }
 }
 
+/// Any of `vals` in `field`, scored a constant 1.0 as ES's terms query is.
+fn constant_score_any(field: &str, vals: &[Value]) -> Query {
+    let term = |v: &Value| Query::Term {
+        field: field.to_owned(),
+        value: v.clone(),
+    };
+    Query::Bool {
+        must: vec![Query::MatchAll],
+        should: vec![],
+        must_not: vec![],
+        filter: vec![Query::Bool {
+            must: vec![],
+            should: vals.iter().map(term).collect(),
+            must_not: vec![],
+            filter: vec![],
+            min_should: 1,
+        }],
+        min_should: 0,
+    }
+}
+
 pub fn parse_query(v: &Value) -> Result<Query, String> {
     let (kind, body) = single_field("query", v)
         .map_err(|_| "query malformed, expected a single query type".to_owned())?;
@@ -171,6 +195,34 @@ pub fn parse_query(v: &Value) -> Result<Query, String> {
             Ok(Query::Term {
                 field: field.clone(),
                 value,
+            })
+        }
+        "terms" => {
+            let o = body.as_object().ok_or("[terms] query malformed")?;
+            let (field, vals) = o
+                .iter()
+                .find(|(k, _)| !matches!(k.as_str(), "boost" | "_name"))
+                .ok_or("[terms] query requires a field name, followed by array of terms")?;
+            let vals = vals
+                .as_array()
+                .ok_or("[terms] query does not support lookup or non-array values")?;
+            Ok(constant_score_any(field, vals))
+        }
+        "ids" => {
+            let o = body.as_object().ok_or("[ids] query malformed")?;
+            check_keys("ids", o, &["values", "boost", "_name"])?;
+            let vals = o.get("values").and_then(Value::as_array);
+            Ok(constant_score_any(
+                "_id",
+                vals.map_or(&[][..], Vec::as_slice),
+            ))
+        }
+        "exists" => {
+            let o = body.as_object().ok_or("[exists] query malformed")?;
+            check_keys("exists", o, &["field", "boost", "_name"])?;
+            let field = o.get("field").and_then(Value::as_str);
+            Ok(Query::Exists {
+                field: field.ok_or("required [field] not specified")?.to_owned(),
             })
         }
         "range" => {
@@ -572,6 +624,10 @@ impl<'a> Searcher<'a> {
                     .iter()
                     .any(|t| t.starts_with(prefix.as_str()))
                     .then_some(1.0)
+            }
+            Query::Exists { field } => {
+                let (_, path) = self.kind(field);
+                (!values(&d.source, path).is_empty()).then_some(1.0)
             }
             Query::Range {
                 field,
