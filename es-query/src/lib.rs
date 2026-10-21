@@ -617,10 +617,7 @@ impl<'a> Searcher<'a> {
         let (field, wanted) = match q {
             Query::Match { field, query, .. } => {
                 let (kind, _) = self.kind(field);
-                let t = match kind {
-                    Kind::Text => Analyzer::Standard.analyze(query),
-                    _ => vec![query.clone()],
-                };
+                let t = query_terms(kind, query);
                 (field, t)
             }
             Query::Term { field, value } => (field, vec![text(value)]),
@@ -692,10 +689,7 @@ impl<'a> Searcher<'a> {
             Query::MatchAll => Some(1.0),
             Query::Match { field, query, and } => {
                 let (kind, path) = self.kind(field);
-                let wanted = match kind {
-                    Kind::Text => Analyzer::Standard.analyze(query),
-                    _ => vec![query.clone()],
-                };
+                let wanted = query_terms(kind, query);
                 self.score_terms(field, kind, path, &wanted, *and, d)
             }
             Query::Term { field, value } if field == "_id" => (text(value) == id).then_some(1.0),
@@ -1102,4 +1096,12 @@ pub fn count_many(targets: &[Target], q: &Query) -> Result<usize, String> {
             .count();
     }
     Ok(n)
+}
+
+/// Terms a match query looks up: analyzed for text fields, verbatim otherwise.
+fn query_terms(kind: Kind, query: &str) -> Vec<String> {
+    match kind {
+        Kind::Text => Analyzer::Standard.analyze(query),
+        _ => vec![query.to_owned()],
+    }
 }
