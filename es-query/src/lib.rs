@@ -576,7 +576,16 @@ impl<'a> Searcher<'a> {
     }
 
     fn kind<'f>(&self, field: &'f str) -> (Kind, &'f str) {
-        let path = source_path(self.index, field);
+        let mut path = source_path(self.index, field);
+        // a literal `x.keyword` source key wins over the multi-field fallback
+        if path != field
+            && self
+                .index
+                .docs()
+                .any(|(_, d)| d.source.get(field).is_some())
+        {
+            path = field;
+        }
         if let Some(k) = self.kinds.borrow().get(field) {
             return (*k, path);
         }

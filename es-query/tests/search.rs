@@ -460,3 +460,11 @@ fn wildcard_matches_star_and_question_mark() {
     let t = ids(json!({"query": {"wildcard": {"title": "qu*k"}}}));
     assert_eq!(sorted(t), ["1", "2"]);
 }
+
+#[test]
+fn literal_dotted_keyword_source_field_is_not_shadowed() {
+    let mut i = Index::default();
+    i.put("1", json!({"foo": "a", "foo.keyword": "b"}));
+    let req = SearchRequest::parse(&json!({"query": {"term": {"foo.keyword": "b"}}})).unwrap();
+    assert_eq!(search(&i, &req).total, 1);
+}
