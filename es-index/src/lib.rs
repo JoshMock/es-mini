@@ -189,8 +189,9 @@ pub struct Index {
     /// Closed indices keep their metadata but reject document reads, writes, and searches.
     pub closed: bool,
     docs: HashMap<String, Document>,
-    // ponytail: sources of updated/deleted docs, kept for BM25 stats like Lucene's unmerged
-    // segments; real merges drop them, which this never does
+    /// Sources of updated/deleted docs, kept for BM25 statistics like Lucene's unmerged segments.
+    // ponytail: a "merge" drops them all once they pass a third of all physical docs, roughly
+    // ES's default merge policy; real merges are per segment and less predictable
     superseded: Vec<Value>,
     // ponytail: tombstones are never pruned; ES drops them after index.gc_deletes (60s)
     deleted_versions: HashMap<String, u64>,
@@ -249,7 +250,7 @@ impl Index {
             },
         );
         let result = if let Some(old) = old {
-            self.superseded.push(old.source);
+            self.supersede(old.source);
             DocResult::Updated
         } else {
             DocResult::Created
@@ -294,6 +295,14 @@ impl Index {
         self.docs.iter().map(|(id, d)| (id.as_str(), d))
     }
 
+    fn supersede(&mut self, old: Value) {
+        self.superseded.push(old);
+        // superseded / (live + superseded) > 1/3
+        if self.superseded.len() * 2 > self.docs.len() {
+            self.superseded.clear();
+        }
+    }
+
     /// Sources of documents that were updated or deleted (see `superseded`).
     pub fn superseded(&self) -> &[Value] {
         &self.superseded
@@ -306,7 +315,7 @@ impl Index {
         self.deleted_versions.insert(id.to_owned(), version);
         let result = match self.docs.remove(id) {
             Some(old) => {
-                self.superseded.push(old.source);
+                self.supersede(old.source);
                 DocResult::Deleted
             }
             None => DocResult::NotFound,
@@ -443,6 +452,20 @@ mod tests {
         assert_eq!(idx.delete("1"), w(DocResult::Deleted, 3, 2));
         assert!(idx.get("1").is_none());
         assert_eq!(idx.delete("1"), w(DocResult::NotFound, 4, 3));
+    }
+
+    #[test]
+    fn superseded_docs_are_dropped_past_a_third_of_all_docs() {
+        let mut idx = Index::default();
+        for id in ["a", "b", "c"] {
+            idx.put(id, json!({}));
+        }
+        idx.put("a", json!({"v": 2}));
+        // 1 superseded of 4 physical docs: kept, like an unmerged segment.
+        assert_eq!(idx.superseded().len(), 1);
+        idx.delete("b");
+        // 2 of 4 exceeds a third: "merged" away.
+        assert_eq!(idx.superseded().len(), 0);
     }
 
     #[test]
