@@ -57,6 +57,25 @@ const SUITES: Record<string, Suite> = {
 const ALL_FROZEN = ["z_old", ...Object.values(SUITES).flatMap((s) => s.frozen)];
 const LISTS = Object.values(SUITES).map((s) => s.list);
 const MAX_CONSECUTIVE_REJECTIONS = 3;
+const SONNET = "anthropic/claude-sonnet-5-5", OPUS = "anthropic/claude-opus-5-5";
+const REVIEW_MODEL = `${OPUS}:high`;
+/** Model per target (see models.md in the overnight bundle); --model overrides all. */
+function modelFor(suite: string, id: string): string {
+  if (flag("model")) return flag("model")!;
+  if (suite !== "goals") return `${SONNET}:low`;
+  if (/^(debt-full-postings|debt-incremental|debt-read-from-segments)/.test(id)) return `${OPUS}:high`;
+  return `${OPUS}:medium`;
+}
+
+/** `provider/model-id:thinking`, e.g. `anthropic/claude-opus-5-5:high`; see models.md. */
+async function resolveModel(spec: string, runtime: any) {
+  const [path, thinking = "low"] = spec.split(":");
+  const [provider, ...rest] = path.split("/");
+  const model = runtime.getModel(provider, rest.join("/"));
+  if (!model) throw new Error(`model ${path} is not available; check ~/.pi/agent settings and credentials`);
+  return { model, thinkingLevel: thinking };
+}
+
 
 const repo = resolve(import.meta.dirname, "..");
 const args = process.argv.slice(2);
@@ -168,10 +187,19 @@ function verify(
 }
 
 /** Runs one agent session with a time limit; returns the model name it used. */
-async function runAgent(makePrompt: (model: string) => string): Promise<string> {
+async function runAgent(makePrompt: (model: string) => string, spec: string): Promise<string> {
   // Imported lazily so --dry-run works without installing the SDK.
-  const { createAgentSession, SessionManager } = await import("@earendil-works/pi-coding-agent");
-  const { session } = await createAgentSession({ cwd: repo, sessionManager: SessionManager.inMemory() });
+  const { createAgentSession, SessionManager, ModelRuntime } = await import("@earendil-works/pi-coding-agent");
+  const modelRuntime = await ModelRuntime.create();
+  const { model: chosen, thinkingLevel } = await resolveModel(spec, modelRuntime);
+  console.log(`ralph: model ${spec}`);
+  const { session } = await createAgentSession({
+    cwd: repo,
+    sessionManager: SessionManager.inMemory(),
+    modelRuntime,
+    model: chosen,
+    thinkingLevel: thinkingLevel as any,
+  });
   const model = session.model?.name ?? session.model?.id ?? "unknown model";
   session.subscribe((event) => {
     if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
@@ -192,13 +220,13 @@ async function runAgent(makePrompt: (model: string) => string): Promise<string> 
 }
 
 /** Runs one iteration and rolls it back if verification fails; returns whether it was accepted. */
-async function iterate(label: string, makePrompt: (m: string) => string, opts: Parameters<typeof verify>[2]) {
+async function iterate(label: string, makePrompt: (m: string) => string, opts: Parameters<typeof verify>[2], spec: string) {
   const start = git("rev-parse", "HEAD");
   if (dryRun) {
     console.log(makePrompt("<model from the session>"));
     return false;
   }
-  const model = await runAgent(makePrompt);
+  const model = await runAgent(makePrompt, spec);
   const failure = verify(start, model, opts);
   if (failure) {
     // Only discards this iteration's own commits and edits; the tree was clean at start.
@@ -236,7 +264,7 @@ outer: for (const name of suiteNames) {
       requireCommit: true,
       mustRemove: suite.kind === "xfail" ? [suite.list, id] : undefined,
       goal: suite.kind === "goal" ? [suite.list, id] : undefined,
-    });
+    }, modelFor(name, id));
     if (dryRun) break outer;
     if (ok) {
       rejections = 0;
@@ -250,7 +278,7 @@ outer: for (const name of suiteNames) {
     } // goals are ordered: a rejected goal is retried, never skipped
     if (reviewEvery && accepted > 0 && accepted % reviewEvery === 0 && git("rev-parse", "HEAD") !== lastReview) {
       const since = lastReview;
-      await iterate(`review of ${since.slice(0, 8)}..HEAD`, (m) => reviewPrompt(since, m), { requireCommit: false });
+      await iterate(`review of ${since.slice(0, 8)}..HEAD`, (m) => reviewPrompt(since, m), { requireCommit: false }, flag("model") ?? REVIEW_MODEL);
       lastReview = git("rev-parse", "HEAD");
     }
   }
