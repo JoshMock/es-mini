@@ -147,7 +147,8 @@ pub fn resolve_data(indices: &Indices, expr: &str) -> Result<Vec<Target>, Resolv
     let wildcards_only = expr
         .split(',')
         .map(str::trim)
-        .all(|p| p == "_all" || p.contains('*'));
+        .enumerate()
+        .all(|(i, p)| p == "_all" || p.contains('*') || (i > 0 && p.starts_with('-')));
     let is_closed = |t: &Target| indices[&t.index].closed;
     match targets.iter().find(|t| is_closed(t)) {
         Some(t) if !wildcards_only => Err(ResolveError::IndexClosed(t.index.clone())),
@@ -321,6 +322,8 @@ mod tests {
         );
         assert_eq!(names(&resolve_data(&all, "logs-*").unwrap()), ["logs-2"]);
         assert_eq!(resolve_data(&all, "_all").unwrap().len(), 2);
+        let excluded = resolve_data(&all, "*,-other").unwrap();
+        assert_eq!(names(&excluded), ["logs-2"], "an exclusion names nothing");
         // Metadata reads still see closed indices.
         assert_eq!(names(&resolve_read(&all, "logs-1").unwrap()), ["logs-1"]);
         assert_eq!(
