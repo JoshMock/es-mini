@@ -42,9 +42,16 @@ pub fn write_points(
             .count();
         let leaf = data.0.len() as i64;
         data.vint(values.len() as i32);
-        data.byte(32); // doc ids as plain ints
-        for i in &order {
-            data.bytes(&(pairs[*i].0 as i32).to_le_bytes());
+        let ids: Vec<u32> = order.iter().map(|i| pairs[*i].0).collect();
+        if ids.windows(2).all(|w| w[1] == w[0] + 1) {
+            data.byte(254); // CONTIGUOUS_ID: the run starting at one doc id
+            data.vint(ids[0] as i32);
+        } else {
+            // ponytail: Lucene also packs ids as 16/21/24-bit or a bitset; plain ints read the same.
+            data.byte(32);
+            for id in &ids {
+                data.bytes(&(*id as i32).to_le_bytes());
+            }
         }
         data.vint(prefix as i32);
         data.bytes(&min[..prefix]);
@@ -105,5 +112,49 @@ mod tests {
         assert_eq!(sortable_bytes(4, 8), [0x80, 0, 0, 0, 0, 0, 0, 4]);
         assert_eq!(sortable_bytes(-1, 4), [0x7f, 0xff, 0xff, 0xff]);
         assert!(sortable_bytes(-5, 8) < sortable_bytes(3, 8));
+    }
+
+    /// Elasticsearch's own `_seq_no` points, rebuilt from its doc values, must match byte for byte.
+    #[test]
+    fn seq_no_points_match_the_es_fixture() {
+        use crate::{SegmentInfos, SegmentReader, doc_values::DocValues};
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../fixtures/es-9.5.5/data/indices");
+        let mut checked = 0;
+        for e in std::fs::read_dir(dir).unwrap() {
+            let idx = e.unwrap().path().join("0/index");
+            let si = SegmentInfos::read_latest(&idx).unwrap();
+            for seg in &si.segments {
+                let r = SegmentReader::open(&idx, seg.clone()).unwrap();
+                let Ok(f) = r.field("_seq_no") else { continue };
+                if f.point_dimensions == 0 || seg.del_count > 0 {
+                    continue;
+                }
+                let Ok(DocValues::Numbers(nums)) = r.doc_values("_seq_no") else {
+                    continue;
+                };
+                let pairs: PointValues = nums
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(d, v)| v.iter().map(move |n| (d as u32, sortable_bytes(*n, 8))))
+                    .collect();
+                let (m, i, d) = write_points(&[(f.number, pairs)], &seg.info.id).unwrap();
+                let name = |ext: &str| {
+                    r.cfs
+                        .names()
+                        .find(|n| n.ends_with(ext))
+                        .unwrap()
+                        .to_string()
+                };
+                // Real segments also hold other point fields after `_seq_no`; compare its part.
+                let (m, i, d) = (&m[..m.len() - 36], &i[..i.len() - 16], &d[..d.len() - 16]);
+                for (ext, ours) in [(".kdm", m), (".kdi", i), (".kdd", d)] {
+                    let real = r.cfs.file(&name(ext)).unwrap();
+                    assert_eq!(&real[..ours.len()], ours, "{ext}");
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked > 0);
     }
 }
