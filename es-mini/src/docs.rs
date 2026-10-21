@@ -62,6 +62,9 @@ fn write<T>(
 ) -> Result<(T, u64, String), AppError> {
     let mut indices = state.write().expect("lock poisoned");
     let target = aliases::resolve_write(&indices, name)?;
+    if !indices.contains_key(&target) {
+        crate::indices::validate_index_name(&target)?;
+    }
     let index = indices.entry(target.clone()).or_insert_with(|| {
         let mut created = Index::default();
         created.settings.record_creation(&target);

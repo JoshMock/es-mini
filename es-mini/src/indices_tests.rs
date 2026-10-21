@@ -351,3 +351,27 @@ async fn new_indices_record_identity_and_creation_time() {
         b["auto"]["settings"]["index"]["uuid"]
     );
 }
+
+#[tokio::test]
+async fn invalid_index_names_are_rejected() {
+    let app = app();
+    for name in ["Upper", "-lead", "a%20b", "a%23b", "..", "a%2Cb"] {
+        let (s, r) = call(&app, Method::PUT, &format!("/{name}"), None).await;
+        assert_eq!(
+            (s, &r["error"]["type"]),
+            (
+                StatusCode::BAD_REQUEST,
+                &json!("invalid_index_name_exception")
+            ),
+            "{name}"
+        );
+    }
+    let (s, r) = call(&app, Method::PUT, "/Upper/_doc/1", Some(json!({}))).await;
+    assert_eq!(
+        (s, &r["error"]["type"]),
+        (
+            StatusCode::BAD_REQUEST,
+            &json!("invalid_index_name_exception")
+        )
+    );
+}

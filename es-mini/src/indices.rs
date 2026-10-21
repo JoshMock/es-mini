@@ -33,11 +33,50 @@ fn check_field_type(field: &str, spec: &Value) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Port of `MetadataCreateIndexService.validateIndexOrAliasName` (index-name rules).
+pub fn validate_index_name(name: &str) -> Result<(), AppError> {
+    let bad = |reason: String| AppError::InvalidIndexName {
+        index: name.to_owned(),
+        reason,
+    };
+    if name.contains(' ') {
+        return Err(bad("must not contain spaces".into()));
+    }
+    if name.contains('#') {
+        return Err(bad("must not contain '#'".into()));
+    }
+    if name.contains(':') {
+        return Err(bad("must not contain ':'".into()));
+    }
+    if name.starts_with(['_', '-', '+']) {
+        return Err(bad("must not start with '_', '-', or '+'".into()));
+    }
+    if name.len() > 255 {
+        return Err(bad(format!(
+            "index name is too long, ({} > 255)",
+            name.len()
+        )));
+    }
+    if name == "." || name == ".." {
+        return Err(bad("must not be '.' or '..'".into()));
+    }
+    if name.to_lowercase() != name {
+        return Err(bad("must be lowercase".into()));
+    }
+    if name.contains(['"', '*', '\\', '<', '|', ',', '>', '/', '?']) {
+        return Err(bad(
+            "must not contain the following characters [ , \", *, \\, <, |, ,, >, /, ?]".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub async fn create(
     State(state): State<AppState>,
     Path(name): Path<String>,
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
+    validate_index_name(&resolve_date_math(&name))?;
     let body = parse_body(&body)?;
     let mut index = Index::default();
     index.settings.record_creation(&name);
