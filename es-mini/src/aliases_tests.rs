@@ -293,3 +293,17 @@ async fn mapping_and_settings_resolve_expressions_like_get_index() {
         );
     }
 }
+
+#[tokio::test]
+async fn shards_total_counts_one_per_target_index() {
+    let app = setup().await;
+    for (m, uri) in [
+        (Method::POST, "/a,b/_search"),
+        (Method::POST, "/a,b/_count"),
+        (Method::POST, "/a,b/_refresh"),
+    ] {
+        let (_, r) = call(&app, m, uri, None).await;
+        assert_eq!(r["_shards"]["total"], 2, "{uri}");
+        assert_eq!(r["_shards"]["successful"], 2, "{uri}");
+    }
+}

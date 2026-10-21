@@ -88,9 +88,9 @@ const COUNT_PARAMS: [&str; 15] = [
     "terminate_after",
 ];
 
-// ponytail: one shard per target index is reported as a single shard
-fn shards() -> Value {
-    json!({"total": 1, "successful": 1, "skipped": 0, "failed": 0})
+// ponytail: every index has exactly one shard, so total is the number of targets
+pub(crate) fn shards(n: usize) -> Value {
+    json!({"total": n, "successful": n, "skipped": 0, "failed": 0})
 }
 
 pub async fn search_all(
@@ -198,7 +198,7 @@ pub async fn search(
     let resp = json!({
         "took": start.elapsed().as_millis() as u64,
         "timed_out": false,
-        "_shards": shards(),
+        "_shards": shards(targets.len()),
         "hits": hits
     });
     Ok(Json(resp))
@@ -256,7 +256,7 @@ pub async fn count(
     let resolved = crate::indices::data_targets(&indices, &name, &params)?;
     let n = es_query::count_many(&targets(&indices, &resolved), &query)
         .map_err(AppError::ParsingException)?;
-    let resp = json!({"count": n, "_shards": shards()});
+    let resp = json!({"count": n, "_shards": shards(resolved.len())});
     Ok(Json(resp))
 }
 

@@ -352,14 +352,13 @@ pub async fn refresh(
 ) -> Result<Json<Value>, AppError> {
     check(&uri, &params, &[])?;
     let mut indices = state.write().expect("lock poisoned");
-    for n in read_indices(&indices, &name, &params)? {
-        indices
-            .get_mut(&n)
-            .expect("resolved index exists")
-            .refresh();
+    let names = read_indices(&indices, &name, &params)?;
+    for n in &names {
+        indices.get_mut(n).expect("resolved index exists").refresh();
     }
+    let total = names.len();
     Ok(Json(
-        json!({"_shards": {"total": 1, "successful": 1, "failed": 0}}),
+        json!({"_shards": {"total": total, "successful": total, "failed": 0}}),
     ))
 }
 
