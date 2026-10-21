@@ -33,12 +33,24 @@ fn unframe(blob: &[u8]) -> Result<Vec<u8>> {
     }
 }
 
+/// Joins a blob's pages, checking they are numbered from 0 and only the last is flagged `last_page`.
+fn assemble(mut pages: Vec<(i32, bool, Vec<u8>)>) -> Result<Vec<u8>> {
+    pages.sort_by_key(|p| p.0);
+    let n = pages.len();
+    for (i, (page, last, _)) in pages.iter().enumerate() {
+        if *page != i as i32 || *last != (i + 1 == n) {
+            return err("cluster state blob has a missing, duplicate or misordered page");
+        }
+    }
+    unframe(&pages.into_iter().flat_map(|p| p.2).collect::<Vec<_>>())
+}
+
 /// Reads every index in `data_dir`, ordered by name.
 pub fn read_indices(data_dir: &Path) -> Result<Vec<IndexMetadata>> {
     let dir = data_dir.join("_state");
     // (page, bytes) per index uuid / mapping hash
-    let mut index_pages: BTreeMap<String, Vec<(i32, Vec<u8>)>> = BTreeMap::new();
-    let mut mapping_pages: BTreeMap<String, Vec<(i32, Vec<u8>)>> = BTreeMap::new();
+    let mut index_pages: BTreeMap<String, Vec<(i32, bool, Vec<u8>)>> = BTreeMap::new();
+    let mut mapping_pages: BTreeMap<String, Vec<(i32, bool, Vec<u8>)>> = BTreeMap::new();
     for seg in SegmentInfos::read_latest(&dir)?.segments {
         let reader = SegmentReader::open(&dir, seg)?;
         let live = reader.live_docs()?;
@@ -46,12 +58,13 @@ pub fn read_indices(data_dir: &Path) -> Result<Vec<IndexMetadata>> {
             if !live[doc] {
                 continue;
             }
-            let (mut key, mut page, mut data) = (None, 0, None);
+            let (mut key, mut page, mut last, mut data) = (None, 0, false, None);
             for (number, value) in fields {
                 match (reader.field_by_number(number)?.name.as_str(), value) {
                     ("index_uuid", StoredValue::String(s)) => key = Some((true, s)),
                     ("mapping_hash", StoredValue::String(s)) => key = Some((false, s)),
                     ("page", StoredValue::Int(p)) => page = p,
+                    ("last_page", StoredValue::Int(l)) => last = l != 0,
                     ("data", StoredValue::Bytes(b)) => data = Some(b),
                     _ => {}
                 }
@@ -64,13 +77,9 @@ pub fn read_indices(data_dir: &Path) -> Result<Vec<IndexMetadata>> {
             } else {
                 &mut mapping_pages
             };
-            pages.entry(key).or_default().push((page, data));
+            pages.entry(key).or_default().push((page, last, data));
         }
     }
-    let assemble = |mut pages: Vec<(i32, Vec<u8>)>| {
-        pages.sort_by_key(|p| p.0);
-        unframe(&pages.into_iter().flat_map(|p| p.1).collect::<Vec<_>>())
-    };
     let mut mappings = BTreeMap::new();
     for (hash, pages) in mapping_pages {
         let wrapper = assemble(pages)?;
@@ -96,8 +105,13 @@ pub fn read_indices(data_dir: &Path) -> Result<Vec<IndexMetadata>> {
         let settings = match meta.get("settings") {
             Some(Value::Object(s)) => s
                 .iter()
-                .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_owned())))
-                .collect(),
+                // list settings (arrays) are not modelled and stay dropped
+                .filter(|(_, v)| !matches!(v, Value::Array(_)))
+                .map(|(k, v)| match v.as_str() {
+                    Some(v) => Ok((k.clone(), v.to_owned())),
+                    None => err(format!("index {uuid} setting {k} is not a string")),
+                })
+                .collect::<Result<_>>()?,
             _ => BTreeMap::new(),
         };
         let mappings = meta
@@ -334,6 +348,13 @@ pub fn write_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn assemble_rejects_lost_pages() {
+        assert!(assemble(vec![(0, false, vec![1])]).is_err());
+        assert!(assemble(vec![(1, true, vec![1])]).is_err());
+        assert!(assemble(vec![(0, true, vec![1]), (0, true, vec![1])]).is_err());
+    }
 
     #[test]
     fn written_indices_read_back() {
