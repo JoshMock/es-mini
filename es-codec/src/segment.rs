@@ -91,7 +91,12 @@ impl SegmentReader {
 
     /// Every term of `field` in term order with its postings.
     pub fn terms(&self, field: &str) -> Result<Vec<terms::TermPostings>> {
-        terms::read_terms(self, field)
+        terms::read_terms(self, field, None)
+    }
+
+    /// One term of `field` with its docs and freqs (no positions), if the field has it.
+    pub fn term(&self, field: &str, term: &[u8]) -> Result<Option<terms::TermPostings>> {
+        Ok(terms::read_terms(self, field, Some(term))?.pop())
     }
 
     /// A field's doc values, from the field's latest doc values generation.

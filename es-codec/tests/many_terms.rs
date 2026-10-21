@@ -60,3 +60,14 @@ fn reads_a_multi_block_terms_dictionary() {
         .collect();
     assert_eq!(q, want_q);
 }
+
+#[test]
+fn looks_up_one_term_without_decoding_the_others() {
+    let seg = common::open("many-terms");
+    for (term, doc) in terms().into_iter().zip(0..) {
+        let got = seg.term("t", term.as_bytes()).unwrap().unwrap();
+        assert_eq!((got.term, got.docs), (term.into_bytes(), vec![(doc, 1)]));
+    }
+    assert_eq!(seg.term("t", b"absent").unwrap(), None);
+    assert_eq!(seg.term("q", b"q042").unwrap().unwrap().docs.len(), 1);
+}

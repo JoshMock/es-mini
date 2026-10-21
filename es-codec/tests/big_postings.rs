@@ -50,3 +50,13 @@ fn reads_postings_with_packed_blocks() {
         }
     }
 }
+
+#[test]
+fn looks_up_a_term_with_packed_blocks_and_no_positions() {
+    let seg = common::open("big-postings");
+    for (term, docs) in expected("text") {
+        let got = seg.term("text", term.as_bytes()).unwrap().unwrap();
+        assert_eq!(got.docs, docs, "{term}");
+        assert!(got.positions.is_empty());
+    }
+}

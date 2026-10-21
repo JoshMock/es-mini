@@ -55,7 +55,12 @@ impl TermPostings {
     }
 }
 
-pub(crate) fn read_terms(r: &SegmentReader, field: &str) -> Result<Vec<TermPostings>> {
+/// Every term of `field`, or only `want` (if present) and without positions.
+pub(crate) fn read_terms(
+    r: &SegmentReader,
+    field: &str,
+    want: Option<&[u8]>,
+) -> Result<Vec<TermPostings>> {
     let info = r.field(field)?;
     let attr = |k: &str| info.attributes.get(&format!("PerFieldPostingsFormat.{k}"));
     let (Some(format), Some(suffix)) = (attr("format"), attr("suffix")) else {
@@ -67,16 +72,20 @@ pub(crate) fn read_terms(r: &SegmentReader, field: &str) -> Result<Vec<TermPosti
     let suffix = format!("{format}_{suffix}");
     let file = |ext: &str| r.cfs_file(&format!("_{suffix}.{ext}"));
     // `.pos` and `.pay` exist only when some field has positions, or offsets or payloads.
+    let positions = |ext| match want {
+        None => file(ext).unwrap_or_default(),
+        Some(_) => Vec::new(),
+    };
     let files = TermFiles {
         tim: file("tim")?,
         tip: file("tip")?,
         tmd: file("tmd")?,
         doc: file("doc")?,
-        pos: file("pos").unwrap_or_default(),
-        pay: file("pay").unwrap_or_default(),
+        pos: positions("pos"),
+        pay: positions("pay"),
         psm: Vec::new(),
     };
-    decode_terms(&files, &r.seg.info.id, &suffix, &r.fields, info)
+    decode_terms(&files, &r.seg.info.id, &suffix, &r.fields, info, want)
 }
 
 /// The postings files of one segment's postings format instance.
@@ -98,6 +107,7 @@ fn decode_terms(
     suffix: &str,
     fields: &[FieldInfo],
     info: &FieldInfo,
+    want: Option<&[u8]>,
 ) -> Result<Vec<TermPostings>> {
     let field = info.name.as_str();
     let (tim, tip, tmd, doc, pos, pay) = (
@@ -162,11 +172,13 @@ fn decode_terms(
             pos,
             pay,
             info,
+            want,
+            terms: 0,
+            total_term_freq: 0,
             out: Vec::new(),
         };
         walker.block(root_block as usize, &[], 0)?;
-        let total: u64 = walker.out.iter().map(|t| t.total_term_freq).sum();
-        if walker.out.len() as i64 != num_terms || total != sum_total_term_freq as u64 {
+        if walker.terms != num_terms || walker.total_term_freq != sum_total_term_freq as u64 {
             return err(format!(
                 "terms of {field} do not match the committed statistics"
             ));
@@ -385,6 +397,12 @@ struct Walker<'a> {
     pos: &'a [u8],
     pay: &'a [u8],
     info: &'a FieldInfo,
+    /// The only term to decode postings for, without positions; `None` decodes every term.
+    // ponytail: still walks every block; seek through the `.tip` trie if lookups get slow
+    want: Option<&'a [u8]>,
+    /// Terms walked and their summed total term freq, checked against the field's statistics.
+    terms: i64,
+    total_term_freq: u64,
     out: Vec<TermPostings>,
 }
 
@@ -464,8 +482,16 @@ impl Walker<'_> {
                 self.decode_stats(stats, &mut state)?;
                 self.decode_postings(metas, &mut state, first_term)?;
                 first_term = false;
+                self.terms += 1;
+                self.total_term_freq += state.total_term_freq;
+                if self.want.is_some_and(|w| w != term) {
+                    continue;
+                }
                 let docs = self.docs(&state)?;
-                let positions = self.positions(&state, &docs)?;
+                let positions = match self.want {
+                    None => self.positions(&state, &docs)?,
+                    Some(_) => vec![],
+                };
                 self.out.push(TermPostings {
                     term,
                     total_term_freq: state.total_term_freq,
@@ -631,7 +657,7 @@ mod tests {
         let id = [5u8; 16];
         let files = write_terms(&[(&fa, &a), (&fb, &b)], &id, "Lucene104_0", &[]).unwrap();
         let fields = [fa.clone(), fb.clone()];
-        let read = |f| decode_terms(&files, &id, "Lucene104_0", &fields, f).unwrap();
+        let read = |f| decode_terms(&files, &id, "Lucene104_0", &fields, f, None).unwrap();
         assert_eq!(read(&fa), a);
         assert_eq!(read(&fb), b);
     }
