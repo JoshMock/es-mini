@@ -80,3 +80,25 @@ fn keyword_analyzer_is_identity() {
     );
     assert_eq!(Analyzer::Keyword.analyze(""), vec![""]);
 }
+
+#[test]
+fn emoji_zwj_sequence_is_one_token() {
+    let family = "👨\u{200d}👩\u{200d}👧";
+    assert_eq!(standard_tokenize(family), vec![family]);
+}
+
+#[test]
+fn hangul_syllables_are_one_token() {
+    assert_eq!(standard_tokenize("한국어 테스트"), vec!["한국어", "테스트"]);
+}
+
+#[test]
+fn max_token_length_boundary() {
+    let a255 = "a".repeat(255);
+    assert_eq!(standard_tokenize(&a255), vec![a255.as_str()]);
+    let a256 = "a".repeat(256);
+    assert_eq!(standard_tokenize(&a256), vec![&a256[..255], "a"]);
+    // 255 UTF-16 units: astral chars count as two.
+    let wide = "😀".repeat(128);
+    assert_eq!(standard_tokenize(&wide).concat().chars().count(), 128);
+}

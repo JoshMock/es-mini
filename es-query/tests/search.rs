@@ -503,3 +503,21 @@ fn error_kinds() {
     );
     assert_eq!(k(serde_json::json!({"bogus": 1})), ErrorKind::Parsing);
 }
+
+#[test]
+fn parse_query_error_messages() {
+    let err = |v: Value| parse_query(&v).unwrap_err().to_string();
+    assert_eq!(
+        err(json!({"match_all": {}, "term": {}})),
+        "query malformed, expected a single query type"
+    );
+    assert_eq!(
+        err(json!({"match": {"a": 1, "b": 2}})),
+        "[match] query malformed, expected a single field"
+    );
+    assert_eq!(err(json!({"terms": 1})), "[terms] query malformed");
+    assert_eq!(
+        err(json!({"match": {"a": {"query": "x", "operator": "xor"}}})),
+        "Unsupported defaultOperator [xor], can either be 'and' or 'or'"
+    );
+}
