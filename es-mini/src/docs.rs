@@ -175,6 +175,19 @@ fn require_alias(
     }
 }
 
+/// Applies the `require_alias` check before, and `refresh` after, a single-document write.
+fn with_write_params(
+    state: &AppState,
+    params: &HashMap<String, String>,
+    index: &str,
+    op: impl FnOnce() -> Reply,
+) -> Reply {
+    require_alias(state, params, index)?;
+    let mut reply = op()?;
+    force_refresh(state, params, index, &mut reply)?;
+    Ok(reply)
+}
+
 const WRITE_PARAMS: [&str; 14] = [
     "routing",
     "refresh",
@@ -200,11 +213,10 @@ pub async fn index_with_id(
     body: Bytes,
 ) -> Reply {
     params::check(&uri, &params, &WRITE_PARAMS)?;
-    require_alias(&state, &params, &index)?;
     let create = params.get("op_type").is_some_and(|o| o == "create");
-    let mut reply = put_or_create(&state, &index, &id, parse_json(&body)?, create)?;
-    force_refresh(&state, &params, &index, &mut reply)?;
-    Ok(reply)
+    with_write_params(&state, &params, &index, || {
+        put_or_create(&state, &index, &id, parse_json(&body)?, create)
+    })
 }
 
 pub async fn index_auto_id(
@@ -215,8 +227,9 @@ pub async fn index_auto_id(
     body: Bytes,
 ) -> Reply {
     params::check(&uri, &params, &WRITE_PARAMS)?;
-    require_alias(&state, &params, &index)?;
-    put_or_create(&state, &index, &auto_id(), parse_json(&body)?, true)
+    with_write_params(&state, &params, &index, || {
+        put_or_create(&state, &index, &auto_id(), parse_json(&body)?, true)
+    })
 }
 
 pub async fn create(
@@ -227,7 +240,9 @@ pub async fn create(
     body: Bytes,
 ) -> Reply {
     params::check(&uri, &params, &WRITE_PARAMS)?;
-    put_or_create(&state, &index, &id, parse_json(&body)?, true)
+    with_write_params(&state, &params, &index, || {
+        put_or_create(&state, &index, &id, parse_json(&body)?, true)
+    })
 }
 
 const GET_PARAMS: [&str; 11] = [
@@ -292,7 +307,7 @@ pub async fn delete(
     Query(params): Query<HashMap<String, String>>,
 ) -> Reply {
     params::check(&uri, &params, &DELETE_PARAMS)?;
-    delete_doc(&state, &index, &id)
+    with_write_params(&state, &params, &index, || delete_doc(&state, &index, &id))
 }
 
 pub fn delete_doc(state: &AppState, index: &str, id: &str) -> Reply {
@@ -324,10 +339,9 @@ pub async fn update(
     body: Bytes,
 ) -> Reply {
     params::check(&uri, &params, &UPDATE_PARAMS)?;
-    require_alias(&state, &params, &index)?;
-    let mut reply = update_doc(&state, &index, &id, &parse_json(&body)?)?;
-    force_refresh(&state, &params, &index, &mut reply)?;
-    Ok(reply)
+    with_write_params(&state, &params, &index, || {
+        update_doc(&state, &index, &id, &parse_json(&body)?)
+    })
 }
 
 pub fn update_doc(state: &AppState, index: &str, id: &str, body: &Value) -> Reply {

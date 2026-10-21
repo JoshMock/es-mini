@@ -223,3 +223,29 @@ async fn non_realtime_get_sees_refreshed_docs_only() {
         json!(true)
     );
 }
+
+#[tokio::test]
+async fn every_write_endpoint_honors_refresh_and_require_alias() {
+    let app = app();
+    let doc = || Some(json!({"a": 1}));
+    for (m, uri) in [
+        (Method::POST, "/idx/_doc?refresh=true"),
+        (Method::PUT, "/idx/_create/c?refresh=true"),
+        (Method::DELETE, "/idx/_doc/c?refresh=true"),
+    ] {
+        let (_, r) = call(&app, m, uri, doc()).await;
+        assert_eq!(r["forced_refresh"], json!(true), "{uri}");
+    }
+    for (m, uri) in [
+        (Method::POST, "/new/_doc?require_alias=true"),
+        (Method::PUT, "/new/_create/c?require_alias=true"),
+        (Method::DELETE, "/new/_doc/c?require_alias=true"),
+    ] {
+        let (s, r) = call(&app, m, uri, doc()).await;
+        assert_eq!(
+            (s, &r["error"]["type"]),
+            (StatusCode::NOT_FOUND, &json!("index_not_found_exception")),
+            "{uri}"
+        );
+    }
+}
