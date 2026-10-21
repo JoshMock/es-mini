@@ -40,6 +40,25 @@ pub enum FieldMapping {
     },
 }
 
+impl FieldMapping {
+    /// The ES|QL-facing type name (`text`, `keyword`, `long`, `integer`, `double`, `boolean`, `date`).
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Self::Text | Self::TextKeyword { .. } => "text",
+            Self::Keyword { .. } => "keyword",
+            Self::Long => "long",
+            Self::Integer | Self::Short | Self::Byte => "integer",
+            Self::Double | Self::Float => "double",
+            Self::Boolean => "boolean",
+            Self::Date { .. } => "date",
+        }
+    }
+
+    pub fn is_numeric(&self) -> bool {
+        matches!(self.type_name(), "long" | "integer" | "double")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Mappings {
     /// The `_source` mapping section, e.g. `{"enabled": false}`.
@@ -587,6 +606,15 @@ pub type Indices = BTreeMap<String, Index>;
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn field_mapping_type_name_and_numeric() {
+        assert_eq!(FieldMapping::Short.type_name(), "integer");
+        assert_eq!(FieldMapping::Float.type_name(), "double");
+        assert!(FieldMapping::Byte.is_numeric());
+        assert!(!FieldMapping::Boolean.is_numeric());
+        assert!(!FieldMapping::Text.is_numeric());
+    }
 
     #[test]
     fn mappings_round_trip() {

@@ -328,15 +328,7 @@ fn columns(index: &Index) -> BTreeMap<String, String> {
         flatten_types("", &d.source, &mut cols);
     }
     for (name, m) in &index.mappings.properties {
-        let t = match m {
-            FieldMapping::Text | FieldMapping::TextKeyword { .. } => "text",
-            FieldMapping::Keyword { .. } => "keyword",
-            FieldMapping::Long => "long",
-            FieldMapping::Integer | FieldMapping::Short | FieldMapping::Byte => "integer",
-            FieldMapping::Double | FieldMapping::Float => "double",
-            FieldMapping::Boolean => "boolean",
-            FieldMapping::Date { .. } => "date",
-        };
+        let t = m.type_name();
         cols.insert(name.clone(), t.to_owned());
         cols.remove(&format!("{name}.keyword"));
         // ponytail: dynamic strings only ever get a keyword multi-field

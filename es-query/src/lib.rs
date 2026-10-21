@@ -54,7 +54,8 @@ fn resolve(index: &Index, field: &str, sample: impl Fn(&str) -> Option<Value>) -
         Some(FieldMapping::Boolean) => Kind::Bool,
         // ponytail: dates match and sort as their JSON values (only range parses instants); no date math
         Some(FieldMapping::Date { .. }) => Kind::Keyword,
-        Some(_) => Kind::Number,
+        Some(m) if m.is_numeric() => Kind::Number,
+        Some(_) => unreachable!("every FieldMapping is text, keyword, boolean, date or numeric"),
         None if field.ends_with(".keyword") => Kind::Keyword,
         // ponytail: unmapped fields are typed from their first value, mimicking ES dynamic mapping
         None => match sample(field) {
