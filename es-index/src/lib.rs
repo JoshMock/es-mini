@@ -259,10 +259,12 @@ impl Index {
                 v => Some(v),
             };
             let mapping = match v {
-                Some(Value::String(s)) if is_strict_date(s) => FieldMapping::Date {
-                    format: None,
-                    locale: None,
-                },
+                Some(d @ Value::String(_)) if parse_date_millis(d).is_some() => {
+                    FieldMapping::Date {
+                        format: None,
+                        locale: None,
+                    }
+                }
                 Some(Value::String(_)) if auto_text => FieldMapping::TextKeyword {
                     fields: [(
                         "keyword".to_owned(),
@@ -477,34 +479,81 @@ pub fn iso_date(millis: u64) -> String {
     format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{sec:02}.{milli:03}Z")
 }
 
-/// Epoch milliseconds of a date value: a number, or `yyyy-MM-dd[THH:mm[:ss[.SSS]]][Z]` (UTC).
-// ponytail: ES's default `strict_date_optional_time||epoch_millis` only, no zone offsets.
+/// Epoch milliseconds of a date value: a number, or ES's default `strict_date_optional_time`
+/// string `yyyy[-MM[-dd[THH[:mm[:ss[.S+]]][Z|+HH[:mm]|-HH[:mm]]]]]`.
+// ponytail: the mapping's `format` is ignored; numeric strings are not read as epoch_millis
 pub fn parse_date_millis(v: &serde_json::Value) -> Option<i64> {
-    let Some(s) = v.as_str() else {
+    fn num(s: &mut &str, n: usize) -> Option<i64> {
+        let (d, rest) = s.split_at_checked(n)?;
+        if !d.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        *s = rest;
+        d.parse().ok()
+    }
+    fn eat(s: &mut &str, c: char) -> bool {
+        s.strip_prefix(c).inspect(|r| *s = r).is_some()
+    }
+    let Some(mut s) = v.as_str() else {
         return v.as_i64();
     };
-    let (date, time) = s.split_once('T').unwrap_or((s, ""));
-    let mut d = date.splitn(3, '-').map(|p| p.parse::<i64>().ok());
-    let (y, m, day) = (d.next()??, d.next()??, d.next()??);
-    let time = time.strip_suffix('Z').unwrap_or(time);
-    let (hms, frac) = time.split_once('.').unwrap_or((time, ""));
-    let mut t = hms
-        .split(':')
-        .filter(|p| !p.is_empty())
-        .map(|p| p.parse::<i64>().ok());
-    let (h, min, sec) = (
-        t.next().unwrap_or(Some(0))?,
-        t.next().unwrap_or(Some(0))?,
-        t.next().unwrap_or(Some(0))?,
-    );
-    let milli = format!("{frac:0<3}")[..3].parse::<i64>().ok()?;
+    let y = num(&mut s, 4)?;
+    let [
+        mut m,
+        mut day,
+        mut h,
+        mut min,
+        mut sec,
+        mut milli,
+        mut offset,
+    ] = [1, 1, 0, 0, 0, 0, 0];
+    if eat(&mut s, '-') {
+        m = num(&mut s, 2)?;
+        if eat(&mut s, '-') {
+            day = num(&mut s, 2)?;
+            if eat(&mut s, 'T') {
+                h = num(&mut s, 2)?;
+                if eat(&mut s, ':') {
+                    min = num(&mut s, 2)?;
+                    if eat(&mut s, ':') {
+                        sec = num(&mut s, 2)?;
+                        if eat(&mut s, '.') || eat(&mut s, ',') {
+                            let n = s.bytes().take_while(u8::is_ascii_digit).count();
+                            if n == 0 {
+                                return None;
+                            }
+                            milli = format!("{:0<3}", &s[..n.min(3)]).parse().ok()?;
+                            s = &s[n..];
+                        }
+                    }
+                }
+                let sign = if eat(&mut s, '+') {
+                    1
+                } else if eat(&mut s, '-') {
+                    -1
+                } else {
+                    0
+                };
+                if sign == 0 {
+                    eat(&mut s, 'Z');
+                } else {
+                    let oh = num(&mut s, 2)?;
+                    let om = if eat(&mut s, ':') { num(&mut s, 2)? } else { 0 };
+                    offset = sign * (oh * 60 + om);
+                }
+            }
+        }
+    }
+    if !s.is_empty() {
+        return None;
+    }
     // Howard Hinnant's days_from_civil.
     let y = y - i64::from(m <= 2);
     let era = y.div_euclid(400);
     let yoe = y - era * 400;
     let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
     let days = era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468;
-    Some(((days * 24 + h) * 60 + min) * 60_000 + sec * 1000 + milli)
+    Some(((days * 24 + h) * 60 + min - offset) * 60_000 + sec * 1000 + milli)
 }
 
 /// Parses an ES time value (`250ms`, `60s`, `2m`, `1h`, `1d`); `None` for `-1` or junk.
@@ -520,53 +569,6 @@ pub fn parse_time(v: &str) -> Option<Duration> {
         let n: u64 = v.strip_suffix(unit)?.parse().ok()?;
         Some(Duration::from_millis(n * millis))
     })
-}
-
-/// Whether `s` matches ES's default dynamic date format `strict_date_optional_time`:
-/// `yyyy[-MM[-dd[THH[:mm[:ss[.S+]]][Z|+HH:mm]]]]`.
-fn is_strict_date(s: &str) -> bool {
-    fn digits(s: &mut &str, n: usize) -> Option<()> {
-        let (d, rest) = s.split_at_checked(n)?;
-        d.bytes().all(|b| b.is_ascii_digit()).then(|| *s = rest)
-    }
-    fn eat(s: &mut &str, c: char) -> bool {
-        s.strip_prefix(c).inspect(|r| *s = r).is_some()
-    }
-    fn parse(s: &mut &str) -> Option<()> {
-        digits(s, 4)?;
-        for sep in ['-', '-'] {
-            if !eat(s, sep) {
-                return Some(());
-            }
-            digits(s, 2)?;
-        }
-        if !eat(s, 'T') {
-            return Some(());
-        }
-        digits(s, 2)?;
-        if eat(s, ':') {
-            digits(s, 2)?;
-            if eat(s, ':') {
-                digits(s, 2)?;
-                if eat(s, '.') || eat(s, ',') {
-                    let n = s.bytes().take_while(u8::is_ascii_digit).count();
-                    (n > 0).then(|| *s = &s[n..])?;
-                }
-            }
-        }
-        if eat(s, 'Z') {
-            return Some(());
-        }
-        if eat(s, '+') || eat(s, '-') {
-            digits(s, 2)?;
-            if eat(s, ':') {
-                digits(s, 2)?;
-            }
-        }
-        Some(())
-    }
-    let mut rest = s;
-    parse(&mut rest).is_some() && rest.is_empty()
 }
 
 /// All indices, keyed by name.
@@ -722,6 +724,28 @@ mod tests {
         );
         assert_eq!(parse_date_millis(&json!(5)), Some(5));
         assert_eq!(parse_date_millis(&json!("junk")), None);
+    }
+
+    #[test]
+    fn dynamically_detected_dates_parse_to_epoch_millis() {
+        // The disk writer skips a date field whose values do not parse, so every string
+        // map_dynamic detects as a date must parse.
+        for (s, ms) in [
+            ("2024", 1_704_067_200_000),
+            ("2024-01", 1_704_067_200_000),
+            ("2024-01-02T03", 1_704_164_400_000),
+            ("2024-01-02T03:04:05+01:00", 1_704_161_045_000),
+            ("2024-01-02T03:04:05-01", 1_704_168_245_000),
+            ("2024-01-02T03:04:05,5Z", 1_704_164_645_500),
+        ] {
+            let mut i = Index::default();
+            i.map_dynamic(&json!({ "d": s }));
+            assert!(matches!(
+                i.mappings.properties["d"],
+                FieldMapping::Date { .. }
+            ));
+            assert_eq!(parse_date_millis(&json!(s)), Some(ms), "{s}");
+        }
     }
 
     #[test]
