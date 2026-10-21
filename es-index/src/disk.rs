@@ -1,16 +1,24 @@
 //! Loads indices from, and saves them to, an Elasticsearch data directory.
 //!
-//! ponytail: live documents are copied into memory once at open; stream from the segments when
-//! indices outgrow RAM.
+//! An opened index serves its documents from the segments: only ids, versions and term
+//! statistics are read into memory, and a `_source` is read from disk when a document is.
 
 use crate::{Document, Index, Indices, Mappings, TermStats};
 use es_codec::{
-    SegmentInfos, SegmentReader, cluster_state::read_indices, doc_values::DocValues,
-    field_infos::IndexOptions, stored_fields::StoredValue, uid::decode_id,
+    SegmentInfos, SegmentReader,
+    cluster_state::read_indices,
+    doc_values::DocValues,
+    field_infos::IndexOptions,
+    stored_fields::{Doc, StoredValue},
+    uid::decode_id,
 };
 use serde::Deserialize;
 use serde_json::Value;
-use std::{collections::HashSet, path::Path};
+use std::{
+    borrow::Cow,
+    collections::{HashMap, HashSet},
+    path::Path,
+};
 
 /// Opens every index of `data_dir` (single shard 0).
 pub fn open(data_dir: &Path) -> es_codec::Result<Indices> {
@@ -37,6 +45,105 @@ pub fn open(data_dir: &Path) -> es_codec::Result<Indices> {
     Ok(out)
 }
 
+/// Where a live document of a [`Shard`] is, with its version and sequence number.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DiskDoc {
+    segment: usize,
+    doc: usize,
+    pub(crate) version: u64,
+    pub(crate) seq_no: u64,
+}
+
+/// The segments of a shard opened from disk. Documents stay in them until read.
+pub(crate) struct Shard {
+    segments: Vec<SegmentReader>,
+    /// Live documents by id. Writes to the index remove the ones they replace or delete.
+    ids: HashMap<String, DiskDoc>,
+}
+
+impl std::fmt::Debug for Shard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Shard")
+            .field("segments", &self.segments.len())
+            .field("docs", &self.ids.len())
+            .finish()
+    }
+}
+
+/// The `_id` and `_source` bytes of a document's stored fields.
+fn id_and_source(
+    seg: &SegmentReader,
+    fields: Doc,
+) -> es_codec::Result<(Option<String>, Option<Vec<u8>>)> {
+    let (mut id, mut source) = (None, None);
+    for (n, v) in fields {
+        match (seg.field_by_number(n)?.name.as_str(), v) {
+            ("_id", StoredValue::Bytes(b)) => id = Some(decode_id(&b)),
+            ("_source", StoredValue::Bytes(b)) => source = Some(b),
+            _ => {}
+        }
+    }
+    Ok((id, source))
+}
+
+fn document(d: &DiskDoc, source: Option<Vec<u8>>) -> es_codec::Result<Document> {
+    let source = source.ok_or_else(|| es_codec::Error("document has no _source".into()))?;
+    Ok(Document {
+        source: serde_json::from_slice(&source).map_err(|e| es_codec::Error(e.to_string()))?,
+        version: d.version,
+        seq_no: d.seq_no,
+    })
+}
+
+impl Shard {
+    pub(crate) fn len(&self) -> usize {
+        self.ids.len()
+    }
+
+    pub(crate) fn meta(&self, id: &str) -> Option<DiskDoc> {
+        self.ids.get(id).copied()
+    }
+
+    /// Forgets a document the index replaced or deleted.
+    pub(crate) fn remove(&mut self, id: &str) -> Option<DiskDoc> {
+        self.ids.remove(id)
+    }
+
+    /// Reads a live document from its segment.
+    pub(crate) fn load(&self, d: &DiskDoc) -> es_codec::Result<Document> {
+        let seg = &self.segments[d.segment];
+        document(d, id_and_source(seg, seg.document(d.doc)?)?.1)
+    }
+
+    /// The live documents whose id `keep` accepts, segment by segment, read a chunk at a time.
+    pub(crate) fn docs<'a>(
+        &'a self,
+        keep: impl Fn(&str) -> bool + Copy + 'a,
+    ) -> impl Iterator<Item = es_codec::Result<(&'a str, Document)>> + 'a {
+        self.segments.iter().enumerate().flat_map(move |(s, seg)| {
+            let docs: Box<dyn Iterator<Item = _>> = match seg.documents(0..seg.max_doc()) {
+                Ok(docs) => Box::new(docs),
+                Err(e) => Box::new(std::iter::once(Err(e))),
+            };
+            docs.enumerate().filter_map(move |(doc, fields)| {
+                let read = || {
+                    let (Some(id), source) = id_and_source(seg, fields?)? else {
+                        return Ok(None);
+                    };
+                    let Some((id, d)) = self.ids.get_key_value(&id) else {
+                        return Ok(None);
+                    };
+                    if (d.segment, d.doc) != (s, doc) || !keep(id) {
+                        return Ok(None);
+                    }
+                    Ok(Some((id.as_str(), document(d, source)?)))
+                };
+                read().transpose()
+            })
+        })
+    }
+}
+
 fn longs(seg: &SegmentReader, field: &str) -> Vec<Option<i64>> {
     match seg.doc_values(field) {
         Ok(DocValues::Numbers(n)) => n.iter().map(|v| v.first().copied()).collect(),
@@ -56,12 +163,16 @@ fn load_shard(index: &mut Index, dir: &Path) -> es_codec::Result<()> {
         index.next_seq_no = index.next_seq_no.max(max + 1);
     }
     index.commit = infos.user_data;
+    let mut shard = Shard {
+        segments: vec![],
+        ids: HashMap::new(),
+    };
     for seg in infos.segments {
         let seg = SegmentReader::open(dir, seg)?;
         for f in seg
             .fields
             .iter()
-            .filter(|f| f.index_options != IndexOptions::None)
+            .filter(|f| f.index_options != IndexOptions::None && f.name != "_id")
         {
             // ponytail: fields in formats the codec lacks (e.g. ES812Postings `_id`) get no stats
             let Ok(terms) = seg.terms(&f.name) else {
@@ -84,35 +195,65 @@ fn load_shard(index: &mut Index, dir: &Path) -> es_codec::Result<()> {
         }
         let (versions, seq_nos) = (longs(&seg, "_version"), longs(&seg, "_seq_no"));
         let live = seg.live_docs()?;
-        for (doc, fields) in seg.stored_fields()?.into_iter().enumerate() {
+        let segment = shard.segments.len();
+        let mut add = |id: String, doc: usize| {
             if !live[doc] {
-                continue;
+                return;
             }
-            let mut id = None;
-            let mut source = None;
-            for (n, v) in fields {
-                match (seg.field_by_number(n)?.name.as_str(), v) {
-                    ("_id", StoredValue::Bytes(b)) => id = Some(decode_id(&b)),
-                    ("_source", StoredValue::Bytes(b)) => source = serde_json::from_slice(&b).ok(),
-                    _ => {}
+            let at = |v: &[Option<i64>]| v.get(doc).copied().flatten().unwrap_or(0) as u64;
+            let d = DiskDoc {
+                segment,
+                doc,
+                version: at(&versions),
+                seq_no: at(&seq_nos),
+            };
+            index.next_seq_no = index.next_seq_no.max(d.seq_no + 1);
+            shard.ids.insert(id, d);
+        };
+        // Ids come from the `_id` postings, or from the stored fields where the codec cannot
+        // read those (Elasticsearch writes `_id` in ES812Postings).
+        match seg.terms("_id") {
+            Ok(terms) => {
+                for t in terms {
+                    let id = decode_id(&t.term);
+                    t.docs.iter().for_each(|d| add(id.clone(), d.0 as usize));
                 }
             }
-            let (Some(id), Some(source)) = (id, source) else {
-                continue;
-            };
-            let at = |v: &[Option<i64>]| v.get(doc).copied().flatten().unwrap_or(0) as u64;
-            index.insert_loaded(
-                id,
-                Document {
-                    source,
-                    version: at(&versions),
-                    seq_no: at(&seq_nos),
-                },
-            );
+            Err(_) => {
+                for (doc, fields) in seg.documents(0..seg.max_doc())?.enumerate() {
+                    if let (Some(id), Some(_)) = id_and_source(&seg, fields?)? {
+                        add(id, doc);
+                    }
+                }
+            }
         }
+        shard.segments.push(seg);
     }
     index.stats = Some(stats);
+    index.disk = Some(shard);
     Ok(())
+}
+
+/// The documents of `ix` that the saved segments do not hold: all but the `current` ids.
+fn unsaved<'a>(
+    ix: &'a Index,
+    current: &'a HashSet<String>,
+) -> es_codec::Result<Vec<(&'a str, Cow<'a, Document>)>> {
+    let mut out: Vec<_> = ix
+        .docs
+        .iter()
+        .filter(|(id, _)| !current.contains(*id))
+        .map(|(id, d)| (id.as_str(), Cow::Borrowed(d)))
+        .collect();
+    if let Some(disk) = &ix.disk
+        && disk.ids.keys().any(|id| !current.contains(id))
+    {
+        for doc in disk.docs(|id| !current.contains(id)) {
+            let (id, d) = doc?;
+            out.push((id, Cow::Owned(d)));
+        }
+    }
+    Ok(out)
 }
 
 /// Lucene's `SmallFloat.intToByte4`: the norm byte for a field of `len` terms.
@@ -471,7 +612,10 @@ fn reuse_segments(
                     continue;
                 }
                 let saved = seq_nos.get(doc).copied().flatten();
-                if ix.get(&id).is_some_and(|d| Some(d.seq_no as i64) == saved) {
+                if ix
+                    .meta(&id)
+                    .is_some_and(|(_, seq_no)| Some(seq_no as i64) == saved)
+                {
                     current.insert(id.clone());
                 } else {
                     live[doc] = false;
@@ -634,9 +778,10 @@ fn write_snapshot(data_dir: &Path, indices: &Indices, prev: &Path) -> es_codec::
                 HashSet::new(),
             ),
         };
-        let mut docs: Vec<_> = ix.docs().filter(|(id, _)| !current.contains(*id)).collect();
+        let mut owned = unsaved(ix, &current)?;
+        owned.sort_by_key(|(_, d)| d.seq_no);
+        let docs: Vec<_> = owned.iter().map(|(id, d)| (*id, &**d)).collect();
         if !docs.is_empty() {
-            docs.sort_by_key(|(_, d)| d.seq_no);
             infos.segments.push(write_docs(
                 &dir,
                 infos.counter,

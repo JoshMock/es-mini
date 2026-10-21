@@ -10,6 +10,7 @@ pub use mapping::{FieldMapping, Mappings};
 use serde::Serialize;
 use serde_json::Value;
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, HashMap, VecDeque},
     time::{Duration, Instant},
 };
@@ -186,7 +187,10 @@ pub struct Index {
     pub closed: bool,
     /// User data of the shard commit the index was opened from; saves keep its history markers.
     pub commit: BTreeMap<String, String>,
+    /// Documents written since the index was opened; they replace any on disk.
     docs: HashMap<String, Document>,
+    /// The segments of an index opened from disk, serving the documents not written since.
+    disk: Option<disk::Shard>,
     /// Sources of updated/deleted docs, kept for BM25 statistics like Lucene's unmerged segments.
     // ponytail: a "merge" drops them all once they pass a third of all physical docs, roughly
     // ES's default merge policy; real merges are per segment and less predictable
@@ -202,11 +206,34 @@ pub struct Index {
 
 impl Index {
     fn last_version(&self, id: &str) -> u64 {
-        self.docs
-            .get(id)
-            .map(|d| d.version)
+        self.meta(id)
+            .map(|m| m.0)
             .or_else(|| self.deleted_versions.get(id).map(|t| t.0))
             .unwrap_or(0)
+    }
+
+    /// The version and sequence number of a live document, without reading its source.
+    pub(crate) fn meta(&self, id: &str) -> Option<(u64, u64)> {
+        match self.docs.get(id) {
+            Some(d) => Some((d.version, d.seq_no)),
+            None => self.disk.as_ref()?.meta(id).map(|d| (d.version, d.seq_no)),
+        }
+    }
+
+    /// Removes a live document, returning its source.
+    fn take(&mut self, id: &str) -> Option<Value> {
+        if let Some(d) = self.docs.remove(id) {
+            return Some(d.source);
+        }
+        let disk = self.disk.as_mut()?;
+        let d = disk.remove(id)?;
+        // ponytail: an unreadable superseded source is left out of the BM25 statistics
+        Some(disk.load(&d).map_or(Value::Null, |d| d.source))
+    }
+
+    /// Number of live documents.
+    fn len(&self) -> usize {
+        self.docs.len() + self.disk.as_ref().map_or(0, disk::Shard::len)
     }
 
     fn next_seq_no(&mut self) -> u64 {
@@ -245,7 +272,8 @@ impl Index {
         let version = self.last_version(id) + 1;
         let seq_no = self.next_seq_no();
         self.deleted_versions.remove(id);
-        let old = self.docs.insert(
+        let old = self.take(id);
+        self.docs.insert(
             id.to_owned(),
             Document {
                 source,
@@ -254,7 +282,7 @@ impl Index {
             },
         );
         let result = if let Some(old) = old {
-            self.supersede(old.source);
+            self.supersede(old);
             DocResult::Updated
         } else {
             DocResult::Created
@@ -268,15 +296,10 @@ impl Index {
 
     /// Creates a document; `Err(current_version)` if it already exists.
     pub fn create(&mut self, id: &str, source: Value) -> Result<WriteResult, u64> {
-        match self.docs.get(id) {
-            Some(doc) => Err(doc.version),
+        match self.meta(id) {
+            Some((version, _)) => Err(version),
             None => Ok(self.put(id, source)),
         }
-    }
-
-    pub(crate) fn insert_loaded(&mut self, id: String, doc: Document) {
-        self.next_seq_no = self.next_seq_no.max(doc.seq_no + 1);
-        self.docs.insert(id, doc);
     }
 
     /// Makes all writes so far visible to search.
@@ -290,19 +313,34 @@ impl Index {
             || d.seq_no < self.refreshed_seq_no
     }
 
-    pub fn get(&self, id: &str) -> Option<&Document> {
-        self.docs.get(id)
+    /// A live document; one on disk is read from its segment.
+    pub fn get(&self, id: &str) -> Option<Cow<'_, Document>> {
+        if let Some(d) = self.docs.get(id) {
+            return Some(Cow::Borrowed(d));
+        }
+        let disk = self.disk.as_ref()?;
+        // ponytail: a document whose segment cannot be read is reported missing
+        disk.load(&disk.meta(id)?).ok().map(Cow::Owned)
     }
 
-    /// All live documents, in no particular order.
-    pub fn docs(&self) -> impl Iterator<Item = (&str, &Document)> {
-        self.docs.iter().map(|(id, d)| (id.as_str(), d))
+    /// All live documents, in no particular order; those on disk are read as iterated.
+    pub fn docs(&self) -> impl Iterator<Item = (&str, Cow<'_, Document>)> {
+        let on_disk = self.disk.iter().flat_map(|d| d.docs(|_| true));
+        self.docs
+            .iter()
+            .map(|(id, d)| (id.as_str(), Cow::Borrowed(d)))
+            // ponytail: documents whose segment cannot be read are skipped
+            .chain(
+                on_disk
+                    .filter_map(Result::ok)
+                    .map(|(id, d)| (id, Cow::Owned(d))),
+            )
     }
 
     fn supersede(&mut self, old: Value) {
         self.superseded.push(old);
         // superseded / (live + superseded) > 1/3
-        if self.superseded.len() * 2 > self.docs.len() {
+        if self.superseded.len() * 2 > self.len() {
             self.superseded.clear();
         }
     }
@@ -320,9 +358,9 @@ impl Index {
         let now = Instant::now();
         self.deleted_versions.insert(id.to_owned(), (version, now));
         self.tombstone_order.push_back((id.to_owned(), now));
-        let result = match self.docs.remove(id) {
+        let result = match self.take(id) {
             Some(old) => {
-                self.supersede(old.source);
+                self.supersede(old);
                 DocResult::Deleted
             }
             None => DocResult::NotFound,
@@ -343,7 +381,7 @@ impl Index {
         upsert: Option<Value>,
         detect_noop: bool,
     ) -> Option<WriteResult> {
-        let Some(doc) = self.docs.get(id) else {
+        let Some(doc) = self.get(id) else {
             return upsert.map(|source| self.put(id, source));
         };
         let mut source = doc.source.clone();
@@ -356,6 +394,7 @@ impl Index {
                 seq_no,
             });
         }
+        drop(doc);
         Some(self.put(id, source))
     }
 }

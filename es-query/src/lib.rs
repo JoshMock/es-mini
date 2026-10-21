@@ -10,7 +10,7 @@ pub use parse::{Query, parse_query, parse_query_string};
 
 use es_index::{Document, FieldMapping, Index, analysis::Analyzer, parse_date_millis};
 use serde_json::Value;
-use std::{cell::RefCell, cmp::Ordering, collections::HashMap};
+use std::{borrow::Cow, cell::RefCell, cmp::Ordering, collections::HashMap};
 
 /// Lucene wildcard syntax: `*` any run, `?` one char, `\\` escapes.
 fn wildcard_match(p: &[char], t: &[char]) -> bool {
@@ -235,9 +235,12 @@ impl<'a> Searcher<'a> {
         let (kind, path) = self.kind(field);
         let (mut docs, mut len) = (0.0, 0.0);
         let mut df: HashMap<&str, f64> = HashMap::new();
-        let sources = (self.index.docs().map(|(_, d)| &d.source)).chain(self.index.superseded());
-        for source in sources {
-            let t = terms(kind, &values(source, path));
+        let live = self.index.docs().map(|(_, d)| match d {
+            Cow::Borrowed(d) => Cow::Borrowed(&d.source),
+            Cow::Owned(d) => Cow::Owned(d.source),
+        });
+        for source in live.chain(self.index.superseded().iter().map(Cow::Borrowed)) {
+            let t = terms(kind, &values(&source, path));
             if t.is_empty() {
                 continue;
             }
@@ -568,7 +571,7 @@ pub struct Hit<'a> {
     /// The concrete index the hit came from.
     pub index: &'a str,
     pub id: &'a str,
-    pub doc: &'a Document,
+    pub doc: Cow<'a, Document>,
     /// `None` when sorting by a field (ES reports `_score: null`).
     pub score: Option<f32>,
     pub sort: Vec<Value>,
@@ -652,7 +655,7 @@ pub fn search_many<'a>(
         let query = with_filter(&req.query, *filter)?;
         let s = Searcher::new(index, &query);
         for (id, doc) in index.docs().filter(|(_, d)| index.searchable(d)) {
-            let Some(score) = s.score(&query, id, doc) else {
+            let Some(score) = s.score(&query, id, &doc) else {
                 continue;
             };
             let sort: Vec<Value> = req

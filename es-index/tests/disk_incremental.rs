@@ -139,3 +139,32 @@ fn an_elasticsearch_written_index_is_rewritten_whole() {
         assert!(SegmentInfos::read_latest(&shard).unwrap().segments.len() <= 1);
     }
 }
+
+#[test]
+fn writes_replace_and_delete_documents_served_from_disk() {
+    let dir = scratch("overwrite");
+    let mut indices = Indices::new();
+    let ix = indices.entry("idx".into()).or_default();
+    for i in 0..5 {
+        ix.put(&i.to_string(), json!({"v": i}));
+    }
+    disk::save(&dir, &indices).unwrap();
+
+    let mut indices = disk::open(&dir).unwrap();
+    let ix = indices.get_mut("idx").unwrap();
+    assert_eq!(ix.create("0", json!({})), Err(1));
+    let r = ix.update("1", &json!({"w": 1}), None, true).unwrap();
+    assert_eq!((r.version, r.seq_no), (2, 5));
+    assert_eq!(ix.delete("2").version, 2);
+    assert!(ix.get("2").is_none());
+    assert_eq!(ix.get("1").unwrap().source, json!({"v": 1, "w": 1}));
+    assert_eq!(ix.docs().count(), 4);
+    disk::save(&dir, &indices).unwrap();
+
+    let back = disk::open(&dir).unwrap();
+    let mut ids: Vec<_> = back["idx"].docs().map(|(id, _)| id.to_owned()).collect();
+    ids.sort();
+    assert_eq!(ids, ["0", "1", "3", "4"]);
+    let one = back["idx"].get("1").unwrap();
+    assert_eq!((one.version, &one.source), (2, &json!({"v": 1, "w": 1})));
+}
