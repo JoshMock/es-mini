@@ -318,6 +318,7 @@ mod tests {
                 fields: &fields,
                 stored: &stored,
                 numeric: &numeric,
+                sorted_numeric: &[],
                 keyword: &keyword,
                 norms: &[(6, lengths)],
                 terms: &terms,

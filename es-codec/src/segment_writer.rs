@@ -4,7 +4,7 @@ use crate::{
     Result, SegmentCommitInfo, SegmentInfo,
     codec_util::ID_LEN,
     compound::write_compound,
-    doc_values::write_doc_values,
+    doc_values::write_doc_values_with,
     field_infos::{DocValuesType, FieldInfo, IndexOptions, write_field_infos},
     norms::write_norms,
     output::Output,
@@ -30,6 +30,8 @@ pub struct NewSegment<'a> {
     pub stored: &'a [Vec<(i32, StoredValue)>],
     /// `(field number, value per doc)`
     pub numeric: &'a [(i32, Vec<i64>)],
+    /// `(field number, one value per doc)` for single-valued SORTED_NUMERIC fields
+    pub sorted_numeric: &'a [(i32, Vec<i64>)],
     /// `(field number, term per doc)` for single-valued keyword fields
     pub keyword: &'a [(i32, Vec<Vec<u8>>)],
     /// `(field number, one norm per doc)`
@@ -42,7 +44,8 @@ pub struct NewSegment<'a> {
 /// to a [`crate::SegmentInfos`] and writes that (which writes the `.si`).
 pub fn write_segment(dir: &Path, s: &NewSegment) -> Result<SegmentCommitInfo> {
     let (fdm, fdt, fdx) = write_stored_fields(s.stored, &s.id)?;
-    let (dvm, dvd) = write_doc_values(s.numeric, s.keyword, &s.id, "Lucene90_0");
+    let (dvm, dvd) =
+        write_doc_values_with(s.numeric, s.sorted_numeric, s.keyword, &s.id, "Lucene90_0");
     let by_number = |n: &i32| {
         s.fields
             .iter()
@@ -226,6 +229,7 @@ mod tests {
                 fields: &fields,
                 stored: &stored,
                 numeric: &numeric,
+                sorted_numeric: &[],
                 keyword: &keyword,
                 norms: &[],
                 terms: &terms,

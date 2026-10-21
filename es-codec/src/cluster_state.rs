@@ -301,6 +301,7 @@ pub fn write_state(
             fields: &fields,
             stored: &stored,
             numeric: &[],
+            sorted_numeric: &[],
             keyword: &[],
             norms: &[],
             terms: &terms,

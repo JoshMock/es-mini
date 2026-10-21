@@ -756,6 +756,18 @@ pub fn write_doc_values(
     id: &[u8; codec_util::ID_LEN],
     suffix: &str,
 ) -> (Vec<u8>, Vec<u8>) {
+    write_doc_values_with(numeric, &[], keyword, id, suffix)
+}
+
+/// Like [`write_doc_values`], plus single-valued dense `sorted_numeric` fields (what ES uses for
+/// `long`, `double`, `boolean`, ...).
+pub fn write_doc_values_with(
+    numeric: &[(i32, Vec<i64>)],
+    sorted_numeric: &[(i32, Vec<i64>)],
+    keyword: &[(i32, Vec<Vec<u8>>)],
+    id: &[u8; codec_util::ID_LEN],
+    suffix: &str,
+) -> (Vec<u8>, Vec<u8>) {
     let (mut dvm, mut dvd) = (Output::default(), Output::default());
     dvm.index_header("Lucene90DocValuesMetadata", VERSION_MAX, id, suffix);
     dvd.index_header("Lucene90DocValuesData", VERSION_MAX, id, suffix);
@@ -763,6 +775,12 @@ pub fn write_doc_values(
         dvm.bytes(&number.to_le_bytes());
         dvm.byte(0);
         write_numeric_entry(&mut dvm, &mut dvd, values);
+    }
+    for (number, values) in sorted_numeric {
+        dvm.bytes(&number.to_le_bytes());
+        dvm.byte(4);
+        write_numeric_entry(&mut dvm, &mut dvd, values);
+        dvm.bytes(&(values.len() as i32).to_le_bytes());
     }
     for (number, values) in keyword {
         let mut terms: Vec<&[u8]> = values.iter().map(|v| &v[..]).collect();
@@ -801,6 +819,18 @@ mod tests {
         let (m, d) = write_doc_values(&[(7, b.clone())], &[], &id, "Lucene90_0");
         let got = decode(&m, &d, (&id, 3), "Lucene90_0", 7, &|_| Ok(false)).unwrap();
         assert_eq!(got, wrap(b));
+    }
+
+    #[test]
+    fn write_then_read_sorted_numeric_round_trips() {
+        let id = [5u8; 16];
+        let v = vec![10, -3, 25, 7];
+        let (m, d) = write_doc_values_with(&[], &[(2, v.clone())], &[], &id, "Lucene90_0");
+        let got = decode(&m, &d, (&id, 4), "Lucene90_0", 2, &|_| Ok(false)).unwrap();
+        assert_eq!(
+            got,
+            DocValues::Numbers(v.into_iter().map(|x| vec![x]).collect())
+        );
     }
 
     #[test]

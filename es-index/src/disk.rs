@@ -131,6 +131,198 @@ fn load_shard(index: &mut Index, dir: &Path) -> es_codec::Result<()> {
     Ok(())
 }
 
+/// Lucene's `SmallFloat.intToByte4`: the norm byte for a field of `len` terms.
+fn norm_byte(len: u32) -> i8 {
+    let int4 = |i: u32| {
+        let bits = 32 - i.leading_zeros();
+        if bits < 4 {
+            i
+        } else {
+            let shift = bits - 4;
+            ((i >> shift) & 7) | ((shift + 1) << 3)
+        }
+    };
+    (if len < 24 { len } else { 24 + int4(len - 24) }) as u8 as i8
+}
+
+/// Index data for one shard segment, built from the mapped fields that every doc has a scalar
+/// value for. Field numbers start at 6, after the metadata fields.
+// ponytail: no `date`/`float` fields, no points (so Elasticsearch cannot range-search numbers),
+// no positions, sparse or multi-valued fields, and at most 48 terms per field (codec limit).
+#[derive(Default)]
+struct UserFields {
+    fields: Vec<es_codec::field_infos::FieldInfo>,
+    sorted_numeric: Vec<(i32, Vec<i64>)>,
+    keyword: Vec<(i32, Vec<Vec<u8>>)>,
+    norms: Vec<(i32, Vec<i8>)>,
+    terms: Vec<(i32, Vec<es_codec::terms::TermPostings>)>,
+}
+
+fn user_fields(
+    mappings: &Mappings,
+    docs: &[(&str, &Document)],
+    meta: &[es_codec::field_infos::FieldInfo],
+) -> UserFields {
+    use crate::{FieldMapping as M, analysis::Analyzer};
+    use es_codec::{field_infos::DocValuesType, terms::TermPostings};
+    use std::collections::BTreeMap;
+    let mut out = UserFields::default();
+    for (name, mapping) in &mappings.properties {
+        let values: Vec<_> = docs.iter().map(|(_, d)| d.source.get(name)).collect();
+        let scalar = |v: &Option<&Value>| matches!(v, Some(v) if !v.is_array() && !v.is_object() && !v.is_null());
+        if !values.iter().all(scalar) {
+            continue;
+        }
+        let values: Vec<&Value> = values.into_iter().flatten().collect();
+        let number = (meta.len() + out.fields.len()) as i32;
+        let text = |v: &Value| v.as_str().map(str::to_owned);
+        let postings = |keys: Vec<Vec<Vec<u8>>>| -> Vec<TermPostings> {
+            let mut m = BTreeMap::<Vec<u8>, Vec<(u32, u32)>>::new();
+            for (doc, terms) in keys.into_iter().enumerate() {
+                let mut freq = BTreeMap::<Vec<u8>, u32>::new();
+                for t in terms {
+                    *freq.entry(t).or_default() += 1;
+                }
+                for (t, f) in freq {
+                    m.entry(t).or_default().push((doc as u32, f));
+                }
+            }
+            m.into_iter()
+                .map(|(term, docs)| TermPostings {
+                    term,
+                    total_term_freq: docs.iter().map(|d| u64::from(d.1)).sum(),
+                    docs,
+                    positions: vec![],
+                })
+                .collect()
+        };
+        let (index_options, doc_values, omit_norms) = match mapping {
+            M::Text | M::TextKeyword { .. } => {
+                let Some(texts) = values.iter().map(|v| text(v)).collect::<Option<Vec<_>>>() else {
+                    continue;
+                };
+                let toks: Vec<Vec<Vec<u8>>> = texts
+                    .iter()
+                    .map(|t| {
+                        Analyzer::Standard
+                            .analyze(t)
+                            .into_iter()
+                            .map(String::into_bytes)
+                            .collect()
+                    })
+                    .collect();
+                let terms = postings(toks.clone());
+                if terms.is_empty() || terms.len() > 48 {
+                    continue;
+                }
+                out.norms.push((
+                    number,
+                    toks.iter().map(|t| norm_byte(t.len() as u32)).collect(),
+                ));
+                out.terms.push((number, terms));
+                (IndexOptions::DocsAndFreqs, DocValuesType::None, false)
+            }
+            M::Keyword => {
+                let Some(keys) = values
+                    .iter()
+                    .map(|v| text(v).map(String::into_bytes))
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    continue;
+                };
+                let terms = postings(keys.iter().map(|k| vec![k.clone()]).collect());
+                if terms.len() > 48 {
+                    continue;
+                }
+                out.terms.push((number, terms));
+                out.keyword.push((number, keys));
+                (IndexOptions::Docs, DocValuesType::SortedSet, true)
+            }
+            M::Boolean => {
+                let Some(bools) = values
+                    .iter()
+                    .map(|v| v.as_bool())
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    continue;
+                };
+                out.terms.push((
+                    number,
+                    postings(
+                        bools
+                            .iter()
+                            .map(|b| vec![if *b { b"T".to_vec() } else { b"F".to_vec() }])
+                            .collect(),
+                    ),
+                ));
+                out.sorted_numeric
+                    .push((number, bools.iter().map(|b| i64::from(*b)).collect()));
+                (IndexOptions::Docs, DocValuesType::SortedNumeric, true)
+            }
+            M::Long | M::Integer | M::Short | M::Byte => {
+                let Some(ints) = values
+                    .iter()
+                    .map(|v| v.as_i64())
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    continue;
+                };
+                out.sorted_numeric.push((number, ints));
+                (IndexOptions::None, DocValuesType::SortedNumeric, true)
+            }
+            M::Double => {
+                let Some(fs) = values
+                    .iter()
+                    .map(|v| v.as_f64())
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    continue;
+                };
+                // NumericUtils.doubleToSortableLong
+                let sortable = |f: f64| {
+                    let b = f.to_bits() as i64;
+                    b ^ ((b >> 63) & i64::MAX)
+                };
+                out.sorted_numeric
+                    .push((number, fs.into_iter().map(sortable).collect()));
+                (IndexOptions::None, DocValuesType::SortedNumeric, true)
+            }
+            M::Date { .. } | M::Float => continue,
+        };
+        let mut attributes = BTreeMap::new();
+        let mut copy = |from: &str, kind: &str| {
+            for k in ["format", "suffix"] {
+                let key = format!("PerField{kind}Format.{k}");
+                attributes.insert(key.clone(), meta_attr(from, &key, meta));
+            }
+        };
+        if index_options != IndexOptions::None {
+            copy("_id", "Postings");
+        }
+        if doc_values != DocValuesType::None {
+            copy("_version", "DocValues");
+        }
+        out.fields.push(es_codec::field_infos::FieldInfo {
+            name: name.clone(),
+            number,
+            omit_norms,
+            index_options,
+            doc_values,
+            attributes,
+            ..meta[2].clone()
+        });
+    }
+    out
+}
+
+fn meta_attr(field: &str, key: &str, meta: &[es_codec::field_infos::FieldInfo]) -> String {
+    meta.iter()
+        .find(|f| f.name == field)
+        .expect("meta field")
+        .attributes[key]
+        .clone()
+}
+
 /// Replaces `data_dir` with a snapshot of `indices`: cluster metadata plus, per index, one
 /// segment holding every live document's `_id`, `_source`, `_version` and `_seq_no`.
 // ponytail: whole-directory rewrite per save and no postings for user fields (they are rebuilt
@@ -223,18 +415,24 @@ pub fn save(data_dir: &Path, indices: &Indices) -> es_codec::Result<()> {
                 positions: vec![],
             })
             .collect();
+        let user = user_fields(&ix.mappings, &docs, &fields);
+        let mut all_fields = fields.clone();
+        all_fields.extend(user.fields);
+        let mut terms = vec![(0, ids)];
+        terms.extend(user.terms);
         let seg = write_segment(
             &dir,
             &NewSegment {
                 name: "_0",
                 id: [7; 16],
                 max_doc: docs.len() as i32,
-                fields: &fields,
+                fields: &all_fields,
                 stored: &stored,
                 numeric: &numeric,
-                keyword: &[],
-                norms: &[],
-                terms: &[(0, ids)],
+                sorted_numeric: &user.sorted_numeric,
+                keyword: &user.keyword,
+                norms: &user.norms,
+                terms: &terms,
             },
         )?;
         let max_seq = docs.last().map_or(-1, |(_, d)| d.seq_no as i64);
