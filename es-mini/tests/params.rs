@@ -187,3 +187,11 @@ async fn alias_handlers_accept_known_params() {
         assert_ne!(status, 400, "{method} {uri}");
     }
 }
+
+#[tokio::test]
+async fn filter_path_applies_to_every_json_response() {
+    let (status, body) = call("GET", "/_cluster/health?filter_path=status").await;
+    assert_eq!((status, body), (200, json!({"status": "green"})));
+    let (status, body) = call("GET", "/missing/_doc/1?filter_path=status").await;
+    assert_eq!((status, body), (404, json!({"status": 404})));
+}

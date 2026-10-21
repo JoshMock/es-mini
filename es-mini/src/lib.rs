@@ -179,6 +179,34 @@ pub fn app_persisted(dir: &std::path::Path) -> Result<Router, String> {
     )))
 }
 
+/// Applies `filter_path` to every JSON response, errors included, as Java's `RestController` does.
+async fn filter_response(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let filter = axum::extract::Query::<HashMap<String, String>>::try_from_uri(req.uri())
+        .ok()
+        .and_then(|q| q.0.get("filter_path").cloned());
+    let res = next.run(req).await;
+    let json_body = res
+        .headers()
+        .get("content-type")
+        .is_some_and(|c| c.as_bytes().starts_with(b"application/json"));
+    let Some(f) = filter.filter(|_| json_body) else {
+        return res;
+    };
+    let (mut parts, body) = res.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, usize::MAX).await else {
+        return parts.status.into_response();
+    };
+    let Ok(v) = serde_json::from_slice::<Value>(&bytes) else {
+        return (parts, bytes).into_response();
+    };
+    let out = serde_json::to_vec(&filter_path::apply(&v, &f)).unwrap_or_default();
+    parts.headers.remove("content-length");
+    (parts, out).into_response()
+}
+
 fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(info))
@@ -256,6 +284,7 @@ fn router(state: AppState) -> Router {
         )
         .route("/{index}/_update/{id}", post(docs::update))
         .with_state(state)
+        .layer(axum::middleware::from_fn(filter_response))
 }
 
 #[cfg(test)]

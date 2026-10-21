@@ -181,10 +181,7 @@ pub async fn search(
         "_shards": shards(),
         "hits": hits
     });
-    Ok(Json(match params.get("filter_path") {
-        Some(f) => crate::filter_path::apply(&resp, f),
-        None => resp,
-    }))
+    Ok(Json(resp))
 }
 
 pub async fn count_all(
@@ -240,10 +237,7 @@ pub async fn count(
     let n = es_query::count_many(&targets(&indices, &resolved), &query)
         .map_err(AppError::ParsingException)?;
     let resp = json!({"count": n, "_shards": shards()});
-    Ok(Json(match params.get("filter_path") {
-        Some(f) => crate::filter_path::apply(&resp, f),
-        None => resp,
-    }))
+    Ok(Json(resp))
 }
 
 pub async fn esql(

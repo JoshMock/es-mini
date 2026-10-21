@@ -1,7 +1,21 @@
 //! `filter_path` response filtering: dotted patterns with `*`/`**` wildcards; `-` prefix excludes.
 use serde_json::Value;
 
-type Pats<'a> = Vec<Vec<&'a str>>;
+type Pats = Vec<Vec<String>>;
+
+/// Splits on unescaped dots; `\.` is a literal dot, as in Java's `FilterPath.parse`.
+fn split(f: &str) -> Vec<String> {
+    let (mut out, mut cur, mut chars) = (Vec::new(), String::new(), f.chars().peekable());
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if chars.peek() == Some(&'.') => cur.push(chars.next().unwrap_or('.')),
+            '.' => out.push(std::mem::take(&mut cur)),
+            c => cur.push(c),
+        }
+    }
+    out.push(cur);
+    out
+}
 
 fn glob(p: &str, s: &str) -> bool {
     match p.split_once('*') {
@@ -13,7 +27,7 @@ fn glob(p: &str, s: &str) -> bool {
 }
 
 /// Advances patterns past `key`; the bool is true when a pattern matched completely.
-fn step<'a>(pats: &Pats<'a>, key: &str) -> (Pats<'a>, bool) {
+fn step(pats: &Pats, key: &str) -> (Pats, bool) {
     let (mut next, mut full) = (Vec::new(), false);
     for p in pats {
         if p[0] == "**" {
@@ -26,7 +40,7 @@ fn step<'a>(pats: &Pats<'a>, key: &str) -> (Pats<'a>, bool) {
                 },
                 _ => {}
             }
-        } else if glob(p[0], key) {
+        } else if glob(&p[0], key) {
             match p.len() {
                 1 => full = true,
                 _ => next.push(p[1..].to_vec()),
@@ -71,8 +85,8 @@ pub fn apply(v: &Value, filter: &str) -> Value {
     let (mut inc, mut exc): (Pats, Pats) = (Vec::new(), Vec::new());
     for f in filter.split(',').filter(|f| !f.is_empty()) {
         match f.strip_prefix('-') {
-            Some(x) => exc.push(x.split('.').collect()),
-            None => inc.push(f.split('.').collect()),
+            Some(x) => exc.push(split(x)),
+            None => inc.push(split(f)),
         }
     }
     let inc = (!inc.is_empty()).then_some(inc);
@@ -83,6 +97,13 @@ pub fn apply(v: &Value, filter: &str) -> Value {
 mod tests {
     use super::apply;
     use serde_json::json;
+
+    #[test]
+    fn escaped_dot_is_literal() {
+        let v = json!({"a.b": 1, "a": {"b": 2}});
+        assert_eq!(apply(&v, "a\\.b"), json!({"a.b": 1}));
+        assert_eq!(apply(&v, "a.b"), json!({"a": {"b": 2}}));
+    }
 
     #[test]
     fn includes_and_excludes() {
