@@ -91,12 +91,86 @@ pub(crate) fn read_docs(
     Ok(out)
 }
 
-/// Writes one term's docs (fewer than [`BLOCK_SIZE`], ascending) in the group-varint tail form
-/// `read_docs` reads: all doc deltas (low bit set when the freq is 1), then the other freqs.
-pub fn write_docs_tail(out: &mut Output, docs: &[(u32, u32)], has_freqs: bool) {
-    assert!(docs.len() < BLOCK_SIZE, "full blocks are not written yet");
+/// Largest impact counts and byte sizes written, for the `.psm` metadata.
+#[derive(Default)]
+pub struct ImpactMax {
+    pub level0_num: i32,
+    pub level0_bytes: i32,
+    pub level1_num: i32,
+    pub level1_bytes: i32,
+}
+
+/// Writes one term's docs (ascending) as `read_docs` reads them: full blocks of [`BLOCK_SIZE`]
+/// behind skip headers (with level-1 headers around each 32 blocks), then a group-varint tail of
+/// doc deltas (low bit set when the freq is 1) and the other freqs. `norms` holds the field's
+/// norm per doc for impacts; without it every norm is 1.
+pub fn write_docs(
+    out: &mut Output,
+    docs: &[(u32, u32)],
+    has_freqs: bool,
+    norms: Option<&[i8]>,
+    max: &mut ImpactMax,
+) {
+    let norm = |d: u32| norms.map_or(1, |n| n[d as usize] as i64);
+    let pairs = |docs: &[(u32, u32)]| -> Vec<(u32, i64)> {
+        docs.iter().map(|&(d, f)| (f, norm(d))).collect()
+    };
     let mut prev = -1i64;
-    let deltas: Vec<u32> = docs
+    let (mut group, mut group_pairs, mut group_prev) = (Output::default(), vec![], -1i64);
+    let full = docs.len() / BLOCK_SIZE;
+    for (i, block) in docs.as_chunks::<BLOCK_SIZE>().0.iter().enumerate() {
+        let last = block[BLOCK_SIZE - 1].0 as i64;
+        let mut body = Output::default();
+        write_full_block(&mut body, block, prev);
+        if has_freqs {
+            write_pfor(&mut body, &block.iter().map(|d| d.1).collect::<Vec<_>>());
+        }
+        // After the doc delta and block length: the impacts (when there are freqs), then the body.
+        let mut after = Output::default();
+        let block_pairs = pairs(block);
+        if has_freqs {
+            let impacts = competitive(&block_pairs);
+            let mut bytes = Output::default();
+            write_impacts(&mut bytes, &impacts);
+            max.level0_num = max.level0_num.max(impacts.len() as i32);
+            max.level0_bytes = max.level0_bytes.max(bytes.0.len() as i32);
+            after.vint(bytes.0.len() as i32);
+            after.bytes(&bytes.0);
+        }
+        let mut header = Output::default();
+        write_vint15(&mut header, (last - prev) as i32);
+        write_vlong15(&mut header, (after.0.len() + body.0.len()) as i64);
+        header.bytes(&after.0);
+        // Blocks of a complete group of 32 wait for their level-1 header; the rest go straight out.
+        let in_group = (i / 32 + 1) * 32 <= full;
+        let dest = if in_group { &mut group } else { &mut *out };
+        dest.vlong(header.0.len() as i64);
+        dest.bytes(&header.0);
+        dest.bytes(&body.0);
+        group_pairs.extend(block_pairs);
+        prev = last;
+        if in_group && i % 32 == 31 {
+            out.vint((last - group_prev) as i32);
+            let mut skip = Output::default();
+            if has_freqs {
+                let impacts = competitive(&group_pairs);
+                write_impacts(&mut skip, &impacts);
+                max.level1_num = max.level1_num.max(impacts.len() as i32);
+                max.level1_bytes = max.level1_bytes.max(skip.0.len() as i32);
+                // The header after its length short is the impacts' length short and the impacts.
+                let header = 2 + skip.0.len();
+                out.vlong((2 + header + group.0.len()) as i64);
+                out.bytes(&(header as i16).to_le_bytes());
+                out.bytes(&(skip.0.len() as i16).to_le_bytes());
+                out.bytes(&skip.0);
+            } else {
+                out.vlong(group.0.len() as i64);
+            }
+            out.bytes(&group.0);
+            (group, group_pairs, group_prev) = (Output::default(), vec![], last);
+        }
+    }
+    let deltas: Vec<u32> = docs[full * BLOCK_SIZE..]
         .iter()
         .map(|&(d, f)| {
             let delta = (d as i64 - prev) as u32;
@@ -120,9 +194,157 @@ pub fn write_docs_tail(out: &mut Output, docs: &[(u32, u32)], has_freqs: bool) {
         out.vint(v as i32);
     }
     if has_freqs {
-        for &(_, f) in docs.iter().filter(|d| d.1 != 1) {
+        for &(_, f) in docs[full * BLOCK_SIZE..].iter().filter(|d| d.1 != 1) {
             out.vint(f as i32);
         }
+    }
+}
+
+/// The `(freq, norm)` pairs no other pair beats (higher or equal freq with a lower or equal
+/// norm), ascending by freq and norm: the only ones block-max scoring needs.
+fn competitive(pairs: &[(u32, i64)]) -> Vec<(u32, i64)> {
+    let mut sorted = pairs.to_vec();
+    sorted.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    let mut out: Vec<(u32, i64)> = vec![];
+    for (f, n) in sorted {
+        if out.last().is_none_or(|l| n < l.1) {
+            out.push((f, n));
+        }
+    }
+    out.reverse();
+    out
+}
+
+fn write_impacts(out: &mut Output, impacts: &[(u32, i64)]) {
+    let (mut prev_freq, mut prev_norm) = (0, 0);
+    for &(f, n) in impacts {
+        let freq_delta = (f - prev_freq - 1) as i32;
+        let norm_delta = n - prev_norm - 1;
+        if norm_delta == 0 {
+            out.vint(freq_delta << 1);
+        } else {
+            out.vint(freq_delta << 1 | 1);
+            out.vlong((norm_delta << 1) ^ (norm_delta >> 63));
+        }
+        (prev_freq, prev_norm) = (f, n);
+    }
+}
+
+fn write_vint15(out: &mut Output, v: i32) {
+    write_vlong15(out, v as i64);
+}
+
+fn write_vlong15(out: &mut Output, v: i64) {
+    if v & !0x7fff == 0 {
+        out.bytes(&(v as i16).to_le_bytes());
+    } else {
+        out.bytes(&((v & 0x7fff) as i16 | i16::MIN).to_le_bytes());
+        out.vlong(v >> 15);
+    }
+}
+
+/// A block of exactly [`BLOCK_SIZE`] docs after `prev`: a run, a bit set, or packed deltas,
+/// whichever is smallest.
+fn write_full_block(out: &mut Output, block: &[(u32, u32)], prev: i64) {
+    let range = (block[BLOCK_SIZE - 1].0 as i64 - prev) as usize;
+    let mut last = prev;
+    let deltas: Vec<u32> = block
+        .iter()
+        .map(|d| {
+            let delta = (d.0 as i64 - last) as u32;
+            last = d.0 as i64;
+            delta
+        })
+        .collect();
+    let bits = 32 - deltas.iter().fold(0, |a, d| a | d).leading_zeros();
+    let words = range.div_ceil(64);
+    if range == BLOCK_SIZE {
+        out.byte(0);
+    } else if words < bits as usize * 4 {
+        out.byte(-(words as i8) as u8);
+        let mut set = vec![0u64; words];
+        for d in block {
+            let i = (d.0 as i64 - prev - 1) as usize;
+            set[i / 64] |= 1 << (i % 64);
+        }
+        set.iter().for_each(|w| out.long(*w as i64));
+    } else {
+        out.byte(bits as u8);
+        write_for(out, &deltas, bits);
+    }
+}
+
+/// `ForUtil.encode`, the inverse of [`read_for`].
+fn write_for(out: &mut Output, ints: &[u32], bits: u32) {
+    let lane_bits = match bits {
+        ..=8 => 8,
+        9..=16 => 16,
+        _ => 32,
+    };
+    let lanes = (32 / lane_bits) as usize;
+    let mut words = vec![0u32; bits as usize * 8];
+    for lane in 0..lanes {
+        let shift = 32 - lane_bits * (lane as u32 + 1);
+        let count = BLOCK_SIZE / lanes;
+        let mut lane_words = vec![0u32; words.len()];
+        pack_lane(
+            &ints[lane * count..][..count],
+            &mut lane_words,
+            lane_bits,
+            bits,
+        );
+        for (w, l) in words.iter_mut().zip(lane_words) {
+            *w |= l << shift;
+        }
+    }
+    words.iter().for_each(|w| out.bytes(&w.to_le_bytes()));
+}
+
+/// Inverse of [`unpack_lane`].
+fn pack_lane(ints: &[u32], words: &mut [u32], word_bits: u32, bits: u32) {
+    let per_shift = (bits * 8) as usize;
+    let mut idx = 0;
+    let mut shift = word_bits as i32 - bits as i32;
+    while shift >= 0 {
+        for w in &mut words[..per_shift] {
+            *w |= ints[idx] << shift;
+            idx += 1;
+        }
+        shift -= bits as i32;
+    }
+    let leftover = (shift + bits as i32) as u32;
+    let (mut word, mut remaining) = (0, bits);
+    while idx < ints.len() {
+        if remaining >= leftover {
+            remaining -= leftover;
+            words[word] |= (ints[idx] >> remaining) & mask(leftover);
+            word += 1;
+            if remaining == 0 {
+                idx += 1;
+                remaining = bits;
+            }
+        } else {
+            words[word] |= (ints[idx] & mask(remaining)) << (leftover - remaining);
+            idx += 1;
+            let next = bits - leftover + remaining;
+            words[word] |= (ints[idx] >> next) & mask(leftover - remaining);
+            remaining = next;
+            word += 1;
+        }
+    }
+}
+
+/// `PForUtil.encode` without exceptions: every value gets as many bits as the widest needs.
+fn write_pfor(out: &mut Output, ints: &[u32]) {
+    let bits = 32 - ints.iter().fold(0, |a, d| a | d).leading_zeros();
+    if ints.iter().all(|i| *i == ints[0]) {
+        out.byte(0);
+        out.vint(ints[0] as i32);
+    } else {
+        // ponytail: no patched exceptions, a few huge freqs widen the whole block.
+        assert!(bits < 32, "freqs are below 2^31");
+        out.byte(bits as u8);
+        write_for(out, ints, bits);
     }
 }
 
@@ -422,8 +644,57 @@ mod tests {
                 .map(|(i, &d)| (d, if has_freqs { 1 + (i as u32 % 3) } else { 1 }))
                 .collect();
             let mut out = Output::default();
-            write_docs_tail(&mut out, &docs, has_freqs);
+            write_docs(&mut out, &docs, has_freqs, None, &mut ImpactMax::default());
             assert_eq!(read_docs(&out.0, 0, docs.len(), has_freqs).unwrap(), docs);
+        }
+    }
+
+    #[test]
+    fn full_blocks_round_trip() {
+        // Dense runs, bit sets, packed deltas, varied freqs, and level-1 skip data (20000 docs).
+        let docs_for = |gap: &dyn Fn(u32) -> u32| {
+            let mut d = 0;
+            (0..20000u32)
+                .map(|i| {
+                    d += gap(i);
+                    (
+                        d,
+                        1 + i % 7 * (i % 11) + if i % 997 == 0 { 1000 } else { 0 },
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let norms: Vec<i8> = (0..20_000_000).map(|i| (i % 50) as i8).collect();
+        for docs in [
+            docs_for(&|_| 1),
+            docs_for(&|i| 1 + i % 3),
+            docs_for(&|i| 1 + (i * 7919) % 500),
+            docs_for(&|i| if i % 300 == 0 { 70000 } else { 1 }),
+        ] {
+            for n in [255, 256, 257, 512, 8191, 8192, 8448, 20000] {
+                for has_freqs in [true, false] {
+                    let want: Vec<_> = docs[..n]
+                        .iter()
+                        .map(|&(d, f)| (d, if has_freqs { f } else { 1 }))
+                        .collect();
+                    let mut out = Output::default();
+                    let mut max = ImpactMax::default();
+                    write_docs(&mut out, &want, has_freqs, Some(&norms), &mut max);
+                    assert_eq!(read_docs(&out.0, 0, n, has_freqs).unwrap(), want, "{n}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn packed_blocks_round_trip_at_every_width() {
+        for bits in 1..=32u32 {
+            let ints: Vec<u32> = (0..BLOCK_SIZE as u64)
+                .map(|i| ((i * 2654435761) as u32) & mask(bits))
+                .collect();
+            let mut out = Output::default();
+            write_for(&mut out, &ints, bits);
+            assert_eq!(read_for(&mut DataInput::new(&out.0), bits).unwrap(), ints);
         }
     }
 }

@@ -160,13 +160,6 @@ struct UserFields {
     points: Vec<(i32, Vec<Vec<u8>>)>,
 }
 
-/// Whether es-codec can write these postings: terms in 256+ docs need full postings blocks.
-fn writable(terms: &[es_codec::terms::TermPostings]) -> bool {
-    terms
-        .iter()
-        .all(|t| t.docs.len() < es_codec::postings::BLOCK_SIZE)
-}
-
 fn user_fields(
     mappings: &Mappings,
     docs: &[(&str, &Document)],
@@ -222,7 +215,7 @@ fn user_fields(
                     })
                     .collect();
                 let terms = postings(toks.clone());
-                if terms.is_empty() || !writable(&terms) {
+                if terms.is_empty() {
                     continue;
                 }
                 out.norms.push((
@@ -241,9 +234,6 @@ fn user_fields(
                     continue;
                 };
                 let terms = postings(keys.iter().map(|k| vec![k.clone()]).collect());
-                if !writable(&terms) {
-                    continue;
-                }
                 out.terms.push((number, terms));
                 out.keyword.push((number, keys));
                 (IndexOptions::Docs, DocValuesType::SortedSet, true)
@@ -262,9 +252,6 @@ fn user_fields(
                         .map(|b| vec![if *b { b"T".to_vec() } else { b"F".to_vec() }])
                         .collect(),
                 );
-                if !writable(&terms) {
-                    continue;
-                }
                 out.terms.push((number, terms));
                 out.sorted_numeric
                     .push((number, bools.iter().map(|b| i64::from(*b)).collect()));

@@ -112,11 +112,9 @@ fn saves_and_reloads_many_terms_and_docs() {
     );
 }
 
-/// Terms in 256+ docs need Lucene104's full postings blocks, which the writer does not produce
-/// yet (see ralph/goals.txt): the save still persists every document for es-mini, leaving only
-/// that field's postings out of the segment.
+/// Terms in 256+ docs are written as full postings blocks.
 #[test]
-fn a_term_in_256_docs_still_saves_every_document() {
+fn a_term_in_256_docs_saves_every_document() {
     use es_index::{FieldMapping, Index};
     let mut idx = Index::default();
     idx.mappings

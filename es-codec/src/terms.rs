@@ -149,16 +149,17 @@ fn decode_terms(
 }
 
 /// `TrieReader.load` for the root node: the file pointer of the root block in `.tim`.
-/// Writes the terms dictionary and docs-only/freqs postings of `fields` (terms in fewer than
-/// [`postings::BLOCK_SIZE`] docs, no positions): one leaf block per field. Lucene's writer caps
+/// Writes the terms dictionary and docs-only/freqs postings of `fields` (no positions): one leaf block per field. Lucene's writer caps
 /// leaf blocks at 48 terms for lookup speed; its reader accepts any count.
 ///
-/// ponytail: no floor blocks, prefix sharing, suffix compression, singleton runs, or `.pos`/`.pay`,
-/// and no full postings blocks; a term in 256+ docs is an error until they exist.
+/// `norms` are the fields' norms per doc, for the competitive impacts of freq fields.
+///
+/// ponytail: no floor blocks, prefix sharing, suffix compression, singleton runs, or `.pos`/`.pay`.
 pub fn write_terms(
     fields: &[(&FieldInfo, &[TermPostings])],
     id: &[u8; codec_util::ID_LEN],
     suffix: &str,
+    norms: &[(i32, &[i8])],
 ) -> crate::Result<TermFiles> {
     use crate::output::Output;
     let (mut tim, mut tip, mut tmd, mut doc) = (
@@ -174,20 +175,14 @@ pub fn write_terms(
     tmd.index_header("Lucene104PostingsWriterTerms", 0, id, suffix);
     tmd.vint(postings::BLOCK_SIZE as i32);
     tmd.vint(fields.len() as i32);
+    let mut max = postings::ImpactMax::default();
     for (info, terms) in fields {
+        let field_norms = norms.iter().find(|n| n.0 == info.number).map(|n| n.1);
         let options = info.index_options;
         if terms.is_empty() || !matches!(options, IndexOptions::Docs | IndexOptions::DocsAndFreqs) {
             return crate::err(format!(
                 "field {} needs terms and docs-only or freqs postings",
                 info.name
-            ));
-        }
-        if let Some(t) = terms.iter().find(|t| t.docs.len() >= postings::BLOCK_SIZE) {
-            return crate::err(format!(
-                "field {}: a term in {} docs needs full {}-doc postings blocks, which es-codec cannot write yet",
-                info.name,
-                t.docs.len(),
-                postings::BLOCK_SIZE
             ));
         }
         let has_freqs = options != IndexOptions::Docs;
@@ -216,7 +211,7 @@ pub fn write_terms(
                 let fp = doc.0.len() as u64;
                 metas.vlong(((fp - last_fp) << 1) as i64);
                 last_fp = fp;
-                postings::write_docs_tail(&mut doc, &t.docs, has_freqs);
+                postings::write_docs(&mut doc, &t.docs, has_freqs, field_norms, &mut max);
             }
         }
         let block_fp = tim.0.len() as i64;
@@ -253,10 +248,16 @@ pub fn write_terms(
     tmd.long(tip.0.len() as i64 + FOOTER_LEN);
     tmd.long(tim.0.len() as i64 + FOOTER_LEN);
     let doc = doc.finish();
-    // No skip data is written, so both impact maxima are zero; then the final `.doc` length.
     let mut psm = Output::default();
     psm.index_header("Lucene104PostingsWriterMeta", 0, id, suffix);
-    psm.bytes(&[0; 16]);
+    for v in [
+        max.level0_num,
+        max.level0_bytes,
+        max.level1_num,
+        max.level1_bytes,
+    ] {
+        psm.bytes(&v.to_le_bytes());
+    }
     psm.long(doc.len() as i64);
     Ok(TermFiles {
         tim: tim.finish(),
@@ -586,7 +587,7 @@ mod tests {
             field("b", 1, IndexOptions::Docs),
         );
         let id = [5u8; 16];
-        let files = write_terms(&[(&fa, &a), (&fb, &b)], &id, "Lucene104_0").unwrap();
+        let files = write_terms(&[(&fa, &a), (&fb, &b)], &id, "Lucene104_0", &[]).unwrap();
         let fields = [fa.clone(), fb.clone()];
         let read = |f| decode_terms(&files, &id, "Lucene104_0", &fields, f).unwrap();
         assert_eq!(read(&fa), a);
