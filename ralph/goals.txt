@@ -1,4 +1,3 @@
 # Ordered goals for the Ralph loop's `goals` suite. One line each; an iteration deletes a line
 # only when that goal's done-criteria hold. Later goals assume earlier ones are done.
-task-19b: es-mini persists its indices through the es-codec writer: with ES_MINI_DATA set, index creation and document writes land in that data directory as Lucene segments plus cluster metadata (es-codec's data_dir writer), and a restarted server serves the same documents; done when a write-restart-read test passes.
 task-20: Cross-engine write compatibility (EXECUTION.md task 20): a script copies a Rust-written data directory, boots Elasticsearch 9.5.5 on it in Docker (1 CPU, 1 GB, requests via docker exec, container always removed), and checks a fixed query set; done when that check passes.
