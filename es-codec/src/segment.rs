@@ -74,7 +74,17 @@ impl SegmentReader {
         &self,
         docs: std::ops::Range<usize>,
     ) -> Result<impl Iterator<Item = Result<stored_fields::Doc>> + '_> {
-        stored_fields::read_documents(self, docs)
+        let docs = self.documents_where(move |d| docs.contains(&d))?;
+        Ok(docs.map(|d| d.map(|d| d.1)))
+    }
+
+    /// The stored fields of the docs `keep` accepts, with their doc ids, in doc order. Only the
+    /// chunks holding them are read.
+    pub fn documents_where<'a>(
+        &'a self,
+        keep: impl Fn(usize) -> bool + 'a,
+    ) -> Result<impl Iterator<Item = Result<(usize, stored_fields::Doc)>> + 'a> {
+        stored_fields::read_documents(self, keep)
     }
 
     /// The stored fields of one doc.

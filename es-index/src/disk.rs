@@ -140,23 +140,21 @@ impl Shard {
     }
 
     /// The live documents at a position `keep` accepts, segment by segment, read a chunk at a
-    /// time.
-    // ponytail: decompresses every chunk; skip chunks without kept docs if that shows up
+    /// time; chunks without such documents are not read.
     pub(crate) fn docs<'a: 'k, 'k>(
         &'a self,
         keep: impl Fn(DiskPos) -> bool + Copy + 'k,
     ) -> impl Iterator<Item = es_codec::Result<(&'a str, Document)>> + 'k {
         self.segments.iter().enumerate().flat_map(move |(s, seg)| {
-            let docs: Box<dyn Iterator<Item = _>> = match seg.documents(0..seg.max_doc()) {
+            let docs: Box<dyn Iterator<Item = _>> = match seg.documents_where(move |d| keep((s, d)))
+            {
                 Ok(docs) => Box::new(docs),
                 Err(e) => Box::new(std::iter::once(Err(e))),
             };
-            docs.enumerate().filter_map(move |(doc, fields)| {
-                if !keep((s, doc)) {
-                    return None;
-                }
+            docs.filter_map(move |fields| {
                 let read = || {
-                    let (Some(id), source) = id_and_source(seg, fields?)? else {
+                    let (doc, fields) = fields?;
+                    let (Some(id), source) = id_and_source(seg, fields)? else {
                         return Ok(None);
                     };
                     let Some((id, d)) = self.ids.get_key_value(&id) else {

@@ -7,7 +7,6 @@ use crate::{
     lz4,
     output::Output,
 };
-use std::ops::Range;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum StoredValue {
@@ -188,14 +187,13 @@ pub(crate) fn read_fields_index(
 }
 
 impl FieldsIndex {
-    /// Chunks holding docs of `range`, in order: `(first doc, .fdt offset, .fdt length)`.
-    pub(crate) fn chunks(&self, range: Range<usize>) -> impl Iterator<Item = (usize, u64, u64)> {
-        let first = self
-            .docs
-            .partition_point(|d| *d as usize <= range.start)
-            .saturating_sub(1);
-        (first..self.docs.len() - 1)
-            .take_while(move |i| (self.docs[*i] as usize) < range.end)
+    /// Chunks holding docs `keep` accepts, in order: `(first doc, .fdt offset, .fdt length)`.
+    pub(crate) fn chunks(
+        &self,
+        keep: impl Fn(usize) -> bool,
+    ) -> impl Iterator<Item = (usize, u64, u64)> {
+        (0..self.docs.len() - 1)
+            .filter(move |i| (self.docs[*i] as usize..self.docs[i + 1] as usize).any(&keep))
             .map(|i| {
                 let (from, to) = (self.pointers[i], self.pointers[i + 1]);
                 (
@@ -248,11 +246,12 @@ impl FieldsIndex {
     }
 }
 
-/// The stored fields of the docs in `range`, decoded a chunk at a time.
-pub(crate) fn read_documents(
-    r: &SegmentReader,
-    range: Range<usize>,
-) -> Result<impl Iterator<Item = Result<Doc>> + '_> {
+/// The stored fields of the docs `keep` accepts, with their doc ids, decoded a chunk at a time.
+/// Chunks without such docs are not read.
+pub(crate) fn read_documents<'a>(
+    r: &'a SegmentReader,
+    keep: impl Fn(usize) -> bool + 'a,
+) -> Result<impl Iterator<Item = Result<(usize, Doc)>> + 'a> {
     let id = &r.seg.info.id;
     let index = read_fields_index(&r.cfs_file(".fdm")?, &r.cfs_file(".fdx")?, id, r.max_doc())?;
     let header = r.cfs_slice(".fdt", 0, index.pointers[0] as u64)?;
@@ -264,7 +263,7 @@ pub(crate) fn read_documents(
         id,
         "",
     )?;
-    let chunks: Vec<_> = index.chunks(range.clone()).collect();
+    let chunks: Vec<_> = index.chunks(&keep).collect();
     Ok(chunks.into_iter().flat_map(move |(base, offset, len)| {
         let docs = r
             .cfs_slice(".fdt", offset, len)
@@ -272,8 +271,8 @@ pub(crate) fn read_documents(
         match docs {
             Ok(docs) => (base..)
                 .zip(docs)
-                .filter(|(d, _)| range.contains(d))
-                .map(|(_, doc)| Ok(doc))
+                .filter(|(d, _)| keep(*d))
+                .map(Ok)
                 .collect(),
             Err(e) => vec![Err(e)],
         }
@@ -446,10 +445,10 @@ mod tests {
             })
             .collect();
         let id = [7u8; 16];
-        let read = |n: usize, range: Range<usize>| {
+        let read = |n: usize, keep: &dyn Fn(usize) -> bool| {
             let (fdm, fdt, fdx) = write_stored_fields(&docs[..n], &id).unwrap();
             let index = read_fields_index(&fdm, &fdx, &id, n).unwrap();
-            let chunks: Vec<_> = index.chunks(range).collect();
+            let chunks: Vec<_> = index.chunks(keep).collect();
             let docs: Vec<Doc> = chunks
                 .iter()
                 .flat_map(|&(base, at, len)| {
@@ -459,13 +458,17 @@ mod tests {
                 .collect();
             (chunks.len(), docs)
         };
-        let (chunks, all) = read(3000, 0..3000);
+        let (chunks, all) = read(3000, &|_| true);
         assert_eq!(all, docs);
         assert!(chunks > 2, "{chunks} chunks");
         // Only the chunk holding the asked-for docs is read.
-        let (n, part) = read(3000, 1500..1502);
+        let (n, part) = read(3000, &|d| (1500..1502).contains(&d));
         assert_eq!(n, 1);
         assert!(part.len() < 3000 && part.windows(2).any(|w| w == &docs[1500..1502]));
-        assert_eq!(read(1, 0..1), (1, docs[..1].to_vec()));
+        assert_eq!(read(1, &|d| d == 0), (1, docs[..1].to_vec()));
+        // Chunks between the asked-for docs are skipped.
+        let (n, part) = read(3000, &|d| d == 0 || d == 2999);
+        assert_eq!(n, 2);
+        assert!(part.contains(&docs[0]) && part.contains(&docs[2999]));
     }
 }
