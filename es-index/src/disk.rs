@@ -444,7 +444,7 @@ fn write_snapshot(data_dir: &Path, indices: &Indices) -> es_codec::Result<()> {
             // Elasticsearch refuses to load index metadata without the creation version.
             settings
                 .entry("index.version.created".into())
-                .or_insert_with(|| crate::VERSION_CREATED.into());
+                .or_insert_with(|| crate::VERSION_CREATED.to_string());
             IndexMetadata {
                 name: name.clone(),
                 uuid,

@@ -3,14 +3,12 @@
 use crate::{
     Error, Result, SegmentInfos,
     cluster_state::{ALLOCATION_ID, GlobalMetadata, IndexMetadata, write_state},
-    segment_infos::shard_user_data,
+    segment_infos::{INDEX_VERSION_ID, NODE_VERSION_ID, shard_user_data},
     state_file::{self, manifest_doc, node_doc, retention_leases_doc, shard_state_doc},
     translog::{Checkpoint, write_empty},
 };
 use std::path::Path;
 
-const NODE_VERSION: i64 = 9_050_599;
-const INDEX_VERSION: i64 = 9_111_000;
 // Fixed 22-char ids; ES only requires uniqueness per shard.
 const HISTORY_UUID: &str = "esminiHistoryUuid0000A";
 const TRANSLOG_UUID: &str = "esminiTranslogUuid000A";
@@ -31,7 +29,7 @@ pub fn write_empty_data_dir(
         &state,
         "node",
         0,
-        &node_doc(&global.node_id, NODE_VERSION, INDEX_VERSION),
+        &node_doc(&global.node_id, NODE_VERSION_ID, INDEX_VERSION_ID),
     )?;
     state_file::write(
         &state,
@@ -365,7 +363,7 @@ mod tests {
         let state = state_file::read(&out.join("_state/node-0.st")).unwrap();
         assert_eq!(
             state,
-            node_doc(&global.node_id, NODE_VERSION, INDEX_VERSION)
+            node_doc(&global.node_id, NODE_VERSION_ID, INDEX_VERSION_ID)
         );
         if std::env::var_os("ESM_WRITE_DIR").is_none() {
             std::fs::remove_dir_all(&out).unwrap();

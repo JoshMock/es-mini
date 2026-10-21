@@ -78,9 +78,9 @@ fn read_version(input: &mut DataInput, vint: bool) -> Result<Version> {
 }
 
 /// `index.version.created` / `es_version` / oldest index version of Elasticsearch 9.5.5 data (from the fixture).
-pub const INDEX_VERSION_ID: &str = "9111000";
+pub const INDEX_VERSION_ID: i64 = 9_111_000;
 /// Node version id of Elasticsearch 9.5.5.
-pub const NODE_VERSION_ID: &str = "9050599";
+pub const NODE_VERSION_ID: i64 = 9_050_599;
 
 /// Commit user data Elasticsearch 9.5.5 requires on a shard's Lucene commit.
 pub fn shard_user_data(
@@ -92,7 +92,7 @@ pub fn shard_user_data(
     [
         ("history_uuid", history_uuid.to_string()),
         ("translog_uuid", translog_uuid.to_string()),
-        ("es_version", INDEX_VERSION_ID.into()),
+        ("es_version", INDEX_VERSION_ID.to_string()),
         ("max_seq_no", max_seq_no.to_string()),
         ("local_checkpoint", local_checkpoint.to_string()),
         ("min_retained_seq_no", (local_checkpoint + 1).to_string()),

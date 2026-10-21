@@ -115,7 +115,7 @@ impl Settings {
         for (key, value) in [
             ("index.uuid", random_uuid()),
             ("index.creation_date", now.as_millis().to_string()),
-            ("index.version.created", VERSION_CREATED.to_owned()),
+            ("index.version.created", VERSION_CREATED.to_string()),
             ("index.provided_name", name.to_owned()),
         ] {
             self.0.entry(key.to_owned()).or_insert(value);
@@ -454,7 +454,7 @@ fn merge(target: &mut Value, patch: &Value) {
 }
 
 /// `index.version.created` of indices created by Elasticsearch 9.5.5 (read from the fixture).
-pub const VERSION_CREATED: &str = es_codec::segment_infos::INDEX_VERSION_ID;
+pub const VERSION_CREATED: i64 = es_codec::segment_infos::INDEX_VERSION_ID;
 
 /// A 22-character URL-safe base64 id like Elasticsearch's index UUIDs.
 fn random_uuid() -> String {

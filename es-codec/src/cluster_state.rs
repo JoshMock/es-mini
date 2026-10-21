@@ -302,10 +302,13 @@ pub fn write_state(
             ("current_term", global.term.to_string()),
             ("last_accepted_version", "1".into()),
             ("node_id", global.node_id.clone()),
-            ("node_version", crate::segment_infos::NODE_VERSION_ID.into()),
+            (
+                "node_version",
+                crate::segment_infos::NODE_VERSION_ID.to_string(),
+            ),
             (
                 "oldest_index_version",
-                crate::segment_infos::INDEX_VERSION_ID.into(),
+                crate::segment_infos::INDEX_VERSION_ID.to_string(),
             ),
             ("cluster_uuid", global.cluster_uuid.clone()),
             ("cluster_uuid_committed", "true".into()),
