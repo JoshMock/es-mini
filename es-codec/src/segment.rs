@@ -52,14 +52,36 @@ impl SegmentReader {
             .map_or_else(|| err(format!("{} has no {name}", self.seg.name)), Ok)
     }
 
+    /// `len` bytes at `offset` of a sub-file of the compound file.
+    pub(crate) fn cfs_slice(&self, name: &str, offset: u64, len: u64) -> Result<Vec<u8>> {
+        self.cfs
+            .slice(name, offset, len)?
+            .map_or_else(|| err(format!("{} has no {name}", self.seg.name)), Ok)
+    }
+
     /// A per-generation file beside the compound file, e.g. `_0_1.liv` for `suffix` `_1.liv`.
     pub(crate) fn gen_file(&self, suffix: &str) -> Result<Vec<u8>> {
         crate::read_file(&self.dir.join(format!("{}{suffix}", self.seg.name)))
     }
 
     /// All stored fields of every doc, indexed by doc id: `(field number, value)`.
-    pub fn stored_fields(&self) -> Result<Vec<Vec<(i32, stored_fields::StoredValue)>>> {
-        stored_fields::read_stored_fields(self)
+    pub fn stored_fields(&self) -> Result<Vec<stored_fields::Doc>> {
+        self.documents(0..self.max_doc())?.collect()
+    }
+
+    /// The stored fields of the docs in `docs`, in doc order, read from disk a chunk at a time.
+    pub fn documents(
+        &self,
+        docs: std::ops::Range<usize>,
+    ) -> Result<impl Iterator<Item = Result<stored_fields::Doc>> + '_> {
+        stored_fields::read_documents(self, docs)
+    }
+
+    /// The stored fields of one doc.
+    pub fn document(&self, doc: usize) -> Result<stored_fields::Doc> {
+        self.documents(doc..doc + 1)?
+            .next()
+            .unwrap_or_else(|| err(format!("{} has no doc {doc}", self.seg.name)))
     }
 
     /// Whether each doc id is live: neither hard-deleted nor soft-deleted.

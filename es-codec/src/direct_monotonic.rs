@@ -1,6 +1,7 @@
-//! `DirectWriter` packing and `DirectMonotonicWriter`, shared by doc values and stored fields.
+//! `DirectWriter`/`DirectReader` packing and `DirectMonotonicWriter`/`Reader`, shared by doc
+//! values and stored fields.
 
-use crate::output::Output;
+use crate::{Result, err, input::DataInput, output::Output};
 
 /// Smallest width `DirectReader` supports that holds `range`.
 pub(crate) fn direct_bits(range: u64) -> u8 {
@@ -57,6 +58,74 @@ pub(crate) fn write_direct_monotonic(
         ));
     }
     data
+}
+
+/// `DirectMonotonicReader.Meta`: per block `(min, avg, offset, bits per value)`.
+pub(crate) struct DirectMonotonic {
+    block_shift: u32,
+    blocks: Vec<(i64, f32, i64, u8)>,
+}
+
+pub(crate) fn read_direct_monotonic(
+    meta: &mut DataInput,
+    num_values: u64,
+    block_shift: i32,
+) -> Result<DirectMonotonic> {
+    if !(2..=22).contains(&block_shift) {
+        return err(format!("invalid block shift {block_shift}"));
+    }
+    let blocks = (0..num_values.div_ceil(1 << block_shift))
+        .map(|_| {
+            Ok((
+                meta.read_long()?,
+                f32::from_bits(meta.read_int()? as u32),
+                meta.read_long()?,
+                meta.read_byte()?,
+            ))
+        })
+        .collect::<Result<_>>()?;
+    Ok(DirectMonotonic {
+        block_shift: block_shift as u32,
+        blocks,
+    })
+}
+
+/// `DirectReader.get`: LSB-first bit-packed value `index` of `bits` bits, starting at byte 0.
+pub(crate) fn direct_get(bytes: &[u8], bits: u8, index: u64) -> Result<i64> {
+    match bits {
+        0 => return Ok(0),
+        1..=64 => {}
+        _ => return err(format!("invalid bits per value {bits}")),
+    }
+    let bit = index * bits as u64;
+    let (byte, shift) = ((bit >> 3) as usize, bit & 7);
+    let end = (byte + 8).min(bytes.len());
+    let Some(chunk) = bytes
+        .get(byte..end)
+        .filter(|c| c.len() as u64 * 8 >= shift + bits as u64)
+    else {
+        return err("packed value extends past its slice");
+    };
+    let mut word = [0u8; 8];
+    word[..chunk.len()].copy_from_slice(chunk);
+    let mask = if bits == 64 { !0 } else { (1u64 << bits) - 1 };
+    Ok((u64::from_le_bytes(word) >> shift & mask) as i64)
+}
+
+impl DirectMonotonic {
+    /// The first `n` values, packed in `bytes` (the addresses slice).
+    pub(crate) fn values(&self, bytes: &[u8], n: u64) -> Result<Vec<i64>> {
+        (0..n)
+            .map(|i| {
+                let (min, avg, offset, bits) = self.blocks[(i >> self.block_shift) as usize];
+                let in_block = i & ((1 << self.block_shift) - 1);
+                let packed = bytes.get(offset as usize..).unwrap_or_default();
+                let delta = direct_get(packed, bits, in_block)?;
+                // Java multiplies a float by a long as float, then truncates to long.
+                Ok(min + (avg * in_block as f32) as i64 + delta)
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]

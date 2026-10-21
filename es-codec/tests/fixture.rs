@@ -173,6 +173,17 @@ fn reads_stored_fields() {
 }
 
 #[test]
+fn reads_single_stored_documents() {
+    for seg in segments() {
+        let all = seg.stored_fields().unwrap();
+        for (doc, fields) in all.iter().enumerate() {
+            assert_eq!(&seg.document(doc).unwrap(), fields);
+        }
+        assert!(seg.document(all.len()).is_err());
+    }
+}
+
+#[test]
 fn reads_live_docs_from_soft_deletes() {
     let segments = segments();
     let live_ids = |seg: &SegmentReader| -> Vec<String> {

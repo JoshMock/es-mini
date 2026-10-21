@@ -1,12 +1,13 @@
 //! Stored fields (`.fdt`, Lucene90StoredFieldsFormat BEST_SPEED: LZ4 with preset dictionary).
 use crate::{
     Result, SegmentReader, codec_util,
-    direct_monotonic::write_direct_monotonic,
+    direct_monotonic::{read_direct_monotonic, write_direct_monotonic},
     err,
     input::{DataInput, zigzag},
     lz4,
     output::Output,
 };
+use std::ops::Range;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum StoredValue {
@@ -134,35 +135,84 @@ fn read_field(doc: &mut DataInput, ty: u64) -> Result<StoredValue> {
     })
 }
 
-pub(crate) fn read_stored_fields(r: &SegmentReader) -> Result<Vec<Vec<(i32, StoredValue)>>> {
-    read_stored_fields_files(
-        &r.cfs_file(".fdm")?,
-        &r.cfs_file(".fdt")?,
-        &r.seg.info.id,
-        r.max_doc(),
-    )
+/// One doc's stored fields: `(field number, value)`.
+pub type Doc = Vec<(i32, StoredValue)>;
+
+/// `FieldsIndexReader`: the first doc and `.fdt` start of every chunk, plus one past the end.
+pub(crate) struct FieldsIndex {
+    chunk_size: usize,
+    docs: Vec<i64>,
+    pointers: Vec<i64>,
 }
 
-fn read_stored_fields_files(
-    meta: &[u8],
-    fdt: &[u8],
+/// Reads the fields index from `.fdm` and `.fdx`.
+pub(crate) fn read_fields_index(
+    fdm: &[u8],
+    fdx: &[u8],
     id: &[u8; codec_util::ID_LEN],
     max_doc: usize,
-) -> Result<Vec<Vec<(i32, StoredValue)>>> {
-    codec_util::check_footer(meta)?;
-    let m = &mut DataInput::new(meta);
+) -> Result<FieldsIndex> {
+    codec_util::check_footer(fdm)?;
+    let m = &mut DataInput::new(fdm);
     codec_util::check_index_header(m, "Lucene90FieldsIndexMeta", 0, 1, id, "")?;
     let chunk_size = m.read_len()?;
+    if m.read_int()? as usize != max_doc {
+        return err("stored fields index does not cover every doc");
+    }
+    let block_shift = m.read_int()?;
+    let n =
+        u64::try_from(m.read_int()?).map_err(|_| crate::Error("negative chunk count".into()))?;
+    codec_util::check_footer(fdx)?;
+    codec_util::check_index_header(
+        &mut DataInput::new(fdx),
+        "Lucene90FieldsIndexIdx",
+        0,
+        1,
+        id,
+        "",
+    )?;
+    let mut column = || -> Result<Vec<i64>> {
+        let start = m.read_long()? as usize;
+        let mono = read_direct_monotonic(m, n, block_shift)?;
+        mono.values(fdx.get(start..).unwrap_or_default(), n)
+    };
+    let (docs, pointers) = (column()?, column()?);
+    if docs.first() != Some(&0) || docs.last() != Some(&(max_doc as i64)) {
+        return err("corrupt stored fields index");
+    }
+    Ok(FieldsIndex {
+        chunk_size,
+        docs,
+        pointers,
+    })
+}
 
-    codec_util::check_footer(fdt)?;
-    let inp = &mut DataInput::new(&fdt[..fdt.len() - codec_util::FOOTER_LEN]);
-    codec_util::check_index_header(inp, "Lucene90StoredFieldsFastData", 1, 1, id, "")?;
-    let mut docs = Vec::with_capacity(max_doc);
-    while inp.remaining() > 0 {
-        let doc_base = inp.read_len()?;
+impl FieldsIndex {
+    /// Chunks holding docs of `range`, in order: `(first doc, .fdt offset, .fdt length)`.
+    pub(crate) fn chunks(&self, range: Range<usize>) -> impl Iterator<Item = (usize, u64, u64)> {
+        let first = self
+            .docs
+            .partition_point(|d| *d as usize <= range.start)
+            .saturating_sub(1);
+        (first..self.docs.len() - 1)
+            .take_while(move |i| (self.docs[*i] as usize) < range.end)
+            .map(|i| {
+                let (from, to) = (self.pointers[i], self.pointers[i + 1]);
+                (
+                    self.docs[i] as usize,
+                    from as u64,
+                    (to - from).max(0) as u64,
+                )
+            })
+    }
+
+    /// Decodes one chunk's bytes, which must start with `doc_base`.
+    pub(crate) fn read_chunk(&self, chunk: &[u8], doc_base: usize) -> Result<Vec<Doc>> {
+        let inp = &mut DataInput::new(chunk);
+        let base = inp.read_len()?;
         let token = inp.read_len()?;
         let (n_docs, sliced) = (token >> 2, token & 1 != 0);
-        if doc_base != docs.len() || docs.len() + n_docs > max_doc {
+        if base != doc_base || n_docs == 0 {
             return err(format!("corrupt stored fields chunk at doc {doc_base}"));
         }
         let (counts, lens) = if n_docs == 1 {
@@ -177,12 +227,13 @@ fn read_stored_fields_files(
         let mut data = Vec::new();
         if sliced {
             while data.len() < total {
-                data.extend(decompress(inp, (total - data.len()).min(chunk_size))?);
+                data.extend(decompress(inp, (total - data.len()).min(self.chunk_size))?);
             }
         } else {
             data = decompress(inp, total)?;
         }
         let mut at = 0;
+        let mut docs = Vec::with_capacity(n_docs);
         for (count, len) in counts.into_iter().zip(lens) {
             let doc = &mut DataInput::new(&data[at..at + len as usize]);
             at += len as usize;
@@ -193,11 +244,40 @@ fn read_stored_fields_files(
             }
             docs.push(fields);
         }
+        Ok(docs)
     }
-    if docs.len() != max_doc {
-        return err("stored fields do not cover every doc");
-    }
-    Ok(docs)
+}
+
+/// The stored fields of the docs in `range`, decoded a chunk at a time.
+pub(crate) fn read_documents(
+    r: &SegmentReader,
+    range: Range<usize>,
+) -> Result<impl Iterator<Item = Result<Doc>> + '_> {
+    let id = &r.seg.info.id;
+    let index = read_fields_index(&r.cfs_file(".fdm")?, &r.cfs_file(".fdx")?, id, r.max_doc())?;
+    let header = r.cfs_slice(".fdt", 0, index.pointers[0] as u64)?;
+    codec_util::check_index_header(
+        &mut DataInput::new(&header),
+        "Lucene90StoredFieldsFastData",
+        1,
+        1,
+        id,
+        "",
+    )?;
+    let chunks: Vec<_> = index.chunks(range.clone()).collect();
+    Ok(chunks.into_iter().flat_map(move |(base, offset, len)| {
+        let docs = r
+            .cfs_slice(".fdt", offset, len)
+            .and_then(|c| index.read_chunk(&c, base));
+        match docs {
+            Ok(docs) => (base..)
+                .zip(docs)
+                .filter(|(d, _)| range.contains(d))
+                .map(|(_, doc)| Ok(doc))
+                .collect(),
+            Err(e) => vec![Err(e)],
+        }
+    }))
 }
 
 const BLOCK_SHIFT: i32 = 10;
@@ -366,15 +446,26 @@ mod tests {
             })
             .collect();
         let id = [7u8; 16];
-        let (fdm, fdt, _) = write_stored_fields(&docs, &id).unwrap();
-        assert_eq!(
-            read_stored_fields_files(&fdm, &fdt, &id, 3000).unwrap(),
-            docs
-        );
-        let (fdm, fdt, _) = write_stored_fields(&docs[..1], &id).unwrap();
-        assert_eq!(
-            read_stored_fields_files(&fdm, &fdt, &id, 1).unwrap(),
-            docs[..1]
-        );
+        let read = |n: usize, range: Range<usize>| {
+            let (fdm, fdt, fdx) = write_stored_fields(&docs[..n], &id).unwrap();
+            let index = read_fields_index(&fdm, &fdx, &id, n).unwrap();
+            let chunks: Vec<_> = index.chunks(range).collect();
+            let docs: Vec<Doc> = chunks
+                .iter()
+                .flat_map(|&(base, at, len)| {
+                    let chunk = &fdt[at as usize..(at + len) as usize];
+                    index.read_chunk(chunk, base).unwrap()
+                })
+                .collect();
+            (chunks.len(), docs)
+        };
+        let (chunks, all) = read(3000, 0..3000);
+        assert_eq!(all, docs);
+        assert!(chunks > 2, "{chunks} chunks");
+        // Only the chunk holding the asked-for docs is read.
+        let (n, part) = read(3000, 1500..1502);
+        assert_eq!(n, 1);
+        assert!(part.len() < 3000 && part.windows(2).any(|w| w == &docs[1500..1502]));
+        assert_eq!(read(1, 0..1), (1, docs[..1].to_vec()));
     }
 }
