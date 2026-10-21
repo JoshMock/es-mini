@@ -19,6 +19,17 @@ impl Output {
         self.bytes(&v.to_le_bytes());
     }
 
+    pub fn int(&mut self, v: i32) {
+        self.bytes(&v.to_le_bytes());
+    }
+
+    /// Codec header without the segment id/suffix: magic, codec name, version.
+    pub fn header(&mut self, codec: &str, version: i32) {
+        self.be_int(CODEC_MAGIC);
+        self.string(codec);
+        self.be_int(version);
+    }
+
     pub fn be_int(&mut self, v: i32) {
         self.bytes(&v.to_be_bytes());
     }
@@ -62,9 +73,7 @@ impl Output {
     }
 
     pub fn index_header(&mut self, codec: &str, version: i32, id: &[u8; ID_LEN], suffix: &str) {
-        self.be_int(CODEC_MAGIC);
-        self.string(codec);
-        self.be_int(version);
+        self.header(codec, version);
         self.bytes(id);
         self.byte(suffix.len() as u8);
         self.bytes(suffix.as_bytes());

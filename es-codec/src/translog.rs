@@ -1,6 +1,6 @@
 //! Writer for an empty Elasticsearch translog generation (`translog-N.tlog` + `translog.ckp`).
 
-use crate::codec_util::{CODEC_MAGIC, crc32};
+use crate::codec_util::crc32;
 use crate::output::Output;
 
 /// Fields of `translog.ckp` that vary for an empty translog.
@@ -13,9 +13,7 @@ pub struct Checkpoint {
 /// Returns `(translog-N.tlog, translog.ckp)` bytes for a translog holding no operations.
 pub fn write_empty(uuid: &str, cp: &Checkpoint) -> (Vec<u8>, Vec<u8>) {
     let mut t = Output::default();
-    t.be_int(CODEC_MAGIC);
-    t.string("translog");
-    t.be_int(3);
+    t.header("translog", 3);
     t.be_int(uuid.len() as i32);
     t.bytes(uuid.as_bytes());
     t.be_long(cp.primary_term);
@@ -24,11 +22,9 @@ pub fn write_empty(uuid: &str, cp: &Checkpoint) -> (Vec<u8>, Vec<u8>) {
     let header_len = t.0.len() as i64;
 
     let mut c = Output::default();
-    c.be_int(CODEC_MAGIC);
-    c.string("ckp");
-    c.be_int(4);
+    c.header("ckp", 4);
     c.long(header_len);
-    c.bytes(&0i32.to_le_bytes()); // numOps
+    c.int(0); // numOps
     c.long(cp.generation);
     c.long(-1); // minSeqNo
     c.long(-1); // maxSeqNo

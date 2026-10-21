@@ -10,10 +10,8 @@ use std::path::Path;
 
 pub fn write(dir: &Path, prefix: &str, generation: i64, doc: &Value) -> Result<()> {
     let mut out = Output::default();
-    out.be_int(codec_util::CODEC_MAGIC);
-    out.string("state");
-    out.be_int(2);
-    out.bytes(&1i32.to_le_bytes());
+    out.header("state", 2);
+    out.int(1);
     out.bytes(&smile::encode(doc));
     let path = dir.join(format!("{prefix}-{generation}.st"));
     std::fs::create_dir_all(dir).map_err(|e| crate::Error(format!("{}: {e}", path.display())))?;
