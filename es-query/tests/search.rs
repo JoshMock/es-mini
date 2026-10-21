@@ -328,3 +328,21 @@ fn sorting_on_a_text_field_is_refused() {
     let ok = SearchRequest::parse(&json!({"sort": ["_score"]})).unwrap();
     assert!(es_query::check_sortable(&targets, &ok).is_ok());
 }
+
+#[test]
+fn sorting_on_an_unmapped_field_is_refused_unless_unmapped_type_is_set() {
+    let idx = index();
+    let targets = [("i", &idx, None)];
+    let check = |sort: Value| {
+        es_query::check_sortable(
+            &targets,
+            &SearchRequest::parse(&json!({"sort": sort})).unwrap(),
+        )
+    };
+    let e = check(json!(["nope"])).unwrap_err();
+    assert_eq!(e, "No mapping found for [nope] in order to sort on");
+    assert!(check(json!([{"nope": {"unmapped_type": "long"}}])).is_ok());
+    for ok in ["tag", "nested.x", "_score", "_doc", "_id", "_index"] {
+        assert!(check(json!([ok])).is_ok(), "{ok}");
+    }
+}

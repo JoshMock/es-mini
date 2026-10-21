@@ -664,6 +664,8 @@ impl<'a> Searcher<'a> {
 pub struct SortField {
     pub field: String,
     pub desc: bool,
+    /// `unmapped_type` was given, so a missing mapping is not an error.
+    pub unmapped_ok: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -724,6 +726,7 @@ fn parse_sort(v: &Value) -> Result<SortField, String> {
         Value::String(f) => Ok(SortField {
             desc: f == "_score",
             field: f.clone(),
+            unmapped_ok: false,
         }),
         Value::Object(m) if m.len() == 1 => {
             let (field, p) = m.iter().next().expect("len checked");
@@ -738,6 +741,7 @@ fn parse_sort(v: &Value) -> Result<SortField, String> {
             Ok(SortField {
                 field: field.clone(),
                 desc,
+                unmapped_ok: p.get("unmapped_type").is_some(),
             })
         }
         _ => Err(format!("malformed sort [{v}]")),
@@ -783,6 +787,25 @@ fn with_filter(q: &Query, filter: Option<&Value>) -> Result<Query, String> {
 pub fn check_sortable(targets: &[Target], req: &SearchRequest) -> Result<(), String> {
     for f in &req.sort {
         for (_, index, _) in targets {
+            let known = f.unmapped_ok
+                || f.field.starts_with('_')
+                || index.mappings.properties.contains_key(&f.field)
+                || f.field.strip_suffix(".keyword").is_some_and(|b| {
+                    matches!(
+                        index.mappings.properties.get(b),
+                        Some(FieldMapping::TextKeyword { .. })
+                    )
+                })
+                // ponytail: object fields are not mapped here, so accept any path present in a source
+                || index
+                    .docs()
+                    .any(|(_, d)| !values(&d.source, &f.field).is_empty());
+            if !known {
+                return Err(format!(
+                    "No mapping found for [{}] in order to sort on",
+                    f.field
+                ));
+            }
             if let Some(FieldMapping::Text | FieldMapping::TextKeyword { .. }) =
                 index.mappings.properties.get(&f.field)
             {
