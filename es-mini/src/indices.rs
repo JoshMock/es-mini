@@ -186,6 +186,16 @@ fn read_indices(
     let names: Vec<String> = aliases::resolve_read(indices, &expr)?
         .into_iter()
         .map(|t| t.index)
+        // ponytail: filters literal names too, and only open/closed (no hidden, none)
+        .filter(|n| match flag("expand_wildcards") {
+            Some(w) => w.split(',').any(|s| match s {
+                "all" => true,
+                "open" => !indices[n].closed,
+                "closed" => indices[n].closed,
+                _ => false,
+            }),
+            None => true,
+        })
         .collect();
     if names.is_empty() && flag("allow_no_indices") == Some("false") {
         return Err(AppError::IndexNotFound(expr));

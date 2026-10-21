@@ -1,3 +1,1 @@
 # Known-failing YAML tests. Fix one, then delete its line.
-indices.get/10_basic.yml/Should return test_index_2 if expand_wildcards=open
-indices.get/10_basic.yml/Should return test_index_3 if expand_wildcards=closed
