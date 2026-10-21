@@ -11,8 +11,8 @@ mod search;
 
 use axum::{
     Json, Router,
-    extract::{Query, State},
-    http::Uri,
+    extract::{Path, Query, State},
+    http::{StatusCode, Uri},
     response::IntoResponse,
     routing::{get, post, put},
 };
@@ -63,19 +63,46 @@ const HEALTH_PARAMS: [&str; 11] = [
 
 async fn health(
     State(state): State<AppState>,
+    index: Option<Path<String>>,
     uri: Uri,
     Query(params): Query<HashMap<String, String>>,
-) -> Result<Json<Value>, AppError> {
+) -> Result<(StatusCode, Json<Value>), AppError> {
     params::check(&uri, &params, &HEALTH_PARAMS)?;
+    let store = state.read().expect("lock poisoned");
+    let names: Vec<String> = match &index {
+        None => store.keys().cloned().collect(),
+        Some(Path(expr)) => match es_index::aliases::resolve_read(&store, expr) {
+            Ok(targets) => targets.into_iter().map(|t| t.index).collect(),
+            Err(_) => {
+                let mut body = health_body(0);
+                body["status"] = json!("red");
+                body["timed_out"] = json!(true);
+                return Ok((StatusCode::REQUEST_TIMEOUT, Json(body)));
+            }
+        },
+    };
     let level = params.get("level").map(String::as_str);
-    let mut body = json!({
+    let mut body = health_body(names.len());
+    if matches!(level, Some("indices" | "shards")) {
+        let shards = level == Some("shards");
+        let indices: serde_json::Map<String, Value> = names
+            .iter()
+            .map(|name| (name.clone(), index_health(shards)))
+            .collect();
+        body["indices"] = Value::Object(indices);
+    }
+    Ok((StatusCode::OK, Json(body)))
+}
+
+fn health_body(shards: usize) -> Value {
+    json!({
         "cluster_name": CLUSTER_NAME,
         "status": "green",
         "timed_out": false,
         "number_of_nodes": 1,
         "number_of_data_nodes": 1,
-        "active_primary_shards": 0,
-        "active_shards": 0,
+        "active_primary_shards": shards,
+        "active_shards": shards,
         "relocating_shards": 0,
         "initializing_shards": 0,
         "unassigned_shards": 0,
@@ -85,18 +112,7 @@ async fn health(
         "number_of_in_flight_fetch": 0,
         "task_max_waiting_in_queue_millis": 0,
         "active_shards_percent_as_number": 100.0
-    });
-    if matches!(level, Some("indices" | "shards")) {
-        let shards = level == Some("shards");
-        let indices: serde_json::Map<String, Value> = state
-            .read()
-            .expect("lock poisoned")
-            .keys()
-            .map(|name| (name.clone(), index_health(shards)))
-            .collect();
-        body["indices"] = Value::Object(indices);
-    }
-    Ok(Json(body))
+    })
 }
 
 // ponytail: every index is one green primary shard, no replicas
@@ -211,7 +227,7 @@ fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(info))
         .route("/_cluster/health", get(health))
-        .route("/_cluster/health/{index}", get(health)) // ponytail: index filter ignored
+        .route("/_cluster/health/{index}", get(health))
         .route(
             "/{index}",
             put(indices::create)
@@ -311,6 +327,18 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(axum::serve(listener, app()).into_future());
+
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let req = "GET /_cluster/health/nope HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+        tokio::io::AsyncWriteExt::write_all(&mut stream, req.as_bytes())
+            .await
+            .unwrap();
+        let mut resp = String::new();
+        tokio::io::AsyncReadExt::read_to_string(&mut stream, &mut resp)
+            .await
+            .unwrap();
+        assert!(resp.starts_with("HTTP/1.1 408"), "{resp}");
+        assert!(resp.contains("\"timed_out\":true"), "{resp}");
 
         for (path, key) in [("/", "tagline"), ("/_cluster/health", "status")] {
             let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
