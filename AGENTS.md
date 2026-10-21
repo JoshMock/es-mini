@@ -15,6 +15,48 @@ Run `scripts/check.sh` before every commit; it must pass. It runs `cargo fmt --c
 `clippy -D warnings` (lints configured in root `Cargo.toml`), tests, and `cargo doc -D warnings`.
 Do not weaken lints or add `#[allow(...)]` to get it passing without stating why.
 
+## Environment
+
+- The sandbox makes `~/.cargo` read-only. Run cargo with `CARGO_HOME=/tmp/esm-cargo` and share
+  one `CARGO_TARGET_DIR=/tmp/esm-target` across checkouts and sessions, so concurrent builds
+  queue instead of compiling twice. CPU is limited: keep `-j 2`, under `nice`.
+- Java cannot start in the sandbox, and Docker's published ports are unreachable; plain
+  localhost connections to a process you started do work.
+
+## Ground truth
+
+- Elasticsearch 9.5.5 and Lucene 10.5.1 (COMPATIBILITY.md) define correct behavior and bytes.
+  Port from their source at those versions (skill: port-lucene-format), not from memory.
+- `fixtures/expected/*.json` are real Elasticsearch responses to the requests in
+  `fixtures/generate.sh`; the parity tests compare against them. Check against a live
+  Elasticsearch when they do not cover a case (skill: verify-with-elasticsearch).
+
+## Codebase map
+
+- `es-codec`: Lucene/Elasticsearch on-disk formats, read and write. `es-index`: index model,
+  settings, mappings, analysis, alias and expression resolution, and `disk` (open/save a data
+  directory). `es-query`: query DSL and ES|QL over `es-index`. `es-mini`: the axum server.
+- Reuse the shared helpers instead of re-implementing them: index expressions resolve through
+  `es_index::aliases` (`resolve_read` for metadata, `resolve_data` for document reads and
+  searches, which refuses closed indices, and `resolve_write`), and `indices::read_indices`
+  adds `ignore_unavailable`/`allow_no_indices`/`expand_wildcards`.
+- Known-failure lists: `tests/yaml-xfail.txt` and `fixtures/parity-xfail.txt` must only shrink
+  (a listed test that passes fails the run); `tests/yaml-out-of-scope.txt` changes only by a
+  human decision.
+
+## Durability
+
+`es_index::disk::save` must never leave a data directory half-written: it builds the snapshot
+beside the directory and swaps it in (`disk::recover` completes interrupted swaps), saves are
+serialized, and a failed save fails the request. Keep those properties in any change to
+persistence, and never let a writer panic or silently drop data it cannot encode.
+
+## Reviewing agent-made changes
+
+After any Ralph batch or unattended run, review its commits before building on them (skill:
+review-ralph-batch). Passing `scripts/check.sh` has not been enough to catch duplicated
+helpers, untested regressions, fake endpoints, or goals marked done early.
+
 ## Unattended runs
 
 These standing orders apply when no human is watching (Ralph loop iterations, overnight runs).
@@ -27,8 +69,8 @@ entry with the target and the decision needed), then stop or move on. Never wait
 - Do not rewrite history (rebase, amend, reword, or reset commits you did not make this
   iteration). Never push.
 - Docker is allowed only for Elasticsearch 9.5.5 verification: one container at a time, capped
-  at 1 CPU and 1 GB, requests via `docker exec` (the sandbox blocks localhost TCP), and always
-  removed afterwards (`docker rm -f`), even on failure.
+  at 1 CPU and 1 GB, requests via `docker exec` (the sandbox cannot reach ports Docker
+  publishes), and always removed afterwards (`docker rm -f`), even on failure.
 - Keep CPU low: cargo at `-j 2` (scripts/check.sh's default) under `nice`; no benchmarks or
   release builds.
 - Never regenerate `fixtures/es-9.5.5/` or `fixtures/expected/`; other tests depend on their bytes.
