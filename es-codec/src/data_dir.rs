@@ -266,7 +266,10 @@ mod tests {
             (10, docs.iter().map(|d| i64::from(d.5)).collect()),
             (11, docs.iter().map(|d| d.6).collect()),
         ];
-        let keyword = [(7, docs.iter().map(|d| d.2.as_bytes().to_vec()).collect())];
+        let keyword = [(
+            7,
+            docs.iter().map(|d| vec![d.2.as_bytes().to_vec()]).collect(),
+        )];
         let postings = |mut m: BTreeMap<Vec<u8>, Vec<(u32, u32)>>| -> Vec<TermPostings> {
             std::mem::take(&mut m)
                 .into_iter()
@@ -320,7 +323,7 @@ mod tests {
                 numeric: &numeric,
                 sorted_numeric: &[],
                 keyword: &keyword,
-                norms: &[(6, lengths)],
+                norms: &[(6, lengths.into_iter().map(Some).collect())],
                 terms: &terms,
                 points: &[],
             },

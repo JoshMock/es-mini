@@ -457,6 +457,36 @@ pub fn iso_date(millis: u64) -> String {
     format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{sec:02}.{milli:03}Z")
 }
 
+/// Epoch milliseconds of a date value: a number, or `yyyy-MM-dd[THH:mm[:ss[.SSS]]][Z]` (UTC).
+// ponytail: ES's default `strict_date_optional_time||epoch_millis` only, no zone offsets.
+pub fn parse_date_millis(v: &serde_json::Value) -> Option<i64> {
+    let Some(s) = v.as_str() else {
+        return v.as_i64();
+    };
+    let (date, time) = s.split_once('T').unwrap_or((s, ""));
+    let mut d = date.splitn(3, '-').map(|p| p.parse::<i64>().ok());
+    let (y, m, day) = (d.next()??, d.next()??, d.next()??);
+    let time = time.strip_suffix('Z').unwrap_or(time);
+    let (hms, frac) = time.split_once('.').unwrap_or((time, ""));
+    let mut t = hms
+        .split(':')
+        .filter(|p| !p.is_empty())
+        .map(|p| p.parse::<i64>().ok());
+    let (h, min, sec) = (
+        t.next().unwrap_or(Some(0))?,
+        t.next().unwrap_or(Some(0))?,
+        t.next().unwrap_or(Some(0))?,
+    );
+    let milli = format!("{frac:0<3}")[..3].parse::<i64>().ok()?;
+    // Howard Hinnant's days_from_civil.
+    let y = y - i64::from(m <= 2);
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let days = era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468;
+    Some(((days * 24 + h) * 60 + min) * 60_000 + sec * 1000 + milli)
+}
+
 /// Parses an ES time value (`250ms`, `60s`, `2m`, `1h`, `1d`); `None` for `-1` or junk.
 pub fn parse_time(v: &str) -> Option<Duration> {
     let units = [
@@ -585,6 +615,20 @@ mod tests {
         // The expired tombstone is forgotten, so the doc starts over like a new one.
         assert_eq!(idx.put("1", json!({})).version, 1);
         assert_eq!(idx.tombstones(), 0);
+    }
+
+    #[test]
+    fn parses_dates_back_to_epoch_millis() {
+        use serde_json::json;
+        for ms in [0u64, 1_705_314_600_123, 1_709_251_200_000] {
+            assert_eq!(parse_date_millis(&json!(iso_date(ms))), Some(ms as i64));
+        }
+        assert_eq!(
+            parse_date_millis(&json!("2024-01-01")),
+            Some(1_704_067_200_000)
+        );
+        assert_eq!(parse_date_millis(&json!(5)), Some(5));
+        assert_eq!(parse_date_millis(&json!("junk")), None);
     }
 
     #[test]

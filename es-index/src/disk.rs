@@ -145,19 +145,28 @@ fn norm_byte(len: u32) -> i8 {
     (if len < 24 { len } else { 24 + int4(len - 24) }) as u8 as i8
 }
 
-/// Index data for one shard segment, built from the mapped fields that every doc has a scalar
-/// value for. Field numbers start at 6, after the metadata fields.
+/// Index data for one shard segment, built from the mapped fields whose values are scalars or
+/// arrays of scalars. Field numbers start at 6, after the metadata fields.
 // ponytail: fields the writer cannot encode yet are left out of the segment, which only
-// Elasticsearch notices (es-mini rebuilds every field from `_source` on open): `date`/`float`,
-// sparse or multi-valued fields, positions, and any field with a term in 256+ docs.
+// Elasticsearch notices (es-mini rebuilds every field from `_source` on open): values of the
+// wrong type or nested objects, custom date formats, positions, and any field with a term in
+// 256+ docs.
 #[derive(Default)]
 struct UserFields {
     fields: Vec<es_codec::field_infos::FieldInfo>,
-    sorted_numeric: Vec<(i32, Vec<i64>)>,
-    keyword: Vec<(i32, Vec<Vec<u8>>)>,
-    norms: Vec<(i32, Vec<i8>)>,
+    sorted_numeric: Vec<(i32, Vec<Vec<i64>>)>,
+    keyword: Vec<(i32, Vec<Vec<Vec<u8>>>)>,
+    norms: Vec<(i32, Vec<Option<i8>>)>,
     terms: Vec<(i32, Vec<es_codec::terms::TermPostings>)>,
-    points: Vec<(i32, Vec<Vec<u8>>)>,
+    points: Vec<(i32, es_codec::points::PointValues)>,
+}
+
+/// Converts every value, or `None` if any cannot be.
+fn typed<T>(values: &[Vec<&Value>], f: &dyn Fn(&Value) -> Option<T>) -> Option<Vec<Vec<T>>> {
+    values
+        .iter()
+        .map(|vs| vs.iter().map(|v| f(v)).collect())
+        .collect()
 }
 
 fn user_fields(
@@ -170,14 +179,20 @@ fn user_fields(
     use std::collections::BTreeMap;
     let mut out = UserFields::default();
     for (name, mapping) in &mappings.properties {
-        let values: Vec<_> = docs.iter().map(|(_, d)| d.source.get(name)).collect();
-        let scalar = |v: &Option<&Value>| matches!(v, Some(v) if !v.is_array() && !v.is_object() && !v.is_null());
-        if !values.iter().all(scalar) {
+        // Values per doc: arrays flatten, nulls and absent fields are no values.
+        let values: Vec<Vec<&Value>> = docs
+            .iter()
+            .map(|(_, d)| match d.source.get(name) {
+                Some(Value::Array(a)) => a.iter().filter(|v| !v.is_null()).collect(),
+                Some(v) if !v.is_null() => vec![v],
+                _ => vec![],
+            })
+            .collect();
+        let flat = || values.iter().flatten();
+        if flat().next().is_none() || flat().any(|v| v.is_array() || v.is_object()) {
             continue;
         }
-        let values: Vec<&Value> = values.into_iter().flatten().collect();
         let number = (meta.len() + out.fields.len()) as i32;
-        let text = |v: &Value| v.as_str().map(str::to_owned);
         let postings = |keys: Vec<Vec<Vec<u8>>>| -> Vec<TermPostings> {
             let mut m = BTreeMap::<Vec<u8>, Vec<(u32, u32)>>::new();
             for (doc, terms) in keys.into_iter().enumerate() {
@@ -198,18 +213,25 @@ fn user_fields(
                 })
                 .collect()
         };
+        // Docs index a term once however often it repeats (docs-only postings have no freqs).
+        let dedup = |mut keys: Vec<Vec<Vec<u8>>>| {
+            keys.iter_mut().for_each(|k| {
+                k.sort();
+                k.dedup();
+            });
+            keys
+        };
         let mut point_width = 0;
         let (index_options, doc_values, omit_norms) = match mapping {
             M::Text | M::TextKeyword { .. } => {
-                let Some(texts) = values.iter().map(|v| text(v)).collect::<Option<Vec<_>>>() else {
+                let Some(texts) = typed(&values, &|v| v.as_str().map(str::to_owned)) else {
                     continue;
                 };
                 let toks: Vec<Vec<Vec<u8>>> = texts
                     .iter()
-                    .map(|t| {
-                        Analyzer::Standard
-                            .analyze(t)
-                            .into_iter()
+                    .map(|ts| {
+                        ts.iter()
+                            .flat_map(|t| Analyzer::Standard.analyze(t))
                             .map(String::into_bytes)
                             .collect()
                     })
@@ -220,87 +242,85 @@ fn user_fields(
                 }
                 out.norms.push((
                     number,
-                    toks.iter().map(|t| norm_byte(t.len() as u32)).collect(),
+                    toks.iter()
+                        .map(|t| (!t.is_empty()).then(|| norm_byte(t.len() as u32)))
+                        .collect(),
                 ));
                 out.terms.push((number, terms));
                 (IndexOptions::DocsAndFreqs, DocValuesType::None, false)
             }
             M::Keyword => {
-                let Some(keys) = values
-                    .iter()
-                    .map(|v| text(v).map(String::into_bytes))
-                    .collect::<Option<Vec<_>>>()
+                let Some(keys) = typed(&values, &|v| v.as_str().map(|s| s.as_bytes().to_vec()))
                 else {
                     continue;
                 };
-                let terms = postings(keys.iter().map(|k| vec![k.clone()]).collect());
-                out.terms.push((number, terms));
+                let keys = dedup(keys);
+                out.terms.push((number, postings(keys.clone())));
                 out.keyword.push((number, keys));
                 (IndexOptions::Docs, DocValuesType::SortedSet, true)
             }
             M::Boolean => {
-                let Some(bools) = values
-                    .iter()
-                    .map(|v| v.as_bool())
-                    .collect::<Option<Vec<_>>>()
-                else {
+                let Some(bools) = typed(&values, &|v| v.as_bool()) else {
                     continue;
                 };
-                let terms = postings(
+                let keys = dedup(
                     bools
                         .iter()
-                        .map(|b| vec![if *b { b"T".to_vec() } else { b"F".to_vec() }])
+                        .map(|bs| {
+                            bs.iter()
+                                .map(|b| if *b { b"T".to_vec() } else { b"F".to_vec() })
+                                .collect()
+                        })
                         .collect(),
                 );
-                out.terms.push((number, terms));
-                out.sorted_numeric
-                    .push((number, bools.iter().map(|b| i64::from(*b)).collect()));
-                (IndexOptions::Docs, DocValuesType::SortedNumeric, true)
-            }
-            M::Long | M::Integer | M::Short | M::Byte => {
-                let Some(ints) = values
-                    .iter()
-                    .map(|v| v.as_i64())
-                    .collect::<Option<Vec<_>>>()
-                else {
-                    continue;
-                };
-                let width = if matches!(mapping, M::Long) { 8 } else { 4 };
-                out.points.push((
+                out.terms.push((number, postings(keys)));
+                out.sorted_numeric.push((
                     number,
-                    ints.iter()
-                        .map(|v| es_codec::points::sortable_bytes(*v, width))
+                    bools
+                        .iter()
+                        .map(|bs| bs.iter().map(|b| i64::from(*b)).collect())
                         .collect(),
                 ));
-                point_width = width as i32;
-                out.sorted_numeric.push((number, ints));
-                (IndexOptions::None, DocValuesType::SortedNumeric, true)
+                (IndexOptions::Docs, DocValuesType::SortedNumeric, true)
             }
-            M::Double => {
-                let Some(fs) = values
-                    .iter()
-                    .map(|v| v.as_f64())
-                    .collect::<Option<Vec<_>>>()
-                else {
-                    continue;
-                };
-                // NumericUtils.doubleToSortableLong
-                let sortable = |f: f64| {
+            M::Long | M::Integer | M::Short | M::Byte | M::Double | M::Float | M::Date { .. } => {
+                // Doc values are the sortable longs ES stores; points are their big-endian bytes.
+                let sortable_long = |f: f64| {
                     let b = f.to_bits() as i64;
                     b ^ ((b >> 63) & i64::MAX)
                 };
+                let sortable_int = |f: f32| {
+                    let b = f.to_bits() as i32;
+                    i64::from(b ^ ((b >> 31) & i32::MAX))
+                };
+                let (width, nums) = match mapping {
+                    M::Long => (8, typed(&values, &|v| v.as_i64())),
+                    M::Double => (8, typed(&values, &|v| v.as_f64().map(sortable_long))),
+                    M::Float => (
+                        4,
+                        typed(&values, &|v| v.as_f64().map(|f| sortable_int(f as f32))),
+                    ),
+                    M::Date { .. } => (8, typed(&values, &crate::parse_date_millis)),
+                    _ => (4, typed(&values, &|v| v.as_i64())),
+                };
+                let Some(nums) = nums else {
+                    continue;
+                };
                 out.points.push((
                     number,
-                    fs.iter()
-                        .map(|f| es_codec::points::sortable_bytes(sortable(*f), 8))
+                    nums.iter()
+                        .enumerate()
+                        .flat_map(|(doc, ns)| {
+                            ns.iter().map(move |n| {
+                                (doc as u32, es_codec::points::sortable_bytes(*n, width))
+                            })
+                        })
                         .collect(),
                 ));
-                point_width = 8;
-                out.sorted_numeric
-                    .push((number, fs.into_iter().map(sortable).collect()));
+                point_width = width as i32;
+                out.sorted_numeric.push((number, nums));
                 (IndexOptions::None, DocValuesType::SortedNumeric, true)
             }
-            M::Date { .. } | M::Float => continue,
         };
         let mut attributes = BTreeMap::new();
         let mut copy = |from: &str, kind: &str| {

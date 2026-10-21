@@ -31,15 +31,15 @@ pub struct NewSegment<'a> {
     /// `(field number, value per doc)`
     pub numeric: &'a [(i32, Vec<i64>)],
     /// `(field number, one value per doc)` for single-valued SORTED_NUMERIC fields
-    pub sorted_numeric: &'a [(i32, Vec<i64>)],
-    /// `(field number, term per doc)` for single-valued keyword fields
-    pub keyword: &'a [(i32, Vec<Vec<u8>>)],
+    pub sorted_numeric: &'a [(i32, Vec<Vec<i64>>)],
+    /// `(field number, terms per doc)` for keyword fields
+    pub keyword: &'a [(i32, Vec<Vec<Vec<u8>>>)],
     /// `(field number, one norm per doc)`
-    pub norms: &'a [(i32, Vec<i8>)],
+    pub norms: &'a [(i32, Vec<Option<i8>>)],
     /// `(field number, terms)`
     pub terms: &'a [(i32, Vec<TermPostings>)],
     /// `(field number, sortable value bytes per doc)`
-    pub points: &'a [(i32, Vec<Vec<u8>>)],
+    pub points: &'a [(i32, crate::points::PointValues)],
 }
 
 /// Writes the segment's compound file into `dir` and returns its commit info; the caller adds it
@@ -59,9 +59,15 @@ pub fn write_segment(dir: &Path, s: &NewSegment) -> Result<SegmentCommitInfo> {
         .iter()
         .map(|(n, t)| (by_number(n), &t[..]))
         .collect();
-    let norm_fields: Vec<_> = s.norms.iter().map(|(n, v)| (*n, &v[..])).collect();
-    let t = write_terms(&term_fields, &s.id, "Lucene104_0", &norm_fields)?;
-    let (nvm, nvd) = write_norms(&s.id, &norm_fields);
+    let dense: Vec<(i32, Vec<i8>)> = s
+        .norms
+        .iter()
+        .map(|(n, v)| (*n, v.iter().map(|x| x.unwrap_or(0)).collect()))
+        .collect();
+    let dense: Vec<_> = dense.iter().map(|(n, v)| (*n, &v[..])).collect();
+    let t = write_terms(&term_fields, &s.id, "Lucene104_0", &dense)?;
+    let sparse: Vec<_> = s.norms.iter().map(|(n, v)| (*n, &v[..])).collect();
+    let (nvm, nvd) = write_norms(&s.id, &sparse);
     let mut files = vec![
         (".nvm".to_string(), nvm),
         (".nvd".into(), nvd),
@@ -215,7 +221,9 @@ mod tests {
         let numeric = [(1, vec![10, 20, 30, 40, 50])];
         let keyword = [(
             2,
-            (0..5).map(|i| format!("k{}", i % 2).into_bytes()).collect(),
+            (0..5)
+                .map(|i| vec![format!("k{}", i % 2).into_bytes()])
+                .collect(),
         )];
         let terms = [(
             0,

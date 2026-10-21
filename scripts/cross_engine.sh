@@ -36,6 +36,8 @@ done
 SCORES=',"max_score"'
 VOLATILE='["took","start_time_in_millis","completion_time_in_millis","expiration_time_in_millis","cpu_nanos","read_nanos","bytes_read","rows_emitted"'"$SCORES"']'
 strip() { python3 -c 'import json,sys; d=json.load(sys.stdin); [d.pop(k,None) for k in json.loads(sys.argv[1])]; [h.pop("_score",None) for h in d.get("hits",{}).get("hits",[])] if "max_score" in sys.argv[1] else 0; d.get("hits",{}).pop("max_score",None) if "max_score" in sys.argv[1] else 0; print(json.dumps(d, indent=2, sort_keys=True, ensure_ascii=False))' "$VOLATILE"; }
+# EXTRA_CHECKS=file runs that script (with `req` available) instead of the fixture comparison.
+if [ -n "${EXTRA_CHECKS:-}" ]; then . "$EXTRA_CHECKS"; exit; fi
 fail=0
 check() { # name method path [body]
   if req "$2" "$3" "${4:-}" | strip | diff -q - <(strip <"$ROOT/fixtures/expected/$1.json") >/dev/null 2>&1; then

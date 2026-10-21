@@ -12,29 +12,37 @@ pub fn sortable_bytes(v: i64, width: usize) -> Vec<u8> {
     }
 }
 
-/// `(meta, index, data)` files. `fields` is `(field number, value per doc)`; every value in a
-/// field has the same width and every doc has one value.
+/// `(doc, sortable value bytes)` pairs of one field, in doc order.
+pub type PointValues = Vec<(u32, Vec<u8>)>;
+
+/// `(meta, index, data)` files. `fields` is `(field number, (doc, value) pairs)`; every value in
+/// a field has the same width, and a doc may have none or several.
 // ponytail: one leaf per field regardless of size; a real tree if Elasticsearch must range-search
 // huge shards fast.
 pub fn write_points(
-    fields: &[(i32, Vec<Vec<u8>>)],
+    fields: &[(i32, PointValues)],
     id: &[u8; ID_LEN],
 ) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     let (mut meta, mut index, mut data) = (Output::default(), Output::default(), Output::default());
     meta.index_header("Lucene90PointsFormatMeta", 1, id, "");
     index.index_header("Lucene90PointsFormatIndex", 1, id, "");
     data.index_header("Lucene90PointsFormatData", 1, id, "");
-    for (number, values) in fields {
+    for (number, pairs) in fields {
+        let values: Vec<&[u8]> = pairs.iter().map(|p| p.1.as_slice()).collect();
         let width = values[0].len();
         let mut order: Vec<usize> = (0..values.len()).collect();
-        order.sort_by(|a, b| values[*a].cmp(&values[*b]).then(a.cmp(b)));
-        let (min, max) = (&values[order[0]], &values[order[order.len() - 1]]);
-        let prefix = min.iter().zip(max).take_while(|(a, b)| a == b).count();
+        order.sort_by(|a, b| values[*a].cmp(values[*b]).then(a.cmp(b)));
+        let (min, max) = (values[order[0]], values[order[order.len() - 1]]);
+        let prefix = min
+            .iter()
+            .zip(max.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
         let leaf = data.0.len() as i64;
         data.vint(values.len() as i32);
         data.byte(32); // doc ids as plain ints
         for i in &order {
-            data.bytes(&(*i as i32).to_le_bytes());
+            data.bytes(&(pairs[*i].0 as i32).to_le_bytes());
         }
         data.vint(prefix as i32);
         data.bytes(&min[..prefix]);
@@ -72,7 +80,9 @@ pub fn write_points(
         meta.bytes(min);
         meta.bytes(max);
         meta.vlong(values.len() as i64);
-        meta.vint(values.len() as i32);
+        let mut docs: Vec<u32> = pairs.iter().map(|p| p.0).collect();
+        docs.dedup(); // pairs are in doc order
+        meta.vint(docs.len() as i32);
         meta.vint((index.0.len() as i64 - index_start) as i32);
         meta.long(leaf);
         meta.long(index_start);

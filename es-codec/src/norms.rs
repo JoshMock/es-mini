@@ -1,20 +1,21 @@
 //! `Lucene90NormsFormat` writer for fields that have a norm on every doc (`.nvm` meta, `.nvd` data).
-use crate::{codec_util::ID_LEN, output::Output};
+use crate::{codec_util::ID_LEN, doc_values::write_docs_with_field, output::Output};
 
-/// Returns `(nvm, nvd)` for `fields` of `(field number, one norm per doc)`.
+/// Returns `(nvm, nvd)` for `fields` of `(field number, norm per doc, `None` for docs without one)`.
 ///
-/// ponytail: norms are 1 byte each (Lucene's `SmallFloat` encoding yields signed bytes) and every
-/// doc has one; add wider norms and sparse (IndexedDISI) fields if a mapping needs them.
-pub fn write_norms(id: &[u8; ID_LEN], fields: &[(i32, &[i8])]) -> (Vec<u8>, Vec<u8>) {
+/// ponytail: norms are 1 byte each (Lucene's `SmallFloat` encoding yields signed bytes); add wider
+/// norms if a mapping needs them.
+pub fn write_norms(id: &[u8; ID_LEN], fields: &[(i32, &[Option<i8>])]) -> (Vec<u8>, Vec<u8>) {
     let (mut meta, mut data) = (Output::default(), Output::default());
     meta.index_header("Lucene90NormsMetadata", 0, id, "");
     data.index_header("Lucene90NormsData", 0, id, "");
-    for &(number, norms) in fields {
+    for &(number, per_doc) in fields {
+        let docs: Vec<u32> = (0..per_doc.len() as u32)
+            .filter(|d| per_doc[*d as usize].is_some())
+            .collect();
+        let norms: Vec<i8> = per_doc.iter().flatten().copied().collect();
         meta.bytes(&number.to_le_bytes());
-        meta.long(-1); // docsWithField: all docs
-        meta.long(0);
-        meta.bytes(&(-1i16).to_le_bytes()); // jump table entries
-        meta.byte(0xff); // dense rank power
+        write_docs_with_field(&mut meta, &mut data, &docs, per_doc.len());
         meta.bytes(&(norms.len() as i32).to_le_bytes());
         match norms.split_first() {
             Some((&first, rest)) if rest.iter().all(|&n| n == first) => {
@@ -50,7 +51,7 @@ mod tests {
     /// Bytes of `.nvm`/`.nvd` from the ES 9.5.5 fixture shard `_0` (field 3 = `title`, 5 docs).
     #[test]
     fn matches_es_9_5_5_fixture() {
-        let (nvm, nvd) = write_norms(&ID, &[(3, &[4, 3, 3, 6, 5])]);
+        let (nvm, nvd) = write_norms(&ID, &[(3, &[4, 3, 3, 6, 5].map(Some))]);
         assert_eq!(
             nvd,
             unhex(
@@ -67,7 +68,7 @@ mod tests {
 
     #[test]
     fn constant_norms_store_no_data() {
-        let (nvm, nvd) = write_norms(&ID, &[(1, &[7, 7, 7])]);
+        let (nvm, nvd) = write_norms(&ID, &[(1, &[7, 7, 7].map(Some))]);
         assert_eq!(nvd.len(), 43 + 16);
         assert!(nvm.windows(9).any(|w| w == [0, 7, 0, 0, 0, 0, 0, 0, 0]));
     }
