@@ -330,7 +330,7 @@ fn columns(index: &Index) -> BTreeMap<String, String> {
     for (name, m) in &index.mappings.properties {
         let t = match m {
             FieldMapping::Text | FieldMapping::TextKeyword { .. } => "text",
-            FieldMapping::Keyword => "keyword",
+            FieldMapping::Keyword { .. } => "keyword",
             FieldMapping::Long => "long",
             FieldMapping::Integer | FieldMapping::Short | FieldMapping::Byte => "integer",
             FieldMapping::Double | FieldMapping::Float => "double",

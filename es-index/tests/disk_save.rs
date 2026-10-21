@@ -93,7 +93,7 @@ fn saves_and_reloads_many_terms_and_docs() {
         .insert("title".into(), FieldMapping::Text);
     idx.mappings
         .properties
-        .insert("tag".into(), FieldMapping::Keyword);
+        .insert("tag".into(), FieldMapping::Keyword { ignore_above: None });
     for i in 0..200 {
         idx.put(
             &i.to_string(),
@@ -119,7 +119,7 @@ fn a_term_in_256_docs_saves_every_document() {
     let mut idx = Index::default();
     idx.mappings
         .properties
-        .insert("tag".into(), FieldMapping::Keyword);
+        .insert("tag".into(), FieldMapping::Keyword { ignore_above: None });
     idx.mappings
         .properties
         .insert("ok".into(), FieldMapping::Boolean);

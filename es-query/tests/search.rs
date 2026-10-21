@@ -6,7 +6,7 @@ fn index() -> Index {
     let mut i = Index::default();
     i.mappings
         .properties
-        .insert("tag".into(), FieldMapping::Keyword);
+        .insert("tag".into(), FieldMapping::Keyword { ignore_above: None });
     i.put(
         "1",
         json!({"title": "The quick brown fox", "tag": "animal", "n": 5, "ok": true}),

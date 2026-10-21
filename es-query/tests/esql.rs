@@ -7,7 +7,7 @@ fn indices() -> BTreeMap<String, Index> {
     let mut i = Index::default();
     i.mappings
         .properties
-        .insert("name".into(), FieldMapping::Keyword);
+        .insert("name".into(), FieldMapping::Keyword { ignore_above: None });
     i.mappings
         .properties
         .insert("age".into(), FieldMapping::Long);

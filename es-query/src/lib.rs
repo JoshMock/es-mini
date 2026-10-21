@@ -226,7 +226,7 @@ fn source_path<'f>(index: &Index, field: &'f str) -> &'f str {
 fn resolve(index: &Index, field: &str, sample: impl Fn(&str) -> Option<Value>) -> Kind {
     match index.mappings.properties.get(field) {
         Some(FieldMapping::Text | FieldMapping::TextKeyword { .. }) => Kind::Text,
-        Some(FieldMapping::Keyword) => Kind::Keyword,
+        Some(FieldMapping::Keyword { .. }) => Kind::Keyword,
         Some(FieldMapping::Boolean) => Kind::Bool,
         // ponytail: dates compare as their JSON values (ISO strings sort correctly); no date math
         Some(FieldMapping::Date { .. }) => Kind::Keyword,

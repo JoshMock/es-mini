@@ -223,7 +223,7 @@ fn user_fields(
                 out.terms.push((number, terms));
                 (IndexOptions::DocsAndFreqs, DocValuesType::None, false)
             }
-            M::Keyword => {
+            M::Keyword { .. } => {
                 let Some(keys) = typed(&values, &|v| v.as_str().map(|s| s.as_bytes().to_vec()))
                 else {
                     continue;

@@ -21,7 +21,10 @@ pub enum FieldMapping {
     TextKeyword {
         fields: BTreeMap<String, FieldMapping>,
     },
-    Keyword,
+    Keyword {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ignore_above: Option<u32>,
+    },
     Long,
     Integer,
     Short,
@@ -243,7 +246,7 @@ impl Index {
 
     /// Adds dynamic mappings for fields of `source` not yet mapped.
     pub fn map_dynamic(&mut self, source: &Value) {
-        // ponytail: top-level fields only; no nested objects, numeric_detection or ignore_above
+        // ponytail: top-level fields only; no nested objects or numeric_detection
         let auto_text =
             self.settings.get("index.mapping.dynamic_strings.auto_text") != Some("false");
         let Some(obj) = source.as_object() else {
@@ -261,9 +264,17 @@ impl Index {
                     locale: None,
                 },
                 Some(Value::String(_)) if auto_text => FieldMapping::TextKeyword {
-                    fields: [("keyword".to_owned(), FieldMapping::Keyword)].into(),
+                    fields: [(
+                        "keyword".to_owned(),
+                        FieldMapping::Keyword {
+                            ignore_above: Some(256),
+                        },
+                    )]
+                    .into(),
                 },
-                Some(Value::String(_)) => FieldMapping::Keyword,
+                Some(Value::String(_)) => FieldMapping::Keyword {
+                    ignore_above: Some(256),
+                },
                 Some(Value::Bool(_)) => FieldMapping::Boolean,
                 Some(Value::Number(n)) if n.is_f64() => FieldMapping::Float,
                 Some(Value::Number(_)) => FieldMapping::Long,
@@ -576,7 +587,10 @@ mod tests {
             "at": {"type": "date"}
         }});
         let m: Mappings = serde_json::from_value(raw.clone()).unwrap();
-        assert_eq!(m.properties["tag"], FieldMapping::Keyword);
+        assert_eq!(
+            m.properties["tag"],
+            FieldMapping::Keyword { ignore_above: None }
+        );
         assert_eq!(serde_json::to_value(&m).unwrap(), raw);
     }
 
@@ -589,6 +603,10 @@ mod tests {
         }));
         let p = &i.mappings.properties;
         assert!(matches!(p["s"], FieldMapping::TextKeyword { .. }));
+        assert_eq!(
+            serde_json::to_value(&p["s"]).unwrap(),
+            json!({"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}})
+        );
         assert_eq!(p["n"], FieldMapping::Long);
         assert_eq!(p["f"], FieldMapping::Float);
         assert_eq!(p["b"], FieldMapping::Boolean);
