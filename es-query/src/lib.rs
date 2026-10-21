@@ -921,7 +921,8 @@ fn with_filter(q: &Query, filter: Option<&Value>) -> Result<Query, String> {
     })
 }
 
-/// ES refuses to sort on a `text` field (fielddata is off by default).
+/// ES refuses to sort on an unmapped field (without `unmapped_type`) or a `text` field
+/// (fielddata is off by default).
 pub fn check_sortable(targets: &[Target], req: &SearchRequest) -> Result<(), String> {
     for f in &req.sort {
         for (_, index, _) in targets {
