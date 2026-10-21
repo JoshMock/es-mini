@@ -6,7 +6,10 @@ pub mod disk;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    collections::{BTreeMap, HashMap, VecDeque},
+    time::{Duration, Instant},
+};
 
 /// MVP field types; flat mappings only (no object/nested).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -198,8 +201,11 @@ pub struct Index {
     // ponytail: a "merge" drops them all once they pass a third of all physical docs, roughly
     // ES's default merge policy; real merges are per segment and less predictable
     superseded: Vec<Value>,
-    // ponytail: tombstones are never pruned; ES drops them after index.gc_deletes (60s)
-    deleted_versions: HashMap<String, u64>,
+    /// Version and deletion time of deleted docs, kept for `index.gc_deletes` (default 60s) so
+    /// a re-created doc continues the version count, as in ES.
+    deleted_versions: HashMap<String, (u64, Instant)>,
+    /// Tombstones in deletion order, so expired ones are pruned from the front.
+    tombstone_order: VecDeque<(String, Instant)>,
     next_seq_no: u64,
     refreshed_seq_no: u64,
 }
@@ -209,7 +215,7 @@ impl Index {
         self.docs
             .get(id)
             .map(|d| d.version)
-            .or_else(|| self.deleted_versions.get(id).copied())
+            .or_else(|| self.deleted_versions.get(id).map(|t| t.0))
             .unwrap_or(0)
     }
 
@@ -241,8 +247,34 @@ impl Index {
         }
     }
 
+    /// Drops tombstones older than `index.gc_deletes`.
+    fn prune_tombstones(&mut self) {
+        let ttl = self
+            .settings
+            .get("index.gc_deletes")
+            .and_then(parse_time)
+            .unwrap_or(Duration::from_secs(60));
+        let now = Instant::now();
+        while let Some((id, at)) = self.tombstone_order.front() {
+            if now.duration_since(*at) < ttl {
+                break;
+            }
+            // A newer delete of the same id re-queued it; only its latest entry removes it.
+            if self.deleted_versions.get(id).is_some_and(|t| t.1 == *at) {
+                self.deleted_versions.remove(id);
+            }
+            self.tombstone_order.pop_front();
+        }
+    }
+
+    /// Number of deleted docs whose versions are still remembered.
+    pub fn tombstones(&self) -> usize {
+        self.deleted_versions.len()
+    }
+
     /// Creates or overwrites a document.
     pub fn put(&mut self, id: &str, source: Value) -> WriteResult {
+        self.prune_tombstones();
         let version = self.last_version(id) + 1;
         let seq_no = self.next_seq_no();
         self.deleted_versions.remove(id);
@@ -315,9 +347,12 @@ impl Index {
 
     /// Deletes a document. Like ES, a missing document still consumes a version and seq_no.
     pub fn delete(&mut self, id: &str) -> WriteResult {
+        self.prune_tombstones();
         let version = self.last_version(id) + 1;
         let seq_no = self.next_seq_no();
-        self.deleted_versions.insert(id.to_owned(), version);
+        let now = Instant::now();
+        self.deleted_versions.insert(id.to_owned(), (version, now));
+        self.tombstone_order.push_back((id.to_owned(), now));
         let result = match self.docs.remove(id) {
             Some(old) => {
                 self.supersede(old.source);
@@ -367,6 +402,21 @@ fn merge(target: &mut Value, patch: &Value) {
         }
         (t, p) => *t = p.clone(),
     }
+}
+
+/// Parses an ES time value (`250ms`, `60s`, `2m`, `1h`, `1d`); `None` for `-1` or junk.
+pub fn parse_time(v: &str) -> Option<Duration> {
+    let units = [
+        ("ms", 1u64),
+        ("s", 1_000),
+        ("m", 60_000),
+        ("h", 3_600_000),
+        ("d", 86_400_000),
+    ];
+    units.iter().find_map(|(unit, millis)| {
+        let n: u64 = v.strip_suffix(unit)?.parse().ok()?;
+        Some(Duration::from_millis(n * millis))
+    })
 }
 
 /// All indices, keyed by name.
@@ -471,6 +521,29 @@ mod tests {
         idx.delete("b");
         // 2 of 4 exceeds a third: "merged" away.
         assert_eq!(idx.superseded().len(), 0);
+    }
+
+    #[test]
+    fn tombstones_expire_after_gc_deletes() {
+        let mut idx = Index::default();
+        idx.settings.merge(&json!({"index.gc_deletes": "0s"}));
+        idx.put("1", json!({}));
+        idx.delete("1");
+        // The expired tombstone is forgotten, so the doc starts over like a new one.
+        assert_eq!(idx.put("1", json!({})).version, 1);
+        assert_eq!(idx.tombstones(), 0);
+    }
+
+    #[test]
+    fn parses_es_time_values() {
+        use std::time::Duration;
+        assert_eq!(parse_time("60s"), Some(Duration::from_secs(60)));
+        assert_eq!(parse_time("250ms"), Some(Duration::from_millis(250)));
+        assert_eq!(parse_time("2m"), Some(Duration::from_secs(120)));
+        assert_eq!(parse_time("1h"), Some(Duration::from_secs(3600)));
+        assert_eq!(parse_time("1d"), Some(Duration::from_secs(86400)));
+        assert_eq!(parse_time("-1"), None);
+        assert_eq!(parse_time("soon"), None);
     }
 
     #[test]
