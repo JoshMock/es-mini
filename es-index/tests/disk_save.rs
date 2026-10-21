@@ -82,3 +82,58 @@ fn resaving_an_elasticsearch_directory_keeps_its_index_identity() {
         es_meta[0].settings["index.version.created"]
     );
 }
+
+/// Hundreds of distinct terms per field (each term in fewer than 256 docs).
+#[test]
+fn saves_and_reloads_many_terms_and_docs() {
+    use es_index::{FieldMapping, Index};
+    let mut idx = Index::default();
+    idx.mappings
+        .properties
+        .insert("title".into(), FieldMapping::Text);
+    idx.mappings
+        .properties
+        .insert("tag".into(), FieldMapping::Keyword);
+    for i in 0..200 {
+        idx.put(
+            &i.to_string(),
+            json!({"title": format!("common word{i}"), "tag": format!("t{}", i % 2)}),
+        );
+    }
+    let mut indices = Indices::new();
+    indices.insert("big".into(), idx);
+    let dir = scratch("big").join("data");
+    disk::save(&dir, &indices).unwrap();
+    let back = disk::open(&dir).unwrap();
+    assert_eq!(back["big"].docs().count(), 200);
+    assert_eq!(
+        back["big"].get("199").unwrap().source["title"],
+        "common word199"
+    );
+}
+
+/// Terms in 256+ docs need Lucene104's full postings blocks, which the writer does not produce
+/// yet (see ralph/goals.txt): the save still persists every document for es-mini, leaving only
+/// that field's postings out of the segment.
+#[test]
+fn a_term_in_256_docs_still_saves_every_document() {
+    use es_index::{FieldMapping, Index};
+    let mut idx = Index::default();
+    idx.mappings
+        .properties
+        .insert("tag".into(), FieldMapping::Keyword);
+    idx.mappings
+        .properties
+        .insert("ok".into(), FieldMapping::Boolean);
+    for i in 0..300 {
+        idx.put(&i.to_string(), json!({"tag": "same", "ok": true}));
+    }
+    let dir = scratch("full-block").join("data");
+    disk::save(&dir, &Indices::from([("idx".to_owned(), idx)])).unwrap();
+    let back = disk::open(&dir).unwrap();
+    assert_eq!(back["idx"].docs().count(), 300);
+    assert_eq!(
+        back["idx"].get("299").unwrap().source,
+        json!({"tag": "same", "ok": true})
+    );
+}

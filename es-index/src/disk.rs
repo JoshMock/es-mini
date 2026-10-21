@@ -147,8 +147,9 @@ fn norm_byte(len: u32) -> i8 {
 
 /// Index data for one shard segment, built from the mapped fields that every doc has a scalar
 /// value for. Field numbers start at 6, after the metadata fields.
-// ponytail: no `date`/`float` fields,
-// no positions, sparse or multi-valued fields, and at most 48 terms per field (codec limit).
+// ponytail: fields the writer cannot encode yet are left out of the segment, which only
+// Elasticsearch notices (es-mini rebuilds every field from `_source` on open): `date`/`float`,
+// sparse or multi-valued fields, positions, and any field with a term in 256+ docs.
 #[derive(Default)]
 struct UserFields {
     fields: Vec<es_codec::field_infos::FieldInfo>,
@@ -157,6 +158,13 @@ struct UserFields {
     norms: Vec<(i32, Vec<i8>)>,
     terms: Vec<(i32, Vec<es_codec::terms::TermPostings>)>,
     points: Vec<(i32, Vec<Vec<u8>>)>,
+}
+
+/// Whether es-codec can write these postings: terms in 256+ docs need full postings blocks.
+fn writable(terms: &[es_codec::terms::TermPostings]) -> bool {
+    terms
+        .iter()
+        .all(|t| t.docs.len() < es_codec::postings::BLOCK_SIZE)
 }
 
 fn user_fields(
@@ -214,7 +222,7 @@ fn user_fields(
                     })
                     .collect();
                 let terms = postings(toks.clone());
-                if terms.is_empty() || terms.len() > 48 {
+                if terms.is_empty() || !writable(&terms) {
                     continue;
                 }
                 out.norms.push((
@@ -233,7 +241,7 @@ fn user_fields(
                     continue;
                 };
                 let terms = postings(keys.iter().map(|k| vec![k.clone()]).collect());
-                if terms.len() > 48 {
+                if !writable(&terms) {
                     continue;
                 }
                 out.terms.push((number, terms));
@@ -248,15 +256,16 @@ fn user_fields(
                 else {
                     continue;
                 };
-                out.terms.push((
-                    number,
-                    postings(
-                        bools
-                            .iter()
-                            .map(|b| vec![if *b { b"T".to_vec() } else { b"F".to_vec() }])
-                            .collect(),
-                    ),
-                ));
+                let terms = postings(
+                    bools
+                        .iter()
+                        .map(|b| vec![if *b { b"T".to_vec() } else { b"F".to_vec() }])
+                        .collect(),
+                );
+                if !writable(&terms) {
+                    continue;
+                }
+                out.terms.push((number, terms));
                 out.sorted_numeric
                     .push((number, bools.iter().map(|b| i64::from(*b)).collect()));
                 (IndexOptions::Docs, DocValuesType::SortedNumeric, true)
