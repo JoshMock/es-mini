@@ -12,9 +12,11 @@ mod search;
 use axum::{
     Json, Router,
     extract::{Query, State},
+    http::Uri,
     response::IntoResponse,
     routing::{get, post, put},
 };
+use error::AppError;
 use es_index::Indices;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -45,10 +47,26 @@ async fn info() -> Json<Value> {
     }))
 }
 
+const HEALTH_PARAMS: [&str; 11] = [
+    "level",
+    "local",
+    "timeout",
+    "master_timeout",
+    "wait_for_status",
+    "wait_for_no_relocating_shards",
+    "wait_for_no_initializing_shards",
+    "wait_for_active_shards",
+    "wait_for_nodes",
+    "wait_for_events",
+    "expand_wildcards",
+];
+
 async fn health(
     State(state): State<AppState>,
+    uri: Uri,
     Query(params): Query<HashMap<String, String>>,
-) -> Json<Value> {
+) -> Result<Json<Value>, AppError> {
+    params::check(&uri, &params, &HEALTH_PARAMS)?;
     let level = params.get("level").map(String::as_str);
     let mut body = json!({
         "cluster_name": CLUSTER_NAME,
@@ -78,7 +96,7 @@ async fn health(
             .collect();
         body["indices"] = Value::Object(indices);
     }
-    Json(body)
+    Ok(Json(body))
 }
 
 // ponytail: every index is one green primary shard, no replicas

@@ -96,3 +96,61 @@ async fn search_count_bulk_accept_known_params() {
         assert!(!reason.contains("unrecognized"), "{method} {uri}: {reason}");
     }
 }
+
+#[tokio::test]
+async fn index_admin_handlers_reject_unknown_params() {
+    for (method, uri) in [
+        ("PUT", "/x?foo=1"),
+        ("GET", "/x?foo=1"),
+        ("DELETE", "/x?foo=1"),
+        ("POST", "/x/_refresh?foo=1"),
+        ("GET", "/x/_settings?foo=1"),
+        ("GET", "/_settings?foo=1"),
+        ("GET", "/x/_settings/index.*?foo=1"),
+        ("GET", "/_settings/index.*?foo=1"),
+        ("PUT", "/x/_settings?foo=1"),
+        ("PUT", "/_settings?foo=1"),
+        ("POST", "/x/_close?foo=1"),
+        ("POST", "/x/_open?foo=1"),
+        ("GET", "/x/_mapping?foo=1"),
+        ("GET", "/_mapping?foo=1"),
+        ("GET", "/_cluster/health?foo=1"),
+        ("POST", "/_query?foo=1"),
+        ("PUT", "/x/_create/1?foo=1"),
+        ("DELETE", "/x/_doc/1?foo=1"),
+    ] {
+        let (status, body) = call(method, uri).await;
+        assert_eq!(status, 400, "{method} {uri}");
+        assert_eq!(body["error"]["type"], "illegal_argument_exception");
+        let path = uri.split('?').next().unwrap();
+        assert_eq!(
+            body["error"]["reason"],
+            json!(format!(
+                "request [{path}] contains unrecognized parameter: [foo]"
+            ))
+        );
+    }
+}
+
+#[tokio::test]
+async fn index_admin_handlers_accept_known_params() {
+    for (method, uri) in [
+        ("PUT", "/y?master_timeout=1s&timeout=1s"),
+        ("GET", "/y?flat_settings=true&ignore_unavailable=true&human"),
+        (
+            "GET",
+            "/y/_settings?include_defaults=true&expand_wildcards=open",
+        ),
+        ("PUT", "/y/_settings?reopen=true&preserve_existing=true"),
+        ("POST", "/y/_close?allow_no_indices=true"),
+        ("POST", "/y/_open?wait_for_active_shards=1"),
+        ("GET", "/y/_mapping?local=true"),
+        ("GET", "/_cluster/health?level=indices&timeout=1s"),
+        ("DELETE", "/x/_doc/1?refresh=true&routing=r"),
+        ("DELETE", "/y?timeout=1s"),
+    ] {
+        let (_, body) = call(method, uri).await;
+        let reason = body["error"]["reason"].as_str().unwrap_or_default();
+        assert!(!reason.contains("unrecognized"), "{method} {uri}: {reason}");
+    }
+}

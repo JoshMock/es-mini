@@ -1,16 +1,25 @@
 use crate::aliases::{parse_alias, reject_bad_scalars, resolve_date_math};
-use crate::{AppState, error::AppError};
+use crate::{AppState, error::AppError, params};
 use axum::{
     Json,
     body::Bytes,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{StatusCode, Uri},
 };
 use es_index::{FieldMapping, Index, Mappings};
 use es_index::{Indices, aliases};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
+
+/// `IndicesOptions` parameters, accepted by every index-addressed API.
+const INDICES_OPTIONS: [&str; 3] = ["ignore_unavailable", "allow_no_indices", "expand_wildcards"];
+
+/// Rejects parameters outside `allowed` and the indices options.
+fn check(uri: &Uri, params: &HashMap<String, String>, allowed: &[&str]) -> Result<(), AppError> {
+    let all: Vec<&str> = [&INDICES_OPTIONS[..], allowed].concat();
+    params::check(uri, params, &all)
+}
 
 pub fn parse_body(body: &Bytes) -> Result<Value, AppError> {
     if body.is_empty() {
@@ -72,8 +81,15 @@ pub fn validate_index_name(name: &str) -> Result<(), AppError> {
 pub async fn create(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    uri: Uri,
+    Query(params): Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
+    params::check(
+        &uri,
+        &params,
+        &["timeout", "master_timeout", "wait_for_active_shards"],
+    )?;
     validate_index_name(&resolve_date_math(&name))?;
     let body = parse_body(&body)?;
     let mut index = Index::default();
@@ -165,8 +181,10 @@ pub async fn create(
 pub async fn delete(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    uri: Uri,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, AppError> {
+    check(&uri, &params, &["timeout", "master_timeout"])?;
     let ignore = params
         .get("ignore_unavailable")
         .is_some_and(|v| v == "true");
@@ -241,11 +259,21 @@ fn read_indices(
     Ok(names)
 }
 
+const GET_PARAMS: [&str; 5] = [
+    "flat_settings",
+    "include_defaults",
+    "local",
+    "master_timeout",
+    "features",
+];
+
 pub async fn get(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    uri: Uri,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, AppError> {
+    check(&uri, &params, &GET_PARAMS)?;
     let indices = state.read().expect("lock poisoned");
     let body: Map<String, Value> = read_indices(&indices, &name, &params)?
         .into_iter()
@@ -289,8 +317,10 @@ pub async fn head(State(state): State<AppState>, Path(name): Path<String>) -> St
 pub async fn refresh(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    uri: Uri,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, AppError> {
+    check(&uri, &params, &[])?;
     let mut indices = state.write().expect("lock poisoned");
     for n in read_indices(&indices, &name, &params)? {
         indices
@@ -306,40 +336,46 @@ pub async fn refresh(
 pub async fn get_settings(
     state: State<AppState>,
     Path(name): Path<String>,
+    uri: Uri,
     params: Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, AppError> {
-    settings_response(state, name, "*", params)
+    settings_response(state, name, "*", uri, params)
 }
 
 pub async fn get_all_settings(
     state: State<AppState>,
+    uri: Uri,
     params: Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, AppError> {
-    settings_response(state, "_all".into(), "*", params)
+    settings_response(state, "_all".into(), "*", uri, params)
 }
 
 pub async fn get_all_settings_named(
     state: State<AppState>,
     Path(filter): Path<String>,
+    uri: Uri,
     params: Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, AppError> {
-    settings_response(state, "_all".into(), &filter, params)
+    settings_response(state, "_all".into(), &filter, uri, params)
 }
 
 pub async fn get_settings_named(
     state: State<AppState>,
     Path((name, filter)): Path<(String, String)>,
+    uri: Uri,
     params: Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, AppError> {
-    settings_response(state, name, &filter, params)
+    settings_response(state, name, &filter, uri, params)
 }
 
 fn settings_response(
     State(state): State<AppState>,
     name: String,
     filter: &str,
+    uri: Uri,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, AppError> {
+    check(&uri, &params, &GET_PARAMS)?;
     let filter = if filter == "_all" { "*" } else { filter };
     let include_defaults = params.get("include_defaults").is_some_and(|v| v == "true");
     let flat = params.get("flat_settings").is_some_and(|v| v == "true");
@@ -382,10 +418,11 @@ fn settings_response(
 pub async fn put_settings(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    uri: Uri,
     Query(params): Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
-    put_settings_on(state, name, params, body)
+    put_settings_on(state, name, uri, params, body)
 }
 
 /// Marks indices closed (or open) and returns their names.
@@ -403,11 +440,15 @@ fn set_closed(
     Ok(names)
 }
 
+const OPEN_CLOSE_PARAMS: [&str; 3] = ["timeout", "master_timeout", "wait_for_active_shards"];
+
 pub async fn close(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    uri: Uri,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, AppError> {
+    check(&uri, &params, &OPEN_CLOSE_PARAMS)?;
     let closed: Map<String, Value> = set_closed(&state, &name, &params, true)?
         .into_iter()
         .map(|n| (n, json!({"closed": true})))
@@ -420,8 +461,10 @@ pub async fn close(
 pub async fn open(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    uri: Uri,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, AppError> {
+    check(&uri, &params, &OPEN_CLOSE_PARAMS)?;
     set_closed(&state, &name, &params, false)?;
     Ok(Json(
         json!({"acknowledged": true, "shards_acknowledged": true}),
@@ -430,10 +473,11 @@ pub async fn open(
 
 pub async fn put_all_settings(
     State(state): State<AppState>,
+    uri: Uri,
     Query(params): Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
-    put_settings_on(state, "_all".into(), params, body)
+    put_settings_on(state, "_all".into(), uri, params, body)
 }
 
 const TOP_LEVEL_SETTINGS: [&str; 6] = [
@@ -448,9 +492,21 @@ const TOP_LEVEL_SETTINGS: [&str; 6] = [
 fn put_settings_on(
     state: AppState,
     name: String,
+    uri: Uri,
     params: HashMap<String, String>,
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
+    check(
+        &uri,
+        &params,
+        &[
+            "flat_settings",
+            "master_timeout",
+            "timeout",
+            "preserve_existing",
+            "reopen",
+        ],
+    )?;
     let body = parse_body(&body)?;
     // ponytail: index.codec is the only static setting checked; ES also rejects e.g. number_of_shards
     let settings = body.get("settings").unwrap_or(&body);
@@ -486,8 +542,10 @@ fn put_settings_on(
 pub async fn get_mapping(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    uri: Uri,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, AppError> {
+    check(&uri, &params, &["local", "master_timeout"])?;
     let indices = state.read().expect("lock poisoned");
     let out: Map<String, Value> = read_indices(&indices, &name, &params)?
         .into_iter()
@@ -496,6 +554,10 @@ pub async fn get_mapping(
     Ok(Json(Value::Object(out)))
 }
 
-pub async fn get_all_mappings(state: State<AppState>) -> Result<Json<Value>, AppError> {
-    get_mapping(state, Path("_all".to_string()), Query(Default::default())).await
+pub async fn get_all_mappings(
+    state: State<AppState>,
+    uri: Uri,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, AppError> {
+    get_mapping(state, Path("_all".to_string()), uri, Query(params)).await
 }

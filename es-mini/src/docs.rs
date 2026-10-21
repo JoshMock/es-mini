@@ -222,8 +222,11 @@ pub async fn index_auto_id(
 pub async fn create(
     State(state): State<AppState>,
     Path((index, id)): Path<(String, String)>,
+    uri: Uri,
+    Query(params): Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Reply {
+    params::check(&uri, &params, &WRITE_PARAMS)?;
     put_or_create(&state, &index, &id, parse_json(&body)?, true)
 }
 
@@ -269,10 +272,26 @@ pub async fn get(
     })
 }
 
+const DELETE_PARAMS: [&str; 10] = [
+    "routing",
+    "refresh",
+    "version",
+    "version_type",
+    "if_seq_no",
+    "if_primary_term",
+    "require_alias",
+    "timeout",
+    "wait_for_active_shards",
+    "master_timeout",
+];
+
 pub async fn delete(
     State(state): State<AppState>,
     Path((index, id)): Path<(String, String)>,
+    uri: Uri,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Reply {
+    params::check(&uri, &params, &DELETE_PARAMS)?;
     delete_doc(&state, &index, &id)
 }
 

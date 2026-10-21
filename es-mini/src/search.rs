@@ -246,7 +246,17 @@ pub async fn count(
     }))
 }
 
-pub async fn esql(State(state): State<AppState>, body: Bytes) -> Result<Json<Value>, AppError> {
+pub async fn esql(
+    State(state): State<AppState>,
+    uri: Uri,
+    Query(params): Query<HashMap<String, String>>,
+    body: Bytes,
+) -> Result<Json<Value>, AppError> {
+    params::check(
+        &uri,
+        &params,
+        &["delimiter", "drop_null_columns", "allow_partial_results"],
+    )?;
     let start = Instant::now();
     let body = parse_body(&body)?;
     let query = body["query"]
