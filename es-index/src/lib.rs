@@ -243,24 +243,33 @@ impl Index {
 
     /// Adds dynamic mappings for fields of `source` not yet mapped.
     pub fn map_dynamic(&mut self, source: &Value) {
-        // ponytail: top-level string fields only; no other dynamic types or nested objects
+        // ponytail: top-level fields only; no nested objects, numeric_detection or ignore_above
         let auto_text =
             self.settings.get("index.mapping.dynamic_strings.auto_text") != Some("false");
-        if let Some(obj) = source.as_object() {
-            for k in obj.iter().filter(|(_, v)| v.is_string()).map(|(k, _)| k) {
-                self.mappings
-                    .properties
-                    .entry(k.clone())
-                    .or_insert_with(|| {
-                        if auto_text {
-                            FieldMapping::TextKeyword {
-                                fields: [("keyword".to_owned(), FieldMapping::Keyword)].into(),
-                            }
-                        } else {
-                            FieldMapping::Keyword
-                        }
-                    });
-            }
+        let Some(obj) = source.as_object() else {
+            return;
+        };
+        for (k, v) in obj {
+            // An array maps like its first non-null element.
+            let v = match v {
+                Value::Array(a) => a.iter().find(|e| !e.is_null()),
+                v => Some(v),
+            };
+            let mapping = match v {
+                Some(Value::String(s)) if is_strict_date(s) => FieldMapping::Date {
+                    format: None,
+                    locale: None,
+                },
+                Some(Value::String(_)) if auto_text => FieldMapping::TextKeyword {
+                    fields: [("keyword".to_owned(), FieldMapping::Keyword)].into(),
+                },
+                Some(Value::String(_)) => FieldMapping::Keyword,
+                Some(Value::Bool(_)) => FieldMapping::Boolean,
+                Some(Value::Number(n)) if n.is_f64() => FieldMapping::Float,
+                Some(Value::Number(_)) => FieldMapping::Long,
+                _ => continue,
+            };
+            self.mappings.properties.entry(k.clone()).or_insert(mapping);
         }
     }
 
@@ -502,6 +511,53 @@ pub fn parse_time(v: &str) -> Option<Duration> {
     })
 }
 
+/// Whether `s` matches ES's default dynamic date format `strict_date_optional_time`:
+/// `yyyy[-MM[-dd[THH[:mm[:ss[.S+]]][Z|+HH:mm]]]]`.
+fn is_strict_date(s: &str) -> bool {
+    fn digits(s: &mut &str, n: usize) -> Option<()> {
+        let (d, rest) = s.split_at_checked(n)?;
+        d.bytes().all(|b| b.is_ascii_digit()).then(|| *s = rest)
+    }
+    fn eat(s: &mut &str, c: char) -> bool {
+        s.strip_prefix(c).inspect(|r| *s = r).is_some()
+    }
+    fn parse(s: &mut &str) -> Option<()> {
+        digits(s, 4)?;
+        for sep in ['-', '-'] {
+            if !eat(s, sep) {
+                return Some(());
+            }
+            digits(s, 2)?;
+        }
+        if !eat(s, 'T') {
+            return Some(());
+        }
+        digits(s, 2)?;
+        if eat(s, ':') {
+            digits(s, 2)?;
+            if eat(s, ':') {
+                digits(s, 2)?;
+                if eat(s, '.') || eat(s, ',') {
+                    let n = s.bytes().take_while(u8::is_ascii_digit).count();
+                    (n > 0).then(|| *s = &s[n..])?;
+                }
+            }
+        }
+        if eat(s, 'Z') {
+            return Some(());
+        }
+        if eat(s, '+') || eat(s, '-') {
+            digits(s, 2)?;
+            if eat(s, ':') {
+                digits(s, 2)?;
+            }
+        }
+        Some(())
+    }
+    let mut rest = s;
+    parse(&mut rest).is_some() && rest.is_empty()
+}
+
 /// All indices, keyed by name.
 pub type Indices = BTreeMap<String, Index>;
 
@@ -522,6 +578,25 @@ mod tests {
         let m: Mappings = serde_json::from_value(raw.clone()).unwrap();
         assert_eq!(m.properties["tag"], FieldMapping::Keyword);
         assert_eq!(serde_json::to_value(&m).unwrap(), raw);
+    }
+
+    #[test]
+    fn dynamic_mapping_detects_types() {
+        let mut i = Index::default();
+        i.map_dynamic(&json!({
+            "s": "hi", "n": 3, "f": 1.5, "b": true, "d": "2024-01-02T03:04:05Z",
+            "d2": "2024-01", "notd": "2024-1-2", "arr": [null, 7], "nul": null
+        }));
+        let p = &i.mappings.properties;
+        assert!(matches!(p["s"], FieldMapping::TextKeyword { .. }));
+        assert_eq!(p["n"], FieldMapping::Long);
+        assert_eq!(p["f"], FieldMapping::Float);
+        assert_eq!(p["b"], FieldMapping::Boolean);
+        assert!(matches!(p["d"], FieldMapping::Date { .. }));
+        assert!(matches!(p["d2"], FieldMapping::Date { .. }));
+        assert!(matches!(p["notd"], FieldMapping::TextKeyword { .. }));
+        assert_eq!(p["arr"], FieldMapping::Long);
+        assert!(!p.contains_key("nul"));
     }
 
     #[test]
