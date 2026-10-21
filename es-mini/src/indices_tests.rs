@@ -313,3 +313,13 @@ async fn get_human_adds_readable_settings() {
     let (_, r) = call(&app, Method::GET, "/idx", None).await;
     assert!(r["idx"]["settings"]["index"]["version"].is_null());
 }
+
+#[tokio::test]
+async fn get_index_features_selects_sections() {
+    let app = app();
+    let body = json!({"mappings": {"properties": {"t": {"type": "text"}}}});
+    call(&app, Method::PUT, "/idx", Some(body)).await;
+    let (_, r) = call(&app, Method::GET, "/idx?features=aliases,settings", None).await;
+    assert_eq!(r["idx"]["mappings"], json!({}));
+    assert!(r["idx"].get("aliases").is_some() && r["idx"].get("settings").is_some());
+}

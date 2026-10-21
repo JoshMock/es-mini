@@ -209,10 +209,19 @@ pub async fn get(
                 settings["index"]["creation_date_string"] = json!("1970-01-01T00:00:00.000Z");
                 settings["index"]["version"] = json!({"created_string": "9.5.5"});
             }
-            (
-                n,
-                json!({"aliases": i.aliases, "mappings": i.mappings, "settings": settings}),
-            )
+            let mut out =
+                json!({"aliases": i.aliases, "mappings": i.mappings, "settings": settings});
+            if let Some(features) = params.get("features") {
+                for (k, v) in out.as_object_mut().unwrap() {
+                    if !features
+                        .split(',')
+                        .any(|f| f.trim_end_matches('s') == k.trim_end_matches('s'))
+                    {
+                        *v = json!({});
+                    }
+                }
+            }
+            (n, out)
         })
         .collect();
     Ok(Json(Value::Object(body)))
