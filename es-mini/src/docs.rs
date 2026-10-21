@@ -272,6 +272,56 @@ const GET_PARAMS: [&str; 11] = [
     "force_synthetic_source",
 ];
 
+/// Applies `_source`, `_source_includes` and `_source_excludes`; `None` means `_source` is omitted.
+fn filter_source(source: &Value, params: &HashMap<String, String>) -> Option<Value> {
+    let list = |k: &str| params.get(k).filter(|v| !v.is_empty());
+    let mut inc = list("_source_includes").cloned();
+    match params.get("_source").map(String::as_str) {
+        Some("false") => return None,
+        Some("true") | Some("") | None => {}
+        Some(v) => inc = Some(inc.map_or(v.to_string(), |i| format!("{i},{v}"))),
+    }
+    let mut filter = inc.unwrap_or_default();
+    for e in list("_source_excludes").iter().flat_map(|e| e.split(',')) {
+        filter.push_str(&format!(",-{e}"));
+    }
+    Some(if filter.is_empty() {
+        source.clone()
+    } else {
+        crate::filter_path::apply(source, &filter)
+    })
+}
+
+pub async fn get_source(
+    state: State<AppState>,
+    path: Path<(String, String)>,
+    uri: Uri,
+    Query(params): Query<HashMap<String, String>>,
+) -> Reply {
+    let (s, Json(mut r)) = get(state.clone(), path, uri, Query(params.clone())).await?;
+    let (index, id) = (r["_index"].clone(), r["_id"].clone());
+    let enabled = state.read().expect("lock poisoned")[r["_index"].as_str().unwrap_or_default()]
+        .mappings
+        .source_enabled();
+    Ok(match r.get_mut("_source").map(Value::take) {
+        Some(src) if enabled => (
+            s,
+            Json(filter_source(&src, &params).unwrap_or_else(|| json!({}))),
+        ),
+        _ if s == StatusCode::OK => {
+            let reason = format!(
+                "Source not found [{}]/[{}]",
+                index.as_str().unwrap_or_default(),
+                id.as_str().unwrap_or_default()
+            );
+            let e = json!({"type": "resource_not_found_exception", "reason": reason});
+            let body = json!({"error": {"root_cause": [e.clone()], "type": e["type"], "reason": e["reason"]}, "status": 404});
+            (StatusCode::NOT_FOUND, Json(body))
+        }
+        _ => (s, Json(r)),
+    })
+}
+
 pub async fn get(
     State(state): State<AppState>,
     Path((index, id)): Path<(String, String)>,
@@ -286,13 +336,18 @@ pub async fn get(
     let realtime = params.get("realtime").is_none_or(|v| v != "false")
         || params.get("refresh").is_some_and(|v| v != "false");
     Ok(match i.get(&id).filter(|d| realtime || i.searchable(d)) {
-        Some(d) => (
-            StatusCode::OK,
-            Json(json!({
+        Some(d) => {
+            let mut r = json!({
                 "_index": index, "_id": id, "_version": d.version, "_seq_no": d.seq_no,
-                "_primary_term": 1, "found": true, "_source": d.source
-            })),
-        ),
+                "_primary_term": 1, "found": true
+            });
+            if let Some(src) =
+                filter_source(&d.source, &params).filter(|_| i.mappings.source_enabled())
+            {
+                r["_source"] = src;
+            }
+            (StatusCode::OK, Json(r))
+        }
         None => (
             StatusCode::NOT_FOUND,
             Json(json!({"_index": index, "_id": id, "found": false})),

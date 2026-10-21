@@ -292,3 +292,34 @@ async fn search_window_and_negative_from_are_rejected() {
     .await;
     assert_eq!(s, StatusCode::OK);
 }
+
+#[tokio::test]
+async fn get_source_endpoint_and_filtering() {
+    let app = app();
+    call(
+        &app,
+        Method::PUT,
+        "/idx/_doc/1",
+        Some(json!({"a": 1, "b": {"c": 2, "d": 3}})),
+    )
+    .await;
+    let (s, r) = call(&app, Method::GET, "/idx/_source/1", None).await;
+    assert_eq!(
+        (s, r),
+        (StatusCode::OK, json!({"a": 1, "b": {"c": 2, "d": 3}}))
+    );
+    let (_, r) = call(
+        &app,
+        Method::GET,
+        "/idx/_source/1?_source_excludes=b.d",
+        None,
+    )
+    .await;
+    assert_eq!(r, json!({"a": 1, "b": {"c": 2}}));
+    let (_, r) = call(&app, Method::GET, "/idx/_doc/1?_source=a", None).await;
+    assert_eq!(r["_source"], json!({"a": 1}));
+    let (_, r) = call(&app, Method::GET, "/idx/_doc/1?_source=false", None).await;
+    assert!(r.get("_source").is_none());
+    let (s, _) = call(&app, Method::GET, "/idx/_source/9", None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}

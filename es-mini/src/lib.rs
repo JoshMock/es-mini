@@ -294,6 +294,7 @@ fn router(state: AppState) -> Router {
                 .get(docs::get)
                 .delete(docs::delete),
         )
+        .route("/{index}/_source/{id}", get(docs::get_source))
         .route(
             "/{index}/_create/{id}",
             put(docs::create).post(docs::create),

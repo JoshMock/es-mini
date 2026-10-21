@@ -42,8 +42,18 @@ pub enum FieldMapping {
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Mappings {
+    /// The `_source` mapping section, e.g. `{"enabled": false}`.
+    #[serde(default, rename = "_source", skip_serializing_if = "Option::is_none")]
+    pub source: Option<Value>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub properties: BTreeMap<String, FieldMapping>,
+}
+
+impl Mappings {
+    /// False when the mapping sets `_source.enabled` to `false`.
+    pub fn source_enabled(&self) -> bool {
+        self.source.as_ref().is_none_or(|s| s["enabled"] != false)
+    }
 }
 
 /// Index settings stored the way ES normalizes them: flat `index.*` keys with string values.
