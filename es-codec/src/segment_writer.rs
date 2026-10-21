@@ -59,7 +59,7 @@ pub fn write_segment(dir: &Path, s: &NewSegment) -> Result<SegmentCommitInfo> {
         .iter()
         .map(|(n, t)| (by_number(n), &t[..]))
         .collect();
-    let t = write_terms(&term_fields, &s.id, "Lucene104_0");
+    let t = write_terms(&term_fields, &s.id, "Lucene104_0")?;
     let norm_fields: Vec<_> = s.norms.iter().map(|(n, v)| (*n, &v[..])).collect();
     let (nvm, nvd) = write_norms(&s.id, &norm_fields);
     let mut files = vec![
