@@ -128,7 +128,7 @@ pub async fn search(
         );
     }
     let indices = state.read().expect("lock poisoned");
-    let resolved = aliases::resolve_data(&indices, &name)?;
+    let resolved = crate::indices::data_targets(&indices, &name, &params)?;
     let targets = targets(&indices, &resolved);
     let r = es_query::search_many(&targets, &req).map_err(AppError::ParsingException)?;
     let hits: Vec<Value> = r
@@ -233,7 +233,7 @@ pub async fn count(
             .map_err(AppError::ParsingException)?,
     };
     let indices = state.read().expect("lock poisoned");
-    let resolved = aliases::resolve_data(&indices, &name)?;
+    let resolved = crate::indices::data_targets(&indices, &name, &params)?;
     let n = es_query::count_many(&targets(&indices, &resolved), &query)
         .map_err(AppError::ParsingException)?;
     let resp = json!({"count": n, "_shards": shards()});

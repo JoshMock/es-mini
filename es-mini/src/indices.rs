@@ -263,6 +263,27 @@ fn read_indices(
     Ok(names)
 }
 
+/// Search/count targets for `expr`, honoring `ignore_unavailable` and `allow_no_indices`.
+pub fn data_targets(
+    indices: &Indices,
+    expr: &str,
+    params: &HashMap<String, String>,
+) -> Result<Vec<aliases::Target>, AppError> {
+    let flag = |k: &str| params.get(k).map(String::as_str);
+    let mut out = vec![];
+    for part in expr.split(',') {
+        match aliases::resolve_data(indices, part) {
+            Ok(t) => out.extend(t),
+            Err(_) if flag("ignore_unavailable") == Some("true") => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    if out.is_empty() && flag("allow_no_indices") == Some("false") {
+        return Err(AppError::IndexNotFound(expr.to_owned()));
+    }
+    Ok(out)
+}
+
 const GET_PARAMS: [&str; 5] = [
     "flat_settings",
     "include_defaults",
@@ -312,9 +333,9 @@ pub async fn get(
 }
 
 pub async fn head(State(state): State<AppState>, Path(name): Path<String>) -> StatusCode {
-    match state.read().expect("lock poisoned").contains_key(&name) {
-        true => StatusCode::OK,
-        false => StatusCode::NOT_FOUND,
+    match aliases::resolve_read(&state.read().expect("lock poisoned"), &name) {
+        Ok(t) if !t.is_empty() => StatusCode::OK,
+        _ => StatusCode::NOT_FOUND,
     }
 }
 
