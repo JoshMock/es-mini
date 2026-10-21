@@ -1,11 +1,15 @@
 //! Alias endpoints: `_alias`, `_aliases`, and `POST /_aliases` actions.
 
-use crate::{AppState, error::AppError, indices::parse_body};
+use crate::{
+    AppState,
+    error::AppError,
+    indices::{check, parse_body},
+};
 use axum::{
     Json,
     body::Bytes,
-    extract::{Path, State},
-    http::StatusCode,
+    extract::{Path, Query, State},
+    http::{StatusCode, Uri},
     response::{IntoResponse, Response},
 };
 use es_index::{
@@ -13,7 +17,11 @@ use es_index::{
     aliases::{self, Alias, glob},
 };
 use serde_json::{Map, Value, json};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+type Params = Query<HashMap<String, String>>;
+
+const WRITE_PARAMS: [&str; 2] = ["timeout", "master_timeout"];
 
 /// Resolves `<static{anchor||/d{yyyy-MM-dd}}>` date math; other names pass through.
 // ponytail: only `anchor||/d{fmt}` with yyyy/MM/dd; `now` and other rounding units unsupported.
@@ -106,8 +114,11 @@ fn alias_glob(pattern: &str, name: &str) -> bool {
 pub async fn put(
     State(state): State<AppState>,
     Path((index, alias)): Path<(String, String)>,
+    uri: Uri,
+    Query(params): Params,
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
+    check(&uri, &params, &WRITE_PARAMS)?;
     let meta = parse_alias(&parse_body(&body)?)?;
     let mut indices = state.write().expect("lock poisoned");
     check_alias_name(&indices, &alias)?;
@@ -122,7 +133,10 @@ pub async fn put(
 pub async fn delete(
     State(state): State<AppState>,
     Path((index, names)): Path<(String, String)>,
+    uri: Uri,
+    Query(params): Params,
 ) -> Result<Json<Value>, AppError> {
+    check(&uri, &params, &WRITE_PARAMS)?;
     let mut indices = state.write().expect("lock poisoned");
     let mut removed = false;
     for name in index_names(&indices, &index)? {
@@ -223,28 +237,42 @@ fn get_response(
     Ok((StatusCode::NOT_FOUND, Json(body)).into_response())
 }
 
-pub async fn get_all(State(state): State<AppState>) -> Result<Response, AppError> {
+pub async fn get_all(
+    State(state): State<AppState>,
+    uri: Uri,
+    Query(params): Params,
+) -> Result<Response, AppError> {
+    check(&uri, &params, &["local"])?;
     get_response(&state, None, None)
 }
 
 pub async fn get_named(
     State(state): State<AppState>,
     Path(names): Path<String>,
+    uri: Uri,
+    Query(params): Params,
 ) -> Result<Response, AppError> {
+    check(&uri, &params, &["local"])?;
     get_response(&state, None, Some(&names))
 }
 
 pub async fn get_for_index(
     State(state): State<AppState>,
     Path(index): Path<String>,
+    uri: Uri,
+    Query(params): Params,
 ) -> Result<Response, AppError> {
+    check(&uri, &params, &["local"])?;
     get_response(&state, Some(&index), None)
 }
 
 pub async fn get_for_index_named(
     State(state): State<AppState>,
     Path((index, names)): Path<(String, String)>,
+    uri: Uri,
+    Query(params): Params,
 ) -> Result<Response, AppError> {
+    check(&uri, &params, &["local"])?;
     get_response(&state, Some(&index), Some(&names))
 }
 
@@ -259,15 +287,24 @@ fn exists(state: &AppState, index: Option<&str>, names: &str) -> StatusCode {
     }
 }
 
-pub async fn head_named(State(state): State<AppState>, Path(names): Path<String>) -> StatusCode {
-    exists(&state, None, &names)
+pub async fn head_named(
+    State(state): State<AppState>,
+    Path(names): Path<String>,
+    uri: Uri,
+    Query(params): Params,
+) -> Result<StatusCode, AppError> {
+    check(&uri, &params, &["local"])?;
+    Ok(exists(&state, None, &names))
 }
 
 pub async fn head_for_index_named(
     State(state): State<AppState>,
     Path((index, names)): Path<(String, String)>,
-) -> StatusCode {
-    exists(&state, Some(&index), &names)
+    uri: Uri,
+    Query(params): Params,
+) -> Result<StatusCode, AppError> {
+    check(&uri, &params, &["local"])?;
+    Ok(exists(&state, Some(&index), &names))
 }
 
 /// String-or-array parameter of an alias action, under its singular or plural key.
@@ -284,7 +321,13 @@ fn names_of(action: &Value, one: &str, many: &str) -> Vec<String> {
 
 /// Applies `POST /_aliases` actions all-or-nothing: they run against a copy of the alias
 /// tables, which replaces the real ones only if every action succeeds.
-pub async fn update(State(state): State<AppState>, body: Bytes) -> Result<Json<Value>, AppError> {
+pub async fn update(
+    State(state): State<AppState>,
+    uri: Uri,
+    Query(params): Params,
+    body: Bytes,
+) -> Result<Json<Value>, AppError> {
+    check(&uri, &params, &WRITE_PARAMS)?;
     let body = parse_body(&body)?;
     let actions = body["actions"]
         .as_array()

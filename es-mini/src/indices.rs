@@ -16,7 +16,11 @@ use std::collections::HashMap;
 const INDICES_OPTIONS: [&str; 3] = ["ignore_unavailable", "allow_no_indices", "expand_wildcards"];
 
 /// Rejects parameters outside `allowed` and the indices options.
-fn check(uri: &Uri, params: &HashMap<String, String>, allowed: &[&str]) -> Result<(), AppError> {
+pub fn check(
+    uri: &Uri,
+    params: &HashMap<String, String>,
+    allowed: &[&str],
+) -> Result<(), AppError> {
     let all: Vec<&str> = [&INDICES_OPTIONS[..], allowed].concat();
     params::check(uri, params, &all)
 }

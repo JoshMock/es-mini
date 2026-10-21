@@ -154,3 +154,36 @@ async fn index_admin_handlers_accept_known_params() {
         assert!(!reason.contains("unrecognized"), "{method} {uri}: {reason}");
     }
 }
+
+#[tokio::test]
+async fn alias_handlers_reject_unknown_params() {
+    for (method, uri) in [
+        ("GET", "/_alias?foo=1"),
+        ("GET", "/_aliases?foo=1"),
+        ("GET", "/_alias/a?foo=1"),
+        ("GET", "/x/_alias?foo=1"),
+        ("GET", "/x/_alias/a?foo=1"),
+        ("HEAD", "/_alias/a?foo=1"),
+        ("HEAD", "/x/_alias/a?foo=1"),
+        ("PUT", "/x/_alias/a?foo=1"),
+        ("DELETE", "/x/_alias/a?foo=1"),
+        ("POST", "/_aliases?foo=1"),
+    ] {
+        let (status, body) = call(method, uri).await;
+        assert_eq!(status, 400, "{method} {uri}");
+        if method != "HEAD" {
+            assert_eq!(body["error"]["type"], "illegal_argument_exception");
+        }
+    }
+}
+
+#[tokio::test]
+async fn alias_handlers_accept_known_params() {
+    for (method, uri) in [
+        ("GET", "/_alias?local=true&ignore_unavailable=true"),
+        ("PUT", "/x/_alias/a?timeout=1s&master_timeout=1s"),
+    ] {
+        let (status, _) = call(method, uri).await;
+        assert_ne!(status, 400, "{method} {uri}");
+    }
+}
