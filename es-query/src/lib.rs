@@ -259,6 +259,10 @@ impl<'a> Searcher<'a> {
             _ => return,
         };
         let (kind, path) = self.kind(field);
+        // they score 1.0 (see score_terms)
+        if matches!(kind, Kind::Number | Kind::Bool) {
+            return;
+        }
         if let Some((docs, ttf)) = self.index.stats.as_ref().and_then(|s| s.fields.get(field)) {
             self.field_stats.insert(field.clone(), (*docs, ttf / docs));
             for w in wanted {
@@ -964,5 +968,8 @@ mod tests {
             {"range": {"price": {"gte": 4}}},
         ]}});
         assert_eq!(read(bool), "8,9");
+        // number terms score 1.0: no BM25 statistics, which would read every source
+        let q = parse_query(&json!({"match": {"n": 7}})).unwrap();
+        assert!(Searcher::new(ix, &q).field_stats.is_empty());
     }
 }
