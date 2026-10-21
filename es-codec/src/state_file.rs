@@ -93,12 +93,13 @@ pub fn read(path: &Path) -> Result<Value> {
     let file = std::fs::read(path).map_err(|e| crate::Error(format!("{}: {e}", path.display())))?;
     check_footer(&file)?;
     let mut input = DataInput::new(&file);
-    if input.read_be_int()? != codec_util::CODEC_MAGIC {
-        return err("bad state file magic");
+    codec_util::check_header(&mut input, "state", 1, 2)?;
+    let format = input.read_int()?;
+    if format != 1 {
+        return err(format!(
+            "unsupported state file format id {format}, expected SMILE (1)"
+        ));
     }
-    input.read_string()?;
-    input.read_be_int()?;
-    input.read_int()?;
     smile::decode(&file[input.pos..file.len() - codec_util::FOOTER_LEN])
 }
 
@@ -130,6 +131,27 @@ mod tests {
             retention_leases_doc(1),
             read(&shard.join("retention-leases-0.st")).unwrap()
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn rejects_bad_header() {
+        let doc = node_doc("n", 1, 1);
+        let dir = std::env::temp_dir().join(format!("esm-sf-bad-{}", std::process::id()));
+        write(&dir, "node", 0, &doc).unwrap();
+        let path = dir.join("node-0.st");
+        let good = std::fs::read(&path).unwrap();
+        // header: magic(4) + vint len(1) + "state"(5) + version(4) + format(4)
+        for (offset, byte) in [(5, b'x'), (13, 9), (14, 2)] {
+            let mut bad = good.clone();
+            bad[offset] = byte;
+            // re-seal the checksum so only the header is wrong
+            let n = bad.len() - 8;
+            let sum = (codec_util::crc32(&bad[..n]) as u64).to_be_bytes();
+            bad[n..].copy_from_slice(&sum);
+            std::fs::write(&path, &bad).unwrap();
+            assert!(read(&path).is_err(), "offset {offset}");
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
