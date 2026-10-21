@@ -11,7 +11,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::{
     borrow::Cow,
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     time::{Duration, Instant},
 };
 
@@ -325,7 +325,16 @@ impl Index {
 
     /// All live documents, in no particular order; those on disk are read as iterated.
     pub fn docs(&self) -> impl Iterator<Item = (&str, Cow<'_, Document>)> {
-        let on_disk = self.disk.iter().flat_map(|d| d.docs(|_| true));
+        self.docs_at(None)
+    }
+
+    /// The live documents in memory, and those on disk at `on_disk` (all if `None`).
+    pub fn docs_at<'a: 'k, 'k>(
+        &'a self,
+        on_disk: Option<&'k BTreeSet<disk::DiskPos>>,
+    ) -> impl Iterator<Item = (&'a str, Cow<'a, Document>)> + 'k {
+        let keep = move |p| on_disk.is_none_or(|at| at.contains(&p));
+        let on_disk = self.disk.iter().flat_map(move |d| d.docs(keep));
         self.docs
             .iter()
             .map(|(id, d)| (id.as_str(), Cow::Borrowed(d)))
@@ -335,6 +344,14 @@ impl Index {
                     .filter_map(Result::ok)
                     .map(|(id, d)| (id, Cow::Owned(d))),
             )
+    }
+
+    /// The on-disk documents that may index `term` in `field`, from its postings (see
+    /// [`docs_at`](Self::docs_at)); `_id` is looked up directly.
+    pub fn disk_term(&self, field: &str, term: &str) -> BTreeSet<disk::DiskPos> {
+        self.disk
+            .as_ref()
+            .map_or_else(BTreeSet::new, |d| d.term_docs(field, term))
     }
 
     fn supersede(&mut self, old: Value) {

@@ -1,16 +1,26 @@
 //! JSON query DSL and ES|QL parsing/execution.
 //!
-//! ponytail: queries scan every document and compute BM25 statistics per query; replace with
-//! postings lookups once the Lucene codec (es-codec) provides an inverted index.
+//! Term, match and bool queries on an index opened from disk read only the on-disk documents
+//! their postings name; the rest scan every document.
+//!
+//! ponytail: matched documents are still scored from their sources; score from postings and
+//! norms if loading the hits shows up.
 
 pub mod esql;
 mod parse;
 
 pub use parse::{Query, parse_query, parse_query_string};
 
-use es_index::{Document, FieldMapping, Index, analysis::Analyzer, parse_date_millis};
+use es_index::{
+    Document, FieldMapping, Index, analysis::Analyzer, disk::DiskPos, parse_date_millis,
+};
 use serde_json::Value;
-use std::{borrow::Cow, cell::RefCell, cmp::Ordering, collections::HashMap};
+use std::{
+    borrow::Cow,
+    cell::RefCell,
+    cmp::Ordering,
+    collections::{BTreeSet, HashMap},
+};
 
 /// Lucene wildcard syntax: `*` any run, `?` one char, `\\` escapes.
 fn wildcard_match(p: &[char], t: &[char]) -> bool {
@@ -174,6 +184,8 @@ struct Searcher<'a> {
     /// Resolved field types, so unmapped fields are sampled once per search.
     /// Per field: its kind, and whether a literal `x.keyword` source key overrides `x`.
     kinds: RefCell<HashMap<String, (Kind, bool)>>,
+    /// The on-disk documents the query can match (see `candidates`).
+    on_disk: Option<BTreeSet<DiskPos>>,
 }
 
 const K1: f64 = 1.2;
@@ -186,8 +198,10 @@ impl<'a> Searcher<'a> {
             field_stats: HashMap::new(),
             doc_freq: HashMap::new(),
             kinds: RefCell::default(),
+            on_disk: None,
         };
         s.gather(q);
+        s.on_disk = s.candidates(q);
         s
     }
 
@@ -199,8 +213,10 @@ impl<'a> Searcher<'a> {
         if let Some(&(k, literal)) = self.kinds.borrow().get(field) {
             return (k, path(literal));
         }
-        // a literal `x.keyword` source key wins over the multi-field fallback
-        let literal = source_path(self.index, field) != field
+        // a literal `x.keyword` source key wins over the multi-field fallback of an unmapped `x`
+        let base = source_path(self.index, field);
+        let literal = base != field
+            && !self.index.mappings.properties.contains_key(base)
             && self
                 .index
                 .docs()
@@ -233,6 +249,19 @@ impl<'a> Searcher<'a> {
             _ => return,
         };
         let (kind, path) = self.kind(field);
+        if let Some((docs, ttf)) = self.index.stats.as_ref().and_then(|s| s.fields.get(field)) {
+            self.field_stats.insert(field.clone(), (*docs, ttf / docs));
+            for w in wanted {
+                let df = self
+                    .index
+                    .stats
+                    .as_ref()
+                    .and_then(|s| s.doc_freq.get(&(field.clone(), w.clone())));
+                self.doc_freq
+                    .insert((field.clone(), w), df.copied().unwrap_or(0.0));
+            }
+            return;
+        }
         let (mut docs, mut len) = (0.0, 0.0);
         let mut df: HashMap<&str, f64> = HashMap::new();
         let live = self.index.docs().map(|(_, d)| match d {
@@ -262,18 +291,64 @@ impl<'a> Searcher<'a> {
                 df.get(w.as_str()).copied().unwrap_or(0.0),
             );
         }
-        if let Some((docs, ttf)) = self.index.stats.as_ref().and_then(|s| s.fields.get(field)) {
-            self.field_stats.insert(field.clone(), (*docs, ttf / docs));
-            for w in &wanted {
-                let df = self
-                    .index
-                    .stats
-                    .as_ref()
-                    .and_then(|s| s.doc_freq.get(&(field.clone(), w.clone())));
-                self.doc_freq
-                    .insert((field.clone(), w.clone()), df.copied().unwrap_or(0.0));
+    }
+
+    /// The on-disk documents `q` can match, from postings; `None` if it cannot narrow them.
+    fn candidates(&self, q: &Query) -> Option<BTreeSet<DiskPos>> {
+        match q {
+            Query::Term { field, value } => Some(self.term_docs(field, &[text(value)], true)),
+            Query::Match { field, query, and } => {
+                let (kind, _) = self.kind(field);
+                Some(self.term_docs(field, &query_terms(kind, query), *and))
             }
+            Query::Bool {
+                must,
+                should,
+                filter,
+                min_should,
+                ..
+            } => {
+                let required = must
+                    .iter()
+                    .chain(filter)
+                    .filter_map(|c| self.candidates(c))
+                    .reduce(|a, b| &a & &b);
+                let any = match min_should {
+                    0 => None,
+                    _ => should
+                        .iter()
+                        .map(|c| self.candidates(c))
+                        .collect::<Option<Vec<_>>>()
+                        .map(|s| s.into_iter().flatten().collect()),
+                };
+                match (required, any) {
+                    (Some(a), Some(b)) => Some(&a & &b),
+                    (a, b) => a.or(b),
+                }
+            }
+            _ => None,
         }
+    }
+
+    /// The on-disk documents indexing all (or any) of `terms` in `field`.
+    fn term_docs(&self, field: &str, terms: &[String], all: bool) -> BTreeSet<DiskPos> {
+        let (kind, _) = self.kind(field);
+        let mut sets = terms.iter().map(|t| {
+            // Booleans index as `T` and `F`.
+            let t = match (kind, t.as_str()) {
+                (Kind::Bool, "true") => "T",
+                (Kind::Bool, "false") => "F",
+                (_, t) => t,
+            };
+            self.index.disk_term(field, t)
+        });
+        let first = sets.next().unwrap_or_default();
+        sets.fold(first, |a, b| if all { &a & &b } else { &a | &b })
+    }
+
+    /// The documents the query may match: all in memory, and on disk those its postings allow.
+    fn docs(&self) -> impl Iterator<Item = (&'a str, Cow<'a, Document>)> + '_ {
+        self.index.docs_at(self.on_disk.as_ref())
     }
 
     fn bm25(&self, field: &str, term: &str, freq: f64, len: f64) -> f64 {
@@ -654,7 +729,7 @@ pub fn search_many<'a>(
     for (pos, (name, index, filter)) in targets.iter().enumerate() {
         let query = with_filter(&req.query, *filter)?;
         let s = Searcher::new(index, &query);
-        for (id, doc) in index.docs().filter(|(_, d)| index.searchable(d)) {
+        for (id, doc) in s.docs().filter(|(_, d)| index.searchable(d)) {
             let Some(score) = s.score(&query, id, &doc) else {
                 continue;
             };
@@ -747,7 +822,7 @@ pub fn count_many(targets: &[Target], q: &Query) -> Result<usize, QueryError> {
     for (_, index, filter) in targets {
         let q = with_filter(q, *filter)?;
         let s = Searcher::new(index, &q);
-        n += index
+        n += s
             .docs()
             .filter(|(id, d)| s.score(&q, id, d).is_some())
             .count();
@@ -760,5 +835,51 @@ fn query_terms(kind: Kind, query: &str) -> Vec<String> {
     match kind {
         Kind::Text => Analyzer::Standard.analyze(query),
         _ => vec![query.to_owned()],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use es_index::{Indices, disk};
+    use serde_json::json;
+
+    #[test]
+    fn queries_on_an_opened_index_read_only_the_docs_their_postings_hold() {
+        let dir = std::env::temp_dir().join(format!("esm-candidates-{}", std::process::id()));
+        let mut ix = Index::default();
+        let props = &mut ix.mappings.properties;
+        props.insert("title".into(), FieldMapping::Text);
+        props.insert("tag".into(), FieldMapping::Keyword { ignore_above: None });
+        props.insert("ok".into(), FieldMapping::Boolean);
+        for i in 0..50 {
+            let tag = if i % 10 == 0 { "ten" } else { "other" };
+            ix.put(
+                &i.to_string(),
+                json!({"title": format!("doc {i}"), "tag": tag, "ok": i == 4}),
+            );
+        }
+        disk::save(&dir, &Indices::from([("i".to_owned(), ix)])).unwrap();
+        let opened = disk::open(&dir).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let ix = &opened["i"];
+        let read = |q: Value| {
+            let q = parse_query(&q).unwrap();
+            let on_disk = Searcher::new(ix, &q).candidates(&q).expect("narrowed");
+            let mut ids: Vec<_> = ix.docs_at(Some(&on_disk)).map(|(id, _)| id).collect();
+            ids.sort_by_key(|id| id.parse::<u32>().unwrap());
+            ids.join(",")
+        };
+        assert_eq!(read(json!({"match": {"title": "7"}})), "7");
+        assert_eq!(read(json!({"match": {"title": "7 8"}})), "7,8");
+        assert_eq!(read(json!({"term": {"tag": "ten"}})), "0,10,20,30,40");
+        assert_eq!(read(json!({"term": {"ok": true}})), "4");
+        assert_eq!(read(json!({"term": {"_id": "3"}})), "3");
+        let bool = json!({"bool": {
+            "filter": [{"term": {"tag": "ten"}}],
+            "should": [{"match": {"title": "20 30 31"}}],
+            "minimum_should_match": 1,
+        }});
+        assert_eq!(read(bool), "20,30");
     }
 }

@@ -16,7 +16,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::{
     borrow::Cow,
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     path::Path,
 };
 
@@ -44,6 +44,9 @@ pub fn open(data_dir: &Path) -> es_codec::Result<Indices> {
     }
     Ok(out)
 }
+
+/// A document's place in an opened index's segments: `(segment, doc id)`.
+pub type DiskPos = (usize, usize);
 
 /// Where a live document of a [`Shard`] is, with its version and sequence number.
 #[derive(Debug, Clone, Copy)]
@@ -115,17 +118,43 @@ impl Shard {
         document(d, id_and_source(seg, seg.document(d.doc)?)?.1)
     }
 
-    /// The live documents whose id `keep` accepts, segment by segment, read a chunk at a time.
-    pub(crate) fn docs<'a>(
+    /// The docs that may hold `term` in `field`: those whose postings do, and every doc of a
+    /// segment without readable postings for the field. Some may no longer be live.
+    pub(crate) fn term_docs(&self, field: &str, term: &str) -> BTreeSet<DiskPos> {
+        if field == "_id" {
+            return self
+                .meta(term)
+                .map(|d| (d.segment, d.doc))
+                .into_iter()
+                .collect();
+        }
+        let mut out = BTreeSet::new();
+        for (s, seg) in self.segments.iter().enumerate() {
+            match seg.term(field, term.as_bytes()) {
+                Ok(t) => out.extend(t.iter().flat_map(|t| &t.docs).map(|d| (s, d.0 as usize))),
+                // e.g. a field this segment does not index, or a postings format we lack
+                Err(_) => out.extend((0..seg.max_doc()).map(|d| (s, d))),
+            }
+        }
+        out
+    }
+
+    /// The live documents at a position `keep` accepts, segment by segment, read a chunk at a
+    /// time.
+    // ponytail: decompresses every chunk; skip chunks without kept docs if that shows up
+    pub(crate) fn docs<'a: 'k, 'k>(
         &'a self,
-        keep: impl Fn(&str) -> bool + Copy + 'a,
-    ) -> impl Iterator<Item = es_codec::Result<(&'a str, Document)>> + 'a {
+        keep: impl Fn(DiskPos) -> bool + Copy + 'k,
+    ) -> impl Iterator<Item = es_codec::Result<(&'a str, Document)>> + 'k {
         self.segments.iter().enumerate().flat_map(move |(s, seg)| {
             let docs: Box<dyn Iterator<Item = _>> = match seg.documents(0..seg.max_doc()) {
                 Ok(docs) => Box::new(docs),
                 Err(e) => Box::new(std::iter::once(Err(e))),
             };
             docs.enumerate().filter_map(move |(doc, fields)| {
+                if !keep((s, doc)) {
+                    return None;
+                }
                 let read = || {
                     let (Some(id), source) = id_and_source(seg, fields?)? else {
                         return Ok(None);
@@ -133,7 +162,7 @@ impl Shard {
                     let Some((id, d)) = self.ids.get_key_value(&id) else {
                         return Ok(None);
                     };
-                    if (d.segment, d.doc) != (s, doc) || !keep(id) {
+                    if (d.segment, d.doc) != (s, doc) {
                         return Ok(None);
                     }
                     Ok(Some((id.as_str(), document(d, source)?)))
@@ -245,10 +274,15 @@ fn unsaved<'a>(
         .filter(|(id, _)| !current.contains(*id))
         .map(|(id, d)| (id.as_str(), Cow::Borrowed(d)))
         .collect();
-    if let Some(disk) = &ix.disk
-        && disk.ids.keys().any(|id| !current.contains(id))
-    {
-        for doc in disk.docs(|id| !current.contains(id)) {
+    if let Some(disk) = &ix.disk {
+        let at: HashSet<DiskPos> = (disk.ids.iter())
+            .filter(|(id, _)| !current.contains(*id))
+            .map(|(_, d)| (d.segment, d.doc))
+            .collect();
+        if at.is_empty() {
+            return Ok(out);
+        }
+        for doc in disk.docs(|p| at.contains(&p)) {
             let (id, d) = doc?;
             out.push((id, Cow::Owned(d)));
         }
