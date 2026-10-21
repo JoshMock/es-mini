@@ -373,3 +373,34 @@ fn sort_missing_controls_where_absent_values_go() {
     );
     assert_eq!(order(json!([{"n": {"missing": 3}}])), ["c", "b", "a"]);
 }
+
+#[test]
+fn date_range_compares_instants_not_strings() {
+    let mut idx = Index::default();
+    idx.mappings.properties.insert(
+        "d".into(),
+        FieldMapping::Date {
+            format: None,
+            locale: None,
+        },
+    );
+    idx.put("a", json!({"d": "2024-01-01T00:00:00Z"}));
+    idx.put("b", json!({"d": "2024-06-01"}));
+    idx.put("c", json!({"d": 1_717_286_400_000_i64})); // 2024-06-02
+    let hits = |r: Value| {
+        let req = SearchRequest::parse(&json!({"query": {"range": {"d": r}}})).unwrap();
+        let mut v: Vec<_> = search(&idx, &req)
+            .hits
+            .iter()
+            .map(|h| h.id.to_owned())
+            .collect();
+        v.sort();
+        v
+    };
+    assert_eq!(
+        hits(json!({"gte": "2024-05-01T10:00:00+02:00"})),
+        ["b", "c"]
+    );
+    assert_eq!(hits(json!({"gt": 1_717_200_000_000_i64})), ["c"]);
+    assert_eq!(hits(json!({"lt": "2024-06-01T00:00:00Z"})), ["a"]);
+}

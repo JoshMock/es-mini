@@ -5,7 +5,7 @@
 
 pub mod esql;
 
-use es_index::{Document, FieldMapping, Index, analysis::Analyzer};
+use es_index::{Document, FieldMapping, Index, analysis::Analyzer, parse_date_millis};
 use serde_json::Value;
 use std::{cell::RefCell, cmp::Ordering, collections::HashMap};
 
@@ -588,7 +588,15 @@ impl<'a> Searcher<'a> {
                     }) => Some(locale.as_deref().unwrap_or("en")),
                     _ => None,
                 };
+                let default_date = matches!(
+                    self.index.mappings.properties.get(field),
+                    Some(FieldMapping::Date { format: None, .. })
+                );
                 let cmp = |a: &Value, b: &Value| match locale {
+                    None if default_date => match (parse_date_millis(a), parse_date_millis(b)) {
+                        (Some(x), Some(y)) => x.cmp(&y),
+                        _ => Ordering::Less,
+                    },
                     Some(l) => match (parse_dated(a, l), parse_dated(b, l)) {
                         (Some(x), Some(y)) => x.cmp(&y),
                         _ => Ordering::Less,
