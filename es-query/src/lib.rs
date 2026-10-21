@@ -649,7 +649,6 @@ impl<'a> Searcher<'a> {
         }
     }
 
-    // ponytail: exact field lengths; Lucene quantizes norms to one byte, so scores differ slightly
     fn bm25(&self, field: &str, term: &str, freq: f64, len: f64) -> f64 {
         let (n, avg) = self.field_stats.get(field).copied().unwrap_or((1.0, 1.0));
         let df = self
@@ -657,6 +656,9 @@ impl<'a> Searcher<'a> {
             .get(&(field.to_owned(), term.to_owned()))
             .copied()
             .unwrap_or(0.0);
+        let len = f64::from(es_index::disk::norm_len(es_index::disk::norm_byte(
+            len as u32,
+        )));
         let idf = (1.0 + (n - df + 0.5) / (df + 0.5)).ln();
         // ES's LegacyBM25Similarity scales Lucene's BM25 by (1 + k1).
         idf * (1.0 + K1) * freq / (freq + K1 * (1.0 - B + B * len / avg))

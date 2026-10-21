@@ -106,7 +106,7 @@ fn load_shard(index: &mut Index, dir: &Path) -> es_codec::Result<()> {
 }
 
 /// Lucene's `SmallFloat.intToByte4`: the norm byte for a field of `len` terms.
-fn norm_byte(len: u32) -> i8 {
+pub fn norm_byte(len: u32) -> i8 {
     let int4 = |i: u32| {
         let bits = 32 - i.leading_zeros();
         if bits < 4 {
@@ -117,6 +117,20 @@ fn norm_byte(len: u32) -> i8 {
         }
     };
     (if len < 24 { len } else { 24 + int4(len - 24) }) as u8 as i8
+}
+
+/// Lucene's `SmallFloat.byte4ToInt`: the field length a norm byte stands for.
+pub fn norm_len(norm: i8) -> u32 {
+    let b = norm as u8 as u32;
+    if b < 24 {
+        b
+    } else {
+        let i = b - 24;
+        24 + match i >> 3 {
+            0 => i,
+            s => ((i & 7) | 8) << (s - 1),
+        }
+    }
 }
 
 /// Index data for one shard segment, built from the mapped fields whose values are scalars or
@@ -556,5 +570,19 @@ mod tests {
         let metas = read_indices(&dir).unwrap();
         assert_eq!(metas[0].settings["index.uuid"], metas[0].uuid);
         assert!(metas[0].settings.contains_key("index.version.created"));
+    }
+}
+
+#[cfg(test)]
+mod norm_tests {
+    use super::*;
+
+    #[test]
+    fn norm_len_quantizes_like_lucene() {
+        assert_eq!(norm_len(norm_byte(10)), 10);
+        assert_eq!(norm_len(norm_byte(24)), 24);
+        // 100 -> 24 + int4(76) -> decodes down to a bucket boundary
+        assert_eq!(norm_len(norm_byte(100)), 96);
+        assert_eq!(norm_len(norm_byte(1000)), 984);
     }
 }
