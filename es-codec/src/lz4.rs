@@ -1,6 +1,6 @@
 //! Lucene's LZ4 block format, shared by stored fields, the terms dictionary, and doc values.
 
-use crate::{Result, err, input::DataInput};
+use crate::{Result, err, input::DataInput, output::Output};
 
 /// Lucene `LZ4.decompress`: reads until `out` has grown by `len` bytes. Matches may reference
 /// earlier bytes of `out` (the preset dictionary).
@@ -44,6 +44,20 @@ pub(crate) fn decompress(inp: &mut DataInput, len: usize, out: &mut Vec<u8>) -> 
         return err("corrupt LZ4 block length");
     }
     Ok(())
+}
+
+/// Literal-only LZ4 stream, which any LZ4 decoder accepts.
+pub(crate) fn literals(out: &mut Output, lits: &[u8]) {
+    out.byte((lits.len().min(15) << 4) as u8);
+    if lits.len() >= 15 {
+        let mut rest = lits.len() - 15;
+        while rest >= 255 {
+            out.byte(255);
+            rest -= 255;
+        }
+        out.byte(rest as u8);
+    }
+    out.bytes(lits);
 }
 
 #[cfg(test)]

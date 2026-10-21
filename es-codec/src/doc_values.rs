@@ -636,20 +636,6 @@ pub(crate) fn write_direct_monotonic(
     data
 }
 
-/// Literal-only LZ4 stream, which any LZ4 decoder accepts.
-fn lz4_literals(out: &mut Output, lits: &[u8]) {
-    out.byte((lits.len().min(15) << 4) as u8);
-    if lits.len() >= 15 {
-        let mut rest = lits.len() - 15;
-        while rest >= 255 {
-            out.byte(255);
-            rest -= 255;
-        }
-        out.byte(rest as u8);
-    }
-    out.bytes(lits);
-}
-
 /// `IndexedDISI` of `docs` (ascending, among `max_doc`): block header, then a sorted list, a
 /// bitset (more than 4095 docs) or nothing (all 65536), plus the jump table Lucene adds when
 /// there are two or more blocks. No dense-rank table.
@@ -798,7 +784,7 @@ fn write_terms_dict(dvm: &mut Output, dvd: &mut Output, terms: &[&[u8]]) {
         if block.len() > 1 {
             max_block = max_block.max(rest.0.len());
             dvd.vint(rest.0.len() as i32);
-            lz4_literals(dvd, &rest.0);
+            lz4::literals(dvd, &rest.0);
         }
     }
     let length = dvd.0.len() - start;

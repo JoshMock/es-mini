@@ -2,7 +2,7 @@
 //!
 //! Supports the subset ES writes: shared property names, raw binary, no shared string values.
 
-use crate::{Result, err};
+use crate::{Result, err, input::zigzag};
 
 /// A decoded SMILE value.
 #[derive(Debug, Clone, PartialEq)]
@@ -74,10 +74,6 @@ impl Reader<'_> {
         }
     }
 
-    fn zigzag(v: u64) -> i64 {
-        (v >> 1) as i64 ^ -((v & 1) as i64)
-    }
-
     /// `n` bytes of 7 bits each, big-endian.
     fn bits7(&mut self, n: usize) -> Result<u128> {
         Ok(self
@@ -141,14 +137,14 @@ impl Reader<'_> {
             0x21 => Value::Null,
             0x22 => Value::Bool(false),
             0x23 => Value::Bool(true),
-            0x24 | 0x25 => Value::Int(Self::zigzag(self.vint()?)),
+            0x24 | 0x25 => Value::Int(zigzag(self.vint()?)),
             0x28 => Value::Float(f64::from(f32::from_bits(self.bits7(5)? as u32))),
             0x29 => Value::Float(f64::from_bits(self.bits7(10)? as u64)),
             0x40..=0x5F => Value::String(self.text(usize::from(b & 0x1F) + 1)?),
             0x60..=0x7F => Value::String(self.text(usize::from(b & 0x1F) + 33)?),
             0x80..=0x9F => Value::String(self.text(usize::from(b & 0x1F) + 2)?),
             0xA0..=0xBF => Value::String(self.text(usize::from(b & 0x1F) + 34)?),
-            0xC0..=0xDF => Value::Int(Self::zigzag(u64::from(b & 0x1F))),
+            0xC0..=0xDF => Value::Int(zigzag(u64::from(b & 0x1F))),
             0xE0 | 0xE4 => Value::String(self.long_text()?),
             0xFD => {
                 let n = self.vint()? as usize;

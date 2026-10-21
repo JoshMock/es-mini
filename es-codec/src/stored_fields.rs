@@ -267,17 +267,7 @@ fn write_ints(out: &mut Output, vals: &[usize]) {
 /// literal-only block.
 fn compress(out: &mut Output, data: &[u8]) {
     let mut block = Output::default();
-    let lit = data.len();
-    block.byte((lit.min(15) as u8) << 4);
-    if lit >= 15 {
-        let mut rest = lit - 15;
-        while rest >= 255 {
-            block.byte(255);
-            rest -= 255;
-        }
-        block.byte(rest as u8);
-    }
-    block.bytes(data);
+    lz4::literals(&mut block, data);
     out.vint(0);
     out.vint(data.len() as i32);
     out.vint(1);
