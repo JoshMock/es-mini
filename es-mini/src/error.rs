@@ -40,6 +40,7 @@ pub enum AppError {
     IllegalArgument(String),
     ParsingException(String),
     Verification(String),
+    Io(String),
 }
 
 impl AppError {
@@ -132,6 +133,7 @@ impl AppError {
             ),
             Self::ParsingException(r) => (StatusCode::BAD_REQUEST, "parsing_exception", r, None),
             Self::Verification(r) => (StatusCode::BAD_REQUEST, "verification_exception", r, None),
+            Self::Io(r) => (StatusCode::INTERNAL_SERVER_ERROR, "io_exception", r, None),
             Self::IllegalArgument(r) => (
                 StatusCode::BAD_REQUEST,
                 "illegal_argument_exception",

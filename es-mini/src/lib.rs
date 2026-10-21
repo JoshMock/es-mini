@@ -184,10 +184,11 @@ pub fn app_persisted(dir: &std::path::Path) -> Result<Router, String> {
                     // ponytail: the change stays applied in memory; a later successful save persists it
                     Err(e) => {
                         tracing::error!("saving {}: {e}", dir.display());
-                        let reason = format!("the change was applied but not saved to {}: {e}", dir.display());
-                        let error = json!({"type": "io_exception", "reason": reason});
-                        let body = json!({"error": {"root_cause": [error.clone()], "type": "io_exception", "reason": error["reason"]}, "status": 500});
-                        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response()
+                        AppError::Io(format!(
+                            "the change was applied but not saved to {}: {e}",
+                            dir.display()
+                        ))
+                        .into_response()
                     }
                 }
             }
