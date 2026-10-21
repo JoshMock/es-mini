@@ -46,7 +46,17 @@ fn longs(seg: &SegmentReader, field: &str) -> Vec<Option<i64>> {
 
 fn load_shard(index: &mut Index, dir: &Path) -> es_codec::Result<()> {
     let mut stats = TermStats::default();
-    for seg in SegmentInfos::read_latest(dir)?.segments {
+    let infos = SegmentInfos::read_latest(dir)?;
+    // Operations after the last live doc (deletes) still consumed sequence numbers.
+    if let Some(max) = infos
+        .user_data
+        .get("max_seq_no")
+        .and_then(|m| m.parse::<u64>().ok())
+    {
+        index.next_seq_no = index.next_seq_no.max(max + 1);
+    }
+    index.commit = infos.user_data;
+    for seg in infos.segments {
         let seg = SegmentReader::open(dir, seg)?;
         for f in seg
             .fields
@@ -636,7 +646,7 @@ fn write_snapshot(data_dir: &Path, indices: &Indices, prev: &Path) -> es_codec::
             )?);
             infos.counter += 1;
         }
-        let max_seq = ix.docs().map(|(_, d)| d.seq_no as i64).max().unwrap_or(-1);
+        let max_seq = ix.next_seq_no as i64 - 1;
         infos.generation += 1;
         infos.version += 1;
         infos.user_data = shard_user_data(
@@ -645,15 +655,27 @@ fn write_snapshot(data_dir: &Path, indices: &Indices, prev: &Path) -> es_codec::
             max_seq,
             max_seq,
         );
+        // An index opened from disk continues that shard's history.
+        for key in [
+            "history_uuid",
+            "translog_uuid",
+            "max_unsafe_auto_id_timestamp",
+        ] {
+            if let Some(v) = ix.commit.get(key) {
+                infos.user_data.insert(key.into(), v.clone());
+            }
+        }
         infos.write(&dir)?;
         let cp = es_codec::translog::Checkpoint {
             generation: 1,
             global_checkpoint: max_seq,
             primary_term: 1,
         };
-        let (_, ckp) = es_codec::translog::write_empty("esminiTranslogUuid000A", &cp);
-        std::fs::write(dir.join("../translog/translog.ckp"), ckp)
-            .map_err(|e| es_codec::Error(e.to_string()))?;
+        let (tlog, ckp) = es_codec::translog::write_empty(&infos.user_data["translog_uuid"], &cp);
+        let translog = dir.join("../translog");
+        for (name, bytes) in [("translog-1.tlog", tlog), ("translog.ckp", ckp)] {
+            es_codec::write_file_atomic(&translog.join(name), &bytes)?;
+        }
     }
     Ok(())
 }

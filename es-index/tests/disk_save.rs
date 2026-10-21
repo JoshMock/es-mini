@@ -83,6 +83,46 @@ fn resaving_an_elasticsearch_directory_keeps_its_index_identity() {
     );
 }
 
+/// Elasticsearch treats a shard's history as continuous only if its commit keeps the same
+/// history, translog and sequence-number markers.
+#[test]
+fn resaving_keeps_commit_history() {
+    use es_codec::SegmentInfos;
+    let es_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/es-9.5.5/data");
+    let dir = scratch("history").join("data");
+    disk::save(&dir, &disk::open(&es_dir).unwrap()).unwrap();
+    let saved = es_codec::cluster_state::read_indices(&dir).unwrap();
+    assert!(!saved.is_empty());
+    for meta in saved {
+        let shard = |root: &PathBuf| root.join("indices").join(&meta.uuid).join("0");
+        let commit = |root: &PathBuf| {
+            SegmentInfos::read_latest(&shard(root).join("index"))
+                .unwrap()
+                .user_data
+        };
+        let (es, ours) = (commit(&es_dir), commit(&dir));
+        for key in [
+            "history_uuid",
+            "translog_uuid",
+            "max_seq_no",
+            "local_checkpoint",
+            "max_unsafe_auto_id_timestamp",
+        ] {
+            assert_eq!(ours[key], es[key], "{} {key}", meta.name);
+        }
+        // The translog's header names the commit's translog_uuid.
+        let translog = shard(&dir).join("translog");
+        let tlog = fs::read_dir(&translog)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| p.extension().is_some_and(|x| x == "tlog"))
+            .unwrap();
+        let tlog = fs::read(tlog).unwrap();
+        let uuid = ours["translog_uuid"].as_bytes();
+        assert!(tlog.windows(uuid.len()).any(|w| w == uuid), "{}", meta.name);
+    }
+}
+
 /// Hundreds of distinct terms per field (each term in fewer than 256 docs).
 #[test]
 fn saves_and_reloads_many_terms_and_docs() {

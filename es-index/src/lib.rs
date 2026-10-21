@@ -184,6 +184,8 @@ pub struct Index {
     pub aliases: BTreeMap<String, aliases::Alias>,
     /// Closed indices keep their metadata but reject document reads, writes, and searches.
     pub closed: bool,
+    /// User data of the shard commit the index was opened from; saves keep its history markers.
+    pub commit: BTreeMap<String, String>,
     docs: HashMap<String, Document>,
     /// Sources of updated/deleted docs, kept for BM25 statistics like Lucene's unmerged segments.
     // ponytail: a "merge" drops them all once they pass a third of all physical docs, roughly
