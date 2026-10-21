@@ -350,6 +350,56 @@ pub async fn get(
     })
 }
 
+/// `_mget`: each requested document is fetched through [`get`]; failures become per-item errors.
+pub async fn mget(
+    State(state): State<AppState>,
+    path: Option<Path<String>>,
+    uri: Uri,
+    Query(params): Query<HashMap<String, String>>,
+    body: Bytes,
+) -> Reply {
+    let default_index = path.map(|Path(i)| i);
+    let body = parse_json(&body)?;
+    let missing = |what: &str| AppError::ActionRequestValidation(format!("{what} is missing"));
+    let items: Vec<(Option<String>, String)> = if let Some(docs) = body["docs"].as_array() {
+        let mut v = Vec::new();
+        for d in docs {
+            let id = d["_id"].as_str().ok_or_else(|| missing("id"))?;
+            v.push((d["_index"].as_str().map(String::from), id.to_string()));
+        }
+        v
+    } else if let Some(ids) = body["ids"].as_array() {
+        ids.iter()
+            .map(|i| (None, i.as_str().unwrap_or_default().to_string()))
+            .collect()
+    } else {
+        return Err(AppError::ActionRequestValidation(
+            "no documents to get".into(),
+        ));
+    };
+    let mut docs = Vec::new();
+    for (index, id) in items {
+        let Some(index) = index.or_else(|| default_index.clone()) else {
+            return Err(missing("index"));
+        };
+        let r = get(
+            State(state.clone()),
+            Path((index.clone(), id.clone())),
+            uri.clone(),
+            Query(params.clone()),
+        )
+        .await;
+        docs.push(match r {
+            Ok((_, Json(d))) => d,
+            Err(e) => {
+                let (status, error) = e.parts();
+                json!({"_index": index, "_id": id, "error": error, "status": status.as_u16()})
+            }
+        });
+    }
+    Ok((StatusCode::OK, Json(json!({"docs": docs}))))
+}
+
 const DELETE_PARAMS: [&str; 10] = [
     "routing",
     "refresh",

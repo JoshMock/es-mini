@@ -44,7 +44,7 @@ pub enum AppError {
 
 impl AppError {
     /// Status and the `error` object (with `root_cause`) of the ES envelope.
-    pub fn parts(self) -> (StatusCode, Value) {
+    pub(crate) fn parts(self) -> (StatusCode, Value) {
         let (status, kind, reason, index) = match self {
             Self::IndexClosed(i) => (
                 StatusCode::BAD_REQUEST,
