@@ -125,6 +125,7 @@ fn codes(bits: &mut Bits, out: &mut Vec<u8>, lit: &Huffman, dist: &Huffman) -> R
     }
 }
 
+// ponytail: bit-by-bit reads and canonical decode; buffer bits and use lookup tables if inflate shows up in profiles.
 pub fn inflate(data: &[u8]) -> Result<Vec<u8>> {
     let mut bits = Bits {
         data,

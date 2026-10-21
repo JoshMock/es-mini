@@ -37,6 +37,7 @@ impl SegmentReader {
             .map_or_else(|| err(format!("{} has no field {name}", self.seg.name)), Ok)
     }
 
+    // ponytail: linear scan per lookup; index by number in a map if field counts grow.
     pub fn field_by_number(&self, number: i32) -> Result<&FieldInfo> {
         self.fields.iter().find(|f| f.number == number).map_or_else(
             || err(format!("{} has no field {number}", self.seg.name)),
