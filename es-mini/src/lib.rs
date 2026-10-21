@@ -6,6 +6,7 @@ mod docs;
 mod error;
 mod filter_path;
 mod indices;
+mod params;
 mod search;
 
 use axum::{

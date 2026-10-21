@@ -1,9 +1,9 @@
-use crate::{AppState, error::AppError};
+use crate::{AppState, error::AppError, params};
 use axum::{
     Json,
     body::Bytes,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{StatusCode, Uri},
 };
 use es_index::{DocResult, Index, WriteResult, aliases};
 use serde_json::{Value, json};
@@ -175,12 +175,31 @@ fn require_alias(
     }
 }
 
+const WRITE_PARAMS: [&str; 14] = [
+    "routing",
+    "refresh",
+    "op_type",
+    "version",
+    "version_type",
+    "if_seq_no",
+    "if_primary_term",
+    "pipeline",
+    "require_alias",
+    "require_data_stream",
+    "timeout",
+    "wait_for_active_shards",
+    "include_source_on_error",
+    "master_timeout",
+];
+
 pub async fn index_with_id(
     State(state): State<AppState>,
     Path((index, id)): Path<(String, String)>,
+    uri: Uri,
     Query(params): Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Reply {
+    params::check(&uri, &params, &WRITE_PARAMS)?;
     require_alias(&state, &params, &index)?;
     let create = params.get("op_type").is_some_and(|o| o == "create");
     let mut reply = put_or_create(&state, &index, &id, parse_json(&body)?, create)?;
@@ -191,9 +210,11 @@ pub async fn index_with_id(
 pub async fn index_auto_id(
     State(state): State<AppState>,
     Path(index): Path<String>,
+    uri: Uri,
     Query(params): Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Reply {
+    params::check(&uri, &params, &WRITE_PARAMS)?;
     require_alias(&state, &params, &index)?;
     put_or_create(&state, &index, &auto_id(), parse_json(&body)?, true)
 }
@@ -206,11 +227,27 @@ pub async fn create(
     put_or_create(&state, &index, &id, parse_json(&body)?, true)
 }
 
+const GET_PARAMS: [&str; 11] = [
+    "routing",
+    "refresh",
+    "realtime",
+    "preference",
+    "version",
+    "version_type",
+    "stored_fields",
+    "_source",
+    "_source_includes",
+    "_source_excludes",
+    "force_synthetic_source",
+];
+
 pub async fn get(
     State(state): State<AppState>,
     Path((index, id)): Path<(String, String)>,
+    uri: Uri,
     Query(params): Query<HashMap<String, String>>,
 ) -> Reply {
+    params::check(&uri, &params, &GET_PARAMS)?;
     let indices = state.read().expect("lock poisoned");
     let index = single_index(&indices, &index)?;
     let i = &indices[&index];
@@ -244,12 +281,30 @@ pub fn delete_doc(state: &AppState, index: &str, id: &str) -> Reply {
     Ok(reply(&index, id, w, total))
 }
 
+const UPDATE_PARAMS: [&str; 13] = [
+    "routing",
+    "refresh",
+    "retry_on_conflict",
+    "if_seq_no",
+    "if_primary_term",
+    "require_alias",
+    "timeout",
+    "wait_for_active_shards",
+    "_source",
+    "_source_includes",
+    "_source_excludes",
+    "lang",
+    "include_source_on_error",
+];
+
 pub async fn update(
     State(state): State<AppState>,
     Path((index, id)): Path<(String, String)>,
+    uri: Uri,
     Query(params): Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Reply {
+    params::check(&uri, &params, &UPDATE_PARAMS)?;
     require_alias(&state, &params, &index)?;
     let mut reply = update_doc(&state, &index, &id, &parse_json(&body)?)?;
     force_refresh(&state, &params, &index, &mut reply)?;
