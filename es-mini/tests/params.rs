@@ -313,3 +313,16 @@ async fn malformed_document_source_is_document_parsing_exception() {
     let body: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(body["error"]["type"], "document_parsing_exception");
 }
+
+#[tokio::test]
+async fn unknown_route_and_method_errors() {
+    let (status, body) = call("GET", "/_no_such_endpoint/x/y").await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["type"], "illegal_argument_exception");
+    assert_eq!(
+        body["error"]["reason"],
+        "no handler found for uri [/_no_such_endpoint/x/y] and method [GET]"
+    );
+    let (status, _) = call("DELETE", "/_search").await;
+    assert_eq!(status, 405);
+}

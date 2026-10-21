@@ -303,6 +303,14 @@ fn router(state: AppState) -> Router {
             put(docs::create).post(docs::create),
         )
         .route("/{index}/_update/{id}", post(docs::update))
+        .fallback(
+            |method: axum::http::Method, uri: axum::http::Uri| async move {
+                AppError::IllegalArgument(format!(
+                    "no handler found for uri [{}] and method [{method}]",
+                    uri.path()
+                ))
+            },
+        )
         .with_state(state)
         .layer(axum::middleware::from_fn(filter_response))
 }

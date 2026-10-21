@@ -118,3 +118,15 @@ async fn alias_over_multiple_indices_is_item_error() {
         "illegal_argument_exception"
     );
 }
+
+#[tokio::test]
+async fn missing_trailing_newline_is_request_error() {
+    let app = crate::app();
+    let (s, r) = bulk(&app, "/i/_bulk", "{\"index\":{}}\n{\"a\":1}").await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(r["error"]["type"], "illegal_argument_exception");
+    assert_eq!(
+        r["error"]["reason"],
+        "The bulk request must be terminated by a newline [\\n]"
+    );
+}
