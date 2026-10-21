@@ -48,17 +48,14 @@ pub fn write_segment(dir: &Path, s: &NewSegment) -> Result<SegmentCommitInfo> {
     let (fdm, fdt, fdx) = write_stored_fields(s.stored, &s.id)?;
     let (dvm, dvd) =
         write_doc_values_with(s.numeric, s.sorted_numeric, s.keyword, &s.id, "Lucene90_0");
-    let by_number = |n: &i32| {
-        s.fields
-            .iter()
-            .find(|f| f.number == *n)
-            .expect("known field")
-    };
-    let term_fields: Vec<_> = s
+    let term_fields = s
         .terms
         .iter()
-        .map(|(n, t)| (by_number(n), &t[..]))
-        .collect();
+        .map(|(n, t)| match s.fields.iter().find(|f| f.number == *n) {
+            Some(f) => Ok((f, &t[..])),
+            None => crate::err(format!("terms for unknown field number {n}")),
+        })
+        .collect::<Result<Vec<_>>>()?;
     let dense: Vec<(i32, Vec<i8>)> = s
         .norms
         .iter()
@@ -80,7 +77,7 @@ pub fn write_segment(dir: &Path, s: &NewSegment) -> Result<SegmentCommitInfo> {
         ("_Lucene90_0.dvs".into(), empty_skip_index(&s.id)),
     ];
     if !s.points.is_empty() {
-        let (m, i, d) = crate::points::write_points(s.points, &s.id);
+        let (m, i, d) = crate::points::write_points(s.points, &s.id)?;
         files.extend([(".kdm".into(), m), (".kdi".into(), i), (".kdd".into(), d)]);
     }
     for (ext, bytes) in [
@@ -275,6 +272,34 @@ mod tests {
         assert_eq!(terms, [b"k0".to_vec(), b"k1".to_vec()]);
         assert_eq!(ords, [[0], [1], [0], [1], [0]]);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn unwritable_input_is_an_error_not_a_panic() {
+        let fields = [field("n", 0)];
+        let write = |terms: &[(i32, Vec<TermPostings>)], points: &[(i32, _)]| {
+            write_segment(
+                Path::new("/nonexistent"),
+                &NewSegment {
+                    name: "_0",
+                    id: [9; 16],
+                    max_doc: 0,
+                    fields: &fields,
+                    stored: &[],
+                    numeric: &[],
+                    sorted_numeric: &[],
+                    keyword: &[],
+                    norms: &[],
+                    terms,
+                    points,
+                },
+            )
+        };
+        assert!(write(&[], &[(0, vec![])]).is_err(), "field without points");
+        assert!(
+            write(&[(7, vec![])], &[]).is_err(),
+            "terms of an unknown field"
+        );
     }
 
     #[test]

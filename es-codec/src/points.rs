@@ -16,20 +16,22 @@ pub fn sortable_bytes(v: i64, width: usize) -> Vec<u8> {
 pub type PointValues = Vec<(u32, Vec<u8>)>;
 
 /// `(meta, index, data)` files. `fields` is `(field number, (doc, value) pairs)`; every value in
-/// a field has the same width, and a doc may have none or several.
+/// a field has the same width, and a doc may have none or several, but a field has at least one.
 // ponytail: one leaf per field regardless of size; a real tree if Elasticsearch must range-search
 // huge shards fast.
 pub fn write_points(
     fields: &[(i32, PointValues)],
     id: &[u8; ID_LEN],
-) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+) -> crate::Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
     let (mut meta, mut index, mut data) = (Output::default(), Output::default(), Output::default());
     meta.index_header("Lucene90PointsFormatMeta", 1, id, "");
     index.index_header("Lucene90PointsFormatIndex", 1, id, "");
     data.index_header("Lucene90PointsFormatData", 1, id, "");
     for (number, pairs) in fields {
         let values: Vec<&[u8]> = pairs.iter().map(|p| p.1.as_slice()).collect();
-        let width = values[0].len();
+        let Some(width) = values.first().map(|v| v.len()) else {
+            return crate::err(format!("points field {number} has no values"));
+        };
         let mut order: Vec<usize> = (0..values.len()).collect();
         order.sort_by(|a, b| values[*a].cmp(values[*b]).then(a.cmp(b)));
         let (min, max) = (values[order[0]], values[order[order.len() - 1]]);
@@ -91,7 +93,7 @@ pub fn write_points(
     meta.bytes(&(-1i32).to_le_bytes());
     meta.long(index.len() as i64);
     meta.long(data.len() as i64);
-    (meta.finish(), index, data)
+    Ok((meta.finish(), index, data))
 }
 
 #[cfg(test)]
