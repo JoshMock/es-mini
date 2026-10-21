@@ -434,18 +434,25 @@ fn write_snapshot(data_dir: &Path, indices: &Indices) -> es_codec::Result<()> {
     };
     let metas: Vec<_> = indices
         .iter()
-        .map(|(name, ix)| IndexMetadata {
-            name: name.clone(),
-            uuid: uuid(name),
-            settings: {
-                // Elasticsearch refuses to load index metadata without the creation version.
-                let mut s = ix.settings.flat().clone();
-                s.entry("index.version.created".into())
-                    .or_insert_with(|| "9111000".into());
-                s.insert("index.uuid".into(), uuid(name));
-                s
-            },
-            mappings: serde_json::to_string(&serde_json::json!({"_doc": ix.mappings})).ok(),
+        .map(|(name, ix)| {
+            // Indices read from an Elasticsearch directory keep its identity (index.uuid,
+            // index.version.created); only indices es-mini created get generated values.
+            let mut settings = ix.settings.flat().clone();
+            let uuid = settings
+                .entry("index.uuid".into())
+                .or_insert_with(|| uuid(name))
+                .clone();
+            // Elasticsearch refuses to load index metadata without the creation version.
+            // ponytail: new indices claim an arbitrary 9.x index version, not 9.5.5's exact id
+            settings
+                .entry("index.version.created".into())
+                .or_insert_with(|| "9111000".into());
+            IndexMetadata {
+                name: name.clone(),
+                uuid,
+                settings,
+                mappings: serde_json::to_string(&serde_json::json!({"_doc": ix.mappings})).ok(),
+            }
         })
         .collect();
     let global = GlobalMetadata {

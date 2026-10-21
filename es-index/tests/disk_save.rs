@@ -61,3 +61,24 @@ fn save_keeps_other_top_level_entries() {
     disk::save(&dir, &one_doc(json!({"v": 1}))).unwrap();
     assert!(dir.join("nodes").is_dir() && dir.join("node.lock").is_file());
 }
+
+#[test]
+fn resaving_an_elasticsearch_directory_keeps_its_index_identity() {
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures");
+    let es_dir = fixtures.join("es-9.5.5/data");
+    let es_meta = es_codec::cluster_state::read_indices(&es_dir).unwrap();
+    let dir = scratch("identity").join("data");
+    disk::save(&dir, &disk::open(&es_dir).unwrap()).unwrap();
+    let meta = es_codec::cluster_state::read_indices(&dir).unwrap();
+    assert_eq!(
+        meta[0].uuid,
+        fs::read_to_string(fixtures.join("expected/index_uuid"))
+            .unwrap()
+            .trim()
+    );
+    assert_eq!(meta[0].settings["index.uuid"], meta[0].uuid);
+    assert_eq!(
+        meta[0].settings["index.version.created"],
+        es_meta[0].settings["index.version.created"]
+    );
+}
