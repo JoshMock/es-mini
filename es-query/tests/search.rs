@@ -480,3 +480,14 @@ fn large_longs_keep_precision() {
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].id, "a");
 }
+
+#[test]
+fn integer_term_matches_whole_float_source_value() {
+    let mut i = Index::default();
+    i.put("a", json!({"n": 10.0}));
+    i.put("b", json!({"n": 10.5}));
+    let req = SearchRequest::parse(&json!({"query": {"term": {"n": 10}}})).unwrap();
+    let hits = search(&i, &req).hits;
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].id, "a");
+}

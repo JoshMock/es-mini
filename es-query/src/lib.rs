@@ -792,11 +792,13 @@ impl<'a> Searcher<'a> {
     ) -> Option<f64> {
         let vals = values(&d.source, path);
         let matched = |w: &String| match kind {
-            Kind::Number => match int(&Value::String(w.clone())) {
-                Some(x) => vals.iter().any(|v| int(v) == Some(x)),
-                None => num(&Value::String(w.clone()))
-                    .is_some_and(|x| vals.iter().any(|v| num(v) == Some(x))),
-            },
+            Kind::Number => {
+                let w = Value::String(w.clone());
+                vals.iter().any(|v| match (int(v), int(&w)) {
+                    (Some(a), Some(b)) => a == b,
+                    _ => num(v).is_some_and(|a| num(&w) == Some(a)),
+                })
+            }
             Kind::Bool => vals.iter().any(|v| text(v) == *w),
             _ => false,
         };
