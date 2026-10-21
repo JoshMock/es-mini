@@ -93,6 +93,11 @@ impl Settings {
         self.0.get(key).map(String::as_str)
     }
 
+    /// The flat `index.*` keys and string values.
+    pub fn flat(&self) -> &BTreeMap<String, String> {
+        &self.0
+    }
+
     /// Renders as nested JSON, e.g. `{"index": {"number_of_shards": "1"}}`.
     pub fn to_json(&self) -> Value {
         self.to_json_where(|_| true)

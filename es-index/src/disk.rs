@@ -1,4 +1,4 @@
-//! Loads indices from an Elasticsearch data directory (read-only).
+//! Loads indices from, and saves them to, an Elasticsearch data directory.
 //!
 //! ponytail: live documents are copied into memory once at open; stream from the segments when
 //! indices outgrow RAM.
@@ -128,5 +128,133 @@ fn load_shard(index: &mut Index, dir: &Path) -> es_codec::Result<()> {
         }
     }
     index.stats = Some(stats);
+    Ok(())
+}
+
+/// Replaces `data_dir` with a snapshot of `indices`: cluster metadata plus, per index, one
+/// segment holding every live document's `_id`, `_source`, `_version` and `_seq_no`.
+// ponytail: whole-directory rewrite per save and no postings for user fields (they are rebuilt
+// from `_source` on open); incremental segments and full field indexing when writes get large
+// or when Elasticsearch itself must search these files.
+pub fn save(data_dir: &Path, indices: &Indices) -> es_codec::Result<()> {
+    use es_codec::{
+        cluster_state::{GlobalMetadata, IndexMetadata},
+        data_dir::write_empty_data_dir,
+        segment_infos::shard_user_data,
+        segment_writer::{NewSegment, es_meta_fields, write_segment},
+        terms::TermPostings,
+        uid::encode_id,
+    };
+    for sub in ["_state", "indices"] {
+        match std::fs::remove_dir_all(data_dir.join(sub)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                return Err(es_codec::Error(e.to_string()));
+            }
+            _ => {}
+        }
+    }
+    let uuid = |name: &str| {
+        let h = name.bytes().fold(0xcbf29ce484222325u64, |h, b| {
+            (h ^ u64::from(b)).wrapping_mul(0x100000001b3)
+        });
+        format!("{h:016x}{:06}", name.len() % 1_000_000)
+    };
+    let metas: Vec<_> = indices
+        .iter()
+        .map(|(name, ix)| IndexMetadata {
+            name: name.clone(),
+            uuid: uuid(name),
+            settings: ix.settings.flat().clone(),
+            mappings: serde_json::to_string(&serde_json::json!({"_doc": ix.mappings})).ok(),
+        })
+        .collect();
+    let global = GlobalMetadata {
+        cluster_uuid: "esminiClusterUuid00A".into(),
+        node_id: "esminiNodeId0000000000".into(),
+        term: 1,
+    };
+    write_empty_data_dir(data_dir, &global, &metas)?;
+    let mut fields = es_meta_fields();
+    fields[3].point_dimensions = 0;
+    fields[3].point_index_dimensions = 0;
+    fields[3].point_num_bytes = 0;
+    for (meta, ix) in metas.iter().zip(indices.values()) {
+        let mut docs: Vec<_> = ix.docs().collect();
+        if docs.is_empty() {
+            continue;
+        }
+        docs.sort_by_key(|(_, d)| d.seq_no);
+        let dir = data_dir.join("indices").join(&meta.uuid).join("0/index");
+        let stored: Vec<_> = docs
+            .iter()
+            .map(|(id, d)| {
+                vec![
+                    (0, StoredValue::Bytes(encode_id(id))),
+                    (1, StoredValue::Bytes(d.source.to_string().into_bytes())),
+                ]
+            })
+            .collect();
+        let col = |f: fn(&Document) -> u64| docs.iter().map(|(_, d)| f(d) as i64).collect();
+        let numeric = [
+            (2, col(|d| d.version)),
+            (3, col(|d| d.seq_no)),
+            (4, vec![1; docs.len()]),
+            (5, vec![]),
+        ];
+        let mut ids: Vec<_> = docs
+            .iter()
+            .enumerate()
+            .map(|(i, (id, _))| (encode_id(id), i as u32))
+            .collect();
+        ids.sort();
+        let ids: Vec<_> = ids
+            .into_iter()
+            .map(|(term, doc)| TermPostings {
+                term,
+                total_term_freq: 1,
+                docs: vec![(doc, 1)],
+                positions: vec![],
+            })
+            .collect();
+        let seg = write_segment(
+            &dir,
+            &NewSegment {
+                name: "_0",
+                id: [7; 16],
+                max_doc: docs.len() as i32,
+                fields: &fields,
+                stored: &stored,
+                numeric: &numeric,
+                keyword: &[],
+                norms: &[],
+                terms: &[(0, ids)],
+            },
+        )?;
+        let max_seq = docs.last().map_or(-1, |(_, d)| d.seq_no as i64);
+        SegmentInfos {
+            id: [1; 16],
+            generation: 2,
+            lucene_version: (10, 0, 0),
+            index_created_major: 10,
+            version: 2,
+            counter: 1,
+            segments: vec![seg],
+            user_data: shard_user_data(
+                "esminiHistoryUuid0000A",
+                "esminiTranslogUuid000A",
+                max_seq,
+                max_seq,
+            ),
+        }
+        .write(&dir)?;
+        let cp = es_codec::translog::Checkpoint {
+            generation: 1,
+            global_checkpoint: max_seq,
+            primary_term: 1,
+        };
+        let (_, ckp) = es_codec::translog::write_empty("esminiTranslogUuid000A", &cp);
+        std::fs::write(dir.join("../translog/translog.ckp"), ckp)
+            .map_err(|e| es_codec::Error(e.to_string()))?;
+    }
     Ok(())
 }

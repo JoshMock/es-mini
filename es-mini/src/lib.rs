@@ -113,6 +113,43 @@ pub fn app() -> Router {
 
 /// The full HTTP API over `indices`, e.g. ones opened with [`es_index::disk::open`].
 pub fn app_with(indices: Indices) -> Router {
+    router(Arc::new(RwLock::new(indices)))
+}
+
+/// The full HTTP API over the data directory `dir` (created if missing): its indices are loaded
+/// now, and every successful write request saves them back before it is answered.
+pub fn app_persisted(dir: &std::path::Path) -> Result<Router, String> {
+    let indices = if dir.join("_state").is_dir() {
+        es_index::disk::open(dir).map_err(|e| e.0)?
+    } else {
+        Indices::new()
+    };
+    let state = Arc::new(RwLock::new(indices));
+    let (dir, saved) = (dir.to_owned(), state.clone());
+    Ok(router(state).layer(axum::middleware::from_fn(
+        move |req: axum::extract::Request, next: axum::middleware::Next| {
+            let (dir, state) = (dir.clone(), saved.clone());
+            async move {
+                let path = req.uri().path().to_owned();
+                let reads = req.method().is_safe()
+                    || ["_search", "_count", "_query"]
+                        .iter()
+                        .any(|r| path.ends_with(r));
+                let res = next.run(req).await;
+                if !reads && res.status().is_success() {
+                    // ponytail: saved while serving; a failed save is logged, not surfaced
+                    let state = state.read().unwrap();
+                    if let Err(e) = es_index::disk::save(&dir, &state) {
+                        tracing::error!("saving {}: {e}", dir.display());
+                    }
+                }
+                res
+            }
+        },
+    )))
+}
+
+fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(info))
         .route("/_cluster/health", get(health))
@@ -188,7 +225,7 @@ pub fn app_with(indices: Indices) -> Router {
             put(docs::create).post(docs::create),
         )
         .route("/{index}/_update/{id}", post(docs::update))
-        .with_state(Arc::new(RwLock::new(indices)))
+        .with_state(state)
 }
 
 #[cfg(test)]
