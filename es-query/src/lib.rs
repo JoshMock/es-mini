@@ -25,6 +25,11 @@ pub enum Query {
         field: String,
         prefix: String,
     },
+    Wildcard {
+        field: String,
+        pattern: String,
+        case_insensitive: bool,
+    },
     Exists {
         field: String,
     },
@@ -195,6 +200,36 @@ pub fn parse_query(v: &Value) -> Result<Query, String> {
             Ok(Query::Term {
                 field: field.clone(),
                 value,
+            })
+        }
+        "wildcard" => {
+            let (field, p) = single_field(kind, body)?;
+            let (pattern, case_insensitive) = match p {
+                Value::Object(o) => {
+                    check_keys(
+                        "wildcard",
+                        o,
+                        &[
+                            "value",
+                            "wildcard",
+                            "boost",
+                            "_name",
+                            "case_insensitive",
+                            "rewrite",
+                        ],
+                    )?;
+                    let v = o.get("value").or_else(|| o.get("wildcard"));
+                    (
+                        text(v.ok_or("[wildcard] query requires a value")?),
+                        o.get("case_insensitive").and_then(Value::as_bool) == Some(true),
+                    )
+                }
+                v => (text(v), false),
+            };
+            Ok(Query::Wildcard {
+                field: field.clone(),
+                pattern,
+                case_insensitive,
             })
         }
         "terms" => {
@@ -370,6 +405,17 @@ pub fn parse_query_string(q: &str, df: &str, and: bool) -> Query {
         should,
         must_not: vec![],
         filter: vec![],
+    }
+}
+
+/// Lucene wildcard syntax: `*` any run, `?` one char, `\\` escapes.
+fn wildcard_match(p: &[char], t: &[char]) -> bool {
+    match p.split_first() {
+        None => t.is_empty(),
+        Some(('*', rest)) => (0..=t.len()).any(|i| wildcard_match(rest, &t[i..])),
+        Some(('?', rest)) => !t.is_empty() && wildcard_match(rest, &t[1..]),
+        Some(('\\', [c, rest @ ..])) => t.first() == Some(c) && wildcard_match(rest, &t[1..]),
+        Some((c, rest)) => t.first() == Some(c) && wildcard_match(rest, &t[1..]),
     }
 }
 
@@ -638,6 +684,22 @@ impl<'a> Searcher<'a> {
                 terms(kind, &values(&d.source, path))
                     .iter()
                     .any(|t| t.starts_with(prefix.as_str()))
+                    .then_some(1.0)
+            }
+            Query::Wildcard {
+                field,
+                pattern,
+                case_insensitive,
+            } => {
+                let (kind, path) = self.kind(field);
+                let fold = |s: &str| match case_insensitive {
+                    true => s.to_lowercase().chars().collect::<Vec<_>>(),
+                    false => s.chars().collect(),
+                };
+                let pat = fold(pattern);
+                terms(kind, &values(&d.source, path))
+                    .iter()
+                    .any(|t| wildcard_match(&pat, &fold(t)))
                     .then_some(1.0)
             }
             Query::Exists { field } => {

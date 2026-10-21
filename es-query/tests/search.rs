@@ -444,3 +444,19 @@ fn exists_matches_documents_with_a_value() {
     );
     assert!(ids(json!({"query": {"exists": {"field": "nope"}}})).is_empty());
 }
+
+#[test]
+fn wildcard_matches_star_and_question_mark() {
+    let w = |v: Value| sorted(ids(json!({"query": {"wildcard": {"tag": v}}})));
+    assert_eq!(w(json!("an*")), ["1", "2"]);
+    assert_eq!(w(json!({"value": "p?t"})), ["3"]);
+    assert_eq!(
+        w(json!({"value": "P*", "case_insensitive": true})),
+        ["3", "4"]
+    );
+    assert_eq!(w(json!("*i*")), ["1", "2"]);
+    assert!(w(json!("pe")).is_empty());
+    // Text fields match against analyzed tokens.
+    let t = ids(json!({"query": {"wildcard": {"title": "qu*k"}}}));
+    assert_eq!(sorted(t), ["1", "2"]);
+}
