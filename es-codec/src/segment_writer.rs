@@ -38,6 +38,8 @@ pub struct NewSegment<'a> {
     pub norms: &'a [(i32, Vec<i8>)],
     /// `(field number, terms)`
     pub terms: &'a [(i32, Vec<TermPostings>)],
+    /// `(field number, sortable value bytes per doc)`
+    pub points: &'a [(i32, Vec<Vec<u8>>)],
 }
 
 /// Writes the segment's compound file into `dir` and returns its commit info; the caller adds it
@@ -71,6 +73,10 @@ pub fn write_segment(dir: &Path, s: &NewSegment) -> Result<SegmentCommitInfo> {
         ("_Lucene90_0.dvd".into(), dvd),
         ("_Lucene90_0.dvs".into(), empty_skip_index(&s.id)),
     ];
+    if !s.points.is_empty() {
+        let (m, i, d) = crate::points::write_points(s.points, &s.id);
+        files.extend([(".kdm".into(), m), (".kdi".into(), i), (".kdd".into(), d)]);
+    }
     for (ext, bytes) in [
         ("tim", t.tim),
         ("tip", t.tip),
@@ -233,6 +239,7 @@ mod tests {
                 keyword: &keyword,
                 norms: &[],
                 terms: &terms,
+                points: &[],
             },
         )
         .unwrap();

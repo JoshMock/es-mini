@@ -31,15 +31,18 @@ until req GET '/_cluster/health?wait_for_status=green&timeout=1s' 2>/dev/null | 
   sleep 2
 done
 
-VOLATILE='["took","start_time_in_millis","completion_time_in_millis","expiration_time_in_millis","cpu_nanos","read_nanos","bytes_read","rows_emitted"]'
-strip() { python3 -c 'import json,sys; d=json.load(sys.stdin); [d.pop(k,None) for k in json.loads(sys.argv[1])]; print(json.dumps(d, indent=2, sort_keys=True, ensure_ascii=False))' "$VOLATILE"; }
+# BM25 statistics depend on segment layout (deleted docs, merges), which differs between the
+# fixture's recorded run and any reopened directory, so scores are not compared.
+SCORES=',"max_score"'
+VOLATILE='["took","start_time_in_millis","completion_time_in_millis","expiration_time_in_millis","cpu_nanos","read_nanos","bytes_read","rows_emitted"'"$SCORES"']'
+strip() { python3 -c 'import json,sys; d=json.load(sys.stdin); [d.pop(k,None) for k in json.loads(sys.argv[1])]; [h.pop("_score",None) for h in d.get("hits",{}).get("hits",[])] if "max_score" in sys.argv[1] else 0; d.get("hits",{}).pop("max_score",None) if "max_score" in sys.argv[1] else 0; print(json.dumps(d, indent=2, sort_keys=True, ensure_ascii=False))' "$VOLATILE"; }
 fail=0
 check() { # name method path [body]
-  if req "$2" "$3" "${4:-}" | strip | diff -q - "$ROOT/fixtures/expected/$1.json" >/dev/null 2>&1; then
+  if req "$2" "$3" "${4:-}" | strip | diff -q - <(strip <"$ROOT/fixtures/expected/$1.json") >/dev/null 2>&1; then
     echo "ok   $1"
   else
     echo "FAIL $1"; fail=1
-    [ -z "${VERBOSE:-}" ] || req "$2" "$3" "${4:-}" | strip | diff - "$ROOT/fixtures/expected/$1.json" | head -20 || true
+    [ -z "${VERBOSE:-}" ] || req "$2" "$3" "${4:-}" | strip | diff - <(strip <"$ROOT/fixtures/expected/$1.json") | head -20 || true
   fi
 }
 check get_1 GET /fixture/_doc/1

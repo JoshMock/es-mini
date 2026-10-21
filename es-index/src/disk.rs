@@ -147,7 +147,7 @@ fn norm_byte(len: u32) -> i8 {
 
 /// Index data for one shard segment, built from the mapped fields that every doc has a scalar
 /// value for. Field numbers start at 6, after the metadata fields.
-// ponytail: no `date`/`float` fields, no points (so Elasticsearch cannot range-search numbers),
+// ponytail: no `date`/`float` fields,
 // no positions, sparse or multi-valued fields, and at most 48 terms per field (codec limit).
 #[derive(Default)]
 struct UserFields {
@@ -156,6 +156,7 @@ struct UserFields {
     keyword: Vec<(i32, Vec<Vec<u8>>)>,
     norms: Vec<(i32, Vec<i8>)>,
     terms: Vec<(i32, Vec<es_codec::terms::TermPostings>)>,
+    points: Vec<(i32, Vec<Vec<u8>>)>,
 }
 
 fn user_fields(
@@ -196,6 +197,7 @@ fn user_fields(
                 })
                 .collect()
         };
+        let mut point_width = 0;
         let (index_options, doc_values, omit_norms) = match mapping {
             M::Text | M::TextKeyword { .. } => {
                 let Some(texts) = values.iter().map(|v| text(v)).collect::<Option<Vec<_>>>() else {
@@ -267,6 +269,14 @@ fn user_fields(
                 else {
                     continue;
                 };
+                let width = if matches!(mapping, M::Long) { 8 } else { 4 };
+                out.points.push((
+                    number,
+                    ints.iter()
+                        .map(|v| es_codec::points::sortable_bytes(*v, width))
+                        .collect(),
+                ));
+                point_width = width as i32;
                 out.sorted_numeric.push((number, ints));
                 (IndexOptions::None, DocValuesType::SortedNumeric, true)
             }
@@ -283,6 +293,13 @@ fn user_fields(
                     let b = f.to_bits() as i64;
                     b ^ ((b >> 63) & i64::MAX)
                 };
+                out.points.push((
+                    number,
+                    fs.iter()
+                        .map(|f| es_codec::points::sortable_bytes(sortable(*f), 8))
+                        .collect(),
+                ));
+                point_width = 8;
                 out.sorted_numeric
                     .push((number, fs.into_iter().map(sortable).collect()));
                 (IndexOptions::None, DocValuesType::SortedNumeric, true)
@@ -309,6 +326,9 @@ fn user_fields(
             index_options,
             doc_values,
             attributes,
+            point_dimensions: i32::from(point_width > 0),
+            point_index_dimensions: i32::from(point_width > 0),
+            point_num_bytes: point_width,
             ..meta[2].clone()
         });
     }
@@ -433,6 +453,7 @@ pub fn save(data_dir: &Path, indices: &Indices) -> es_codec::Result<()> {
                 keyword: &user.keyword,
                 norms: &user.norms,
                 terms: &terms,
+                points: &user.points,
             },
         )?;
         let max_seq = docs.last().map_or(-1, |(_, d)| d.seq_no as i64);

@@ -14,6 +14,7 @@ pub mod live_docs;
 mod lz4;
 pub mod norms;
 pub mod output;
+pub mod points;
 pub mod postings;
 pub mod segment;
 pub mod segment_infos;

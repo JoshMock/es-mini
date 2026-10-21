@@ -322,6 +322,7 @@ mod tests {
                 keyword: &keyword,
                 norms: &[(6, lengths)],
                 terms: &terms,
+                points: &[],
             },
         )
         .unwrap();

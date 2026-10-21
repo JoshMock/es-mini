@@ -305,6 +305,7 @@ pub fn write_state(
             keyword: &[],
             norms: &[],
             terms: &terms,
+            points: &[],
         },
     )?;
     SegmentInfos {
