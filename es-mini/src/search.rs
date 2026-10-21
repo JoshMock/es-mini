@@ -102,6 +102,17 @@ pub async fn search_all(
     search(state, Path("_all".into()), uri, params, body).await
 }
 
+/// The `q`/`df`/`default_operator` URI query as a parsed query.
+fn query_from_params(q: &str, params: &HashMap<String, String>) -> es_query::Query {
+    es_query::parse_query_string(
+        q,
+        params.get("df").map_or("_all", String::as_str),
+        params
+            .get("default_operator")
+            .is_some_and(|o| o.eq_ignore_ascii_case("and")),
+    )
+}
+
 pub async fn search(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -113,13 +124,7 @@ pub async fn search(
     let start = Instant::now();
     let mut req = SearchRequest::parse(&parse_body(&body)?).map_err(AppError::from)?;
     if let Some(q) = params.get("q") {
-        req.query = es_query::parse_query_string(
-            q,
-            params.get("df").map_or("_all", String::as_str),
-            params
-                .get("default_operator")
-                .is_some_and(|o| o.eq_ignore_ascii_case("and")),
-        );
+        req.query = query_from_params(q, &params);
     }
     let indices = state.read().expect("lock poisoned");
     let resolved = crate::indices::data_targets(&indices, &name, &params)?;
@@ -233,13 +238,7 @@ pub async fn count(
         )));
     }
     let query = match params.get("q") {
-        Some(q) => es_query::parse_query_string(
-            q,
-            params.get("df").map_or("_all", String::as_str),
-            params
-                .get("default_operator")
-                .is_some_and(|o| o.eq_ignore_ascii_case("and")),
-        ),
+        Some(q) => query_from_params(q, &params),
         None => body
             .get("query")
             .map_or(Ok(es_query::Query::MatchAll), parse_query)?,
