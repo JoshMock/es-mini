@@ -323,3 +323,19 @@ async fn get_source_endpoint_and_filtering() {
     let (s, _) = call(&app, Method::GET, "/idx/_source/9", None).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn get_source_errors_match_elasticsearch() {
+    let app = app();
+    call(&app, Method::PUT, "/idx/_doc/1", Some(json!({"a": 1}))).await;
+    let (s, r) = call(&app, Method::GET, "/idx/_source/9", None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert_eq!(r["error"]["type"], "resource_not_found_exception");
+    assert_eq!(r["error"]["reason"], "Document not found [idx]/[9]");
+    let (s, r) = call(&app, Method::GET, "/idx/_source/1?_source=false", None).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        r["error"]["reason"],
+        "Validation Failed: 1: fetching source can not be disabled;"
+    );
+}

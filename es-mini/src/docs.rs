@@ -297,29 +297,24 @@ pub async fn get_source(
     path: Path<(String, String)>,
     uri: Uri,
     Query(params): Query<HashMap<String, String>>,
-) -> Reply {
-    let (s, Json(mut r)) = get(state.clone(), path, uri, Query(params.clone())).await?;
-    let (index, id) = (r["_index"].clone(), r["_id"].clone());
-    let enabled = state.read().expect("lock poisoned")[r["_index"].as_str().unwrap_or_default()]
-        .mappings
-        .source_enabled();
-    Ok(match r.get_mut("_source").map(Value::take) {
-        Some(src) if enabled => (
-            s,
-            Json(filter_source(&src, &params).unwrap_or_else(|| json!({}))),
-        ),
-        _ if s == StatusCode::OK => {
-            let reason = format!(
-                "Source not found [{}]/[{}]",
-                index.as_str().unwrap_or_default(),
-                id.as_str().unwrap_or_default()
-            );
-            let e = json!({"type": "resource_not_found_exception", "reason": reason});
-            let body = json!({"error": {"root_cause": [e.clone()], "type": e["type"], "reason": e["reason"]}, "status": 404});
-            (StatusCode::NOT_FOUND, Json(body))
-        }
-        _ => (s, Json(r)),
-    })
+) -> Result<Json<Value>, AppError> {
+    if params.get("_source").is_some_and(|v| v == "false") {
+        return Err(AppError::ActionRequestValidation(
+            "fetching source can not be disabled".into(),
+        ));
+    }
+    let (_, Json(mut r)) = get(state, path, uri, Query(params)).await?;
+    let what = match (r.get_mut("_source").map(Value::take), r["found"] == true) {
+        (Some(src), _) => return Ok(Json(src)),
+        (None, true) => "Source",
+        (None, false) => "Document",
+    };
+    let (index, id) = (r["_index"].as_str(), r["_id"].as_str());
+    Err(AppError::ResourceNotFound(format!(
+        "{what} not found [{}]/[{}]",
+        index.unwrap_or_default(),
+        id.unwrap_or_default()
+    )))
 }
 
 pub async fn get(
