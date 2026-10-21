@@ -459,7 +459,6 @@ pub const VERSION_CREATED: &str = "9111000";
 /// A 22-character URL-safe base64 id like Elasticsearch's index UUIDs.
 fn random_uuid() -> String {
     use std::hash::{BuildHasher, Hasher};
-    const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     // RandomState seeds each hasher from OS randomness, so two of them make 128 random bits.
     let half = || {
         std::collections::hash_map::RandomState::new()
@@ -468,7 +467,7 @@ fn random_uuid() -> String {
     };
     let bits = (u128::from(half()) << 64) | u128::from(half());
     (0..22)
-        .map(|i| B64[((bits >> (i * 6)) & 63) as usize] as char)
+        .map(|i| es_codec::base64::URL[((bits >> (i * 6)) & 63) as usize] as char)
         .collect()
 }
 

@@ -71,20 +71,7 @@ fn sha256(data: &[u8]) -> [u8; 32] {
 
 /// Base64 (standard alphabet, padded) of the SHA-256 of `data`.
 pub fn sha256_base64(data: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    sha256(data)
-        .chunks(3)
-        .flat_map(|c| {
-            let n = c.iter().fold(0u32, |n, b| n << 8 | u32::from(*b)) << (8 * (3 - c.len()));
-            (0..4).map(move |i| {
-                if i <= c.len() {
-                    ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char
-                } else {
-                    '='
-                }
-            })
-        })
-        .collect()
+    crate::base64::encode(&sha256(data), crate::base64::STANDARD, true)
 }
 
 #[cfg(test)]

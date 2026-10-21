@@ -3,7 +3,6 @@
 const BASE64_ESCAPE: u8 = 0xfd;
 const NUMERIC: u8 = 0xfe;
 const UTF8: u8 = 0xff;
-const URL_BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
 /// All-digit ids pack two digits per byte (odd tail padded with nibble `f`) after a `0xfe`
 /// prefix; unpadded URL-safe base64 ids (e.g. auto-generated ones) are stored decoded, with a
@@ -53,7 +52,7 @@ fn decode_url_base64(id: &str) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(id.len() * 3 / 4);
     let (mut acc, mut bits) = (0u32, 0);
     for c in id.bytes() {
-        acc = acc << 6 | URL_BASE64.iter().position(|&a| a == c)? as u32;
+        acc = acc << 6 | crate::base64::URL.iter().position(|&a| a == c)? as u32;
         bits += 6;
         if bits >= 8 {
             bits -= 8;
@@ -65,15 +64,7 @@ fn decode_url_base64(id: &str) -> Option<Vec<u8>> {
 }
 
 fn encode_url_base64(b: &[u8]) -> String {
-    b.chunks(3)
-        .flat_map(|c| {
-            let n = c
-                .iter()
-                .enumerate()
-                .fold(0u32, |n, (i, b)| n | u32::from(*b) << (16 - 8 * i));
-            (0..=c.len()).map(move |i| char::from(URL_BASE64[(n >> (18 - 6 * i) & 63) as usize]))
-        })
-        .collect()
+    crate::base64::encode(b, crate::base64::URL, false)
 }
 
 #[cfg(test)]

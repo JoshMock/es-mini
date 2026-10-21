@@ -2,6 +2,7 @@
 //!
 //! ponytail: files are read fully into memory; switch to mmap when indices outgrow RAM.
 
+pub mod base64;
 pub mod cluster_state;
 pub mod codec_util;
 pub mod compound;
