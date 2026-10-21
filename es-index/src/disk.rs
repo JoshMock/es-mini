@@ -6,7 +6,7 @@
 use crate::{Document, Index, Indices, Mappings, TermStats};
 use es_codec::{
     SegmentInfos, SegmentReader, cluster_state::read_indices, doc_values::DocValues,
-    field_infos::IndexOptions, stored_fields::StoredValue,
+    field_infos::IndexOptions, stored_fields::StoredValue, uid::decode_id,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -35,32 +35,6 @@ pub fn open(data_dir: &Path) -> es_codec::Result<Indices> {
         }
     }
     Ok(out)
-}
-
-/// ES `Uid.encodeId` inverse.
-fn decode_id(b: &[u8]) -> String {
-    match b.first() {
-        Some(0xfe) => b[1..]
-            .iter()
-            .flat_map(|x| [x >> 4, x & 0xf])
-            .take_while(|n| *n != 0xf)
-            .map(|n| char::from(b'0' + n))
-            .collect(),
-        Some(0xff) => String::from_utf8_lossy(&b[1..]).into_owned(),
-        Some(0xfd) => b[1..]
-            .chunks(3)
-            .flat_map(|c| {
-                const A: &[u8; 64] =
-                    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-                let n = c
-                    .iter()
-                    .enumerate()
-                    .fold(0u32, |n, (i, b)| n | u32::from(*b) << (16 - 8 * i));
-                (0..=c.len()).map(move |i| char::from(A[(n >> (18 - 6 * i) & 63) as usize]))
-            })
-            .collect(),
-        _ => String::from_utf8_lossy(b).into_owned(),
-    }
 }
 
 fn longs(seg: &SegmentReader, field: &str) -> Vec<Option<i64>> {
