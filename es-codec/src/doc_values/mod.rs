@@ -15,8 +15,8 @@ const VERSION_MAX: i32 = 2;
 const DISI_END_BLOCK: u16 = 0x7fff;
 const TERMS_DICT_BLOCK_LZ4_SHIFT: u32 = 6;
 const TERMS_DICT_BLOCK_SIZE: usize = 1 << TERMS_DICT_BLOCK_LZ4_SHIFT;
-/// Block shift of the direct-monotonic address tables of a terms dictionary.
-const TERMS_DICT_ADDRESS_SHIFT: i32 = 16;
+/// Block shift of the direct-monotonic tables the writer emits (Lucene90DocValuesFormat).
+const DIRECT_MONOTONIC_BLOCK_SHIFT: i32 = 16;
 const TERMS_DICT_REVERSE_INDEX_SHIFT: i32 = 10;
 const TERMS_DICT_REVERSE_INDEX_MASK: usize = (1 << TERMS_DICT_REVERSE_INDEX_SHIFT) - 1;
 

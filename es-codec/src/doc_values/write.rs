@@ -111,7 +111,6 @@ fn flatten(per_doc: &[Vec<i64>]) -> (Vec<u32>, Vec<i64>) {
 /// Sorted-numeric entry: the values, the number of docs with any, and (if some doc has several)
 /// the `DirectMonotonic` start of each doc's values.
 fn write_sorted_numeric_entry(dvm: &mut Output, dvd: &mut Output, per_doc: &[Vec<i64>]) {
-    const SHIFT: i32 = TERMS_DICT_ADDRESS_SHIFT;
     let (docs, values) = flatten(per_doc);
     write_numeric_entry(dvm, dvd, &values, &docs, per_doc.len());
     dvm.bytes(&(docs.len() as i32).to_le_bytes());
@@ -121,8 +120,8 @@ fn write_sorted_numeric_entry(dvm: &mut Output, dvd: &mut Output, per_doc: &[Vec
             starts.push(starts[starts.len() - 1] + per_doc[*d as usize].len() as i64);
         }
         dvm.long(dvd.0.len() as i64);
-        dvm.vint(SHIFT);
-        let packed = write_direct_monotonic(dvm, &starts, SHIFT);
+        dvm.vint(DIRECT_MONOTONIC_BLOCK_SHIFT);
+        let packed = write_direct_monotonic(dvm, &starts, DIRECT_MONOTONIC_BLOCK_SHIFT);
         dvd.bytes(&packed);
         dvm.long(packed.len() as i64);
     }
@@ -130,7 +129,6 @@ fn write_sorted_numeric_entry(dvm: &mut Output, dvd: &mut Output, per_doc: &[Vec
 
 /// Terms dictionary: blocks of 64 terms, the first in full, the rest prefix-compressed.
 fn write_terms_dict(dvm: &mut Output, dvd: &mut Output, terms: &[&[u8]]) {
-    const SHIFT: i32 = TERMS_DICT_ADDRESS_SHIFT;
     let start = dvd.0.len();
     let (mut addresses, mut max_len, mut max_block) = (vec![], 0, 0);
     for block in terms.chunks(TERMS_DICT_BLOCK_SIZE) {
@@ -159,8 +157,8 @@ fn write_terms_dict(dvm: &mut Output, dvd: &mut Output, terms: &[&[u8]]) {
     }
     let length = dvd.0.len() - start;
     dvm.vlong(terms.len() as i64);
-    dvm.bytes(&SHIFT.to_le_bytes());
-    let addr_data = write_direct_monotonic(dvm, &addresses, SHIFT);
+    dvm.bytes(&DIRECT_MONOTONIC_BLOCK_SHIFT.to_le_bytes());
+    let addr_data = write_direct_monotonic(dvm, &addresses, DIRECT_MONOTONIC_BLOCK_SHIFT);
     dvm.bytes(&(max_len as i32).to_le_bytes());
     dvm.bytes(&(max_block as i32).to_le_bytes());
     dvm.long(start as i64);
@@ -168,9 +166,8 @@ fn write_terms_dict(dvm: &mut Output, dvd: &mut Output, terms: &[&[u8]]) {
     dvm.long(dvd.0.len() as i64);
     dvm.long(addr_data.len() as i64);
     dvd.bytes(&addr_data);
-    // Reverse index: one sort key per 2^INDEX_SHIFT terms.
-    const INDEX_SHIFT: i32 = TERMS_DICT_REVERSE_INDEX_SHIFT;
-    dvm.bytes(&INDEX_SHIFT.to_le_bytes());
+    // Reverse index: one sort key per 2^TERMS_DICT_REVERSE_INDEX_SHIFT terms.
+    dvm.bytes(&TERMS_DICT_REVERSE_INDEX_SHIFT.to_le_bytes());
     let (mut keys, mut offsets, mut prev) = (Output::default(), vec![], &[][..]);
     for (ord, term) in terms.iter().enumerate() {
         match ord & TERMS_DICT_REVERSE_INDEX_MASK {
@@ -191,7 +188,7 @@ fn write_terms_dict(dvm: &mut Output, dvd: &mut Output, terms: &[&[u8]]) {
     let index_start = dvd.0.len();
     dvd.bytes(&keys.0);
     let addr_start = dvd.0.len();
-    let index_addr = write_direct_monotonic(dvm, &offsets, SHIFT);
+    let index_addr = write_direct_monotonic(dvm, &offsets, DIRECT_MONOTONIC_BLOCK_SHIFT);
     // meta order: index, then index addresses
     dvm.long(index_start as i64);
     dvm.long(keys.0.len() as i64);
