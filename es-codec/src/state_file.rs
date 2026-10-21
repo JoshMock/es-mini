@@ -81,7 +81,7 @@ pub fn manifest_doc(
 }
 
 pub fn read(path: &Path) -> Result<Value> {
-    let file = std::fs::read(path).map_err(|e| crate::Error(format!("{}: {e}", path.display())))?;
+    let file = crate::read_file(path)?;
     check_footer(&file)?;
     let mut input = DataInput::new(&file);
     codec_util::check_header(&mut input, "state", 1, 2)?;

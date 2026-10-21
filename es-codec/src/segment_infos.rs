@@ -118,8 +118,7 @@ impl SegmentInfos {
         let Some(generation) = latest else {
             return err(format!("no segments_N in {}", dir.display()));
         };
-        let file =
-            std::fs::read(dir.join(format!("segments_{}", radix36(generation)))).map_err(io)?;
+        let file = crate::read_file(&dir.join(format!("segments_{}", radix36(generation))))?;
         Self::parse(dir, &file, generation)
     }
 

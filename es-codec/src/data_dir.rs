@@ -63,7 +63,7 @@ pub fn write_empty_data_dir(
         };
         let (tlog, ckp) = write_empty(TRANSLOG_UUID, &cp);
         for (name, bytes) in [("translog-1.tlog", tlog), ("translog.ckp", ckp)] {
-            std::fs::write(translog.join(name), bytes).map_err(io(&translog))?;
+            crate::write_file_atomic(&translog.join(name), &bytes)?;
         }
         let shard_state = shard.join("_state");
         state_file::write(

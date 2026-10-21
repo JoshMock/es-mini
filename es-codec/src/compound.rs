@@ -79,8 +79,7 @@ pub fn write_compound(
     }
     for (ext, out) in [("cfs", cfs), ("cfe", cfe)] {
         let path = dir.join(format!("{segment}.{ext}"));
-        std::fs::write(&path, out.finish())
-            .map_err(|e| crate::Error(format!("{}: {e}", path.display())))?;
+        crate::write_file_atomic(&path, &out.finish())?;
     }
     Ok(())
 }
