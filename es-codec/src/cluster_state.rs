@@ -200,17 +200,14 @@ pub fn write_state(
             (2, StoredValue::Int(1)),
         ]
     };
-    let object = |fields: Vec<(&str, Value)>| {
-        Value::Object(fields.into_iter().map(|(k, v)| (k.into(), v)).collect())
-    };
     let node = || Value::Array(vec![Value::String(global.node_id.clone())]);
-    let meta = object(vec![
+    let meta = Value::object(vec![
         ("version", Value::Int(1)),
         ("cluster_uuid", Value::String(global.cluster_uuid.clone())),
         ("cluster_uuid_committed", Value::Bool(true)),
         (
             "cluster_coordination",
-            object(vec![
+            Value::object(vec![
                 ("term", Value::Int(global.term as i64)),
                 ("last_committed_config", node()),
                 ("last_accepted_config", node()),
@@ -222,7 +219,7 @@ pub fn write_state(
         (1, StoredValue::Int(0)),
         (
             3,
-            StoredValue::Bytes(inflate::frame(&smile::encode(&object(vec![(
+            StoredValue::Bytes(inflate::frame(&smile::encode(&Value::object(vec![(
                 "meta-data",
                 meta,
             )])))),

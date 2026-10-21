@@ -18,6 +18,10 @@ pub enum Value {
 }
 
 impl Value {
+    pub fn object(fields: Vec<(&str, Value)>) -> Value {
+        Value::Object(fields.into_iter().map(|(k, v)| (k.into(), v)).collect())
+    }
+
     pub fn get(&self, key: &str) -> Option<&Value> {
         match self {
             Value::Object(o) => o.iter().find(|(k, _)| k == key).map(|(_, v)| v),

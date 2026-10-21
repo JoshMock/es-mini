@@ -20,18 +20,9 @@ pub fn write(dir: &Path, prefix: &str, generation: i64, doc: &Value) -> Result<(
     crate::write_file_atomic(&path, &out.finish())
 }
 
-fn obj(fields: Vec<(&str, Value)>) -> Value {
-    Value::Object(
-        fields
-            .into_iter()
-            .map(|(k, v)| (k.to_string(), v))
-            .collect(),
-    )
-}
-
 /// `node-N.st` document.
 pub fn node_doc(node_id: &str, node_version: i64, oldest_index_version: i64) -> Value {
-    obj(vec![
+    Value::object(vec![
         ("node_id", Value::String(node_id.into())),
         ("node_version", Value::Int(node_version)),
         ("oldest_index_version", Value::Int(oldest_index_version)),
@@ -40,19 +31,19 @@ pub fn node_doc(node_id: &str, node_version: i64, oldest_index_version: i64) -> 
 
 /// Shard `state-N.st` document for a primary.
 pub fn shard_state_doc(index_uuid: &str, allocation_id: &str) -> Value {
-    obj(vec![
+    Value::object(vec![
         ("primary", Value::Bool(true)),
         ("index_uuid", Value::String(index_uuid.into())),
         (
             "allocation_id",
-            obj(vec![("id", Value::String(allocation_id.into()))]),
+            Value::object(vec![("id", Value::String(allocation_id.into()))]),
         ),
     ])
 }
 
 /// Shard `retention-leases-N.st` document with no leases.
 pub fn retention_leases_doc(primary_term: i64) -> Value {
-    obj(vec![
+    Value::object(vec![
         ("primary_term", Value::Int(primary_term)),
         ("version", Value::Int(0)),
         ("leases", Value::Array(vec![])),
@@ -69,10 +60,10 @@ pub fn manifest_doc(
     let gens = indices
         .iter()
         .map(|(name, uuid, generation)| {
-            obj(vec![
+            Value::object(vec![
                 (
                     "index",
-                    obj(vec![
+                    Value::object(vec![
                         ("index_name", Value::String((*name).into())),
                         ("index_uuid", Value::String((*uuid).into())),
                     ]),
@@ -81,7 +72,7 @@ pub fn manifest_doc(
             ])
         })
         .collect();
-    obj(vec![
+    Value::object(vec![
         ("current_term", Value::Int(current_term)),
         ("cluster_state_version", Value::Int(cluster_state_version)),
         ("generation", Value::Int(generation)),
