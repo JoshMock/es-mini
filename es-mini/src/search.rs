@@ -148,7 +148,9 @@ pub async fn search(
         .is_some_and(|v| v == "true");
     let track = params.get("track_total_hits").map(String::as_str);
     let limit = match track {
-        Some("true" | "-1") | None => None,
+        Some("true" | "-1") => None,
+        None if as_int => None,
+        None => Some(Some(10_000)),
         Some("false") => Some(None),
         Some(n) => match n.parse::<u64>() {
             Ok(n) if as_int => {

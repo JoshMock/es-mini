@@ -195,3 +195,49 @@ async fn filter_path_applies_to_every_json_response() {
     let (status, body) = call("GET", "/missing/_doc/1?filter_path=status").await;
     assert_eq!((status, body), (404, json!({"status": 404})));
 }
+
+#[tokio::test]
+async fn total_hits_defaults_to_tracking_up_to_10000() {
+    let app = es_mini::app();
+    let mut bulk = String::new();
+    for i in 0..10_001 {
+        bulk.push_str(&format!("{{\"index\":{{\"_id\":\"{i}\"}}}}\n{{\"a\":1}}\n"));
+    }
+    let send = |method: &'static str, uri: &'static str, body: String| {
+        let app = app.clone();
+        async move {
+            let req = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap();
+            let res = app.oneshot(req).await.unwrap();
+            let bytes = res.into_body().collect().await.unwrap().to_bytes();
+            serde_json::from_slice::<Value>(&bytes).unwrap()
+        }
+    };
+    send("POST", "/big/_bulk?refresh=true", bulk).await;
+    let r = send("POST", "/big/_search?size=0", "{}".into()).await;
+    assert_eq!(
+        r["hits"]["total"],
+        json!({"value": 10000, "relation": "gte"})
+    );
+    let r = send(
+        "POST",
+        "/big/_search?size=0&track_total_hits=true",
+        "{}".into(),
+    )
+    .await;
+    assert_eq!(
+        r["hits"]["total"],
+        json!({"value": 10001, "relation": "eq"})
+    );
+    let r = send(
+        "POST",
+        "/big/_search?size=0&rest_total_hits_as_int=true",
+        "{}".into(),
+    )
+    .await;
+    assert_eq!(r["hits"]["total"], json!(10001));
+}
