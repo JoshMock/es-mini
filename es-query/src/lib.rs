@@ -448,7 +448,7 @@ fn resolve(index: &Index, field: &str, sample: impl Fn(&str) -> Option<Value>) -
         Some(FieldMapping::Text | FieldMapping::TextKeyword { .. }) => Kind::Text,
         Some(FieldMapping::Keyword { .. }) => Kind::Keyword,
         Some(FieldMapping::Boolean) => Kind::Bool,
-        // ponytail: dates compare as their JSON values (ISO strings sort correctly); no date math
+        // ponytail: dates match and sort as their JSON values (only range parses instants); no date math
         Some(FieldMapping::Date { .. }) => Kind::Keyword,
         Some(_) => Kind::Number,
         None if field.ends_with(".keyword") => Kind::Keyword,
@@ -714,27 +714,20 @@ impl<'a> Searcher<'a> {
                 lte,
             } => {
                 let (_, path) = self.kind(field);
-                let locale = match self.index.mappings.properties.get(field) {
-                    Some(FieldMapping::Date {
-                        format: Some(_),
-                        locale,
-                    }) => Some(locale.as_deref().unwrap_or("en")),
+                let date = match self.index.mappings.properties.get(field) {
+                    Some(FieldMapping::Date { format, locale }) => Some((format, locale)),
                     _ => None,
                 };
-                let default_date = matches!(
-                    self.index.mappings.properties.get(field),
-                    Some(FieldMapping::Date { format: None, .. })
-                );
-                let cmp = |a: &Value, b: &Value| match locale {
-                    None if default_date => match (parse_date_millis(a), parse_date_millis(b)) {
-                        (Some(x), Some(y)) => x.cmp(&y),
-                        _ => Ordering::Less,
-                    },
-                    Some(l) => match (parse_dated(a, l), parse_dated(b, l)) {
-                        (Some(x), Some(y)) => x.cmp(&y),
-                        _ => Ordering::Less,
-                    },
+                let instant = |v: &Value| match date {
+                    Some((Some(_), locale)) => parse_dated(v, locale.as_deref().unwrap_or("en")),
+                    _ => parse_date_millis(v),
+                };
+                let cmp = |a: &Value, b: &Value| match date {
                     None => scalar_cmp(a, b),
+                    Some(_) => match (instant(a), instant(b)) {
+                        (Some(x), Some(y)) => x.cmp(&y),
+                        _ => Ordering::Less,
+                    },
                 };
                 let scalar_cmp = cmp;
                 let ok = |v: &Value| {
