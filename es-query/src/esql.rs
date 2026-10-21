@@ -462,18 +462,6 @@ fn fields(e: &Expr, out: &mut Vec<String>) {
     }
 }
 
-fn glob(pattern: &str, name: &str) -> bool {
-    match pattern.split_once('*') {
-        None => pattern == name,
-        Some((pre, rest)) => {
-            name.starts_with(pre)
-                && (0..=name.len() - pre.len()).any(|i| {
-                    name.is_char_boundary(pre.len() + i) && glob(rest, &name[pre.len() + i..])
-                })
-        }
-    }
-}
-
 fn unknown(c: &str) -> EsqlError {
     EsqlError::Verification(format!("Unknown column [{c}]"))
 }
@@ -557,7 +545,7 @@ pub fn run(indices: &BTreeMap<String, Index>, query: &str) -> Result<Response, E
                 for p in &patterns {
                     let hits: Vec<_> = cols
                         .iter()
-                        .filter(|c| glob(p, c) && !kept.contains(*c))
+                        .filter(|c| aliases::glob(p, c) && !kept.contains(*c))
                         .cloned()
                         .collect();
                     if hits.is_empty() && !p.contains('*') {
@@ -573,7 +561,7 @@ pub fn run(indices: &BTreeMap<String, Index>, query: &str) -> Result<Response, E
                         return Err(unknown(p));
                     }
                 }
-                cols.retain(|c| !patterns.iter().any(|p| glob(p, c)));
+                cols.retain(|c| !patterns.iter().any(|p| aliases::glob(p, c)));
             }
             Command::Sort(keys) => {
                 if let Some(k) = keys.iter().find(|k| !cols.contains(&k.field)) {
