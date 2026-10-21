@@ -27,10 +27,14 @@ pub enum AppError {
     MapperParsing(String),
     DocumentParsing(String),
     VersionConflict {
+        index: String,
         id: String,
         current_version: u64,
     },
-    DocumentMissing(String),
+    DocumentMissing {
+        index: String,
+        id: String,
+    },
     ActionRequestValidation(String),
     IllegalArgument(String),
     ParsingException(String),
@@ -96,6 +100,7 @@ impl AppError {
                 None,
             ),
             Self::VersionConflict {
+                index,
                 id,
                 current_version,
             } => (
@@ -104,13 +109,13 @@ impl AppError {
                 format!(
                     "[{id}]: version conflict, document already exists (current version [{current_version}])"
                 ),
-                None,
+                Some(index),
             ),
-            Self::DocumentMissing(id) => (
+            Self::DocumentMissing { index, id } => (
                 StatusCode::NOT_FOUND,
                 "document_missing_exception",
                 format!("[{id}]: document missing"),
-                None,
+                Some(index),
             ),
             Self::ActionRequestValidation(r) => (
                 StatusCode::BAD_REQUEST,

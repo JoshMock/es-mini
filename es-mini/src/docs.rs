@@ -16,6 +16,9 @@ use std::{
 type Reply = Result<(StatusCode, Json<Value>), AppError>;
 
 pub fn parse_json(body: &[u8]) -> Result<Value, AppError> {
+    if body.is_empty() {
+        return Err(AppError::Parse("request body is required".into()));
+    }
     serde_json::from_slice(body).map_err(|e| AppError::Parse(e.to_string()))
 }
 
@@ -141,6 +144,7 @@ pub fn put_or_create(
         })
     })?;
     let w = w?.map_err(|current_version| AppError::VersionConflict {
+        index: index.clone(),
         id: id.to_owned(),
         current_version,
     })?;
@@ -374,7 +378,10 @@ pub fn update_doc(state: &AppState, index: &str, id: &str, body: &Value) -> Repl
     let (w, total, index) = write(state, index, |i| {
         i.update(id, &partial, upsert, detect_noop)
     })?;
-    let w = w.ok_or_else(|| AppError::DocumentMissing(id.to_owned()))?;
+    let w = w.ok_or_else(|| AppError::DocumentMissing {
+        index: index.clone(),
+        id: id.to_owned(),
+    })?;
     Ok(reply(&index, id, w, total))
 }
 

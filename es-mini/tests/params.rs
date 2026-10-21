@@ -265,3 +265,36 @@ async fn total_hits_defaults_to_tracking_up_to_10000() {
     .await;
     assert_eq!(r["hits"]["total"]["value"], json!(10001));
 }
+
+#[tokio::test]
+async fn error_metadata_and_empty_body() {
+    let app = es_mini::app();
+    let send = |m: &str, u: &str, b: &'static str| {
+        let req = Request::builder()
+            .method(m)
+            .uri(u)
+            .header("content-type", "application/json")
+            .body(Body::from(b))
+            .unwrap();
+        let app = app.clone();
+        async move {
+            let res = app.oneshot(req).await.unwrap();
+            let s = res.status().as_u16();
+            let b = res.into_body().collect().await.unwrap().to_bytes();
+            (s, serde_json::from_slice::<Value>(&b).unwrap())
+        }
+    };
+    let (s, b) = send("PUT", "/meta1/_doc/1", "").await;
+    assert_eq!(
+        (s, b["error"]["reason"].as_str()),
+        (400, Some("request body is required"))
+    );
+    send("PUT", "/meta1/_doc/1", "{}").await;
+    let (s, b) = send("PUT", "/meta1/_create/1", "{}").await;
+    assert_eq!(s, 409);
+    assert_eq!(b["error"]["index"], "meta1");
+    assert_eq!(b["error"]["index_uuid"], "_na_");
+    let (s, b) = send("POST", "/meta1/_update/9", r#"{"doc":{"a":1}}"#).await;
+    assert_eq!(s, 404);
+    assert_eq!(b["error"]["index"], "meta1");
+}
