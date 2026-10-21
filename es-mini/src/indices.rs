@@ -235,14 +235,7 @@ fn read_indices(
     params: &HashMap<String, String>,
 ) -> Result<Vec<String>, AppError> {
     let flag = |k: &str| params.get(k).map(String::as_str);
-    let expr = match flag("ignore_unavailable") {
-        Some("true") => expr
-            .split(',')
-            .filter(|p| aliases::resolve_read(indices, p).is_ok())
-            .collect::<Vec<_>>()
-            .join(","),
-        _ => expr.to_owned(),
-    };
+    let expr = available(expr, params, |p| aliases::resolve_read(indices, p).is_ok());
     let names: Vec<String> = aliases::resolve_read(indices, &expr)?
         .into_iter()
         .map(|t| t.index)
@@ -263,23 +256,35 @@ fn read_indices(
     Ok(names)
 }
 
+/// `expr` without the parts `resolves` rejects, when `ignore_unavailable=true`. `-exclusions`
+/// stay, so the list still resolves as one expression.
+// ponytail: an exclusion left first (e.g. `missing,-x`) then reads as a literal name
+fn available(
+    expr: &str,
+    params: &HashMap<String, String>,
+    resolves: impl Fn(&str) -> bool,
+) -> String {
+    if params.get("ignore_unavailable").is_none_or(|v| v != "true") {
+        return expr.to_owned();
+    }
+    expr.split(',')
+        .enumerate()
+        .filter(|&(i, p)| (i > 0 && p.starts_with('-')) || resolves(p))
+        .map(|(_, p)| p)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 /// Search/count targets for `expr`, honoring `ignore_unavailable` and `allow_no_indices`.
 pub fn data_targets(
     indices: &Indices,
     expr: &str,
     params: &HashMap<String, String>,
 ) -> Result<Vec<aliases::Target>, AppError> {
-    let flag = |k: &str| params.get(k).map(String::as_str);
-    let mut out = vec![];
-    for part in expr.split(',') {
-        match aliases::resolve_data(indices, part) {
-            Ok(t) => out.extend(t),
-            Err(_) if flag("ignore_unavailable") == Some("true") => {}
-            Err(e) => return Err(e.into()),
-        }
-    }
-    if out.is_empty() && flag("allow_no_indices") == Some("false") {
-        return Err(AppError::IndexNotFound(expr.to_owned()));
+    let expr = available(expr, params, |p| aliases::resolve_data(indices, p).is_ok());
+    let out = aliases::resolve_data(indices, &expr)?;
+    if out.is_empty() && params.get("allow_no_indices").is_some_and(|v| v == "false") {
+        return Err(AppError::IndexNotFound(expr));
     }
     Ok(out)
 }

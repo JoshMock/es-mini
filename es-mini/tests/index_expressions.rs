@@ -46,3 +46,36 @@ async fn search_count_and_head_resolve_expressions() {
         );
     }
 }
+
+async fn get(app: &Router, uri: &str) -> serde_json::Value {
+    let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+#[tokio::test]
+async fn search_lists_resolve_as_one_expression() {
+    let app = es_mini::app();
+    for i in ["logs-1", "logs-2"] {
+        assert_eq!(
+            status(&app, "PUT", &format!("/{i}/_doc/1?refresh=true")).await,
+            201
+        );
+    }
+    let count = async |uri: &str| get(&app, uri).await["count"].clone();
+    assert_eq!(count("/logs-*,-logs-1/_count").await, 1);
+    assert_eq!(count("/logs-1,logs-*/_count").await, 2);
+    let expr = "/logs-*,-logs-1,missing";
+    assert_eq!(
+        count(&format!("{expr}/_count?ignore_unavailable=true")).await,
+        1
+    );
+    let index = get(&app, &format!("{expr}?ignore_unavailable=true")).await;
+    assert_eq!(
+        index.as_object().unwrap().keys().collect::<Vec<_>>(),
+        ["logs-2"]
+    );
+}
