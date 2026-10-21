@@ -1,5 +1,5 @@
 use es_index::{FieldMapping, Index};
-use es_query::{SearchRequest, count, parse_query, search};
+use es_query::{Query, SearchRequest, count, parse_query, search};
 use serde_json::{Value, json};
 
 fn index() -> Index {
@@ -257,6 +257,10 @@ fn leaf_and_bool_queries_validate_parameters() {
             json!({"bool": {"should": [], "minimum_should_match": "abc"}}),
             "abc",
         ),
+        (
+            json!({"bool": {"should": [], "minimum_should_match": "-1<2 3"}}),
+            "-1<2 3",
+        ),
     ] {
         let err = parse_query(&q).unwrap_err();
         assert!(err.contains(msg), "{q}: {err}");
@@ -275,4 +279,31 @@ fn range_accepts_time_zone_and_relation() {
         )
         .is_ok()
     );
+}
+
+#[test]
+fn minimum_should_match_accepts_elasticsearch_specs() {
+    let msm = |spec: Value| {
+        let should = vec![json!({"match_all": {}}); 4];
+        let q = json!({"bool": {"should": should, "minimum_should_match": spec}});
+        match parse_query(&q).unwrap() {
+            Query::Bool { min_should, .. } => min_should,
+            q => panic!("{q:?}"),
+        }
+    };
+    // 4 should clauses; a result of 0 or less leaves the default of 1.
+    for (spec, want) in [
+        (json!(2), 2),
+        (json!("2"), 2),
+        (json!(-1), 3),
+        (json!("75%"), 3),
+        (json!("-25%"), 3),
+        (json!("3<-1"), 3),
+        (json!("5<-1"), 4),
+        (json!("2<-1 3 < 50%"), 2),
+        (json!(-5), 1),
+        (json!(0), 1),
+    ] {
+        assert_eq!(msm(spec.clone()), want, "{spec}");
+    }
 }

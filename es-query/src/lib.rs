@@ -83,6 +83,41 @@ fn check_keys(
     }
 }
 
+/// Port of ES `Queries.calculateMinShouldMatch`: `3`, `-1`, `75%`, `-25%` or `2<-1 5<50%`.
+fn min_should_match(optional: usize, spec: &str) -> Result<usize, String> {
+    let n = optional as i64;
+    let err = || format!("failed to parse minimum_should_match [{spec}]");
+    let int = |s: &str| s.parse::<i32>().map(i64::from).map_err(|_| err());
+    if spec.contains('<') {
+        let spec = spec.split('<').map(str::trim).collect::<Vec<_>>().join("<");
+        let mut result = optional;
+        for cond in spec.split_whitespace() {
+            let (upper, s) = cond.split_once('<').ok_or_else(err)?;
+            if n <= int(upper)? {
+                return Ok(result);
+            }
+            result = min_should_match(optional, s)?;
+        }
+        return Ok(result);
+    }
+    let spec = spec.trim();
+    let result = match spec.strip_suffix('%') {
+        Some(p) => {
+            let calc = (n * int(p)?) as f32 * (1.0 / 100.0);
+            if calc < 0.0 {
+                n + calc as i64
+            } else {
+                calc as i64
+            }
+        }
+        None => match int(spec)? {
+            c if c < 0 => n + c,
+            c => c,
+        },
+    };
+    Ok(result.max(0) as usize)
+}
+
 fn clauses(v: Option<&Value>) -> Result<Vec<Query>, String> {
     match v {
         None => Ok(vec![]),
@@ -218,22 +253,18 @@ pub fn parse_query(v: &Value) -> Result<Query, String> {
             } else {
                 0
             };
-            // ponytail: integer minimum_should_match only; no percentages
             let min_should = match body.get("minimum_should_match") {
-                None => None,
-                Some(Value::String(s)) if s.ends_with('%') => None,
-                Some(m) => Some(
-                    m.as_u64()
-                        .or_else(|| m.as_str()?.parse().ok())
-                        .ok_or_else(|| format!("failed to parse minimum_should_match [{m}]"))?,
-                ),
+                None | Some(Value::Null) => 0,
+                Some(Value::String(m)) => min_should_match(should.len(), m)?,
+                Some(m) => min_should_match(should.len(), &m.to_string())?,
             };
             Ok(Query::Bool {
                 must,
                 should,
                 must_not: clauses(body.get("must_not"))?,
                 filter,
-                min_should: min_should.map_or(default, |m| m as usize),
+                // ES applies only a positive minimum_should_match.
+                min_should: if min_should > 0 { min_should } else { default },
             })
         }
         other => Err(format!("unknown query [{other}]")),
