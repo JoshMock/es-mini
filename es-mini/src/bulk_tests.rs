@@ -65,9 +65,14 @@ async fn mixed_actions_with_one_failure() {
 }
 
 #[tokio::test]
-async fn default_index_from_path_and_no_trailing_newline() {
+async fn default_index_from_path() {
     let app = app();
-    let (s, r) = bulk(&app, "/idx/_bulk", "{\"index\":{\"_id\":\"1\"}}\n{\"a\":1}").await;
+    let (s, r) = bulk(
+        &app,
+        "/idx/_bulk",
+        "{\"index\":{\"_id\":\"1\"}}\n{\"a\":1}\n",
+    )
+    .await;
     assert_eq!((s, &r["errors"]), (StatusCode::OK, &json!(false)));
     let (_, r) = call(&app, Method::GET, "/idx/_doc/1", None).await;
     assert_eq!(r["_source"], json!({"a": 1}));

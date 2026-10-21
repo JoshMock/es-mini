@@ -28,6 +28,11 @@ fn parse(
     default_index: Option<&str>,
     require_alias: bool,
 ) -> Result<Vec<Action>, AppError> {
+    if body.last().is_some_and(|b| *b != b'\n') {
+        return Err(AppError::IllegalArgument(
+            "The bulk request must be terminated by a newline [\\n]".into(),
+        ));
+    }
     let mut lines = body
         .split(|b| *b == b'\n')
         .filter(|l| !l.trim_ascii().is_empty())
@@ -71,11 +76,8 @@ fn parse(
         let body = match op.as_str() {
             "delete" => None,
             _ => {
-                let (_, line) = lines.next().ok_or_else(|| {
-                    AppError::IllegalArgument(
-                        "The bulk request must be terminated by a newline [\\n]".into(),
-                    )
-                })?;
+                // Like Elasticsearch, an action line with no source line is dropped.
+                let Some((_, line)) = lines.next() else { break };
                 Some(parse_json(line)?)
             }
         };
@@ -86,6 +88,11 @@ fn parse(
             body,
             require_alias: meta["require_alias"].as_bool().unwrap_or(require_alias),
         });
+    }
+    if actions.is_empty() {
+        return Err(AppError::ActionRequestValidation(
+            "no requests added".into(),
+        ));
     }
     Ok(actions)
 }
@@ -192,4 +199,33 @@ pub async fn bulk_index(
 ) -> Result<Json<Value>, AppError> {
     params::check(&uri, &params, &BULK_PARAMS)?;
     run(state, Some(&index), flag(&params), body).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse;
+
+    fn err(body: &str) -> String {
+        match parse(body.as_bytes(), Some("i"), false) {
+            Err(e) => e.parts().1["reason"].as_str().unwrap().to_owned(),
+            Ok(_) => "ok".into(),
+        }
+    }
+
+    #[test]
+    fn empty_body_has_no_requests() {
+        assert_eq!(err(""), "Validation Failed: 1: no requests added;");
+    }
+
+    #[test]
+    fn unterminated_last_line() {
+        let want = "The bulk request must be terminated by a newline [\\n]";
+        assert_eq!(err("{\"delete\":{\"_id\":\"1\"}}"), want);
+        assert_eq!(err("{\"index\":{}}\n{\"a\":1}"), want);
+    }
+
+    #[test]
+    fn terminated_request_parses() {
+        assert_eq!(err("{\"index\":{}}\n{\"a\":1}\n"), "ok");
+    }
 }
