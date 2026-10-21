@@ -305,6 +305,27 @@ mod tests {
     }
 
     #[test]
+    fn key_back_refs_and_long_key_tokens() {
+        // Keys: "ab", short ref to it, a 34-char key, long ref to that key.
+        let long = "k".repeat(34);
+        let mut d = b":)\n\x00".to_vec();
+        d.push(0xFA);
+        d.extend([0x81, b'a', b'b', 0xC2]); // "ab" (name 0) = 1
+        d.extend([0x40, 0xC4]); // short back-ref to name 0 = 2
+        d.push(0xC0 + 32); // 34-char key via the 0xC0..=0xF7 path (name 1)
+        d.extend(long.bytes());
+        d.push(0xC6);
+        d.extend([0x30, 0x01, 0xC8]); // long back-ref to name 1
+        d.push(0xFB);
+        let v = decode(&d).unwrap();
+        let keys: Vec<&str> = match &v {
+            Value::Object(f) => f.iter().map(|(k, _)| k.as_str()).collect(),
+            _ => panic!(),
+        };
+        assert_eq!(keys, ["ab", "ab", long.as_str(), long.as_str()]);
+    }
+
+    #[test]
     fn encode_round_trips() {
         let v = Value::Object(vec![
             ("a".into(), Value::Int(-70000)),
