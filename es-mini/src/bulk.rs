@@ -2,11 +2,13 @@ use crate::{
     AppState,
     docs::{auto_id, delete_doc, parse_json, put_or_create, update_doc},
     error::AppError,
+    params,
 };
 use axum::{
     Json,
     body::Bytes,
     extract::{Path, Query, State},
+    http::Uri,
 };
 use es_index::aliases;
 use serde_json::{Value, json};
@@ -156,19 +158,38 @@ fn flag(params: &HashMap<String, String>) -> bool {
     params.get("require_alias").is_some_and(|v| v == "true")
 }
 
+const BULK_PARAMS: [&str; 12] = [
+    "_source",
+    "_source_excludes",
+    "_source_includes",
+    "include_source_on_error",
+    "list_executed_pipelines",
+    "pipeline",
+    "refresh",
+    "require_alias",
+    "require_data_stream",
+    "routing",
+    "timeout",
+    "wait_for_active_shards",
+];
+
 pub async fn bulk(
     State(state): State<AppState>,
+    uri: Uri,
     Query(params): Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
+    params::check(&uri, &params, &BULK_PARAMS)?;
     run(state, None, flag(&params), body).await
 }
 
 pub async fn bulk_index(
     State(state): State<AppState>,
     Path(index): Path<String>,
+    uri: Uri,
     Query(params): Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
+    params::check(&uri, &params, &BULK_PARAMS)?;
     run(state, Some(&index), flag(&params), body).await
 }

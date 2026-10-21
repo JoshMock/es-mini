@@ -1,8 +1,9 @@
-use crate::{AppState, error::AppError, indices::parse_body};
+use crate::{AppState, error::AppError, indices::parse_body, params};
 use axum::{
     Json,
     body::Bytes,
     extract::{Path, Query, State},
+    http::Uri,
 };
 use es_index::{Indices, aliases};
 use es_query::{
@@ -21,24 +22,94 @@ fn targets<'a>(indices: &'a Indices, resolved: &'a [aliases::Target]) -> Vec<es_
 }
 
 // ponytail: one shard per target index is reported as a single shard
+const SEARCH_PARAMS: [&str; 46] = [
+    "_slice",
+    "_source",
+    "_source_exclude_vectors",
+    "_source_excludes",
+    "_source_includes",
+    "allow_no_indices",
+    "allow_partial_search_results",
+    "analyze_wildcard",
+    "analyzer",
+    "batched_reduce_size",
+    "ccs_minimize_roundtrips",
+    "default_operator",
+    "df",
+    "docvalue_fields",
+    "expand_wildcards",
+    "explain",
+    "force_synthetic_source",
+    "from",
+    "ignore_throttled",
+    "ignore_unavailable",
+    "include_named_queries_score",
+    "lenient",
+    "max_concurrent_shard_requests",
+    "pre_filter_shard_size",
+    "preference",
+    "q",
+    "request_cache",
+    "rest_total_hits_as_int",
+    "routing",
+    "scroll",
+    "search_type",
+    "seq_no_primary_term",
+    "size",
+    "sort",
+    "stats",
+    "stored_fields",
+    "suggest_field",
+    "suggest_mode",
+    "suggest_size",
+    "suggest_text",
+    "terminate_after",
+    "timeout",
+    "track_scores",
+    "track_total_hits",
+    "typed_keys",
+    "version",
+];
+
+const COUNT_PARAMS: [&str; 15] = [
+    "allow_no_indices",
+    "analyze_wildcard",
+    "analyzer",
+    "default_operator",
+    "df",
+    "expand_wildcards",
+    "ignore_throttled",
+    "ignore_unavailable",
+    "lenient",
+    "min_score",
+    "preference",
+    "q",
+    "routing",
+    "stats",
+    "terminate_after",
+];
+
 fn shards() -> Value {
     json!({"total": 1, "successful": 1, "skipped": 0, "failed": 0})
 }
 
 pub async fn search_all(
     state: State<AppState>,
+    uri: Uri,
     params: Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
-    search(state, Path("_all".into()), params, body).await
+    search(state, Path("_all".into()), uri, params, body).await
 }
 
 pub async fn search(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    uri: Uri,
     Query(params): Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
+    params::check(&uri, &params, &SEARCH_PARAMS)?;
     let start = Instant::now();
     let mut req = SearchRequest::parse(&parse_body(&body)?).map_err(|e| {
         if e.starts_with("failed to parse date field") {
@@ -118,18 +189,21 @@ pub async fn search(
 
 pub async fn count_all(
     state: State<AppState>,
+    uri: Uri,
     params: Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
-    count(state, Path("_all".into()), params, body).await
+    count(state, Path("_all".into()), uri, params, body).await
 }
 
 pub async fn count(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    uri: Uri,
     Query(params): Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
+    params::check(&uri, &params, &COUNT_PARAMS)?;
     if params
         .get("terminate_after")
         .and_then(|v| v.parse::<i64>().ok())

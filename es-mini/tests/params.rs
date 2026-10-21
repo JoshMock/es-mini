@@ -57,3 +57,42 @@ async fn document_handlers_accept_known_params() {
     .await;
     assert_ne!(status, 400);
 }
+
+#[tokio::test]
+async fn search_count_bulk_reject_unknown_params() {
+    for (method, uri) in [
+        ("POST", "/x/_search?foo=1"),
+        ("GET", "/_search?foo=1"),
+        ("POST", "/x/_count?foo=1"),
+        ("POST", "/_count?foo=1"),
+        ("POST", "/_bulk?foo=1"),
+        ("POST", "/x/_bulk?foo=1"),
+    ] {
+        let (status, body) = call(method, uri).await;
+        assert_eq!(status, 400, "{method} {uri}");
+        assert_eq!(body["error"]["type"], "illegal_argument_exception");
+        let path = uri.split('?').next().unwrap();
+        assert_eq!(
+            body["error"]["reason"],
+            json!(format!(
+                "request [{path}] contains unrecognized parameter: [foo]"
+            ))
+        );
+    }
+}
+
+#[tokio::test]
+async fn search_count_bulk_accept_known_params() {
+    for (method, uri) in [
+        (
+            "POST",
+            "/_search?size=1&q=a&rest_total_hits_as_int=true&pretty",
+        ),
+        ("POST", "/_count?q=a&terminate_after=1&filter_path=count"),
+        ("POST", "/_bulk?refresh=true&require_alias=false"),
+    ] {
+        let (_, body) = call(method, uri).await;
+        let reason = body["error"]["reason"].as_str().unwrap_or_default();
+        assert!(!reason.contains("unrecognized"), "{method} {uri}: {reason}");
+    }
+}
