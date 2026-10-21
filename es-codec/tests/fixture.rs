@@ -54,11 +54,11 @@ fn opens_compound_files() {
     let infos = SegmentInfos::read_latest(&dir).unwrap();
     let s0 = &infos.segments[0];
     let cfs = CompoundFile::open(&dir, &s0.name, &s0.info.id).unwrap();
-    let fnm = cfs.file(".fnm").unwrap();
+    let fnm = cfs.file(".fnm").unwrap().unwrap();
     // Every Lucene file starts with the codec magic and ends with a valid checksum footer.
-    assert_eq!(DataInput::new(fnm).read_be_int().unwrap(), 0x3fd7_6c17);
-    es_codec::codec_util::check_footer(fnm).unwrap();
-    assert!(cfs.file(".nope").is_none());
+    assert_eq!(DataInput::new(&fnm).read_be_int().unwrap(), 0x3fd7_6c17);
+    es_codec::codec_util::check_footer(&fnm).unwrap();
+    assert!(cfs.file(".nope").unwrap().is_none());
 }
 
 #[test]

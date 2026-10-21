@@ -4,7 +4,7 @@ use crate::{
     CompoundFile, Result, SegmentCommitInfo, codec_util, err, input::DataInput, output::Output,
     segment_infos::radix36,
 };
-use std::{borrow::Cow, collections::BTreeMap, path::Path};
+use std::{collections::BTreeMap, path::Path};
 
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub enum IndexOptions {
@@ -122,18 +122,18 @@ pub fn read_field_infos(
     seg: &SegmentCommitInfo,
     cfs: &CompoundFile,
 ) -> Result<Vec<FieldInfo>> {
-    let (file, suffix): (Cow<[u8]>, String) = if seg.field_infos_gen == -1 {
+    let (file, suffix) = if seg.field_infos_gen == -1 {
         if !seg.info.is_compound {
             return err("non-compound segments are not supported yet");
         }
         let file = cfs
-            .file(".fnm")
+            .file(".fnm")?
             .ok_or_else(|| crate::Error(format!("{} has no .fnm", seg.name)))?;
-        (Cow::Borrowed(file), String::new())
+        (file, String::new())
     } else {
         let suffix = radix36(seg.field_infos_gen as u64);
         let file = crate::read_file(&dir.join(format!("{}_{suffix}.fnm", seg.name)))?;
-        (Cow::Owned(file), suffix)
+        (file, suffix)
     };
     parse_field_infos(&file, &seg.info.id, &suffix)
 }

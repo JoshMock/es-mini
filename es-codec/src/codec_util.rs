@@ -70,15 +70,7 @@ pub fn check_footer(file: &[u8]) -> Result<()> {
     let Some(start) = file.len().checked_sub(FOOTER_LEN) else {
         return err("file too short for a footer");
     };
-    let mut f = DataInput::new(&file[start..]);
-    if f.read_be_int()? != FOOTER_MAGIC {
-        return err("bad footer magic");
-    }
-    let algorithm = f.read_be_int()?;
-    if algorithm != 0 {
-        return err(format!("unknown checksum algorithm {algorithm}"));
-    }
-    let expected = f.read_be_long()?;
+    let expected = check_footer_structure(&file[start..])?;
     let actual = crc32(&file[..file.len() - 8]) as i64;
     if expected != actual {
         return err(format!(
@@ -86,6 +78,24 @@ pub fn check_footer(file: &[u8]) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Validates a footer's magic and algorithm id (`CodecUtil.retrieveChecksum`) and returns its
+/// checksum.
+pub fn check_footer_structure(footer: &[u8]) -> Result<i64> {
+    let mut f = DataInput::new(footer);
+    if f.read_be_int()? != FOOTER_MAGIC {
+        return err("bad footer magic");
+    }
+    let algorithm = f.read_be_int()?;
+    if algorithm != 0 {
+        return err(format!("unknown checksum algorithm {algorithm}"));
+    }
+    let checksum = f.read_be_long()?;
+    if checksum as u64 >> 32 != 0 {
+        return err(format!("illegal checksum {checksum:#x}"));
+    }
+    Ok(checksum)
 }
 
 const CRC_TABLE: [u32; 256] = {

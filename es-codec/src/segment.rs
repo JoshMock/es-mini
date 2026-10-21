@@ -46,9 +46,9 @@ impl SegmentReader {
     }
 
     /// A sub-file of the compound file by name without the segment prefix, e.g. `.fdt`.
-    pub(crate) fn cfs_file(&self, name: &str) -> Result<&[u8]> {
+    pub(crate) fn cfs_file(&self, name: &str) -> Result<Vec<u8>> {
         self.cfs
-            .file(name)
+            .file(name)?
             .map_or_else(|| err(format!("{} has no {name}", self.seg.name)), Ok)
     }
 

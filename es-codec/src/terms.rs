@@ -68,12 +68,12 @@ pub(crate) fn read_terms(r: &SegmentReader, field: &str) -> Result<Vec<TermPosti
     let file = |ext: &str| r.cfs_file(&format!("_{suffix}.{ext}"));
     // `.pos` and `.pay` exist only when some field has positions, or offsets or payloads.
     let files = TermFiles {
-        tim: file("tim")?.to_vec(),
-        tip: file("tip")?.to_vec(),
-        tmd: file("tmd")?.to_vec(),
-        doc: file("doc")?.to_vec(),
-        pos: file("pos").unwrap_or_default().to_vec(),
-        pay: file("pay").unwrap_or_default().to_vec(),
+        tim: file("tim")?,
+        tip: file("tip")?,
+        tmd: file("tmd")?,
+        doc: file("doc")?,
+        pos: file("pos").unwrap_or_default(),
+        pay: file("pay").unwrap_or_default(),
         psm: Vec::new(),
     };
     decode_terms(&files, &r.seg.info.id, &suffix, &r.fields, info)

@@ -1,6 +1,7 @@
 //! Lucene 10 on-disk codec, read side first. Ported from Lucene 10.5.1 sources.
 //!
-//! ponytail: files are read fully into memory; switch to mmap when indices outgrow RAM.
+//! ponytail: a compound file's sub-files are read whole when asked for (stored fields by chunk);
+//! switch to mmap when that copying shows up.
 
 pub mod base64;
 pub mod cluster_state;

@@ -136,8 +136,8 @@ fn read_field(doc: &mut DataInput, ty: u64) -> Result<StoredValue> {
 
 pub(crate) fn read_stored_fields(r: &SegmentReader) -> Result<Vec<Vec<(i32, StoredValue)>>> {
     read_stored_fields_files(
-        r.cfs_file(".fdm")?,
-        r.cfs_file(".fdt")?,
+        &r.cfs_file(".fdm")?,
+        &r.cfs_file(".fdt")?,
         &r.seg.info.id,
         r.max_doc(),
     )

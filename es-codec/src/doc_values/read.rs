@@ -6,20 +6,18 @@ use crate::{
 /// Decodes a field of a segment, from the field's latest doc values generation.
 pub(crate) fn read_field_values(r: &SegmentReader, field: &str) -> Result<DocValues> {
     let info = r.field(field)?;
-    let owned;
-    let (meta, data, suffix): (&[u8], &[u8], String) = if info.dv_gen == -1 {
+    let (meta, data, suffix) = if info.dv_gen == -1 {
         let name = |ext: &str| r.cfs_file(&format!("_Lucene90_0.{ext}"));
         (name("dvm")?, name("dvd")?, "Lucene90_0".into())
     } else {
         // Updated doc values live outside the compound file, named by generation.
         let suffix = format!("{}_Lucene90_0", radix36(info.dv_gen as u64));
         let name = |ext: &str| r.gen_file(&format!("_{suffix}.{ext}"));
-        owned = (name("dvm")?, name("dvd")?);
-        (&owned.0, &owned.1, suffix)
+        (name("dvm")?, name("dvd")?, suffix)
     };
     let (id, max_doc) = (&r.seg.info.id, r.seg.info.max_doc);
     let skip = |n| Ok(r.field_by_number(n)?.doc_values_skip_index);
-    decode(meta, data, (id, max_doc), &suffix, info.number, &skip)
+    decode(&meta, &data, (id, max_doc), &suffix, info.number, &skip)
 }
 
 /// Location of the `IndexedDISI` listing docs with a value; offset -2 is none, -1 is all docs.

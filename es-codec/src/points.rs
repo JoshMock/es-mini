@@ -147,7 +147,7 @@ mod tests {
                 // Real segments also hold other point fields after `_seq_no`; compare its part.
                 let (m, i, d) = (&m[..m.len() - 36], &i[..i.len() - 16], &d[..d.len() - 16]);
                 for (ext, ours) in [(".kdm", m), (".kdi", i), (".kdd", d)] {
-                    let real = r.cfs.file(&name(ext)).unwrap();
+                    let real = r.cfs.file(&name(ext)).unwrap().unwrap();
                     assert_eq!(&real[..ours.len()], ours, "{ext}");
                 }
                 checked += 1;
