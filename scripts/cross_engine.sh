@@ -27,7 +27,7 @@ req() { printf '%s' "${3:-}" | docker exec -i "$NAME" curl -s -X "$1" "$ES$2" \
 tries=0
 until req GET '/_cluster/health?wait_for_status=green&timeout=1s' 2>/dev/null | grep -q '"timed_out":false'; do
   tries=$((tries + 1))
-  [ $tries -lt 60 ] || { docker logs "$NAME" 2>&1 | tail -20 >&2; echo "ES did not come up" >&2; exit 1; }
+  [ $tries -lt 60 ] || { docker logs "$NAME" 2>&1 | grep -E "fixture|Caused|ERROR|WARN" | grep -v rest.suppressed | cut -c1-700 | tail -8 >&2; req GET /_cat/shards?v >&2; req GET /_cluster/allocation/explain | cut -c1-4000 >&2; echo "ES did not come up" >&2; exit 1; }
   sleep 2
 done
 

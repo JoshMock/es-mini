@@ -164,7 +164,14 @@ pub fn save(data_dir: &Path, indices: &Indices) -> es_codec::Result<()> {
         .map(|(name, ix)| IndexMetadata {
             name: name.clone(),
             uuid: uuid(name),
-            settings: ix.settings.flat().clone(),
+            settings: {
+                // Elasticsearch refuses to load index metadata without the creation version.
+                let mut s = ix.settings.flat().clone();
+                s.entry("index.version.created".into())
+                    .or_insert_with(|| "9111000".into());
+                s.insert("index.uuid".into(), uuid(name));
+                s
+            },
             mappings: serde_json::to_string(&serde_json::json!({"_doc": ix.mappings})).ok(),
         })
         .collect();
@@ -257,4 +264,21 @@ pub fn save(data_dir: &Path, indices: &Indices) -> es_codec::Result<()> {
             .map_err(|e| es_codec::Error(e.to_string()))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn saved_index_metadata_has_uuid_and_creation_version() {
+        let dir = std::env::temp_dir().join(format!("esm-disk-meta-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut all = Indices::new();
+        all.insert("books".into(), Index::default());
+        save(&dir, &all).unwrap();
+        let metas = read_indices(&dir).unwrap();
+        assert_eq!(metas[0].settings["index.uuid"], metas[0].uuid);
+        assert!(metas[0].settings.contains_key("index.version.created"));
+    }
 }
