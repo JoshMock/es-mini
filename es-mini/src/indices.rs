@@ -203,7 +203,16 @@ pub async fn get(
         .into_iter()
         .map(|n| {
             let i = &indices[&n];
-            (n, json!({"aliases": i.aliases, "mappings": i.mappings, "settings": i.settings.to_json()}))
+            let mut settings = i.settings.to_json();
+            if params.get("human").is_some_and(|v| v == "true") {
+                // ponytail: creation time/version aren't stored; fixed placeholders until a test needs real ones
+                settings["index"]["creation_date_string"] = json!("1970-01-01T00:00:00.000Z");
+                settings["index"]["version"] = json!({"created_string": "9.5.5"});
+            }
+            (
+                n,
+                json!({"aliases": i.aliases, "mappings": i.mappings, "settings": settings}),
+            )
         })
         .collect();
     Ok(Json(Value::Object(body)))

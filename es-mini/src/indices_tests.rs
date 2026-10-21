@@ -299,3 +299,17 @@ async fn closed_indices_reject_data_operations_but_keep_metadata() {
     let (s, r) = call(&app, Method::GET, "/idx/_doc/1", None).await;
     assert_eq!((s, &r["_source"]), (StatusCode::OK, &json!({"a": 1})));
 }
+
+#[tokio::test]
+async fn get_human_adds_readable_settings() {
+    let app = app();
+    call(&app, Method::PUT, "/idx", None).await;
+    let (_, r) = call(&app, Method::GET, "/idx?human=true", None).await;
+    assert!(r["idx"]["settings"]["index"]["creation_date_string"].is_string());
+    assert_eq!(
+        r["idx"]["settings"]["index"]["version"]["created_string"],
+        "9.5.5"
+    );
+    let (_, r) = call(&app, Method::GET, "/idx", None).await;
+    assert!(r["idx"]["settings"]["index"]["version"].is_null());
+}
