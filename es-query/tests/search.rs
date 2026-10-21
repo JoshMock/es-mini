@@ -346,3 +346,30 @@ fn sorting_on_an_unmapped_field_is_refused_unless_unmapped_type_is_set() {
         assert!(check(json!([ok])).is_ok(), "{ok}");
     }
 }
+
+#[test]
+fn sort_missing_controls_where_absent_values_go() {
+    let mut i = Index::default();
+    i.mappings.properties.insert("n".into(), FieldMapping::Long);
+    i.put("a", json!({"n": 5}));
+    i.put("b", json!({}));
+    i.put("c", json!({"n": 1}));
+    let order = |sort: Value| {
+        let req = SearchRequest::parse(&json!({"sort": sort})).unwrap();
+        es_query::search(&i, &req)
+            .hits
+            .iter()
+            .map(|h| h.id.to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(order(json!([{"n": {}}])), ["c", "a", "b"]);
+    assert_eq!(
+        order(json!([{"n": {"missing": "_first"}}])),
+        ["b", "c", "a"]
+    );
+    assert_eq!(
+        order(json!([{"n": {"order": "desc", "missing": "_first"}}])),
+        ["b", "a", "c"]
+    );
+    assert_eq!(order(json!([{"n": {"missing": 3}}])), ["c", "b", "a"]);
+}

@@ -666,6 +666,8 @@ pub struct SortField {
     pub desc: bool,
     /// `unmapped_type` was given, so a missing mapping is not an error.
     pub unmapped_ok: bool,
+    /// `missing`: `_first`, `_last` (the default) or a value to sort absent fields as.
+    pub missing: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -727,6 +729,7 @@ fn parse_sort(v: &Value) -> Result<SortField, String> {
             desc: f == "_score",
             field: f.clone(),
             unmapped_ok: false,
+            missing: None,
         }),
         Value::Object(m) if m.len() == 1 => {
             let (field, p) = m.iter().next().expect("len checked");
@@ -742,6 +745,7 @@ fn parse_sort(v: &Value) -> Result<SortField, String> {
                 field: field.clone(),
                 desc,
                 unmapped_ok: p.get("unmapped_type").is_some(),
+                missing: p.get("missing").cloned(),
             })
         }
         _ => Err(format!("malformed sort [{v}]")),
@@ -849,7 +853,15 @@ pub fn search_many<'a>(
                         let mut v = values(&doc.source, path);
                         v.sort_by(|a, b| scalar_cmp(a, b));
                         let pick = if f.desc { v.last() } else { v.first() };
-                        pick.map_or(Value::Null, |v| (*v).clone())
+                        pick.map_or_else(
+                            || match &f.missing {
+                                Some(m) if !matches!(m.as_str(), Some("_first" | "_last")) => {
+                                    m.clone()
+                                }
+                                _ => Value::Null,
+                            },
+                            |v| (*v).clone(),
+                        )
                     }
                 })
                 .collect();
@@ -873,8 +885,11 @@ pub fn search_many<'a>(
             req.sort.iter().zip(a.sort.iter().zip(&b.sort)).fold(
                 Ordering::Equal,
                 |acc, (f, (x, y))| {
+                    let first = f.missing.as_ref().and_then(Value::as_str) == Some("_first");
                     acc.then_with(|| match (x.is_null(), y.is_null()) {
-                        // Missing values sort last in both directions.
+                        // Missing values sort last in both directions unless `missing: _first`.
+                        (true, false) if first => Ordering::Less,
+                        (false, true) if first => Ordering::Greater,
                         (true, false) => Ordering::Greater,
                         (false, true) => Ordering::Less,
                         _ if f.desc => scalar_cmp(y, x),
