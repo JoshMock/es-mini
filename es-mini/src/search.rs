@@ -21,7 +21,6 @@ fn targets<'a>(indices: &'a Indices, resolved: &'a [aliases::Target]) -> Vec<es_
         .collect()
 }
 
-// ponytail: one shard per target index is reported as a single shard
 const SEARCH_PARAMS: [&str; 46] = [
     "_slice",
     "_source",
@@ -89,6 +88,7 @@ const COUNT_PARAMS: [&str; 15] = [
     "terminate_after",
 ];
 
+// ponytail: one shard per target index is reported as a single shard
 fn shards() -> Value {
     json!({"total": 1, "successful": 1, "skipped": 0, "failed": 0})
 }
