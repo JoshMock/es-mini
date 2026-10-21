@@ -224,4 +224,3 @@ start a codec until the HTTP layer it feeds is exercised by tests.
 - **No test-definition edits:** vendored YAML tests are read-only. Fix the implementation, not the
   test.
 - **Single-node, local-only:** bind `127.0.0.1`, no auth/TLS, single volume throughout the MVP.
-- iteration 19: norms::write_norms landed (all-docs 1-byte/constant norms, byte-equal to fixture). Remaining: SORTED/SORTED_SET DV writer, BKD points (or dims=0), doc->segment assembler, manifest index_generations, run cross_engine.sh.
