@@ -78,9 +78,7 @@ pub fn write_points(
         let index_start = index.0.len() as i64;
         index.vlong(leaf);
         meta.bytes(&number.to_le_bytes());
-        meta.be_int(0x3fd7_6c17);
-        meta.string("BKD");
-        meta.be_int(10);
+        meta.header("BKD", 10);
         meta.vint(1);
         meta.vint(1);
         meta.vint(values.len().max(512) as i32);
