@@ -265,6 +265,11 @@ impl Index {
     }
 
     /// Creates a document; `Err(current_version)` if it already exists.
+    /// Errs with the current version when `id` exists, so a create would conflict.
+    pub fn create_check(&self, id: &str) -> Result<(), u64> {
+        self.docs.get(id).map_or(Ok(()), |d| Err(d.version))
+    }
+
     pub fn create(&mut self, id: &str, source: Value) -> Result<WriteResult, u64> {
         match self.docs.get(id) {
             Some(doc) => Err(doc.version),

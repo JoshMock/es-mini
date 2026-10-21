@@ -69,11 +69,11 @@ fn parse(
             return Err(AppError::ActionRequestValidation("id is missing".into()));
         }
         let op = if op == "index" && meta["op_type"] == "create" {
-            &"create".to_owned()
+            "create"
         } else {
-            op
+            op.as_str()
         };
-        let body = match op.as_str() {
+        let body = match op {
             "delete" => None,
             _ => {
                 // Like Elasticsearch, an action line with no source line is dropped.
@@ -82,7 +82,7 @@ fn parse(
             }
         };
         actions.push(Action {
-            op: op.clone(),
+            op: op.to_owned(),
             index: index.to_owned(),
             id,
             body,
@@ -114,16 +114,20 @@ fn execute(state: &AppState, a: Action) -> Value {
     let target = resolved.as_deref().unwrap_or(&a.index).to_owned();
     let id = a.id.unwrap_or_else(auto_id);
     let body = a.body.unwrap_or(Value::Null);
-    let result = match a.op.as_str() {
-        _ if resolved.is_err() => resolved.map(|_| unreachable!()),
-        _ if id.is_empty() => Err(AppError::IllegalArgument(
-            "if _id is specified it must not be empty".into(),
-        )),
-        "index" => put_or_create(state, &target, &id, body, false),
-        "create" => put_or_create(state, &target, &id, body, true),
-        "update" => update_doc(state, &target, &id, &body),
-        _ => delete_doc(state, &target, &id),
-    };
+    let result = (|| {
+        resolved?;
+        if id.is_empty() {
+            return Err(AppError::IllegalArgument(
+                "if _id is specified it must not be empty".into(),
+            ));
+        }
+        match a.op.as_str() {
+            "index" => put_or_create(state, &target, &id, body, false),
+            "create" => put_or_create(state, &target, &id, body, true),
+            "update" => update_doc(state, &target, &id, &body),
+            _ => delete_doc(state, &target, &id),
+        }
+    })();
     let item = match result {
         Ok((status, Json(mut v))) => {
             v["status"] = status.as_u16().into();
