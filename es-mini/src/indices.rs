@@ -39,8 +39,11 @@ pub fn validate_index_name(name: &str) -> Result<(), AppError> {
         index: name.to_owned(),
         reason,
     };
-    if name.contains(' ') {
-        return Err(bad("must not contain spaces".into()));
+    if name.contains([' ', '"', '*', ',', '/', '<', '>', '?', '\\', '|']) {
+        return Err(bad(
+            r#"must not contain the following characters [' ','"','*',',','/','<','>','?','\','|']"#
+                .into(),
+        ));
     }
     if name.contains('#') {
         return Err(bad("must not contain '#'".into()));
@@ -62,11 +65,6 @@ pub fn validate_index_name(name: &str) -> Result<(), AppError> {
     }
     if name.to_lowercase() != name {
         return Err(bad("must be lowercase".into()));
-    }
-    if name.contains(['"', '*', '\\', '<', '|', ',', '>', '/', '?']) {
-        return Err(bad(
-            "must not contain the following characters [ , \", *, \\, <, |, ,, >, /, ?]".into(),
-        ));
     }
     Ok(())
 }

@@ -366,6 +366,23 @@ async fn invalid_index_names_are_rejected() {
             "{name}"
         );
     }
+    // Recorded from Elasticsearch 9.5.5: the filename-character check (space included) runs first.
+    let chars =
+        r#"must not contain the following characters [' ','"','*',',','/','<','>','?','\','|']"#;
+    for (name, reason) in [
+        ("a%20b", chars),
+        ("_a%20b", chars),
+        ("Up%20per", chars),
+        ("a%22b", chars),
+        ("Upper", "must be lowercase"),
+    ] {
+        let (_, r) = call(&app, Method::PUT, &format!("/{name}"), None).await;
+        let reason = format!(
+            "Invalid index name [{}], {reason}",
+            r["error"]["index"].as_str().unwrap()
+        );
+        assert_eq!(r["error"]["reason"], json!(reason), "{name}");
+    }
     let (s, r) = call(&app, Method::PUT, "/Upper/_doc/1", Some(json!({}))).await;
     assert_eq!(
         (s, &r["error"]["type"]),
