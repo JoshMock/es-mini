@@ -249,3 +249,46 @@ async fn every_write_endpoint_honors_refresh_and_require_alias() {
         );
     }
 }
+
+#[tokio::test]
+async fn search_window_and_negative_from_are_rejected() {
+    let app = app();
+    call(
+        &app,
+        Method::PUT,
+        "/idx",
+        Some(json!({"settings": {"max_result_window": 5}})),
+    )
+    .await;
+    let (s, r) = call(
+        &app,
+        Method::POST,
+        "/idx/_search",
+        Some(json!({"from": 3, "size": 3})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert!(r["error"]["reason"].as_str().unwrap().starts_with(
+        "Result window is too large, from + size must be less than or equal to: [5] but was [6]."
+    ));
+    let (s, r) = call(
+        &app,
+        Method::POST,
+        "/idx/_search",
+        Some(json!({"from": -1})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        r["error"]["reason"],
+        "[from] parameter cannot be negative, found [-1]"
+    );
+    let (s, _) = call(
+        &app,
+        Method::POST,
+        "/idx/_search",
+        Some(json!({"from": 2, "size": 3})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+}

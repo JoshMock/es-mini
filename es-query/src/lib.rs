@@ -579,10 +579,13 @@ impl SearchRequest {
             return Err(format!("Unknown key for a START_OBJECT in [{k}]."));
         }
         let query = body.get("query").map_or(Ok(Query::MatchAll), parse_query)?;
-        let usize_of = |k: &str, d| {
-            body.get(k)
-                .map_or(Some(d), |v| v.as_u64().map(|n| n as usize))
-                .ok_or(format!("[{k}] must be a number"))
+        let usize_of = |k: &str, d| match body.get(k) {
+            None => Ok(d),
+            Some(v) => match v.as_i64() {
+                Some(n) if n < 0 => Err(format!("[{k}] parameter cannot be negative, found [{n}]")),
+                Some(n) => Ok(n as usize),
+                None => Err(format!("[{k}] must be a number")),
+            },
         };
         let sort = match body.get("sort") {
             None => vec![],

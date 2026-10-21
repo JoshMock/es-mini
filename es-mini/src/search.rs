@@ -112,7 +112,8 @@ pub async fn search(
     params::check(&uri, &params, &SEARCH_PARAMS)?;
     let start = Instant::now();
     let mut req = SearchRequest::parse(&parse_body(&body)?).map_err(|e| {
-        if e.starts_with("failed to parse date field") {
+        if e.starts_with("failed to parse date field") || e.contains("parameter cannot be negative")
+        {
             AppError::IllegalArgument(e)
         } else {
             AppError::ParsingException(e)
@@ -130,6 +131,19 @@ pub async fn search(
     let indices = state.read().expect("lock poisoned");
     let resolved = crate::indices::data_targets(&indices, &name, &params)?;
     let targets = targets(&indices, &resolved);
+    for (_, index, _) in &targets {
+        let max = index
+            .settings
+            .get("index.max_result_window")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(10_000);
+        if req.from + req.size > max {
+            return Err(AppError::IllegalArgument(format!(
+                "Result window is too large, from + size must be less than or equal to: [{max}] but was [{}]. See the scroll api for a more efficient way to request large data sets. This limit can be set by changing the [index.max_result_window] index level setting.",
+                req.from + req.size
+            )));
+        }
+    }
     let r = es_query::search_many(&targets, &req).map_err(AppError::ParsingException)?;
     let hits: Vec<Value> = r
         .hits
