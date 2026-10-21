@@ -187,3 +187,39 @@ async fn update_require_alias_rejects_non_alias() {
         (StatusCode::NOT_FOUND, &json!("index_not_found_exception"))
     );
 }
+
+#[tokio::test]
+async fn non_realtime_get_sees_refreshed_docs_only() {
+    let app = app();
+    call(
+        &app,
+        Method::PUT,
+        "/idx",
+        Some(json!({"settings": {"refresh_interval": "-1"}})),
+    )
+    .await;
+    call(&app, Method::PUT, "/idx/_doc/1", Some(json!({}))).await;
+    call(&app, Method::POST, "/idx/_refresh", None).await;
+    call(&app, Method::PUT, "/idx/_doc/2", Some(json!({}))).await;
+    let found = |r: serde_json::Value| r["found"].clone();
+    assert_eq!(
+        found(
+            call(&app, Method::GET, "/idx/_doc/1?realtime=false", None)
+                .await
+                .1
+        ),
+        json!(true)
+    );
+    assert_eq!(
+        found(
+            call(&app, Method::GET, "/idx/_doc/2?realtime=false", None)
+                .await
+                .1
+        ),
+        json!(false)
+    );
+    assert_eq!(
+        found(call(&app, Method::GET, "/idx/_doc/2", None).await.1),
+        json!(true)
+    );
+}

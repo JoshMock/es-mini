@@ -207,11 +207,10 @@ pub async fn get(
     let indices = state.read().expect("lock poisoned");
     let index = single_index(&indices, &index)?;
     let i = &indices[&index];
-    // ponytail: no refresh model; a non-realtime get of an index with refresh disabled sees nothing
-    let unrefreshed = params.get("realtime").is_some_and(|v| v == "false")
-        && params.get("refresh").is_none_or(|v| v == "false")
-        && i.settings.get("index.refresh_interval") == Some("-1");
-    Ok(match i.get(&id).filter(|_| !unrefreshed) {
+    // A non-realtime get sees what search sees, unless it asks for a refresh first.
+    let realtime = params.get("realtime").is_none_or(|v| v != "false")
+        || params.get("refresh").is_some_and(|v| v != "false");
+    Ok(match i.get(&id).filter(|d| realtime || i.searchable(d)) {
         Some(d) => (
             StatusCode::OK,
             Json(json!({
