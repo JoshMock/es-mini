@@ -544,7 +544,17 @@ fn parse_dated(v: &Value, locale: &str) -> Option<i64> {
     Some((era * 146097 + doe - 719468) * 86400 + secs - off)
 }
 
+/// Exact integer value, so longs above 2^53 keep their precision.
+fn int(v: &Value) -> Option<i64> {
+    v.as_i64().or_else(|| v.as_str()?.parse().ok())
+}
+
 fn scalar_cmp(a: &Value, b: &Value) -> Ordering {
+    if let (Some(x), Some(y)) = (int(a), int(b))
+        && (!a.is_string() || !b.is_string())
+    {
+        return x.cmp(&y);
+    }
     match (num(a), num(b)) {
         (Some(x), Some(y)) if !a.is_string() || !b.is_string() => x.total_cmp(&y),
         _ => text(a).cmp(&text(b)),
@@ -782,8 +792,11 @@ impl<'a> Searcher<'a> {
     ) -> Option<f64> {
         let vals = values(&d.source, path);
         let matched = |w: &String| match kind {
-            Kind::Number => num(&Value::String(w.clone()))
-                .is_some_and(|x| vals.iter().any(|v| num(v) == Some(x))),
+            Kind::Number => match int(&Value::String(w.clone())) {
+                Some(x) => vals.iter().any(|v| int(v) == Some(x)),
+                None => num(&Value::String(w.clone()))
+                    .is_some_and(|x| vals.iter().any(|v| num(v) == Some(x))),
+            },
             Kind::Bool => vals.iter().any(|v| text(v) == *w),
             _ => false,
         };

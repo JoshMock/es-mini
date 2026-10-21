@@ -468,3 +468,15 @@ fn literal_dotted_keyword_source_field_is_not_shadowed() {
     let req = SearchRequest::parse(&json!({"query": {"term": {"foo.keyword": "b"}}})).unwrap();
     assert_eq!(search(&i, &req).total, 1);
 }
+
+#[test]
+fn large_longs_keep_precision() {
+    let mut i = Index::default();
+    i.put("a", json!({"n": 9007199254740993_i64}));
+    i.put("b", json!({"n": 9007199254740992_i64}));
+    let req =
+        SearchRequest::parse(&json!({"query": {"term": {"n": 9007199254740993_i64}}})).unwrap();
+    let hits = search(&i, &req).hits;
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].id, "a");
+}
