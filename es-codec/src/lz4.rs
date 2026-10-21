@@ -73,4 +73,27 @@ mod tests {
         assert_eq!(out, b"abcdecdecde");
         assert!(decompress(&mut DataInput::new(&[0x10, b'a', 9, 0]), 10, &mut vec![]).is_err());
     }
+
+    #[test]
+    fn long_literal_and_long_match_continuations() {
+        // 300 literals: token 0xF0, extra 255 + 30 (15+255+30 = 300); then the
+        // final-literal-only block ends the stream.
+        let lits: Vec<u8> = (0..300).map(|i| i as u8).collect();
+        let mut block = vec![0xf0, 0xff, 30];
+        block.extend_from_slice(&lits);
+        let mut out = Vec::new();
+        decompress(&mut DataInput::new(&block), 300, &mut out).unwrap();
+        assert_eq!(out, lits);
+        // The writer's literal encoding must round-trip through the reader.
+        let mut w = Output::default();
+        literals(&mut w, &lits);
+        let mut out = Vec::new();
+        decompress(&mut DataInput::new(&w.0), 300, &mut out).unwrap();
+        assert_eq!(out, lits);
+        // 1 literal, then a match of 4 + 15 + 255 + 5 = 279 bytes at offset 1.
+        let block = [0x1f, b'x', 1, 0, 0xff, 5];
+        let mut out = Vec::new();
+        decompress(&mut DataInput::new(&block), 280, &mut out).unwrap();
+        assert_eq!(out, vec![b'x'; 280]);
+    }
 }
