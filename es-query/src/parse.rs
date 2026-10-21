@@ -1,6 +1,6 @@
 //! Query DSL parsing.
 
-use crate::text;
+use crate::{QueryError, text};
 use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -120,7 +120,7 @@ fn min_should_match(optional: usize, spec: &str) -> Result<usize, String> {
     Ok(result.max(0) as usize)
 }
 
-fn clauses(v: Option<&Value>) -> Result<Vec<Query>, String> {
+fn clauses(v: Option<&Value>) -> Result<Vec<Query>, QueryError> {
     match v {
         None => Ok(vec![]),
         Some(Value::Array(a)) => a.iter().map(parse_query).collect(),
@@ -149,7 +149,7 @@ fn constant_score_any(field: &str, vals: &[Value]) -> Query {
     }
 }
 
-pub fn parse_query(v: &Value) -> Result<Query, String> {
+pub fn parse_query(v: &Value) -> Result<Query, QueryError> {
     let (kind, body) = single_field("query", v)
         .map_err(|_| "query malformed, expected a single query type".to_owned())?;
     match kind.as_str() {
@@ -173,7 +173,8 @@ pub fn parse_query(v: &Value) -> Result<Query, String> {
                 Some(o) => {
                     return Err(format!(
                         "Unsupported defaultOperator [{o}], can either be 'and' or 'or'"
-                    ));
+                    )
+                    .into());
                 }
             };
             Ok(Query::Match {
@@ -311,9 +312,9 @@ pub fn parse_query(v: &Value) -> Result<Query, String> {
                     .filter_map(|k| p.get(*k)?.as_i64())
                     .find(|n| n.abs() > 292_278_993)
                 {
-                    return Err(format!(
+                    return Err(QueryError::illegal(format!(
                         "failed to parse date field [{n}] with format [date_optional_time]"
-                    ));
+                    )));
                 }
             }
             Ok(Query::Range {
@@ -364,7 +365,7 @@ pub fn parse_query(v: &Value) -> Result<Query, String> {
                 min_should: if min_should > 0 { min_should } else { default },
             })
         }
-        other => Err(format!("unknown query [{other}]")),
+        other => Err(format!("unknown query [{other}]").into()),
     }
 }
 

@@ -441,22 +441,71 @@ pub struct SearchRequest {
     pub track_total_hits: Option<String>,
 }
 
+/// Which Elasticsearch error type a query failure maps to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorKind {
+    /// `parsing_exception`
+    Parsing,
+    /// `illegal_argument_exception`
+    IllegalArgument,
+}
+
+/// A query failure: its Elasticsearch error type and reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryError {
+    pub kind: ErrorKind,
+    pub msg: String,
+}
+
+impl QueryError {
+    pub fn illegal(msg: impl Into<String>) -> Self {
+        Self {
+            kind: ErrorKind::IllegalArgument,
+            msg: msg.into(),
+        }
+    }
+}
+
+/// A bare message is a `parsing_exception`.
+impl From<String> for QueryError {
+    fn from(msg: String) -> Self {
+        Self {
+            kind: ErrorKind::Parsing,
+            msg,
+        }
+    }
+}
+
+impl From<&str> for QueryError {
+    fn from(msg: &str) -> Self {
+        msg.to_string().into()
+    }
+}
+
+impl std::fmt::Display for QueryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.msg)
+    }
+}
+
 impl SearchRequest {
-    pub fn parse(body: &Value) -> Result<Self, String> {
+    pub fn parse(body: &Value) -> Result<Self, QueryError> {
         if let Some(k) = body.as_object().and_then(|o| {
             o.keys().find(|k| {
                 !["query", "from", "size", "sort", "track_total_hits"].contains(&k.as_str())
             })
         }) {
-            return Err(format!("Unknown key for a START_OBJECT in [{k}]."));
+            return Err(format!("Unknown key for a START_OBJECT in [{k}].").into());
         }
         let query = body.get("query").map_or(Ok(Query::MatchAll), parse_query)?;
         let usize_of = |k: &str, d| match body.get(k) {
             None => Ok(d),
             Some(v) => match v.as_i64() {
-                Some(n) if n < 0 => Err(format!("[{k}] parameter cannot be negative, found [{n}]")),
+                Some(n) if n < 0 => Err(QueryError::illegal(format!(
+                    "[{k}] parameter cannot be negative, found [{n}]"
+                ))),
                 Some(n) => Ok(n as usize),
-                None => Err(format!("[{k}] must be a number")),
+                None => Err(format!("[{k}] must be a number").into()),
             },
         };
         let sort = match body.get("sort") {
@@ -479,7 +528,7 @@ impl SearchRequest {
     }
 }
 
-fn parse_sort(v: &Value) -> Result<SortField, String> {
+fn parse_sort(v: &Value) -> Result<SortField, QueryError> {
     let desc_of = |o: &Value| match o.as_str() {
         Some("desc") => Ok(true),
         Some("asc") => Ok(false),
@@ -509,7 +558,7 @@ fn parse_sort(v: &Value) -> Result<SortField, String> {
                 missing: p.get("missing").cloned(),
             })
         }
-        _ => Err(format!("malformed sort [{v}]")),
+        _ => Err(format!("malformed sort [{v}]").into()),
     }
 }
 
@@ -535,7 +584,7 @@ pub struct SearchResult<'a> {
 pub type Target<'a> = (&'a str, &'a Index, Option<&'a Value>);
 
 /// The request query, narrowed by an alias filter.
-fn with_filter(q: &Query, filter: Option<&Value>) -> Result<Query, String> {
+fn with_filter(q: &Query, filter: Option<&Value>) -> Result<Query, QueryError> {
     Ok(match filter {
         None => q.clone(),
         Some(f) => Query::Bool {
@@ -550,7 +599,7 @@ fn with_filter(q: &Query, filter: Option<&Value>) -> Result<Query, String> {
 
 /// ES refuses to sort on an unmapped field (without `unmapped_type`) or a `text` field
 /// (fielddata is off by default).
-pub fn check_sortable(targets: &[Target], req: &SearchRequest) -> Result<(), String> {
+pub fn check_sortable(targets: &[Target], req: &SearchRequest) -> Result<(), QueryError> {
     for f in &req.sort {
         for (_, index, _) in targets {
             let known = f.unmapped_ok
@@ -567,18 +616,18 @@ pub fn check_sortable(targets: &[Target], req: &SearchRequest) -> Result<(), Str
                     .docs()
                     .any(|(_, d)| !values(&d.source, &f.field).is_empty());
             if !known {
-                return Err(format!(
+                return Err(QueryError::illegal(format!(
                     "No mapping found for [{}] in order to sort on",
                     f.field
-                ));
+                )));
             }
             if let Some(FieldMapping::Text | FieldMapping::TextKeyword { .. }) =
                 index.mappings.properties.get(&f.field)
             {
-                return Err(format!(
+                return Err(QueryError::illegal(format!(
                     "Text fields are not optimised for operations that require per-document field data like aggregations and sorting, so these operations are disabled by default. Please use a keyword field instead. Alternatively, set fielddata=true on [{}] in order to load field data by uninverting the inverted index. Note that this can use significant memory.",
                     f.field
-                ));
+                )));
             }
         }
     }
@@ -594,7 +643,7 @@ pub fn search<'a>(index: &'a Index, req: &SearchRequest) -> SearchResult<'a> {
 pub fn search_many<'a>(
     targets: &[Target<'a>],
     req: &SearchRequest,
-) -> Result<SearchResult<'a>, String> {
+) -> Result<SearchResult<'a>, QueryError> {
     let by_score = req.sort.is_empty() || req.sort.iter().any(|f| f.field == "_score");
     // (target position, hit, score, sort values)
     let mut hits = Vec::new();
@@ -689,7 +738,7 @@ pub fn count(index: &Index, q: &Query) -> usize {
     count_many(&[("", index, None)], q).expect("no alias filter to parse")
 }
 
-pub fn count_many(targets: &[Target], q: &Query) -> Result<usize, String> {
+pub fn count_many(targets: &[Target], q: &Query) -> Result<usize, QueryError> {
     let mut n = 0;
     for (_, index, filter) in targets {
         let q = with_filter(q, *filter)?;

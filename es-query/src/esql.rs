@@ -520,7 +520,7 @@ pub fn run(indices: &BTreeMap<String, Index>, query: &str) -> Result<Response, E
             .as_ref()
             .map(crate::parse_query)
             .transpose()
-            .map_err(EsqlError::Verification)?;
+            .map_err(|e| EsqlError::Verification(e.msg))?;
         let searcher = filter.as_ref().map(|f| (crate::Searcher::new(index, f), f));
         let mut mine: Vec<_> = index
             .docs()

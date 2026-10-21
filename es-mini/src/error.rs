@@ -177,3 +177,12 @@ impl From<es_index::aliases::ResolveError> for AppError {
         }
     }
 }
+
+impl From<es_query::QueryError> for AppError {
+    fn from(e: es_query::QueryError) -> Self {
+        match e.kind {
+            es_query::ErrorKind::Parsing => Self::ParsingException(e.msg),
+            es_query::ErrorKind::IllegalArgument => Self::IllegalArgument(e.msg),
+        }
+    }
+}

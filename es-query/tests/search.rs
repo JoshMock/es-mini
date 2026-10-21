@@ -271,7 +271,7 @@ fn leaf_and_bool_queries_validate_parameters() {
         ),
     ] {
         let err = parse_query(&q).unwrap_err();
-        assert!(err.contains(msg), "{q}: {err}");
+        assert!(err.msg.contains(msg), "{q}: {err}");
     }
     assert!(parse_query(&json!({"match": {"title": {"query": "a", "operator": "AND", "boost": 2, "_name": "n"}}})).is_ok());
     assert!(
@@ -324,7 +324,7 @@ fn sorting_on_a_text_field_is_refused() {
     let targets = [("i", &i, None)];
     let req = SearchRequest::parse(&json!({"sort": ["t"]})).unwrap();
     let e = es_query::check_sortable(&targets, &req).unwrap_err();
-    assert!(e.starts_with("Text fields are not optimised"), "{e}");
+    assert!(e.msg.starts_with("Text fields are not optimised"), "{e}");
     let ok = SearchRequest::parse(&json!({"sort": ["_score"]})).unwrap();
     assert!(es_query::check_sortable(&targets, &ok).is_ok());
 }
@@ -340,7 +340,8 @@ fn sorting_on_an_unmapped_field_is_refused_unless_unmapped_type_is_set() {
         )
     };
     let e = check(json!(["nope"])).unwrap_err();
-    assert_eq!(e, "No mapping found for [nope] in order to sort on");
+    assert_eq!(e.msg, "No mapping found for [nope] in order to sort on");
+    assert_eq!(e.kind, es_query::ErrorKind::IllegalArgument);
     assert!(check(json!([{"nope": {"unmapped_type": "long"}}])).is_ok());
     for ok in ["tag", "nested.x", "_score", "_doc", "_id", "_index"] {
         assert!(check(json!([ok])).is_ok(), "{ok}");
@@ -490,4 +491,15 @@ fn integer_term_matches_whole_float_source_value() {
     let hits = search(&i, &req).hits;
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].id, "a");
+}
+
+#[test]
+fn error_kinds() {
+    use es_query::{ErrorKind, SearchRequest};
+    let k = |b: serde_json::Value| SearchRequest::parse(&b).unwrap_err().kind;
+    assert_eq!(
+        k(serde_json::json!({"size": -1})),
+        ErrorKind::IllegalArgument
+    );
+    assert_eq!(k(serde_json::json!({"bogus": 1})), ErrorKind::Parsing);
 }

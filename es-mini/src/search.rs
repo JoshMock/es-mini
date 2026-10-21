@@ -111,14 +111,7 @@ pub async fn search(
 ) -> Result<Json<Value>, AppError> {
     params::check(&uri, &params, &SEARCH_PARAMS)?;
     let start = Instant::now();
-    let mut req = SearchRequest::parse(&parse_body(&body)?).map_err(|e| {
-        if e.starts_with("failed to parse date field") || e.contains("parameter cannot be negative")
-        {
-            AppError::IllegalArgument(e)
-        } else {
-            AppError::ParsingException(e)
-        }
-    })?;
+    let mut req = SearchRequest::parse(&parse_body(&body)?).map_err(AppError::from)?;
     if let Some(q) = params.get("q") {
         req.query = es_query::parse_query_string(
             q,
@@ -144,8 +137,8 @@ pub async fn search(
             )));
         }
     }
-    es_query::check_sortable(&targets, &req).map_err(AppError::IllegalArgument)?;
-    let r = es_query::search_many(&targets, &req).map_err(AppError::ParsingException)?;
+    es_query::check_sortable(&targets, &req)?;
+    let r = es_query::search_many(&targets, &req)?;
     let hits: Vec<Value> = r
         .hits
         .iter()
@@ -249,13 +242,11 @@ pub async fn count(
         ),
         None => body
             .get("query")
-            .map_or(Ok(es_query::Query::MatchAll), parse_query)
-            .map_err(AppError::ParsingException)?,
+            .map_or(Ok(es_query::Query::MatchAll), parse_query)?,
     };
     let indices = state.read().expect("lock poisoned");
     let resolved = crate::indices::data_targets(&indices, &name, &params)?;
-    let n = es_query::count_many(&targets(&indices, &resolved), &query)
-        .map_err(AppError::ParsingException)?;
+    let n = es_query::count_many(&targets(&indices, &resolved), &query)?;
     let resp = json!({"count": n, "_shards": shards(resolved.len())});
     Ok(Json(resp))
 }
