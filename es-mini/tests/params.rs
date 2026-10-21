@@ -298,3 +298,18 @@ async fn error_metadata_and_empty_body() {
     assert_eq!(s, 404);
     assert_eq!(b["error"]["index"], "meta1");
 }
+
+#[tokio::test]
+async fn malformed_document_source_is_document_parsing_exception() {
+    let req = Request::builder()
+        .method("PUT")
+        .uri("/x/_doc/1")
+        .header("content-type", "application/json")
+        .body(Body::from("{oops"))
+        .unwrap();
+    let res = es_mini::app().oneshot(req).await.unwrap();
+    assert_eq!(res.status().as_u16(), 400);
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["error"]["type"], "document_parsing_exception");
+}

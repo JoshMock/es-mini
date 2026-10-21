@@ -22,6 +22,15 @@ pub fn parse_json(body: &[u8]) -> Result<Value, AppError> {
     serde_json::from_slice(body).map_err(|e| AppError::Parse(e.to_string()))
 }
 
+/// A document source: malformed JSON is a `document_parsing_exception`, an empty body is required.
+fn parse_source(body: &[u8]) -> Result<Value, AppError> {
+    match body.is_empty() {
+        true => parse_json(body),
+        false => serde_json::from_slice(body)
+            .map_err(|e| AppError::DocumentParsing(format!("failed to parse: {e}"))),
+    }
+}
+
 fn check_source(v: Value) -> Result<Value, AppError> {
     if !v.is_object() {
         return Err(AppError::MapperParsing(
@@ -219,7 +228,7 @@ pub async fn index_with_id(
     params::check(&uri, &params, &WRITE_PARAMS)?;
     let create = params.get("op_type").is_some_and(|o| o == "create");
     with_write_params(&state, &params, &index, || {
-        put_or_create(&state, &index, &id, parse_json(&body)?, create)
+        put_or_create(&state, &index, &id, parse_source(&body)?, create)
     })
 }
 
@@ -232,7 +241,7 @@ pub async fn index_auto_id(
 ) -> Reply {
     params::check(&uri, &params, &WRITE_PARAMS)?;
     with_write_params(&state, &params, &index, || {
-        put_or_create(&state, &index, &auto_id(), parse_json(&body)?, true)
+        put_or_create(&state, &index, &auto_id(), parse_source(&body)?, true)
     })
 }
 
@@ -245,7 +254,7 @@ pub async fn create(
 ) -> Reply {
     params::check(&uri, &params, &WRITE_PARAMS)?;
     with_write_params(&state, &params, &index, || {
-        put_or_create(&state, &index, &id, parse_json(&body)?, true)
+        put_or_create(&state, &index, &id, parse_source(&body)?, true)
     })
 }
 
