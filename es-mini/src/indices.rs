@@ -40,6 +40,7 @@ pub async fn create(
 ) -> Result<Json<Value>, AppError> {
     let body = parse_body(&body)?;
     let mut index = Index::default();
+    index.settings.record_creation(&name);
     index.settings.merge(&body["settings"]);
     if let Some(l) = index.settings.get("index.mapping.array_objects.limit")
         && !l.parse::<u64>().is_ok_and(|n| n > 0)
@@ -215,9 +216,13 @@ pub async fn get(
             let i = &indices[&n];
             let mut settings = i.settings.to_json();
             if params.get("human").is_some_and(|v| v == "true") {
-                // ponytail: creation time/version aren't stored; fixed placeholders until a test needs real ones
-                settings["index"]["creation_date_string"] = json!("1970-01-01T00:00:00.000Z");
-                settings["index"]["version"] = json!({"created_string": "9.5.5"});
+                let created = i
+                    .settings
+                    .get("index.creation_date")
+                    .and_then(|d| d.parse().ok());
+                settings["index"]["creation_date_string"] =
+                    json!(es_index::iso_date(created.unwrap_or(0)));
+                settings["index"]["version"]["created_string"] = json!("9.5.5");
             }
             let mut out =
                 json!({"aliases": i.aliases, "mappings": i.mappings, "settings": settings});

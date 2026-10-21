@@ -452,10 +452,9 @@ fn write_snapshot(data_dir: &Path, indices: &Indices) -> es_codec::Result<()> {
                 .or_insert_with(|| uuid(name))
                 .clone();
             // Elasticsearch refuses to load index metadata without the creation version.
-            // ponytail: new indices claim an arbitrary 9.x index version, not 9.5.5's exact id
             settings
                 .entry("index.version.created".into())
-                .or_insert_with(|| "9111000".into());
+                .or_insert_with(|| crate::VERSION_CREATED.into());
             IndexMetadata {
                 name: name.clone(),
                 uuid,

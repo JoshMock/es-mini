@@ -310,8 +310,10 @@ async fn get_human_adds_readable_settings() {
         r["idx"]["settings"]["index"]["version"]["created_string"],
         "9.5.5"
     );
+    // Without ?human, only the raw values ES always returns (e.g. version.created) appear.
     let (_, r) = call(&app, Method::GET, "/idx", None).await;
-    assert!(r["idx"]["settings"]["index"]["version"].is_null());
+    assert!(r["idx"]["settings"]["index"]["version"]["created_string"].is_null());
+    assert!(r["idx"]["settings"]["index"]["creation_date_string"].is_null());
 }
 
 #[tokio::test]
@@ -322,4 +324,30 @@ async fn get_index_features_selects_sections() {
     let (_, r) = call(&app, Method::GET, "/idx?features=aliases,settings", None).await;
     assert_eq!(r["idx"]["mappings"], json!({}));
     assert!(r["idx"].get("aliases").is_some() && r["idx"].get("settings").is_some());
+}
+
+#[tokio::test]
+async fn new_indices_record_identity_and_creation_time() {
+    let app = app();
+    call(&app, Method::PUT, "/made", None).await;
+    call(&app, Method::PUT, "/auto/_doc/1", Some(json!({}))).await;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    for name in ["made", "auto"] {
+        let (_, r) = call(&app, Method::GET, &format!("/{name}/_settings"), None).await;
+        let s = &r[name]["settings"]["index"];
+        assert_eq!(s["uuid"].as_str().unwrap().len(), 22, "{name}");
+        assert_eq!(s["version"]["created"], "9111000", "{name}");
+        assert_eq!(s["provided_name"], name);
+        let created: u128 = s["creation_date"].as_str().unwrap().parse().unwrap();
+        assert!(now - created < 60_000, "{name}: {created}");
+    }
+    let (_, a) = call(&app, Method::GET, "/made/_settings", None).await;
+    let (_, b) = call(&app, Method::GET, "/auto/_settings", None).await;
+    assert_ne!(
+        a["made"]["settings"]["index"]["uuid"],
+        b["auto"]["settings"]["index"]["uuid"]
+    );
 }

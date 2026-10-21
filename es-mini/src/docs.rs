@@ -62,7 +62,11 @@ fn write<T>(
 ) -> Result<(T, u64, String), AppError> {
     let mut indices = state.write().expect("lock poisoned");
     let target = aliases::resolve_write(&indices, name)?;
-    let index = indices.entry(target.clone()).or_default();
+    let index = indices.entry(target.clone()).or_insert_with(|| {
+        let mut created = Index::default();
+        created.settings.record_creation(&target);
+        created
+    });
     let replicas = index
         .settings
         .get("index.number_of_replicas")

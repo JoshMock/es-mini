@@ -92,6 +92,23 @@ impl Settings {
         }
     }
 
+    /// Stamps what Elasticsearch records when it creates an index (`index.uuid`,
+    /// `index.creation_date`, `index.version.created`, `index.provided_name`), keeping any
+    /// values already present, e.g. from an Elasticsearch data directory.
+    pub fn record_creation(&mut self, name: &str) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        for (key, value) in [
+            ("index.uuid", random_uuid()),
+            ("index.creation_date", now.as_millis().to_string()),
+            ("index.version.created", VERSION_CREATED.to_owned()),
+            ("index.provided_name", name.to_owned()),
+        ] {
+            self.0.entry(key.to_owned()).or_insert(value);
+        }
+    }
+
     pub fn get(&self, key: &str) -> Option<&str> {
         self.0.get(key).map(String::as_str)
     }
@@ -404,6 +421,42 @@ fn merge(target: &mut Value, patch: &Value) {
     }
 }
 
+/// `index.version.created` of indices created by Elasticsearch 9.5.5 (read from the fixture).
+pub const VERSION_CREATED: &str = "9111000";
+
+/// A 22-character URL-safe base64 id like Elasticsearch's index UUIDs.
+fn random_uuid() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    // RandomState seeds each hasher from OS randomness, so two of them make 128 random bits.
+    let half = || {
+        std::collections::hash_map::RandomState::new()
+            .build_hasher()
+            .finish()
+    };
+    let bits = (u128::from(half()) << 64) | u128::from(half());
+    (0..22)
+        .map(|i| B64[((bits >> (i * 6)) & 63) as usize] as char)
+        .collect()
+}
+
+/// Formats epoch milliseconds as ES's `date_optional_time` (`2024-01-15T10:30:00.000Z`).
+pub fn iso_date(millis: u64) -> String {
+    let (days, ms) = (millis / 86_400_000, millis % 86_400_000);
+    // Howard Hinnant's civil_from_days, for days since 1970-01-01.
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    let (h, m, sec, milli) = (ms / 3_600_000, ms / 60_000 % 60, ms / 1000 % 60, ms % 1000);
+    format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{sec:02}.{milli:03}Z")
+}
+
 /// Parses an ES time value (`250ms`, `60s`, `2m`, `1h`, `1d`); `None` for `-1` or junk.
 pub fn parse_time(v: &str) -> Option<Duration> {
     let units = [
@@ -532,6 +585,13 @@ mod tests {
         // The expired tombstone is forgotten, so the doc starts over like a new one.
         assert_eq!(idx.put("1", json!({})).version, 1);
         assert_eq!(idx.tombstones(), 0);
+    }
+
+    #[test]
+    fn formats_epoch_millis_as_iso_dates() {
+        assert_eq!(iso_date(0), "1970-01-01T00:00:00.000Z");
+        assert_eq!(iso_date(1_792_182_985_033), "2026-10-16T20:36:25.033Z");
+        assert_eq!(iso_date(951_782_400_000), "2000-02-29T00:00:00.000Z");
     }
 
     #[test]
