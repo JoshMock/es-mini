@@ -354,6 +354,26 @@ impl Index {
             .map_or_else(BTreeSet::new, |d| d.term_docs(field, term))
     }
 
+    /// The on-disk documents with a value of numeric or date `field` that `keep` accepts, from
+    /// doc values (dates as epoch millis); `None` for other fields.
+    // ponytail: floats are skipped, since their f32 values compare differently from the source
+    pub fn disk_numbers(
+        &self,
+        field: &str,
+        keep: impl Fn(&Value) -> bool,
+    ) -> Option<BTreeSet<disk::DiskPos>> {
+        use FieldMapping as M;
+        let decode = match self.mappings.properties.get(field)? {
+            M::Long | M::Integer | M::Short | M::Byte | M::Date { .. } => Value::from,
+            // a sortable long: flipping the non-sign bits of negatives is its own inverse
+            M::Double => |v: i64| Value::from(f64::from_bits((v ^ ((v >> 63) & i64::MAX)) as u64)),
+            _ => return None,
+        };
+        Some(self.disk.as_ref().map_or_else(BTreeSet::new, |d| {
+            d.number_docs(field, |v| keep(&decode(v)))
+        }))
+    }
+
     fn supersede(&mut self, old: Value) {
         self.superseded.push(old);
         // superseded / (live + superseded) > 1/3

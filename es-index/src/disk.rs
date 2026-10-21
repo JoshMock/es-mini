@@ -139,6 +139,24 @@ impl Shard {
         out
     }
 
+    /// The docs with a value of numeric `field` that `keep` accepts, from doc values, and every
+    /// doc of a segment without readable doc values for the field. Some may no longer be live.
+    // ponytail: decodes the whole doc values column; walk the points tree if that shows up
+    pub(crate) fn number_docs(&self, field: &str, keep: impl Fn(i64) -> bool) -> BTreeSet<DiskPos> {
+        let mut out = BTreeSet::new();
+        for (s, seg) in self.segments.iter().enumerate() {
+            match seg.doc_values(field) {
+                Ok(DocValues::Numbers(n)) => out.extend(
+                    (n.iter().enumerate())
+                        .filter(|(_, v)| v.iter().any(|v| keep(*v)))
+                        .map(|(d, _)| (s, d)),
+                ),
+                _ => out.extend((0..seg.max_doc()).map(|d| (s, d))),
+            }
+        }
+        out
+    }
+
     /// The live documents at a position `keep` accepts, segment by segment, read a chunk at a
     /// time; chunks without such documents are not read.
     pub(crate) fn docs<'a: 'k, 'k>(

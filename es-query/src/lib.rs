@@ -164,6 +164,16 @@ fn int(v: &Value) -> Option<i64> {
     v.as_i64().or_else(|| v.as_str()?.parse().ok())
 }
 
+/// Whether a value passes a range query's `[gt, gte, lt, lte]` bounds, given how it compares
+/// with a bound.
+fn in_range(bounds: [Option<&Value>; 4], cmp: impl Fn(&Value) -> Ordering) -> bool {
+    let [gt, gte, lt, lte] = bounds;
+    gt.is_none_or(|b| cmp(b).is_gt())
+        && gte.is_none_or(|b| cmp(b).is_ge())
+        && lt.is_none_or(|b| cmp(b).is_lt())
+        && lte.is_none_or(|b| cmp(b).is_le())
+}
+
 fn scalar_cmp(a: &Value, b: &Value) -> Ordering {
     if let (Some(x), Some(y)) = (int(a), int(b))
         && (!a.is_string() || !b.is_string())
@@ -296,7 +306,17 @@ impl<'a> Searcher<'a> {
     /// The on-disk documents `q` can match, from postings; `None` if it cannot narrow them.
     fn candidates(&self, q: &Query) -> Option<BTreeSet<DiskPos>> {
         match q {
+            Query::Term { field, value } if self.kind(field).0 == Kind::Number => {
+                self.number_docs(field, [None, Some(value), None, Some(value)])
+            }
             Query::Term { field, value } => Some(self.term_docs(field, &[text(value)], true)),
+            Query::Range {
+                field,
+                gt,
+                gte,
+                lt,
+                lte,
+            } => self.number_docs(field, [gt, gte, lt, lte].map(Option::as_ref)),
             Query::Match { field, query, and } => {
                 let (kind, _) = self.kind(field);
                 Some(self.term_docs(field, &query_terms(kind, query), *and))
@@ -344,6 +364,32 @@ impl<'a> Searcher<'a> {
         });
         let first = sets.next().unwrap_or_default();
         sets.fold(first, |a, b| if all { &a & &b } else { &a | &b })
+    }
+
+    /// The on-disk documents whose doc values of numeric or date `field` are within `bounds`
+    /// (see [`in_range`]); `None` for other fields.
+    fn number_docs(&self, field: &str, bounds: [Option<&Value>; 4]) -> Option<BTreeSet<DiskPos>> {
+        let instant = self.instant(field);
+        self.index.disk_numbers(field, |v| {
+            in_range(bounds, |b| match &instant {
+                None => scalar_cmp(v, b),
+                // as scoring does, a bound that is not a date is above every value
+                Some(instant) => {
+                    (v.as_i64().zip(instant(b))).map_or(Ordering::Less, |(x, y)| x.cmp(&y))
+                }
+            })
+        })
+    }
+
+    /// For a date field, how it reads a value as epoch millis.
+    fn instant(&self, field: &str) -> Option<impl Fn(&Value) -> Option<i64> + 'a> {
+        match self.index.mappings.properties.get(field)? {
+            FieldMapping::Date { format, locale } => Some(move |v: &Value| match format {
+                Some(_) => parse_dated(v, locale.as_deref().unwrap_or("en")),
+                None => parse_date_millis(v),
+            }),
+            _ => None,
+        }
     }
 
     /// The documents the query may match: all in memory, and on disk those its postings allow.
@@ -415,29 +461,18 @@ impl<'a> Searcher<'a> {
                 lte,
             } => {
                 let (_, path) = self.kind(field);
-                let date = match self.index.mappings.properties.get(field) {
-                    Some(FieldMapping::Date { format, locale }) => Some((format, locale)),
-                    _ => None,
-                };
-                let instant = |v: &Value| match date {
-                    Some((Some(_), locale)) => parse_dated(v, locale.as_deref().unwrap_or("en")),
-                    _ => parse_date_millis(v),
-                };
-                let cmp = |a: &Value, b: &Value| match date {
+                let instant = self.instant(field);
+                let cmp = |a: &Value, b: &Value| match &instant {
                     None => scalar_cmp(a, b),
-                    Some(_) => match (instant(a), instant(b)) {
+                    Some(instant) => match (instant(a), instant(b)) {
                         (Some(x), Some(y)) => x.cmp(&y),
                         _ => Ordering::Less,
                     },
                 };
-                let scalar_cmp = cmp;
-                let ok = |v: &Value| {
-                    gt.as_ref().is_none_or(|b| scalar_cmp(v, b).is_gt())
-                        && gte.as_ref().is_none_or(|b| scalar_cmp(v, b).is_ge())
-                        && lt.as_ref().is_none_or(|b| scalar_cmp(v, b).is_lt())
-                        && lte.as_ref().is_none_or(|b| scalar_cmp(v, b).is_le())
-                };
-                values(&d.source, path).into_iter().any(ok).then_some(1.0)
+                let bounds = [gt, gte, lt, lte].map(Option::as_ref);
+                (values(&d.source, path).into_iter())
+                    .any(|v| in_range(bounds, |b| cmp(v, b)))
+                    .then_some(1.0)
             }
             Query::Bool {
                 must,
@@ -881,5 +916,53 @@ mod tests {
             "minimum_should_match": 1,
         }});
         assert_eq!(read(bool), "20,30");
+    }
+
+    #[test]
+    fn range_and_number_queries_on_an_opened_index_read_only_the_docs_their_doc_values_hold() {
+        let dir = std::env::temp_dir().join(format!("esm-ranges-{}", std::process::id()));
+        let mut ix = Index::default();
+        let props = &mut ix.mappings.properties;
+        props.insert("n".into(), FieldMapping::Long);
+        props.insert("price".into(), FieldMapping::Double);
+        let date = FieldMapping::Date {
+            format: None,
+            locale: None,
+        };
+        props.insert("when".into(), date);
+        for i in 0..50 {
+            let doc = json!({"n": i, "price": i as f64 * 0.5, "when": format!("20{i:02}-01-01")});
+            ix.put(&i.to_string(), doc);
+        }
+        disk::save(&dir, &Indices::from([("i".to_owned(), ix)])).unwrap();
+        let opened = disk::open(&dir).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let ix = &opened["i"];
+        let read = |q: Value| {
+            let q = parse_query(&q).unwrap();
+            let on_disk = Searcher::new(ix, &q).candidates(&q).expect("narrowed");
+            let mut ids: Vec<_> = ix.docs_at(Some(&on_disk)).map(|(id, _)| id).collect();
+            ids.sort_by_key(|id| id.parse::<u32>().unwrap());
+            ids.join(",")
+        };
+        assert_eq!(
+            read(json!({"range": {"n": {"gte": 45, "lt": 48}}})),
+            "45,46,47"
+        );
+        assert_eq!(
+            read(json!({"range": {"price": {"gt": 2, "lte": "3.0"}}})),
+            "5,6"
+        );
+        assert_eq!(
+            read(json!({"range": {"when": {"gte": "2047-06-01"}}})),
+            "48,49"
+        );
+        assert_eq!(read(json!({"term": {"n": 7}})), "7");
+        assert_eq!(read(json!({"term": {"price": "1.5"}})), "3");
+        let bool = json!({"bool": {"filter": [
+            {"range": {"n": {"lt": 10}}},
+            {"range": {"price": {"gte": 4}}},
+        ]}});
+        assert_eq!(read(bool), "8,9");
     }
 }
