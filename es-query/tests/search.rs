@@ -415,6 +415,16 @@ fn terms_matches_any_value_with_constant_score() {
 }
 
 #[test]
+fn constant_score_filters_with_score_one() {
+    let q = json!({"query": {"constant_score": {"filter": {"term": {"tag": "animal"}}}}});
+    let got = ids(q.clone());
+    assert!(!got.is_empty());
+    let idx = index();
+    let r = search(&idx, &SearchRequest::parse(&q).unwrap());
+    assert!(r.hits.iter().all(|h| h.score == Some(1.0)));
+}
+
+#[test]
 fn ids_matches_document_ids() {
     assert_eq!(
         sorted(ids(json!({"query": {"ids": {"values": ["2", "3", "9"]}}}))),

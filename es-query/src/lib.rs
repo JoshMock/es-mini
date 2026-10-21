@@ -208,6 +208,21 @@ pub fn parse_query(v: &Value) -> Result<Query, String> {
                 .ok_or("[terms] query does not support lookup or non-array values")?;
             Ok(constant_score_any(field, vals))
         }
+        "constant_score" => {
+            let o = body.as_object().ok_or("[constant_score] query malformed")?;
+            check_keys("constant_score", o, &["filter", "boost", "_name"])?;
+            let filter = o
+                .get("filter")
+                .ok_or("[constant_score] requires a 'filter' element")?;
+            // ponytail: boost is ignored, so the score is always 1.0
+            Ok(Query::Bool {
+                must: vec![Query::MatchAll],
+                should: vec![],
+                must_not: vec![],
+                filter: vec![parse_query(filter)?],
+                min_should: 0,
+            })
+        }
         "ids" => {
             let o = body.as_object().ok_or("[ids] query malformed")?;
             check_keys("ids", o, &["values", "boost", "_name"])?;
