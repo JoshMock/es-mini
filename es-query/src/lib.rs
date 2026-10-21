@@ -779,6 +779,23 @@ fn with_filter(q: &Query, filter: Option<&Value>) -> Result<Query, String> {
     })
 }
 
+/// ES refuses to sort on a `text` field (fielddata is off by default).
+pub fn check_sortable(targets: &[Target], req: &SearchRequest) -> Result<(), String> {
+    for f in &req.sort {
+        for (_, index, _) in targets {
+            if let Some(FieldMapping::Text | FieldMapping::TextKeyword { .. }) =
+                index.mappings.properties.get(&f.field)
+            {
+                return Err(format!(
+                    "Text fields are not optimised for operations that require per-document field data like aggregations and sorting, so these operations are disabled by default. Please use a keyword field instead. Alternatively, set fielddata=true on [{}] in order to load field data by uninverting the inverted index. Note that this can use significant memory.",
+                    f.field
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn search<'a>(index: &'a Index, req: &SearchRequest) -> SearchResult<'a> {
     search_many(&[("", index, None)], req).expect("no alias filter to parse")
 }

@@ -315,3 +315,16 @@ fn minimum_should_match_accepts_elasticsearch_specs() {
         assert_eq!(msm(spec.clone()), want, "{spec}");
     }
 }
+
+#[test]
+fn sorting_on_a_text_field_is_refused() {
+    let mut i = Index::default();
+    i.mappings.properties.insert("t".into(), FieldMapping::Text);
+    i.put("1", json!({"t": "a"}));
+    let targets = [("i", &i, None)];
+    let req = SearchRequest::parse(&json!({"sort": ["t"]})).unwrap();
+    let e = es_query::check_sortable(&targets, &req).unwrap_err();
+    assert!(e.starts_with("Text fields are not optimised"), "{e}");
+    let ok = SearchRequest::parse(&json!({"sort": ["_score"]})).unwrap();
+    assert!(es_query::check_sortable(&targets, &ok).is_ok());
+}

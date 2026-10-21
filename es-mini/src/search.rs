@@ -144,6 +144,7 @@ pub async fn search(
             )));
         }
     }
+    es_query::check_sortable(&targets, &req).map_err(AppError::IllegalArgument)?;
     let r = es_query::search_many(&targets, &req).map_err(AppError::ParsingException)?;
     let hits: Vec<Value> = r
         .hits
