@@ -317,7 +317,7 @@ fn read_si(dir: &Path, name: &str, id: &[u8; ID_LEN]) -> Result<SegmentInfo> {
     })
 }
 
-pub(crate) fn radix36(mut n: u64) -> String {
+pub fn radix36(mut n: u64) -> String {
     let mut s = Vec::new();
     loop {
         s.push(char::from_digit((n % 36) as u32, 36).expect("digit < 36"));

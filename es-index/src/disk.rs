@@ -387,9 +387,8 @@ pub fn recover(data_dir: &Path) -> es_codec::Result<()> {
 /// Replaces `data_dir` with a snapshot of `indices` without ever leaving it half-written: the
 /// snapshot is built beside it, then swapped in by two renames that [`recover`] can complete.
 /// Other top-level entries (an Elasticsearch node's `nodes/`, `node.lock`, ...) carry over.
-/// Saves are serialized process-wide.
-// ponytail: rewrites every index on every save, O(total docs) per write; incremental segments
-// when write throughput matters
+/// Saves are serialized process-wide. Each index's previous segments are hard-linked, not
+/// rewritten: a save writes one new segment of the documents changed since the last save.
 pub fn save(data_dir: &Path, indices: &Indices) -> es_codec::Result<()> {
     static SAVING: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _one_at_a_time = SAVING
@@ -406,7 +405,7 @@ pub fn save(data_dir: &Path, indices: &Indices) -> es_codec::Result<()> {
             }
         }
     }
-    write_snapshot(&new, indices)?;
+    write_snapshot(&new, indices, data_dir)?;
     if data_dir.exists() {
         std::fs::rename(data_dir, &old).map_err(io)?;
     }
@@ -414,16 +413,159 @@ pub fn save(data_dir: &Path, indices: &Indices) -> es_codec::Result<()> {
     remove_dir_if_exists(&old)
 }
 
-/// Writes cluster metadata plus, per index, one segment holding every live document's `_id`,
-/// `_source`, `_version` and `_seq_no` into the empty directory `data_dir`.
-fn write_snapshot(data_dir: &Path, indices: &Indices) -> es_codec::Result<()> {
+/// Marks the segments es-mini writes, the only ones a later save reuses: Elasticsearch indexes
+/// some fields differently (`_seq_no` points, text positions) and Lucene rejects a field with
+/// two schemas, so an Elasticsearch-written index is rewritten whole on its first save.
+const WRITER: (&str, &str) = ("es-mini.writer", "1");
+
+// ponytail: an index with this many segments is rewritten as one, a crude stand-in for Lucene's
+// TieredMergePolicy; merge segments selectively if the periodic O(docs) rewrite shows up
+const MAX_SEGMENTS: usize = 10;
+
+fn link(from: &Path, to: &Path) -> es_codec::Result<()> {
+    std::fs::hard_link(from, to)
+        .or_else(|_| std::fs::copy(from, to).map(drop))
+        .map_err(io)
+}
+
+/// Carries the previous commit of an index (in `prev`) over to `dir`: segments that still hold
+/// a live doc are hard-linked, with docs that `ix` replaced or deleted marked in new live docs.
+/// Returns that commit and the ids whose saved copy is current, or `None` when the index must be
+/// written whole (no readable previous commit, too many segments, or not written by es-mini).
+fn reuse_segments(
+    prev: &Path,
+    dir: &Path,
+    ix: &Index,
+) -> es_codec::Result<Option<(SegmentInfos, HashSet<String>)>> {
+    use es_codec::{live_docs::write_liv, segment_infos::radix36};
+    let Ok(mut infos) = SegmentInfos::read_latest(prev) else {
+        return Ok(None);
+    };
+    let ours = |s: &es_codec::SegmentCommitInfo| {
+        s.info.diagnostics.get(WRITER.0).map(String::as_str) == Some(WRITER.1)
+    };
+    if infos.segments.len() >= MAX_SEGMENTS || !infos.segments.iter().all(ours) {
+        return Ok(None);
+    }
+    let mut current = HashSet::new();
+    let mut kept = vec![];
+    for mut seg in std::mem::take(&mut infos.segments) {
+        let r = SegmentReader::open(prev, seg.clone())?;
+        let seq_nos = longs(&r, "_seq_no");
+        let mut live = r.live_docs()?;
+        let dead_before = live.iter().filter(|l| !**l).count();
+        for t in r.terms("_id")? {
+            let id = decode_id(&t.term);
+            for doc in t.docs.iter().map(|d| d.0 as usize) {
+                if !live[doc] {
+                    continue;
+                }
+                let saved = seq_nos.get(doc).copied().flatten();
+                if ix.get(&id).is_some_and(|d| Some(d.seq_no as i64) == saved) {
+                    current.insert(id.clone());
+                } else {
+                    live[doc] = false;
+                }
+            }
+        }
+        let dead = live.iter().filter(|l| !**l).count();
+        if dead == live.len() {
+            continue;
+        }
+        for f in seg.info.files.iter().filter(|f| !f.ends_with(".si")) {
+            link(&prev.join(f), &dir.join(f))?;
+        }
+        let liv = |g: i64| format!("{}_{}.liv", seg.name, radix36(g as u64));
+        if dead > dead_before {
+            seg.del_gen = seg.del_gen.max(0) + 1;
+            seg.del_count = dead as i32;
+            let bytes = write_liv(&live, &seg.info.id, seg.del_gen);
+            es_codec::write_file_atomic(&dir.join(liv(seg.del_gen)), &bytes)?;
+        } else if seg.del_gen != -1 {
+            link(&prev.join(liv(seg.del_gen)), &dir.join(liv(seg.del_gen)))?;
+        }
+        kept.push(seg);
+    }
+    infos.segments = kept;
+    Ok(Some((infos, current)))
+}
+
+/// Writes segment number `counter` of `dir` holding `docs`' `_id`, `_source`, `_version`,
+/// `_seq_no` and mapped fields.
+fn write_docs(
+    dir: &Path,
+    counter: i64,
+    docs: &[(&str, &Document)],
+    mappings: &Mappings,
+    fields: &[es_codec::field_infos::FieldInfo],
+) -> es_codec::Result<es_codec::SegmentCommitInfo> {
+    use es_codec::{
+        segment_infos::radix36,
+        segment_writer::{NewSegment, write_segment},
+        terms::TermPostings,
+        uid::encode_id,
+    };
+    let stored: Vec<_> = docs
+        .iter()
+        .map(|(id, d)| {
+            vec![
+                (0, StoredValue::Bytes(encode_id(id))),
+                (1, StoredValue::Bytes(d.source.to_string().into_bytes())),
+            ]
+        })
+        .collect();
+    let col = |f: fn(&Document) -> u64| docs.iter().map(|(_, d)| f(d) as i64).collect();
+    let numeric = [
+        (2, col(|d| d.version)),
+        (3, col(|d| d.seq_no)),
+        (4, vec![1; docs.len()]),
+        (5, vec![]),
+    ];
+    let mut ids: Vec<_> = docs
+        .iter()
+        .enumerate()
+        .map(|(i, (id, _))| (encode_id(id), i as u32))
+        .collect();
+    ids.sort();
+    let ids = TermPostings::from_sorted(ids);
+    let user = user_fields(mappings, docs, fields);
+    let mut all_fields = fields.to_vec();
+    all_fields.extend(user.fields);
+    let mut terms = vec![(0, ids)];
+    terms.extend(user.terms);
+    // Unique per segment of an index; the first is the `[7; 16]` earlier saves always used.
+    let mut id = [7; 16];
+    id[8..].copy_from_slice(&(0x0707_0707_0707_0707 + counter as u64).to_be_bytes());
+    let mut seg = write_segment(
+        dir,
+        &NewSegment {
+            name: &format!("_{}", radix36(counter as u64)),
+            id,
+            max_doc: docs.len() as i32,
+            fields: &all_fields,
+            stored: &stored,
+            numeric: &numeric,
+            sorted_numeric: &user.sorted_numeric,
+            keyword: &user.keyword,
+            norms: &user.norms,
+            terms: &terms,
+            points: &user.points,
+        },
+    )?;
+    seg.info
+        .diagnostics
+        .insert(WRITER.0.into(), WRITER.1.into());
+    Ok(seg)
+}
+
+/// Writes cluster metadata plus every index's shard into the empty directory `data_dir`,
+/// reusing the segments of the snapshot at `prev` (see [`reuse_segments`]).
+fn write_snapshot(data_dir: &Path, indices: &Indices, prev: &Path) -> es_codec::Result<()> {
     use es_codec::{
         cluster_state::{GlobalMetadata, IndexMetadata},
         data_dir::write_empty_data_dir,
         segment_infos::shard_user_data,
-        segment_writer::{NewSegment, es_meta_fields, write_segment},
-        terms::TermPostings,
-        uid::encode_id,
+        segment_writer::es_meta_fields,
     };
     let uuid = |name: &str| {
         let h = name.bytes().fold(0xcbf29ce484222325u64, |h, b| {
@@ -464,73 +606,46 @@ fn write_snapshot(data_dir: &Path, indices: &Indices) -> es_codec::Result<()> {
     fields[3].point_index_dimensions = 0;
     fields[3].point_num_bytes = 0;
     for (meta, ix) in metas.iter().zip(indices.values()) {
-        let mut docs: Vec<_> = ix.docs().collect();
-        if docs.is_empty() {
-            continue;
-        }
-        docs.sort_by_key(|(_, d)| d.seq_no);
-        let dir = data_dir.join("indices").join(&meta.uuid).join("0/index");
-        let stored: Vec<_> = docs
-            .iter()
-            .map(|(id, d)| {
-                vec![
-                    (0, StoredValue::Bytes(encode_id(id))),
-                    (1, StoredValue::Bytes(d.source.to_string().into_bytes())),
-                ]
-            })
-            .collect();
-        let col = |f: fn(&Document) -> u64| docs.iter().map(|(_, d)| f(d) as i64).collect();
-        let numeric = [
-            (2, col(|d| d.version)),
-            (3, col(|d| d.seq_no)),
-            (4, vec![1; docs.len()]),
-            (5, vec![]),
-        ];
-        let mut ids: Vec<_> = docs
-            .iter()
-            .enumerate()
-            .map(|(i, (id, _))| (encode_id(id), i as u32))
-            .collect();
-        ids.sort();
-        let ids = TermPostings::from_sorted(ids);
-        let user = user_fields(&ix.mappings, &docs, &fields);
-        let mut all_fields = fields.clone();
-        all_fields.extend(user.fields);
-        let mut terms = vec![(0, ids)];
-        terms.extend(user.terms);
-        let seg = write_segment(
-            &dir,
-            &NewSegment {
-                name: "_0",
-                id: [7; 16],
-                max_doc: docs.len() as i32,
-                fields: &all_fields,
-                stored: &stored,
-                numeric: &numeric,
-                sorted_numeric: &user.sorted_numeric,
-                keyword: &user.keyword,
-                norms: &user.norms,
-                terms: &terms,
-                points: &user.points,
-            },
-        )?;
-        let max_seq = docs.last().map_or(-1, |(_, d)| d.seq_no as i64);
-        SegmentInfos {
-            id: [1; 16],
-            generation: 2,
-            lucene_version: es_codec::segment_infos::LUCENE_VERSION,
-            index_created_major: 10,
-            version: 2,
-            counter: 1,
-            segments: vec![seg],
-            user_data: shard_user_data(
-                "esminiHistoryUuid0000A",
-                "esminiTranslogUuid000A",
-                max_seq,
-                max_seq,
+        let shard = |root: &Path| root.join("indices").join(&meta.uuid).join("0/index");
+        let dir = shard(data_dir);
+        let (mut infos, current) = match reuse_segments(&shard(prev), &dir, ix)? {
+            Some(reused) => reused,
+            None => (
+                SegmentInfos {
+                    id: [1; 16],
+                    generation: 1,
+                    lucene_version: es_codec::segment_infos::LUCENE_VERSION,
+                    index_created_major: 10,
+                    version: 1,
+                    counter: 0,
+                    segments: vec![],
+                    user_data: Default::default(),
+                },
+                HashSet::new(),
             ),
+        };
+        let mut docs: Vec<_> = ix.docs().filter(|(id, _)| !current.contains(*id)).collect();
+        if !docs.is_empty() {
+            docs.sort_by_key(|(_, d)| d.seq_no);
+            infos.segments.push(write_docs(
+                &dir,
+                infos.counter,
+                &docs,
+                &ix.mappings,
+                &fields,
+            )?);
+            infos.counter += 1;
         }
-        .write(&dir)?;
+        let max_seq = ix.docs().map(|(_, d)| d.seq_no as i64).max().unwrap_or(-1);
+        infos.generation += 1;
+        infos.version += 1;
+        infos.user_data = shard_user_data(
+            "esminiHistoryUuid0000A",
+            "esminiTranslogUuid000A",
+            max_seq,
+            max_seq,
+        );
+        infos.write(&dir)?;
         let cp = es_codec::translog::Checkpoint {
             generation: 1,
             global_checkpoint: max_seq,
