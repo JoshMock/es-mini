@@ -316,12 +316,12 @@ async fn malformed_document_source_is_document_parsing_exception() {
 
 #[tokio::test]
 async fn unknown_route_and_method_errors() {
-    let (status, body) = call("GET", "/_no_such_endpoint/x/y").await;
+    // Elasticsearch 9.5.5 answers with a bare string error and no `status` field.
+    let (status, body) = call("GET", "/_no_such_endpoint/x/y?foo=bar").await;
     assert_eq!(status, 400);
-    assert_eq!(body["error"]["type"], "illegal_argument_exception");
     assert_eq!(
-        body["error"]["reason"],
-        "no handler found for uri [/_no_such_endpoint/x/y] and method [GET]"
+        body,
+        json!({"error": "no handler found for uri [/_no_such_endpoint/x/y?foo=bar] and method [GET]"})
     );
     let (status, _) = call("DELETE", "/_search").await;
     assert_eq!(status, 405);

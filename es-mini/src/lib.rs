@@ -303,12 +303,14 @@ fn router(state: AppState) -> Router {
             put(docs::create).post(docs::create),
         )
         .route("/{index}/_update/{id}", post(docs::update))
+        // Like Java's `RestController.handleBadRequest`: a bare string error, no `status` field.
         .fallback(
             |method: axum::http::Method, uri: axum::http::Uri| async move {
-                AppError::IllegalArgument(format!(
-                    "no handler found for uri [{}] and method [{method}]",
-                    uri.path()
-                ))
+                let error = format!("no handler found for uri [{uri}] and method [{method}]");
+                (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": error })),
+                )
             },
         )
         .with_state(state)
