@@ -101,3 +101,48 @@ async fn a_write_that_cannot_be_saved_fails() {
             .contains("not saved")
     );
 }
+
+#[tokio::test]
+async fn writes_whose_path_ends_like_a_read_endpoint_survive_restart() {
+    let dir = std::env::temp_dir().join(format!("esm-persist-suffix-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let app = es_mini::app_persisted(&dir).unwrap();
+    call(&app, "PUT", "/my_query", json!({})).await;
+    call(&app, "PUT", "/my_query/_doc/my_count", json!({"n": 1})).await;
+    call(&app, "PUT", "/my_query/_doc/x_search", json!({"n": 2})).await;
+    drop(app);
+    let app = es_mini::app_persisted(&dir).unwrap();
+    call(&app, "DELETE", "/my_query/_doc/x_search", json!({})).await;
+    drop(app);
+
+    let app = es_mini::app_persisted(&dir).unwrap();
+    let doc = call(&app, "GET", "/my_query/_doc/my_count", json!({})).await;
+    assert_eq!(doc["_source"], json!({"n": 1}));
+    let doc = call(&app, "GET", "/my_query/_doc/x_search", json!({})).await;
+    assert_eq!(doc["found"], false);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn posted_reads_do_not_save() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = std::env::temp_dir().join(format!("esm-persist-reads-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let app = es_mini::app_persisted(&root.join("data")).unwrap();
+    call(&app, "PUT", "/idx", json!({})).await;
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let mut statuses = vec![];
+    for uri in ["/idx/_search", "/_search", "/idx/_count", "/_count"] {
+        let req = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        statuses.push(app.clone().oneshot(req).await.unwrap().status());
+    }
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(statuses.iter().all(|s| s.is_success()), "{statuses:?}");
+}

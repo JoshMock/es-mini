@@ -132,11 +132,13 @@ pub fn app_persisted(dir: &std::path::Path) -> Result<Router, String> {
         move |req: axum::extract::Request, next: axum::middleware::Next| {
             let (dir, state) = (dir.clone(), saved.clone());
             async move {
-                let path = req.uri().path().to_owned();
+                let route = req.extensions().get::<axum::extract::MatchedPath>();
                 let reads = req.method().is_safe()
-                    || ["_search", "_count", "_query"]
-                        .iter()
-                        .any(|r| path.ends_with(r));
+                    || route.is_some_and(|r| {
+                        ["/_search", "/_count", "/_query"]
+                            .iter()
+                            .any(|s| r.as_str().ends_with(s))
+                    });
                 let res = next.run(req).await;
                 if reads || !res.status().is_success() {
                     return res;
