@@ -339,3 +339,26 @@ async fn get_source_errors_match_elasticsearch() {
         "Validation Failed: 1: fetching source can not be disabled;"
     );
 }
+
+#[tokio::test]
+async fn refresh_without_an_index_refreshes_every_index() {
+    let app = app();
+    for idx in ["a", "b"] {
+        let settings = json!({"settings": {"refresh_interval": "-1"}});
+        call(&app, Method::PUT, &format!("/{idx}"), Some(settings)).await;
+        call(
+            &app,
+            Method::PUT,
+            &format!("/{idx}/_doc/1"),
+            Some(json!({})),
+        )
+        .await;
+    }
+    for method in [Method::POST, Method::GET] {
+        let (s, r) = call(&app, method, "/_refresh", None).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(r["_shards"]["successful"], 2);
+    }
+    let (_, r) = call(&app, Method::GET, "/b/_doc/1?realtime=false", None).await;
+    assert_eq!(r["found"], true);
+}

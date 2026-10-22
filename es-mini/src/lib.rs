@@ -290,6 +290,10 @@ fn router(state: AppState) -> Router {
             "/{index}/_refresh",
             get(indices::refresh).post(indices::refresh),
         )
+        .route(
+            "/_refresh",
+            get(indices::refresh_all).post(indices::refresh_all),
+        )
         .route("/{index}/_mapping", get(indices::get_mapping))
         .route("/_mapping", get(indices::get_all_mappings))
         .route("/_query", post(search::esql))

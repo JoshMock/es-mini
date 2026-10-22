@@ -283,6 +283,14 @@ pub async fn head(State(state): State<AppState>, Path(name): Path<String>) -> St
     }
 }
 
+pub async fn refresh_all(
+    state: State<AppState>,
+    uri: Uri,
+    params: Query<HashMap<String, String>>,
+) -> Result<Json<Value>, AppError> {
+    refresh(state, Path("_all".into()), uri, params).await
+}
+
 pub async fn refresh(
     State(state): State<AppState>,
     Path(name): Path<String>,
