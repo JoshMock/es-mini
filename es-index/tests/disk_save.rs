@@ -28,12 +28,26 @@ fn source_of(dir: &std::path::Path) -> serde_json::Value {
 
 #[test]
 fn failed_save_keeps_the_previous_snapshot() {
+    // A document write commits in place: a read-only shard directory makes it fail.
     let root = scratch("fail");
     let dir = root.join("data");
     disk::save(&dir, &one_doc(json!({"v": 1}))).unwrap();
-    // A read-only parent makes the new snapshot impossible to write.
+    let meta = es_codec::cluster_state::read_indices(&dir).unwrap();
+    let shard = dir.join("indices").join(&meta[0].uuid).join("0/index");
+    // A real update: the same index with a newer version (and seq_no) of the doc.
+    let mut updated = one_doc(json!({"v": 1}));
+    updated.get_mut("idx").unwrap().put("1", json!({"v": 2}));
+    fs::set_permissions(&shard, fs::Permissions::from_mode(0o555)).unwrap();
+    let result = disk::save(&dir, &updated);
+    fs::set_permissions(&shard, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(result.is_err());
+    assert_eq!(source_of(&dir), json!({"v": 1}));
+
+    // Creating an index rebuilds the directory beside it: a read-only parent makes that fail.
+    let mut more = one_doc(json!({"v": 1}));
+    more.insert("other".into(), Default::default());
     fs::set_permissions(&root, fs::Permissions::from_mode(0o555)).unwrap();
-    let result = disk::save(&dir, &one_doc(json!({"v": 2})));
+    let result = disk::save(&dir, &more);
     fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
     assert!(result.is_err());
     assert_eq!(source_of(&dir), json!({"v": 1}));

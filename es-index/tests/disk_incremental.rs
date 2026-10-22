@@ -168,3 +168,104 @@ fn writes_replace_and_delete_documents_served_from_disk() {
     let one = back["idx"].get("1").unwrap();
     assert_eq!((one.version, &one.source), (2, &json!({"v": 1, "w": 1})));
 }
+
+mod in_place {
+    use super::*;
+    use std::os::unix::fs::MetadataExt;
+
+    fn ino(p: &Path) -> u64 {
+        std::fs::metadata(p).unwrap().ino()
+    }
+
+    fn two_indices() -> Indices {
+        let mut indices = Indices::new();
+        for name in ["a", "b"] {
+            let ix = indices.entry(name.into()).or_default();
+            ix.settings.record_creation(name);
+            for i in 0..100 {
+                ix.put(&i.to_string(), json!({"n": i}));
+            }
+        }
+        indices
+    }
+
+    fn shard_of(dir: &Path, name: &str) -> PathBuf {
+        let meta = read_indices(dir).unwrap();
+        let m = meta.iter().find(|m| m.name == name).unwrap();
+        dir.join("indices").join(&m.uuid).join("0/index")
+    }
+
+    /// A document write commits into the live directory, Lucene-style, instead of building and
+    /// swapping in a copy of it: the directory and existing segment files stay the same.
+    #[test]
+    fn a_document_write_commits_in_place() {
+        let dir = scratch("inplace");
+        let mut indices = two_indices();
+        disk::save(&dir, &indices).unwrap();
+        let a = shard_of(&dir, "a");
+        let first = commit_at(&a).segments[0].name.clone();
+        let (dir_ino, cfs_ino) = (ino(&dir), ino(&a.join(format!("{first}.cfs"))));
+        indices.get_mut("a").unwrap().put("1", json!({"n": -1}));
+        disk::save(&dir, &indices).unwrap();
+        assert_eq!(ino(&dir), dir_ino, "data directory was replaced");
+        assert_eq!(
+            ino(&a.join(format!("{first}.cfs"))),
+            cfs_ino,
+            "segment was rewritten"
+        );
+        let back = disk::open(&dir).unwrap();
+        assert_eq!(back["a"].get("1").unwrap().source, json!({"n": -1}));
+        // Files of the superseded commit are gone.
+        let commits = std::fs::read_dir(&a).unwrap().filter(|e| {
+            e.as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("segments_")
+        });
+        assert_eq!(commits.count(), 1);
+    }
+
+    #[test]
+    fn an_unchanged_index_is_not_rewritten() {
+        let dir = scratch("untouched");
+        let mut indices = two_indices();
+        disk::save(&dir, &indices).unwrap();
+        let before = commit_at(&shard_of(&dir, "b")).generation;
+        indices.get_mut("a").unwrap().put("1", json!({"n": -1}));
+        disk::save(&dir, &indices).unwrap();
+        assert_eq!(commit_at(&shard_of(&dir, "b")).generation, before);
+    }
+
+    /// A crash mid-commit leaves partial files under names the next commit would use, and maybe
+    /// a temporary segments file; reopening sees the last commit and the next save succeeds.
+    #[test]
+    fn leftovers_of_an_interrupted_commit_are_harmless() {
+        let dir = scratch("leftovers");
+        let mut indices = two_indices();
+        disk::save(&dir, &indices).unwrap();
+        let a = shard_of(&dir, "a");
+        let infos = commit_at(&a);
+        let next = format!(
+            "_{}",
+            es_codec::segment_infos::radix36(infos.counter as u64)
+        );
+        for f in [
+            format!("{next}.cfs"),
+            format!("{next}.si"),
+            format!("segments_{}.tmp", infos.generation + 1),
+        ] {
+            std::fs::write(a.join(f), b"half-written").unwrap();
+        }
+        assert_eq!(disk::open(&dir).unwrap()["a"].docs().count(), 100);
+        indices.get_mut("a").unwrap().put("new", json!({"n": 1}));
+        disk::save(&dir, &indices).unwrap();
+        let back = disk::open(&dir).unwrap();
+        assert_eq!(back["a"].docs().count(), 101);
+        assert_eq!(back["a"].get("new").unwrap().source, json!({"n": 1}));
+    }
+
+    fn commit_at(shard: &Path) -> SegmentInfos {
+        SegmentInfos::read_latest(shard).unwrap()
+    }
+}

@@ -46,9 +46,11 @@ Do not weaken lints or add `#[allow(...)]` to get it passing without stating why
 
 ## Durability
 
-`es_index::disk::save` must never leave a data directory half-written: it builds the snapshot
-beside the directory and swaps it in (`disk::recover` completes interrupted swaps), saves are
-serialized, and a failed save fails the request. Keep those properties in any change to
+`es_index::disk::save` must never leave a data directory half-written. Document-only saves
+commit in place with Lucene's protocol (write-once files under new names, fsynced, then an
+atomically renamed `segments_N`; unreferenced files are deleted after); saves that change
+cluster metadata build the snapshot beside the directory and swap it in (`disk::recover`
+completes interrupted swaps). Saves are serialized, and a failed save fails the request. Keep those properties in any change to
 persistence, and never let a writer panic or silently drop data it cannot encode.
 
 ## Reviewing agent-made changes

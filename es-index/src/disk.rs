@@ -595,6 +595,9 @@ pub fn save(data_dir: &Path, indices: &Indices) -> es_codec::Result<()> {
     let _one_at_a_time = SAVING
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if save_in_place(data_dir, indices)? {
+        return Ok(());
+    }
     let (new, old) = (sibling(data_dir, "new"), sibling(data_dir, "old"));
     remove_dir_if_exists(&new)?;
     std::fs::create_dir_all(&new).map_err(io)?;
@@ -631,13 +634,15 @@ fn link(from: &Path, to: &Path) -> es_codec::Result<()> {
 
 /// Carries the previous commit of an index (in `prev`) over to `dir`: segments that still hold
 /// a live doc are hard-linked, with docs that `ix` replaced or deleted marked in new live docs.
-/// Returns that commit and the ids whose saved copy is current, or `None` when the index must be
-/// written whole (no readable previous commit, too many segments, or not written by es-mini).
+/// When `prev` is `dir` (an in-place commit) segments stay where they are. Returns that commit,
+/// the ids whose saved copy is current, and whether any saved doc was replaced or deleted; or
+/// `None` when the index must be written whole (no readable previous commit, too many segments,
+/// or not written by es-mini).
 fn reuse_segments(
     prev: &Path,
     dir: &Path,
     ix: &Index,
-) -> es_codec::Result<Option<(SegmentInfos, HashSet<String>)>> {
+) -> es_codec::Result<Option<(SegmentInfos, HashSet<String>, bool)>> {
     use es_codec::{live_docs::write_liv, segment_infos::radix36};
     let Ok(mut infos) = SegmentInfos::read_latest(prev) else {
         return Ok(None);
@@ -648,8 +653,10 @@ fn reuse_segments(
     if infos.segments.len() >= MAX_SEGMENTS || !infos.segments.iter().all(ours) {
         return Ok(None);
     }
+    let in_place = prev == dir;
     let mut current = HashSet::new();
     let mut kept = vec![];
+    let mut changed = false;
     for mut seg in std::mem::take(&mut infos.segments) {
         let r = SegmentReader::open(prev, seg.clone())?;
         let seq_nos = longs(&r, "_seq_no");
@@ -673,10 +680,16 @@ fn reuse_segments(
             }
         }
         let dead = live.iter().filter(|l| !**l).count();
+        changed |= dead > dead_before;
         if dead == live.len() {
             continue;
         }
-        for f in seg.info.files.iter().filter(|f| !f.ends_with(".si")) {
+        for f in seg
+            .info
+            .files
+            .iter()
+            .filter(|f| !in_place && !f.ends_with(".si"))
+        {
             link(&prev.join(f), &dir.join(f))?;
         }
         let liv = |g: i64| format!("{}_{}.liv", seg.name, radix36(g as u64));
@@ -684,14 +697,15 @@ fn reuse_segments(
             seg.del_gen = seg.del_gen.max(0) + 1;
             seg.del_count = dead as i32;
             let bytes = write_liv(&live, &seg.info.id, seg.del_gen);
-            es_codec::write_file_atomic(&dir.join(liv(seg.del_gen)), &bytes)?;
-        } else if seg.del_gen != -1 {
+            // Synced into the directory by the commit (`SegmentInfos::write`).
+            es_codec::write_file_new(&dir.join(liv(seg.del_gen)), &bytes)?;
+        } else if seg.del_gen != -1 && !in_place {
             link(&prev.join(liv(seg.del_gen)), &dir.join(liv(seg.del_gen)))?;
         }
         kept.push(seg);
     }
     infos.segments = kept;
-    Ok(Some((infos, current)))
+    Ok(Some((infos, current, changed)))
 }
 
 /// Writes segment number `counter` of `dir` holding `docs`' `_id`, `_source`, `_version`,
@@ -762,22 +776,15 @@ fn write_docs(
     Ok(seg)
 }
 
-/// Writes cluster metadata plus every index's shard into the empty directory `data_dir`,
-/// reusing the segments of the snapshot at `prev` (see [`reuse_segments`]).
-fn write_snapshot(data_dir: &Path, indices: &Indices, prev: &Path) -> es_codec::Result<()> {
-    use es_codec::{
-        cluster_state::{GlobalMetadata, IndexMetadata},
-        data_dir::write_empty_data_dir,
-        segment_infos::shard_user_data,
-        segment_writer::es_meta_fields,
-    };
+/// Cluster metadata for `indices`, as both save paths write it.
+fn metas(indices: &Indices) -> Vec<es_codec::cluster_state::IndexMetadata> {
     let uuid = |name: &str| {
         let h = name.bytes().fold(0xcbf29ce484222325u64, |h, b| {
             (h ^ u64::from(b)).wrapping_mul(0x100000001b3)
         });
         format!("{h:016x}{:06}", name.len() % 1_000_000)
     };
-    let metas: Vec<_> = indices
+    indices
         .iter()
         .map(|(name, ix)| {
             // Indices read from an Elasticsearch directory keep its identity (index.uuid,
@@ -791,86 +798,179 @@ fn write_snapshot(data_dir: &Path, indices: &Indices, prev: &Path) -> es_codec::
             settings
                 .entry("index.version.created".into())
                 .or_insert_with(|| crate::VERSION_CREATED.to_string());
-            IndexMetadata {
+            es_codec::cluster_state::IndexMetadata {
                 name: name.clone(),
                 uuid,
                 settings,
                 mappings: serde_json::to_string(&serde_json::json!({"_doc": ix.mappings})).ok(),
             }
         })
-        .collect();
+        .collect()
+}
+
+fn shard_dir(root: &Path, uuid: &str) -> std::path::PathBuf {
+    root.join("indices").join(uuid).join("0/index")
+}
+
+/// Field infos of the metadata fields es-mini writes.
+fn meta_fields() -> Vec<es_codec::field_infos::FieldInfo> {
+    let mut fields = es_codec::segment_writer::es_meta_fields();
+    fields[3].point_dimensions = 0;
+    fields[3].point_index_dimensions = 0;
+    fields[3].point_num_bytes = 0;
+    fields
+}
+
+/// Commits `ix` into the shard directory `dir`, reusing the commit in `prev` (the same
+/// directory for an in-place commit). An in-place commit of an unchanged index writes nothing,
+/// and afterwards deletes the files no longer referenced. Returns whether it committed.
+fn write_shard(prev: &Path, dir: &Path, ix: &Index) -> es_codec::Result<bool> {
+    use es_codec::segment_infos::{radix36, shard_user_data};
+    let in_place = prev == dir;
+    let (mut infos, current, changed) = match reuse_segments(prev, dir, ix)? {
+        Some(reused) => reused,
+        None => (
+            SegmentInfos {
+                id: [1; 16],
+                generation: 1,
+                lucene_version: es_codec::segment_infos::LUCENE_VERSION,
+                index_created_major: 10,
+                version: 1,
+                counter: 0,
+                segments: vec![],
+                user_data: Default::default(),
+            },
+            HashSet::new(),
+            true,
+        ),
+    };
+    let max_seq = ix.next_seq_no as i64 - 1;
+    let mut owned = unsaved(ix, &current)?;
+    let saved_max = infos
+        .user_data
+        .get("max_seq_no")
+        .and_then(|v| v.parse::<i64>().ok());
+    if in_place && !changed && owned.is_empty() && saved_max == Some(max_seq) {
+        return Ok(false);
+    }
+    owned.sort_by_key(|(_, d)| d.seq_no);
+    let docs: Vec<_> = owned.iter().map(|(id, d)| (*id, &**d)).collect();
+    if !docs.is_empty() {
+        infos.segments.push(write_docs(
+            dir,
+            infos.counter,
+            &docs,
+            &ix.mappings,
+            &meta_fields(),
+        )?);
+        infos.counter += 1;
+    }
+    infos.generation += 1;
+    infos.version += 1;
+    infos.user_data = shard_user_data(
+        "esminiHistoryUuid0000A",
+        "esminiTranslogUuid000A",
+        max_seq,
+        max_seq,
+    );
+    // An index opened from disk continues that shard's history.
+    for key in [
+        "history_uuid",
+        "translog_uuid",
+        "max_unsafe_auto_id_timestamp",
+    ] {
+        if let Some(v) = ix.commit.get(key) {
+            infos.user_data.insert(key.into(), v.clone());
+        }
+    }
+    infos.write(dir)?;
+    let cp = es_codec::translog::Checkpoint {
+        generation: 1,
+        global_checkpoint: max_seq,
+        primary_term: 1,
+    };
+    let (tlog, ckp) = es_codec::translog::write_empty(&infos.user_data["translog_uuid"], &cp);
+    let translog = dir.join("../translog");
+    // The (empty) translog only depends on the translog uuid; the checkpoint changes per commit.
+    if !(in_place && translog.join("translog-1.tlog").is_file()) {
+        es_codec::write_file_atomic(&translog.join("translog-1.tlog"), &tlog)?;
+    }
+    es_codec::write_file_atomic(&translog.join("translog.ckp"), &ckp)?;
+    if in_place {
+        // Like Lucene's IndexFileDeleter: drop the previous commit's files (and leftovers of an
+        // interrupted commit) once the new commit is durable.
+        let mut keep: HashSet<String> =
+            HashSet::from([format!("segments_{}", radix36(infos.generation))]);
+        for seg in &infos.segments {
+            keep.extend(seg.info.files.iter().cloned());
+            if seg.del_gen != -1 {
+                keep.insert(format!("{}_{}.liv", seg.name, radix36(seg.del_gen as u64)));
+            }
+        }
+        for entry in std::fs::read_dir(dir).map_err(io)? {
+            let name = entry
+                .map_err(io)?
+                .file_name()
+                .to_string_lossy()
+                .into_owned();
+            if (name.starts_with('_') || name.starts_with("segments_")) && !keep.contains(&name) {
+                let _ = std::fs::remove_file(dir.join(&name));
+            }
+        }
+    }
+    Ok(true)
+}
+
+/// Commits a save that changes only documents directly into `data_dir`, one shard at a time,
+/// with Lucene's commit protocol (see [`write_shard`]). Returns `false`, having written nothing,
+/// when the save must rebuild the directory instead: no previous save, changed cluster metadata
+/// (indices created, deleted, or reconfigured), or a shard es-mini cannot extend in place.
+// ponytail: each shard commits on its own, so a crash during a write spanning indices (a bulk)
+// can persist some of them, as with Elasticsearch's per-shard commits
+fn save_in_place(data_dir: &Path, indices: &Indices) -> es_codec::Result<bool> {
+    let metas = metas(indices);
+    match read_indices(data_dir) {
+        Ok(saved) if saved == metas => {}
+        _ => return Ok(false),
+    }
+    let mut shards = vec![];
+    for (meta, ix) in metas.iter().zip(indices.values()) {
+        let dir = shard_dir(data_dir, &meta.uuid);
+        let ours = SegmentInfos::read_latest(&dir).is_ok_and(|infos| {
+            infos.segments.len() < MAX_SEGMENTS
+                && infos
+                    .segments
+                    .iter()
+                    .all(|s| s.info.diagnostics.get(WRITER.0).map(String::as_str) == Some(WRITER.1))
+        });
+        if !ours {
+            return Ok(false);
+        }
+        shards.push((dir, ix));
+    }
+    for (dir, ix) in shards {
+        write_shard(&dir, &dir, ix)?;
+    }
+    Ok(true)
+}
+
+/// Writes cluster metadata plus every index's shard into the empty directory `data_dir`,
+/// reusing the segments of the snapshot at `prev` (see [`reuse_segments`]).
+fn write_snapshot(data_dir: &Path, indices: &Indices, prev: &Path) -> es_codec::Result<()> {
+    use es_codec::{cluster_state::GlobalMetadata, data_dir::write_empty_data_dir};
+    let metas = metas(indices);
     let global = GlobalMetadata {
         cluster_uuid: "esminiClusterUuid00A".into(),
         node_id: "esminiNodeId0000000000".into(),
         term: 1,
     };
     write_empty_data_dir(data_dir, &global, &metas)?;
-    let mut fields = es_meta_fields();
-    fields[3].point_dimensions = 0;
-    fields[3].point_index_dimensions = 0;
-    fields[3].point_num_bytes = 0;
     for (meta, ix) in metas.iter().zip(indices.values()) {
-        let shard = |root: &Path| root.join("indices").join(&meta.uuid).join("0/index");
-        let dir = shard(data_dir);
-        let (mut infos, current) = match reuse_segments(&shard(prev), &dir, ix)? {
-            Some(reused) => reused,
-            None => (
-                SegmentInfos {
-                    id: [1; 16],
-                    generation: 1,
-                    lucene_version: es_codec::segment_infos::LUCENE_VERSION,
-                    index_created_major: 10,
-                    version: 1,
-                    counter: 0,
-                    segments: vec![],
-                    user_data: Default::default(),
-                },
-                HashSet::new(),
-            ),
-        };
-        let mut owned = unsaved(ix, &current)?;
-        owned.sort_by_key(|(_, d)| d.seq_no);
-        let docs: Vec<_> = owned.iter().map(|(id, d)| (*id, &**d)).collect();
-        if !docs.is_empty() {
-            infos.segments.push(write_docs(
-                &dir,
-                infos.counter,
-                &docs,
-                &ix.mappings,
-                &fields,
-            )?);
-            infos.counter += 1;
-        }
-        let max_seq = ix.next_seq_no as i64 - 1;
-        infos.generation += 1;
-        infos.version += 1;
-        infos.user_data = shard_user_data(
-            "esminiHistoryUuid0000A",
-            "esminiTranslogUuid000A",
-            max_seq,
-            max_seq,
-        );
-        // An index opened from disk continues that shard's history.
-        for key in [
-            "history_uuid",
-            "translog_uuid",
-            "max_unsafe_auto_id_timestamp",
-        ] {
-            if let Some(v) = ix.commit.get(key) {
-                infos.user_data.insert(key.into(), v.clone());
-            }
-        }
-        infos.write(&dir)?;
-        let cp = es_codec::translog::Checkpoint {
-            generation: 1,
-            global_checkpoint: max_seq,
-            primary_term: 1,
-        };
-        let (tlog, ckp) = es_codec::translog::write_empty(&infos.user_data["translog_uuid"], &cp);
-        let translog = dir.join("../translog");
-        for (name, bytes) in [("translog-1.tlog", tlog), ("translog.ckp", ckp)] {
-            es_codec::write_file_atomic(&translog.join(name), &bytes)?;
-        }
+        write_shard(
+            &shard_dir(prev, &meta.uuid),
+            &shard_dir(data_dir, &meta.uuid),
+            ix,
+        )?;
     }
     Ok(())
 }
