@@ -176,11 +176,12 @@ pub fn app_persisted(dir: &std::path::Path) -> Result<Router, String> {
                 let route = req.extensions().get::<axum::extract::MatchedPath>();
                 let reads = req.method().is_safe()
                     || route.is_some_and(|r| {
-                        ["/_search", "/_count", "/_query", "/_field_caps"]
-                            .iter()
-                            .any(|s| r.as_str().ends_with(s))
-                            || r.as_str().starts_with("/_search/scroll")
-                            || r.as_str().ends_with("/_pit")
+                        let r = r.as_str();
+                        r.contains("/_search")
+                            || r.contains("/_msearch")
+                            || ["/_count", "/_query", "/_field_caps", "/_pit"]
+                                .iter()
+                                .any(|s| r.ends_with(s))
                     });
                 let res = next.run(req).await;
                 if reads || !res.status().is_success() {

@@ -146,3 +146,32 @@ async fn posted_reads_do_not_save() {
     let _ = std::fs::remove_dir_all(&root);
     assert!(statuses.iter().all(|s| s.is_success()), "{statuses:?}");
 }
+
+#[tokio::test]
+async fn posted_template_and_msearch_reads_do_not_save() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = std::env::temp_dir().join(format!("esm-persist-tmpl-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    // No index yet, so any save would have to write the data directory's first state.
+    let app = es_mini::app_persisted(&root.join("data")).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let template = r#"{"source": {"query": {"match_all": {}}}}"#;
+    let mut statuses = vec![];
+    for (uri, body) in [
+        ("/_search/template", template.to_owned()),
+        ("/_msearch", "{}\n{}\n".to_owned()),
+        ("/_msearch/template", format!("{{}}\n{template}\n")),
+    ] {
+        let req = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        statuses.push(app.clone().oneshot(req).await.unwrap().status());
+    }
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(statuses.iter().all(|s| s.is_success()), "{statuses:?}");
+}
