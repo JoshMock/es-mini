@@ -11,6 +11,7 @@ pub mod esql;
 mod hll;
 mod hll_tables;
 mod parse;
+mod tdigest;
 
 pub use parse::{Query, parse_query, parse_query_string};
 
@@ -869,7 +870,7 @@ pub fn search_many<'a>(
                 score,
             ));
         }
-        aggs::reduce(&mut aggs, &collector.stats);
+        aggs::reduce(&mut aggs, collector.stats);
     }
     hits.sort_by(|(pa, a, sa), (pb, b, sb)| {
         let fields = if req.sort.is_empty() {
@@ -901,7 +902,7 @@ pub fn search_many<'a>(
         .flatten();
     Ok(SearchResult {
         aggregations: (!req.aggs.is_empty())
-            .then(|| aggs::render(&req.aggs, &aggs, req.typed_keys)),
+            .then(|| aggs::render(&req.aggs, &mut aggs, req.typed_keys)),
         total: hits.len(),
         max_score,
         hits: hits

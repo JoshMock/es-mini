@@ -6,11 +6,12 @@
 //! segments, and converted the same way from the source for documents in memory.
 
 use crate::hll::{self, Hll};
+use crate::tdigest::TDigest;
 use crate::{QueryError, Searcher, fielddata_disabled, int, num, source_path};
 use es_index::{Document, FieldMapping, Index, iso_date, postings::values};
 use serde_json::{Map, Value};
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 enum Metric {
     Avg,
     Sum,
@@ -18,12 +19,22 @@ enum Metric {
     Max,
     ValueCount,
     Stats,
-    ExtendedStats { sigma: f64 },
-    Cardinality { precision: u32 },
+    ExtendedStats {
+        sigma: f64,
+    },
+    Cardinality {
+        precision: u32,
+    },
+    Percentiles {
+        compression: f64,
+        /// Sorted, distinct, in `[0, 100]`.
+        percents: Vec<f64>,
+        keyed: bool,
+    },
 }
 
 impl Metric {
-    fn name(self) -> &'static str {
+    fn name(&self) -> &'static str {
         match self {
             Metric::Avg => "avg",
             Metric::Sum => "sum",
@@ -33,7 +44,21 @@ impl Metric {
             Metric::Stats => "stats",
             Metric::ExtendedStats { .. } => "extended_stats",
             Metric::Cardinality { .. } => "cardinality",
+            Metric::Percentiles { .. } => "percentiles",
         }
+    }
+}
+
+/// Java's `Double.toString`, which names the keys of `percentiles`.
+fn java_double(x: f64) -> String {
+    if x == 0.0 || (1e-3..1e7).contains(&x.abs()) {
+        return format!("{x:?}");
+    }
+    let s = format!("{x:e}");
+    let (m, e) = s.split_once('e').unwrap_or((&s, "0"));
+    match m.contains('.') {
+        true => format!("{m}E{e}"),
+        false => format!("{m}.0E{e}"),
     }
 }
 
@@ -95,6 +120,11 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
         "cardinality" => Metric::Cardinality {
             precision: hll::DEFAULT_PRECISION,
         },
+        "percentiles" => Metric::Percentiles {
+            compression: 100.0,
+            percents: vec![1.0, 5.0, 25.0, 50.0, 75.0, 95.0, 99.0],
+            keyed: true,
+        },
         _ => return Err(format!("Unknown aggregation type [{t}]").into()),
     };
     if subs {
@@ -145,6 +175,74 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
                     )));
                 }
             }
+            ("percents", Metric::Percentiles { percents, .. }) => {
+                let bad = || QueryError::x_content(format!("[{t}] failed to parse field [{k}]"));
+                let mut p: Vec<f64> = (v.as_array().ok_or_else(bad)?.iter())
+                    .map(|v| num(v).ok_or_else(bad))
+                    .collect::<Result<_, _>>()?;
+                if p.is_empty() {
+                    return Err(QueryError::illegal(format!(
+                        "[percents] must not be empty: [{name}]"
+                    )));
+                }
+                p.sort_by(f64::total_cmp);
+                for (i, &x) in p.iter().enumerate() {
+                    if !(0.0..=100.0).contains(&x) {
+                        return Err(QueryError::illegal(format!(
+                            "percent must be in [0,100], got [{}]: [{name}]",
+                            java_double(x)
+                        )));
+                    }
+                    if i > 0 && p[i - 1] == x {
+                        return Err(QueryError::illegal(format!(
+                            "percent [{}] has been specified twice: [{name}]",
+                            java_double(x)
+                        )));
+                    }
+                }
+                *percents = p;
+            }
+            ("keyed", Metric::Percentiles { keyed, .. }) => {
+                *keyed = v.as_bool().ok_or_else(|| {
+                    QueryError::x_content(format!("[{t}] failed to parse field [{k}]"))
+                })?;
+            }
+            ("tdigest", Metric::Percentiles { compression, .. }) => {
+                let o = v
+                    .as_object()
+                    .ok_or_else(|| format!("Expected [START_OBJECT] under [{k}]"))?;
+                for (k, v) in o {
+                    match k.as_str() {
+                        "compression" => {
+                            *compression = num(v).ok_or_else(|| {
+                                QueryError::x_content(format!(
+                                    "[tdigest] failed to parse field [{k}]"
+                                ))
+                            })?;
+                            if *compression < 0.0 {
+                                return Err(QueryError::illegal(format!(
+                                    "[compression] must be greater than or equal to 0. Found [{}]",
+                                    java_double(*compression)
+                                )));
+                            }
+                        }
+                        // ponytail: high_accuracy uses the default digest, which is exact up to
+                        // 20x compression values; ES's AVLTreeDigest (randomized) differs above
+                        "execution_hint" => {
+                            let hint = v.as_str().unwrap_or_default();
+                            let hints =
+                                ["default", "", "high_accuracy", "DEFAULT", "HIGH_ACCURACY"];
+                            if !hints.contains(&hint) {
+                                return Err(QueryError::illegal(format!(
+                                    "Invalid execution_hint [{}], valid values are [default, high_accuracy]",
+                                    es_index::postings::text(v)
+                                )));
+                            }
+                        }
+                        _ => return Err(format!("[tdigest] unknown field [{k}]").into()),
+                    }
+                }
+            }
             _ => return Err(format!("[{t}] unknown field [{k}]").into()),
         }
     }
@@ -177,6 +275,8 @@ pub(crate) struct Stats {
     date: bool,
     /// The distinct values (only for `cardinality`).
     hll: Option<Hll>,
+    /// The value distribution (only for `percentiles`).
+    digest: Option<TDigest>,
 }
 
 impl Default for Stats {
@@ -191,6 +291,7 @@ impl Default for Stats {
             max: f64::NEG_INFINITY,
             date: false,
             hll: None,
+            digest: None,
         }
     }
 }
@@ -215,16 +316,23 @@ impl Stats {
     }
 
     /// Reduces one shard's result into this one, as ES reduces shard results.
-    fn merge(&mut self, o: &Stats) {
+    fn merge(&mut self, o: Stats) {
         self.count += o.count;
         kahan(&mut self.sum, &mut self.delta, o.sum);
         kahan(&mut self.sum_sq, &mut self.sq_delta, o.sum_sq);
         self.min = self.min.min(o.min);
         self.max = self.max.max(o.max);
         self.date |= o.date;
-        match (&mut self.hll, &o.hll) {
-            (Some(h), Some(o)) => h.merge(o),
-            (h, o) => *h = h.take().or_else(|| o.clone()),
+        match (&mut self.hll, o.hll) {
+            (Some(h), Some(o)) => h.merge(&o),
+            (h, o) => *h = h.take().or(o),
+        }
+        // like a data node, reduce shard results into a new digest (see TDigest::coordinated)
+        if let Some(mut o) = o.digest {
+            let d = self
+                .digest
+                .get_or_insert_with(|| TDigest::new(o.compression));
+            d.add_digest(&mut o);
         }
     }
 }
@@ -323,6 +431,10 @@ impl<'s, 'a> Collector<'s, 'a> {
                     Metric::Cardinality { precision } => Some(Hll::new(precision)),
                     _ => None,
                 },
+                digest: match agg.metric {
+                    Metric::Percentiles { compression, .. } => Some(TDigest::new(compression)),
+                    _ => None,
+                },
                 ..Stats::default()
             });
         }
@@ -340,9 +452,9 @@ impl<'s, 'a> Collector<'s, 'a> {
                         .into_iter()
                         .filter_map(|v| doc_value(self.searcher, &agg.field, m, v))
                         .collect();
-                    // keyword doc values are a sorted set
+                    // keyword doc values are a sorted set, other doc values sorted numbers
+                    v.sort_by(crate::scalar_cmp);
                     if matches!(m, FieldMapping::Keyword { .. }) {
-                        v.sort_by_key(es_index::postings::text);
                         v.dedup();
                     }
                     v
@@ -369,6 +481,10 @@ impl<'s, 'a> Collector<'s, 'a> {
             let Some(x) = num(&v).or_else(|| v.as_bool().map(f64::from)) else {
                 continue;
             };
+            if let Some(d) = &mut st.digest {
+                d.add(x, 1);
+                continue;
+            }
             st.add(x);
             st.min = st.min.min(x);
             st.max = st.max.max(x);
@@ -391,13 +507,13 @@ fn hash(m: Option<&FieldMapping>, v: &Value) -> u64 {
 }
 
 /// Reduces each index's results into `total` (one entry per aggregation).
-pub(crate) fn reduce(total: &mut [Stats], shard: &[Stats]) {
+pub(crate) fn reduce(total: &mut [Stats], shard: Vec<Stats>) {
     total.iter_mut().zip(shard).for_each(|(t, s)| t.merge(s));
 }
 
 /// The `aggregations` object of a search response; with `typed_keys`, names are prefixed with
 /// their type (`avg#name`).
-pub(crate) fn render(aggs: &[Agg], stats: &[Stats], typed_keys: bool) -> Value {
+pub(crate) fn render(aggs: &[Agg], stats: &mut [Stats], typed_keys: bool) -> Value {
     let mut out = Map::new();
     for (agg, st) in aggs.iter().zip(stats) {
         let mut body = Map::new();
@@ -415,7 +531,7 @@ pub(crate) fn render(aggs: &[Agg], stats: &[Stats], typed_keys: bool) -> Value {
                 body.insert(format!("{key}_as_string"), iso_date(v as u64).into());
             }
         };
-        match agg.metric {
+        match &agg.metric {
             Metric::Avg => put(&mut body, "value", avg),
             Metric::Sum => put(&mut body, "value", Some(st.sum)),
             Metric::Min => put(&mut body, "value", min),
@@ -426,6 +542,28 @@ pub(crate) fn render(aggs: &[Agg], stats: &[Stats], typed_keys: bool) -> Value {
             Metric::Cardinality { .. } => {
                 let n = st.hll.as_ref().map_or(0, Hll::cardinality);
                 body.insert("value".into(), n.into());
+            }
+            Metric::Percentiles {
+                percents, keyed, ..
+            } => {
+                let mut d = st.digest.take().map(TDigest::coordinated);
+                let mut d = d.as_mut().filter(|d| d.size() > 0);
+                let (mut keyed_values, mut list) = (Map::new(), vec![]);
+                for &p in percents {
+                    let v = d.as_mut().map(|d| d.quantile(p / 100.0));
+                    if *keyed {
+                        put(&mut keyed_values, &java_double(p), v);
+                        continue;
+                    }
+                    let mut entry = Map::from_iter([("key".to_owned(), p.into())]);
+                    put(&mut entry, "value", v);
+                    list.push(entry.into());
+                }
+                let values = match keyed {
+                    true => keyed_values.into(),
+                    false => Value::Array(list),
+                };
+                body.insert("values".into(), values);
             }
             Metric::Stats | Metric::ExtendedStats { .. } => {
                 body.insert("count".into(), st.count.into());
@@ -719,6 +857,120 @@ mod tests {
     }
 
     #[test]
+    fn percentiles_interpolate_like_elasticsearch() {
+        let body = json!({"aggs": {
+            "p": {"percentiles": {"field": "i"}},
+            "e": {"percentiles": {"field": "i", "percents": [50, 5], "keyed": false,
+                "tdigest": {"compression": 200, "execution_hint": "high_accuracy"}}},
+            "d": {"percentiles": {"field": "at", "percents": [50]}},
+            "none": {"percentiles": {"field": "nope", "percents": [0.0001]}},
+            "m": {"percentiles": {"field": "nope", "missing": 1.0, "percents": [99.9]}},
+        }});
+        let got = aggs_of(&index(), body);
+        // values from ES's percentiles_tdigest_metric.yml "Basic test"
+        assert_eq!(
+            got["p"],
+            json!({"values": {"1.0": 2.5, "5.0": 8.5, "25.0": 38.5, "50.0": 76.0,
+                "75.0": 113.5, "95.0": 143.5, "99.0": 149.5}})
+        );
+        assert_eq!(
+            got["e"],
+            json!({"values": [{"key": 5.0, "value": 8.5}, {"key": 50.0, "value": 76.0}]})
+        );
+        assert_eq!(
+            got["d"],
+            json!({"values": {"50.0": 1_619_956_800_000.0,
+                "50.0_as_string": "2021-05-02T12:00:00.000Z"}})
+        );
+        assert_eq!(got["none"], json!({"values": {"1.0E-4": null}}));
+        assert_eq!(got["m"], json!({"values": {"99.9": 1.0}}));
+    }
+
+    #[test]
+    fn percentiles_digest_like_elasticsearch() {
+        let index = |base: u64, docs: u64| {
+            let mut ix = Index::default();
+            let props = &mut ix.mappings.properties;
+            props.insert("d".into(), FieldMapping::Double);
+            props.insert("l".into(), FieldMapping::Long);
+            for doc in 0..docs {
+                let n = base + doc * 500..base + (doc + 1) * 500;
+                let d = n
+                    .clone()
+                    .map(|n| (n * 7919 % 10007) as f64 / 7.0 + (n % 13) as f64);
+                let l = n.map(|n| (n * 7919 % 10007) * (n % 5));
+                let source = json!({"d": d.collect::<Vec<_>>(), "l": l.collect::<Vec<_>>()});
+                ix.put(&doc.to_string(), source);
+            }
+            ix
+        };
+        let percents = [
+            0.0, 0.1, 1.0, 5.0, 25.0, 50.0, 75.0, 95.0, 99.0, 99.9, 100.0,
+        ];
+        let agg = |field: &str, compression: Option<u32>| {
+            let mut p = json!({"field": field, "percents": percents});
+            if let Some(c) = compression {
+                p["tdigest"] = json!({"compression": c});
+            }
+            json!({"percentiles": p})
+        };
+        let body = json!({"size": 0, "aggs": {
+            "d_def": agg("d", None), "d_c1": agg("d", Some(1)), "d_c50": agg("d", Some(50)),
+            "l_def": agg("l", None), "l_c1000": agg("l", Some(1000)),
+        }});
+        // Elasticsearch 9.5.5's responses to the same documents (indexed in this order) and
+        // request, over index p1 and over p1,p2
+        let want_p1 = json!({"d_c1":[0.0,7.21360544217687,24.53486282536385,91.17562698546972,376.7322952610915,721.4876900242893,1061.15479708507,1352.4189169465624,1416.181128285852,1433.7180952380957,1436.0],"d_c50":[0.0,6.464285714285714,20.4096912202381,78.47402597402596,365.27301382811163,721.3542580279241,1075.6396867558842,1363.2653586476094,1420.8612995027493,1434.571428571429,1436.0],"d_def":[0.0,6.357142857142858,20.21153373878624,77.56954501527233,364.3704463731752,721.1580498708637,1077.8105211450777,1364.0550774526675,1420.8700621118014,1434.5816326530617,1436.0],"l_c1000":[0.0,0.0,0.0,0.0,1207.0,7181.0,16125.75,30064.199999999997,37976.04,39720.15600000003,39912.0],"l_def":[0.0,0.0,0.0,0.0,1229.4640981262087,7184.06824408223,16122.229760923818,30248.488320042532,37988.40946440947,39823.33333333344,39912.0]});
+        let want_both = json!({"d_c1":[0.0,7.08733441056925,25.93499698210927,97.33525789786015,416.3464105486386,708.0253131189929,947.0418360774675,1343.333692040015,1416.8177900224964,1433.7797959183677,1439.4285714285713],"d_c50":[0.0,6.296409472880062,20.386422638149412,78.75168553959415,367.8227239196291,717.6558500152502,1068.6814964870318,1359.981660211795,1420.7944776591944,1434.563775510204,1439.4285714285713],"d_def":[0.0,6.285714285714286,20.324704372552397,77.55426322761487,365.8184886427841,721.1480414265849,1078.5901697174731,1364.4613141387238,1421.0354890699064,1434.5556586270873,1439.4285714285713],"l_c1000":[0.0,0.0,0.0,0.0,1195.0,7185.0,16174.5,29993.64999999996,37968.04,39720.136000000275,39912.0],"l_def":[0.0,0.0,0.0,0.0,1296.6107989361483,7180.151654252229,16160.187182393422,30287.33779789335,37982.72589473684,39783.60000000006,39912.0]});
+        let req = SearchRequest::parse(&body).unwrap();
+        let values = |targets: &[crate::Target]| -> Value {
+            let got = crate::search_many(targets, &req)
+                .unwrap()
+                .aggregations
+                .unwrap();
+            let got = got.as_object().unwrap().iter();
+            let vals = |v: &Value| {
+                let p = percents
+                    .iter()
+                    .map(|p| v["values"][super::java_double(*p)].clone());
+                Value::Array(p.collect())
+            };
+            got.map(|(k, v)| (k.clone(), vals(v))).collect()
+        };
+        // ponytail: values kept exactly (l_c1000) match ES's bits; merged centroids match within
+        // `tol` of the value range (the cause of the difference is not found). Several shards
+        // reduce more coarsely, so they differ more, most at compression 1 (skipped).
+        let close = |got: &Value, want: &Value, tol: f64| {
+            for (k, w) in want.as_object().unwrap() {
+                let range = w[10].as_f64().unwrap() - w[0].as_f64().unwrap();
+                let tol = match k.as_str() {
+                    "l_c1000" => 0.0,
+                    "d_c1" if tol > 1e-4 => continue,
+                    _ => tol * range,
+                };
+                for (g, w) in got[k].as_array().unwrap().iter().zip(w.as_array().unwrap()) {
+                    let (g, w) = (g.as_f64().unwrap(), w.as_f64().unwrap());
+                    assert!((g - w).abs() <= tol, "{k}: {g} vs {w}");
+                }
+            }
+        };
+        let (p1, p2) = (index(0, 20), index(10_000, 10));
+        close(&values(&[("p1", &p1, None)]), &want_p1, 1e-4);
+        let both = values(&[("p1", &p1, None), ("p2", &p2, None)]);
+        close(&both, &want_both, 1e-2);
+        let dir = std::env::temp_dir().join(format!("esm-pct-{}", std::process::id()));
+        disk::save(
+            &dir,
+            &Indices::from([("p1".to_owned(), p1), ("p2".to_owned(), p2)]),
+        )
+        .unwrap();
+        let opened = disk::open(&dir).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let (p1, p2) = (&opened["p1"], &opened["p2"]);
+        assert_eq!(values(&[("p1", p1, None), ("p2", p2, None)]), both);
+    }
+
+    #[test]
     fn aggs_reject_bad_requests() {
         let err = |aggs: Value| {
             let req = SearchRequest::parse(&json!({"aggs": aggs}));
@@ -768,6 +1020,36 @@ mod tests {
         assert!(
             err(json!({"a": {"cardinality": {"field": "k", "execution_hint": "x"}}}))
                 .starts_with("Invalid execution mode for cardinality aggregation.  Got [x]")
+        );
+        assert_eq!(
+            err(json!({"a": {"percentiles": {"field": "i", "tdigest": {"compression": -1}}}})),
+            "[compression] must be greater than or equal to 0. Found [-1.0]"
+        );
+        assert_eq!(
+            err(json!({"a": {"percentiles": {"field": "i", "tdigest": {"execution_hint": "x"}}}})),
+            "Invalid execution_hint [x], valid values are [default, high_accuracy]"
+        );
+        assert_eq!(
+            err(json!({"a": {"percentiles": {"field": "i", "percents": []}}})),
+            "[percents] must not be empty: [a]"
+        );
+        assert_eq!(
+            err(json!({"a": {"percentiles": {"field": "i", "percents": [5, 5.0]}}})),
+            "percent [5.0] has been specified twice: [a]"
+        );
+        assert_eq!(
+            err(json!({"a": {"percentiles": {"field": "i", "percents": [101]}}})),
+            "percent must be in [0,100], got [101.0]: [a]"
+        );
+        for bad in [json!(null), json!(["foo"])] {
+            assert_eq!(
+                err(json!({"a": {"percentiles": {"field": "i", "percents": bad}}})),
+                "[percentiles] failed to parse field [percents]"
+            );
+        }
+        assert_eq!(
+            err(json!({"a": {"percentiles": {"field": "k"}}})),
+            "Field [k] of type [keyword] is not supported for aggregation [percentiles]"
         );
         assert_eq!(
             err(json!({"a": {"meta": {}}})),

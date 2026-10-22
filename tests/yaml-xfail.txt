@@ -66,17 +66,6 @@ aggregations/missing.yml/match all
 aggregations/missing.yml/match none
 aggregations/missing.yml/match some
 aggregations/missing.yml/missing param
-aggregations/percentiles_tdigest_metric.yml/Basic test
-aggregations/percentiles_tdigest_metric.yml/Basic test - approximate
-aggregations/percentiles_tdigest_metric.yml/Execution hint
-aggregations/percentiles_tdigest_metric.yml/Explicit Percents test
-aggregations/percentiles_tdigest_metric.yml/Filtered test
-aggregations/percentiles_tdigest_metric.yml/Invalid params test
-aggregations/percentiles_tdigest_metric.yml/Metadata test
-aggregations/percentiles_tdigest_metric.yml/Missing field with missing param
-aggregations/percentiles_tdigest_metric.yml/Missing field without missing param
-aggregations/percentiles_tdigest_metric.yml/Non-keyed test
-aggregations/percentiles_tdigest_metric.yml/Only aggs test
 aggregations/range.yml/Double range
 aggregations/range.yml/Double range default keyed response
 aggregations/range.yml/Double range no decimal
