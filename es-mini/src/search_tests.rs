@@ -323,6 +323,39 @@ async fn profile_global_ordinals_terms_debug() {
 }
 
 #[tokio::test]
+async fn profile_top_level_keyword_terms_run_filter_by_filter() {
+    let app = seeded().await;
+    let terms = json!({"field": "t.keyword", "exclude": ["pear"]});
+    let body = json!({"profile": true, "size": 0, "aggs": {"k": {"terms": terms}}});
+    let (s, r) = call(&app, Method::POST, "/idx/_search", Some(body.clone())).await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    let a = &r["profile"]["shards"][0]["aggregations"][0];
+    assert_eq!(a["type"], "StringTermsAggregatorFromFilters");
+    assert_eq!(a["breakdown"]["collect_count"], 0);
+    let filter = |q: &str| json!({"query": q, "segments_counted_in_constant_time": 1});
+    assert_eq!(
+        a["debug"],
+        json!({
+            "delegate": "FilterByFilterAggregator",
+            "delegate_debug": {
+                "filters": [filter("t.keyword:green apple"), filter("t.keyword:red apple")],
+                "segments_counted": 1,
+                "segments_collected": 0,
+                "segments_with_deleted_docs": 0,
+                "segments_with_doc_count_field": 0,
+            },
+        })
+    );
+
+    // a top-level query other than match_all keeps the native aggregator
+    let mut body = body;
+    body["query"] = json!({"range": {"n": {"lt": 4}}});
+    let (_, r) = call(&app, Method::POST, "/idx/_search", Some(body)).await;
+    let a = &r["profile"]["shards"][0]["aggregations"][0];
+    assert_eq!(a["type"], "GlobalOrdinalsStringTermsAggregator");
+}
+
+#[tokio::test]
 async fn value_type_mismatch_fails_only_that_shard() {
     let app = app();
     for (index, ty) in [("a", "keyword"), ("b", "ip")] {

@@ -476,6 +476,8 @@ struct Timings {
     total_buckets: usize,
     /// Whether a document had several values. ponytail: a shard profiles as one segment.
     multi_valued: bool,
+    /// keyword `terms`: the shard's accepted terms, before keeping its top `shard_size`.
+    keys: Vec<String>,
 }
 
 fn nanos(since: Instant) -> u64 {
@@ -675,8 +677,8 @@ impl<'s, 'a> Collector<'s, 'a> {
 impl Collector<'_, '_> {
     /// This shard's results, and with `profile: true` its `aggregations` profile: one entry per
     /// aggregation, like ES's (post collection releases the doc values readers, building the
-    /// aggregation takes its result).
-    pub(crate) fn finish(mut self) -> (Vec<Stats>, Option<Value>) {
+    /// aggregation takes its result). `match_all` if the search's query matches every document.
+    pub(crate) fn finish(mut self, match_all: bool) -> (Vec<Stats>, Option<Value>) {
         let mut stats = std::mem::take(&mut self.stats);
         self.finish_terms(&mut stats);
         self.stats = stats;
@@ -694,7 +696,7 @@ impl Collector<'_, '_> {
             t.build_aggregation = nanos(start);
         }
         let profile = timings.iter().enumerate();
-        let profile = profile.map(|(i, t)| self.profile(i, t, false));
+        let profile = profile.map(|(i, t)| self.profile(i, t, false, match_all));
         (stats, Some(profile.collect()))
     }
 
@@ -718,6 +720,12 @@ impl Collector<'_, '_> {
             if let Some(timings) = &mut self.timings {
                 // a sub-aggregation's buckets add up over its parent's buckets
                 timings[i].total_buckets += b.counts.len();
+                timings[i].keys = (b.counts.keys())
+                    .filter_map(|k| match k {
+                        terms::Key::Str(s) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .collect();
             }
             t.finish_shard(b);
             if let Some(sub) = &mut self.subs[i] {
@@ -730,9 +738,18 @@ impl Collector<'_, '_> {
 
     /// One aggregation's profile: ES's aggregator class, its timings and its debug counters
     /// (this shard is one leaf); `under_bucket` if a bucket aggregation contains it.
-    fn profile(&self, i: usize, t: &Timings, under_bucket: bool) -> Value {
+    fn profile(&self, i: usize, t: &Timings, under_bucket: bool, match_all: bool) -> Value {
         let (agg, m) = (&self.aggs[i], self.mappings[i]);
         let keyword = matches!(m, Some(FieldMapping::Keyword { .. }));
+        // TermsAggregatorFactory runs a top-level global ordinals `terms` as one term query per
+        // ordinal when it merges with the search's query (only match_all does) and there are
+        // at most MAX_ORDS_TO_TRY_FILTERS ordinals. ponytail: counts accepted terms, not all ords.
+        let from_filters = !under_bucket
+            && match_all
+            && keyword
+            && agg.missing.is_none()
+            && matches!(&agg.metric, Metric::Terms(terms) if !terms.map)
+            && (1..=1000).contains(&t.keys.len());
         let ty = match &agg.metric {
             _ if m.is_none() && agg.missing.is_none() => match agg.metric {
                 Metric::Stats | Metric::ExtendedStats { .. } | Metric::Percentiles { .. } => {
@@ -752,19 +769,25 @@ impl Collector<'_, '_> {
             Metric::Stats => "StatsAggregator",
             Metric::ExtendedStats { .. } => "ExtendedStatsAggregator",
             Metric::Percentiles { .. } => "TDigestPercentilesAggregator",
+            Metric::Terms(_) if from_filters => "StringTermsAggregatorFromFilters",
             Metric::Terms(t) if keyword && t.map => "MapStringTermsAggregator",
             Metric::Terms(_) if keyword => "GlobalOrdinalsStringTermsAggregator",
             Metric::Terms(_) => "NumericTermsAggregator",
         };
+        // the filters collect matches themselves, never through this aggregator
+        let (collect, collect_count) = match from_filters {
+            true => (0, 0),
+            false => (t.collect, t.collect_count),
+        };
         let mut out = serde_json::json!({
             "type": ty,
             "description": agg.name,
-            "time_in_nanos": t.initialize + t.build_leaf_collector + t.collect
+            "time_in_nanos": t.initialize + t.build_leaf_collector + collect
                 + t.post_collection + t.build_aggregation,
             "breakdown": {
                 "initialize": t.initialize, "initialize_count": 1,
                 "build_leaf_collector": t.build_leaf_collector, "build_leaf_collector_count": 1,
-                "collect": t.collect, "collect_count": t.collect_count,
+                "collect": collect, "collect_count": collect_count,
                 "post_collection": t.post_collection, "post_collection_count": 1,
                 "build_aggregation": t.build_aggregation, "build_aggregation_count": 1,
                 "reduce": 0, "reduce_count": 0,
@@ -772,6 +795,25 @@ impl Collector<'_, '_> {
         });
         let used = |b: bool| u32::from(b);
         match (ty, &agg.metric) {
+            ("StringTermsAggregatorFromFilters", _) => {
+                // FilterByFilterAggregator counts each term query's matches from its doc freq
+                // without sub-aggregations, else collects them. ponytail: no deleted docs.
+                let counted = used(agg.subs.is_empty());
+                let filters = t.keys.iter().map(|k| {
+                    let query = format!("{}:{k}", agg.field);
+                    serde_json::json!({"query": query, "segments_counted_in_constant_time": counted})
+                });
+                out["debug"] = serde_json::json!({
+                    "delegate": "FilterByFilterAggregator",
+                    "delegate_debug": {
+                        "filters": filters.collect::<Vec<_>>(),
+                        "segments_counted": counted,
+                        "segments_collected": 1 - counted,
+                        "segments_with_deleted_docs": 0,
+                        "segments_with_doc_count_field": 0,
+                    },
+                });
+            }
             ("GlobalOrdCardinalityAggregator", _) => {
                 out["debug"] = serde_json::json!({
                     "dynamic_pruning_attempted": 0, "dynamic_pruning_used": 0,
@@ -830,7 +872,7 @@ impl Collector<'_, '_> {
             && let Some(timings) = &sub.timings
         {
             let children = timings.iter().enumerate();
-            let children = children.map(|(j, t)| sub.profile(j, t, true));
+            let children = children.map(|(j, t)| sub.profile(j, t, true, false));
             out["children"] = children.collect();
         }
         out

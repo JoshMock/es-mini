@@ -891,7 +891,7 @@ pub fn search_many<'a>(
                 score,
             ));
         }
-        let (stats, p) = collector.finish();
+        let (stats, p) = collector.finish(matches!(query, Query::MatchAll));
         aggs::reduce(&mut aggs, stats);
         if let (Some(all), Some(p)) = (&mut profile, p) {
             all.push(p);

@@ -71,7 +71,6 @@ aggregations/range.yml/Range agg on long field
 aggregations/range.yml/Range aggregation on date field
 aggregations/terms.yml/order by sub agg containing filter
 aggregations/terms.yml/order by sub agg containing nested
-aggregations/terms.yml/string profiler via global ordinals filters implementation
 aggregations/top_hits.yml/docvalue fields
 aggregations/top_hits.yml/explain
 aggregations/top_hits.yml/fetch fields
