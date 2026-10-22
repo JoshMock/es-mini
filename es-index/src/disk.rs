@@ -39,10 +39,42 @@ pub fn open(data_dir: &Path) -> es_codec::Result<Indices> {
         let dir = data_dir.join("indices").join(&meta.uuid).join("0/index");
         // ponytail: indices in codecs we lack (e.g. Zstd stored fields) are left out, not fatal
         if load_shard(&mut index, &dir).is_ok() {
+            replay_translog(&mut index, &dir.join("../translog"))?;
             out.insert(meta.name, index);
         }
     }
     Ok(out)
+}
+
+/// Re-applies the operations in a shard's translog that its commit does not hold: those above
+/// the commit's `local_checkpoint`, up to the checkpoint's offset in the current generation.
+fn replay_translog(index: &mut Index, dir: &Path) -> es_codec::Result<()> {
+    use es_codec::translog::{read, read_checkpoint};
+    let Ok(bytes) = std::fs::read(dir.join("translog.ckp")) else {
+        return Ok(());
+    };
+    let cp = read_checkpoint(&bytes)?;
+    let committed = index
+        .commit
+        .get("local_checkpoint")
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(-1);
+    for generation in cp.min_generation..=cp.generation {
+        let path = dir.join(format!("translog-{generation}.tlog"));
+        let file = std::fs::read(&path)
+            .map_err(|e| es_codec::Error(format!("{}: {e}", path.display())))?;
+        let durable = if generation == cp.generation {
+            (cp.offset as usize).min(file.len())
+        } else {
+            file.len()
+        };
+        for op in read(&file[..durable])?.1 {
+            if op.seq_no() > committed {
+                index.replay(op);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A document's place in an opened index's segments: `(segment, doc id)`.
@@ -591,10 +623,106 @@ pub fn recover(data_dir: &Path) -> es_codec::Result<()> {
 /// Saves are serialized process-wide. Each index's previous segments are hard-linked, not
 /// rewritten: a save writes one new segment of the documents changed since the last save.
 pub fn save(data_dir: &Path, indices: &Indices) -> es_codec::Result<()> {
-    static SAVING: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _one_at_a_time = SAVING
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    commit(data_dir, indices)
+}
+
+/// Serializes saves and persists process-wide.
+static SAVING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Translog operations after which [`persist`] commits segments (Elasticsearch's flush), bounding
+/// how much a restart replays.
+// ponytail: an operation count; Elasticsearch flushes by translog size (512mb) and on idle
+pub const FLUSH_OPS: usize = 5000;
+
+/// Makes the writes since the last call durable, like Elasticsearch: document writes are
+/// appended to each shard's translog (one fsynced append and an in-place checkpoint, per
+/// index written to), and segments are committed only when cluster metadata changed or a
+/// translog reaches [`FLUSH_OPS`]. [`open`] replays the translog.
+pub fn persist(data_dir: &Path, indices: &mut Indices) -> es_codec::Result<()> {
+    let _one_at_a_time = SAVING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let metas = metas(indices);
+    let unchanged = read_indices(data_dir).is_ok_and(|saved| saved == metas);
+    let mut logs = vec![];
+    if unchanged {
+        for (meta, ix) in metas.iter().zip(indices.values()) {
+            let dir = shard_dir(data_dir, &meta.uuid).join("../translog");
+            let Ok(cp) = std::fs::read(dir.join("translog.ckp"))
+                .map_err(io)
+                .and_then(|b| es_codec::translog::read_checkpoint(&b))
+            else {
+                logs.clear();
+                break;
+            };
+            logs.push((dir, cp, ix.unlogged_len()));
+        }
+    }
+    let flush = !unchanged
+        || logs.len() != indices.len()
+        || logs
+            .iter()
+            .any(|(_, cp, n)| cp.num_ops as usize + n >= FLUSH_OPS);
+    if flush {
+        commit(data_dir, indices)?;
+        indices.values_mut().for_each(|ix| drop(ix.take_unlogged()));
+        return Ok(());
+    }
+    for ((dir, cp, _), ix) in logs.into_iter().zip(indices.values_mut()) {
+        let ops = ix.take_unlogged();
+        if !ops.is_empty() {
+            append(&dir, cp, &ops)?;
+        }
+    }
+    Ok(())
+}
+
+/// Appends `ops` to the current translog generation in `dir` (overwriting any torn bytes past the
+/// checkpoint), fsyncs it, then rewrites the checkpoint in place, as Elasticsearch does.
+fn append(
+    dir: &Path,
+    mut cp: es_codec::translog::TranslogCheckpoint,
+    ops: &[es_codec::translog::Op],
+) -> es_codec::Result<()> {
+    use std::io::{Seek, SeekFrom, Write};
+    let bytes: Vec<u8> = ops.iter().flat_map(es_codec::translog::encode).collect();
+    let path = dir.join(format!("translog-{}.tlog", cp.generation));
+    let write = || -> std::io::Result<()> {
+        let mut f = std::fs::OpenOptions::new().write(true).open(&path)?;
+        f.set_len(cp.offset as u64)?;
+        f.seek(SeekFrom::End(0))?;
+        f.write_all(&bytes)?;
+        f.sync_all()
+    };
+    write().map_err(|e| es_codec::Error(format!("{}: {e}", path.display())))?;
+    let seq_nos = ops.iter().map(|o| o.seq_no());
+    let (min, max) = (
+        seq_nos.clone().min().unwrap_or(-1),
+        seq_nos.max().unwrap_or(-1),
+    );
+    if cp.num_ops == 0 {
+        cp.min_seq_no = min;
+    }
+    cp.offset += bytes.len() as i64;
+    cp.num_ops += ops.len() as i32;
+    cp.min_seq_no = cp.min_seq_no.min(min);
+    cp.max_seq_no = cp.max_seq_no.max(max);
+    cp.global_checkpoint = cp.global_checkpoint.max(max);
+    // A fixed-size record rewritten in place and fsynced, like Elasticsearch's Checkpoint.write.
+    let ckp = dir.join("translog.ckp");
+    let write = || -> std::io::Result<()> {
+        let mut f = std::fs::OpenOptions::new().write(true).open(&ckp)?;
+        f.write_all(&es_codec::translog::checkpoint(&cp))?;
+        f.sync_all()
+    };
+    write().map_err(|e| es_codec::Error(format!("{}: {e}", ckp.display())))
+}
+
+/// Commits every index's documents into segments (see [`save`]); the caller holds `SAVING`.
+fn commit(data_dir: &Path, indices: &Indices) -> es_codec::Result<()> {
     if save_in_place(data_dir, indices)? {
         return Ok(());
     }
@@ -884,18 +1012,30 @@ fn write_shard(prev: &Path, dir: &Path, ix: &Index) -> es_codec::Result<bool> {
         }
     }
     infos.write(dir)?;
+    // The commit holds every operation, so the translog starts a new, empty generation.
+    let translog = dir.join("../translog");
+    let previous = std::fs::read(prev.join("../translog/translog.ckp")).ok();
+    let generation = previous
+        .and_then(|b| es_codec::translog::read_checkpoint(&b).ok())
+        .map_or(1, |cp| cp.generation + 1);
     let cp = es_codec::translog::Checkpoint {
-        generation: 1,
+        generation,
         global_checkpoint: max_seq,
         primary_term: 1,
     };
     let (tlog, ckp) = es_codec::translog::write_empty(&infos.user_data["translog_uuid"], &cp);
-    let translog = dir.join("../translog");
-    // The (empty) translog only depends on the translog uuid; the checkpoint changes per commit.
-    if !(in_place && translog.join("translog-1.tlog").is_file()) {
-        es_codec::write_file_atomic(&translog.join("translog-1.tlog"), &tlog)?;
-    }
+    es_codec::write_file_atomic(&translog.join(format!("translog-{generation}.tlog")), &tlog)?;
     es_codec::write_file_atomic(&translog.join("translog.ckp"), &ckp)?;
+    for entry in std::fs::read_dir(&translog).map_err(io)? {
+        let name = entry
+            .map_err(io)?
+            .file_name()
+            .to_string_lossy()
+            .into_owned();
+        if name.starts_with("translog-") && name != format!("translog-{generation}.tlog") {
+            let _ = std::fs::remove_file(translog.join(&name));
+        }
+    }
     if in_place {
         // Like Lucene's IndexFileDeleter: drop the previous commit's files (and leftovers of an
         // interrupted commit) once the new commit is durable.

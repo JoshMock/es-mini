@@ -205,6 +205,8 @@ pub struct Index {
     tombstone_order: VecDeque<(String, Instant)>,
     next_seq_no: u64,
     refreshed_seq_no: u64,
+    /// Writes not yet in the translog (see [`disk::persist`]).
+    unlogged: Vec<es_codec::translog::Op>,
 }
 
 impl Index {
@@ -278,6 +280,23 @@ impl Index {
         self.prune_tombstones();
         let version = self.last_version(id) + 1;
         let seq_no = self.next_seq_no();
+        self.unlogged.push(es_codec::translog::Op::Index {
+            id: id.to_owned(),
+            source: serde_json::to_vec(&source).unwrap_or_default(),
+            seq_no: seq_no as i64,
+            version: version as i64,
+            primary_term: 1,
+        });
+        let result = self.store(id, source, version, seq_no);
+        WriteResult {
+            result,
+            version,
+            seq_no,
+        }
+    }
+
+    /// Stores a document at a given version and sequence number.
+    fn store(&mut self, id: &str, source: Value, version: u64, seq_no: u64) -> DocResult {
         self.deleted_versions.remove(id);
         let old = self.take(id);
         self.postings
@@ -292,16 +311,43 @@ impl Index {
                 seq_no,
             },
         );
-        let result = if let Some(old) = old {
-            self.supersede(old);
-            DocResult::Updated
-        } else {
-            DocResult::Created
-        };
-        WriteResult {
-            result,
-            version,
-            seq_no,
+        match old {
+            Some(old) => {
+                self.supersede(old);
+                DocResult::Updated
+            }
+            None => DocResult::Created,
+        }
+    }
+
+    /// Number of writes not yet in the translog.
+    pub fn unlogged_len(&self) -> usize {
+        self.unlogged.len()
+    }
+
+    /// Writes not yet in the translog, oldest first; taking them marks them logged.
+    pub fn take_unlogged(&mut self) -> Vec<es_codec::translog::Op> {
+        std::mem::take(&mut self.unlogged)
+    }
+
+    /// Re-applies an operation from the translog with its recorded version and sequence number.
+    pub(crate) fn replay(&mut self, op: es_codec::translog::Op) {
+        use es_codec::translog::Op;
+        self.next_seq_no = self.next_seq_no.max(op.seq_no() as u64 + 1);
+        match op {
+            Op::Index {
+                id,
+                source,
+                seq_no,
+                version,
+                ..
+            } => {
+                let source = serde_json::from_slice(&source).unwrap_or(Value::Null);
+                self.store(&id, source, version as u64, seq_no as u64);
+            }
+            Op::Delete { id, version, .. } => {
+                self.remove(&id, version as u64);
+            }
         }
     }
 
@@ -413,20 +459,31 @@ impl Index {
         self.prune_tombstones();
         let version = self.last_version(id) + 1;
         let seq_no = self.next_seq_no();
+        self.unlogged.push(es_codec::translog::Op::Delete {
+            id: id.to_owned(),
+            seq_no: seq_no as i64,
+            version: version as i64,
+            primary_term: 1,
+        });
+        let result = self.remove(id, version);
+        WriteResult {
+            result,
+            version,
+            seq_no,
+        }
+    }
+
+    /// Deletes a document, remembering `version` for `index.gc_deletes`.
+    fn remove(&mut self, id: &str, version: u64) -> DocResult {
         let now = Instant::now();
         self.deleted_versions.insert(id.to_owned(), (version, now));
         self.tombstone_order.push_back((id.to_owned(), now));
-        let result = match self.take(id) {
+        match self.take(id) {
             Some(old) => {
                 self.supersede(old);
                 DocResult::Deleted
             }
             None => DocResult::NotFound,
-        };
-        WriteResult {
-            result,
-            version,
-            seq_no,
         }
     }
 
