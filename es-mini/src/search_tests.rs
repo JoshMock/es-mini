@@ -285,6 +285,44 @@ async fn profile_map_terms_defers_sub_aggregations_not_sorted_on() {
 }
 
 #[tokio::test]
+async fn profile_global_ordinals_terms_debug() {
+    let app = seeded().await;
+    let doc = json!({"t": ["plum", "fig"], "n": 4});
+    call(&app, Method::PUT, "/idx/_doc/4", Some(doc)).await;
+    let terms = json!({"field": "t.keyword", "collect_mode": "breadth_first"});
+    let inner = json!({"terms": terms, "aggs": {"m": {"max": {"field": "n"}}}});
+    let aggs = json!({"o": {"terms": {"field": "n"}, "aggs": {"k": inner}}});
+    let body = json!({"profile": true, "size": 0, "aggs": aggs});
+    let (s, r) = call(&app, Method::POST, "/idx/_search", Some(body)).await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    let a = &r["profile"]["shards"][0]["aggregations"][0]["children"][0];
+    assert_eq!(a["type"], "GlobalOrdinalsStringTermsAggregator");
+    assert_eq!(
+        a["debug"],
+        json!({
+            "deferred_aggregators": ["m"],
+            "collection_strategy": "remap using many bucket ords",
+            "total_buckets": 5,
+            "result_strategy": "terms",
+            "segments_with_single_valued_ords": 0,
+            "segments_with_multi_valued_ords": 1,
+            "has_filter": false,
+        })
+    );
+
+    // single-valued matches, an exclude
+    let terms = json!({"field": "t.keyword", "exclude": ["pear"]});
+    let aggs = json!({"o": {"terms": {"field": "n"}, "aggs": {"k": {"terms": terms}}}});
+    let body = json!({"profile": true, "size": 0, "query": {"range": {"n": {"lt": 4}}},
+        "aggs": aggs});
+    let (_, r) = call(&app, Method::POST, "/idx/_search", Some(body)).await;
+    let d = &r["profile"]["shards"][0]["aggregations"][0]["children"][0]["debug"];
+    assert_eq!(d["segments_with_single_valued_ords"], 1, "{d}");
+    assert_eq!(d["segments_with_multi_valued_ords"], 0);
+    assert_eq!(d["has_filter"], true);
+}
+
+#[tokio::test]
 async fn value_type_mismatch_fails_only_that_shard() {
     let app = app();
     for (index, ty) in [("a", "keyword"), ("b", "ip")] {

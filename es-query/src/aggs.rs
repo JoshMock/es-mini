@@ -474,6 +474,8 @@ struct Timings {
     build_aggregation: u64,
     /// `terms`: the buckets this shard collected, before keeping its top `shard_size`.
     total_buckets: usize,
+    /// Whether a document had several values. ponytail: a shard profiles as one segment.
+    multi_valued: bool,
 }
 
 fn nanos(since: Instant) -> u64 {
@@ -599,6 +601,9 @@ impl<'s, 'a> Collector<'s, 'a> {
 
     fn collect_one(&mut self, i: usize, id: &str, doc: &Document) {
         let vals = self.values(i, id, doc);
+        if let Some(t) = &mut self.timings {
+            t[i].multi_valued |= vals.len() > 1;
+        }
         match vals.is_empty() {
             true => self.add(i, self.missing[i].iter().cloned().collect(), id, doc),
             false => self.add(i, vals, id, doc),
@@ -688,7 +693,8 @@ impl Collector<'_, '_> {
             stats.push(std::mem::take(st));
             t.build_aggregation = nanos(start);
         }
-        let profile = timings.iter().enumerate().map(|(i, t)| self.profile(i, t));
+        let profile = timings.iter().enumerate();
+        let profile = profile.map(|(i, t)| self.profile(i, t, false));
         (stats, Some(profile.collect()))
     }
 
@@ -723,8 +729,8 @@ impl Collector<'_, '_> {
     }
 
     /// One aggregation's profile: ES's aggregator class, its timings and its debug counters
-    /// (this shard is one leaf).
-    fn profile(&self, i: usize, t: &Timings) -> Value {
+    /// (this shard is one leaf); `under_bucket` if a bucket aggregation contains it.
+    fn profile(&self, i: usize, t: &Timings, under_bucket: bool) -> Value {
         let (agg, m) = (&self.aggs[i], self.mappings[i]);
         let keyword = matches!(m, Some(FieldMapping::Keyword { .. }));
         let ty = match &agg.metric {
@@ -782,14 +788,23 @@ impl Collector<'_, '_> {
                     "string_hashing_collectors_used": used((keyword || m.is_none()) && !ords),
                 });
             }
-            ("MapStringTermsAggregator" | "NumericTermsAggregator", Metric::Terms(terms)) => {
+            (_, Metric::Terms(terms)) => {
                 let mut debug = Map::new();
                 let deferred = terms.deferred(&agg.subs);
                 if !deferred.is_empty() {
                     debug.insert("deferred_aggregators".into(), deferred.into());
                 }
+                if ty == "GlobalOrdinalsStringTermsAggregator" {
+                    let strategy = match terms.remaps(&agg.subs, under_bucket) {
+                        true if under_bucket => "remap using many bucket ords",
+                        true => "remap using single bucket ords",
+                        false => "dense",
+                    };
+                    debug.insert("collection_strategy".into(), strategy.into());
+                }
                 debug.insert("total_buckets".into(), t.total_buckets.into());
                 let result = match ty {
+                    "GlobalOrdinalsStringTermsAggregator" => "terms",
                     "MapStringTermsAggregator" => {
                         let field = format!("from Field [{}] of type [keyword]", agg.field);
                         debug.insert("collection_strategy".into(), field.into());
@@ -801,6 +816,12 @@ impl Collector<'_, '_> {
                     _ => "long_terms",
                 };
                 debug.insert("result_strategy".into(), result.into());
+                if ty == "GlobalOrdinalsStringTermsAggregator" {
+                    let (single, multi) = (used(!t.multi_valued), used(t.multi_valued));
+                    debug.insert("segments_with_single_valued_ords".into(), single.into());
+                    debug.insert("segments_with_multi_valued_ords".into(), multi.into());
+                    debug.insert("has_filter".into(), terms.has_filter().into());
+                }
                 out["debug"] = debug.into();
             }
             _ => {}
@@ -808,7 +829,8 @@ impl Collector<'_, '_> {
         if let Some(sub) = &self.subs[i]
             && let Some(timings) = &sub.timings
         {
-            let children = timings.iter().enumerate().map(|(j, t)| sub.profile(j, t));
+            let children = timings.iter().enumerate();
+            let children = children.map(|(j, t)| sub.profile(j, t, true));
             out["children"] = children.collect();
         }
         out

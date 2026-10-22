@@ -74,7 +74,6 @@ aggregations/terms.yml/Global ordinals are not loaded with the map execution hin
 aggregations/terms.yml/order by sub agg containing filter
 aggregations/terms.yml/order by sub agg containing nested
 aggregations/terms.yml/string profiler via global ordinals filters implementation
-aggregations/terms.yml/string profiler via global ordinals native implementation
 aggregations/top_hits.yml/docvalue fields
 aggregations/top_hits.yml/explain
 aggregations/top_hits.yml/fetch fields

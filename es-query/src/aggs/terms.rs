@@ -138,17 +138,32 @@ impl Terms {
     /// ponytail: global ordinals default to `depth_first` when the field has at most
     /// `shard_size` terms; not modelled, since they are not profiled.
     pub(super) fn deferred<'a>(&self, subs: &'a [Agg]) -> Vec<&'a str> {
-        let breadth = (self.breadth_first).unwrap_or(self.shard_size() != i32::MAX as usize);
         let sorted = |i: usize| {
             (self.order.iter()).any(|(by, _)| matches!(by, By::Agg { index, .. } if *index == i))
         };
-        match breadth {
+        match self.breadth() {
             true => (subs.iter().enumerate())
                 .filter(|&(i, _)| !sorted(i))
                 .map(|(_, s)| s.name.as_str())
                 .collect(),
             false => vec![],
         }
+    }
+
+    fn breadth(&self) -> bool {
+        (self.breadth_first).unwrap_or(self.shard_size() != i32::MAX as usize)
+    }
+
+    /// Whether `include` or `exclude` filters the terms.
+    pub(super) fn has_filter(&self) -> bool {
+        self.include.is_some() || !self.exclude.is_empty()
+    }
+
+    /// Whether ES's GlobalOrdinalsStringTermsAggregator remaps global ordinals to buckets
+    /// rather than using them as bucket ordinals directly (TermsAggregatorFactory).
+    pub(super) fn remaps(&self, subs: &[Agg], under_bucket: bool) -> bool {
+        let agg_sort = (self.order.iter()).any(|(by, _)| matches!(by, By::Agg { .. }));
+        under_bucket || self.has_filter() || !subs.is_empty() && (agg_sort || !self.breadth())
     }
 
     fn key_order(&self) -> bool {
