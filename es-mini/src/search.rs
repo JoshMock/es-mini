@@ -202,6 +202,73 @@ pub async fn search(
     Ok(Json(resp))
 }
 
+/// `_msearch`: NDJSON header/body pairs, each run as a `_search`; a failing search fails only its own entry.
+pub async fn msearch(
+    State(state): State<AppState>,
+    path: Option<Path<String>>,
+    uri: Uri,
+    body: Bytes,
+) -> Result<Json<Value>, AppError> {
+    let start = Instant::now();
+    let default = path.map_or("_all".to_string(), |Path(p)| p);
+    let text = std::str::from_utf8(&body)
+        .map_err(|e| AppError::IllegalArgument(format!("request body is not UTF-8: {e}")))?;
+    let mut lines = text.lines().filter(|l| !l.trim().is_empty());
+    let mut responses = Vec::new();
+    while let Some(header) = lines.next() {
+        let item = async {
+            let mut header = parse_body(&Bytes::copy_from_slice(header.as_bytes()))?;
+            let search_body = lines.next().ok_or_else(|| {
+                AppError::IllegalArgument("msearch request must have a body for each header".into())
+            })?;
+            let mut name = default.clone();
+            let mut params = HashMap::new();
+            for (k, v) in header.as_object_mut().into_iter().flatten() {
+                let v = match v {
+                    Value::String(s) => s.clone(),
+                    Value::Array(a) => a
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    other => other.to_string(),
+                };
+                match k.as_str() {
+                    "index" => name = v,
+                    _ => drop(params.insert(k.clone(), v)),
+                }
+            }
+            search(
+                State(state.clone()),
+                Path(name),
+                uri.clone(),
+                Query(params),
+                Bytes::copy_from_slice(search_body.as_bytes()),
+            )
+            .await
+        }
+        .await;
+        responses.push(match item {
+            Ok(Json(mut v)) => {
+                v["status"] = 200.into();
+                v
+            }
+            Err(e) => {
+                let (status, error) = e.parts();
+                json!({"error": error, "status": status.as_u16()})
+            }
+        });
+    }
+    if responses.is_empty() {
+        return Err(AppError::ActionRequestValidation(
+            "no requests added".into(),
+        ));
+    }
+    Ok(Json(
+        json!({"took": start.elapsed().as_millis() as u64, "responses": responses}),
+    ))
+}
+
 pub async fn count_all(
     state: State<AppState>,
     uri: Uri,

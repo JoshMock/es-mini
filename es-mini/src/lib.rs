@@ -287,6 +287,11 @@ fn router(state: AppState) -> Router {
         )
         .route("/_search", get(search::search_all).post(search::search_all))
         .route("/{index}/_search", get(search::search).post(search::search))
+        .route("/_msearch", get(search::msearch).post(search::msearch))
+        .route(
+            "/{index}/_msearch",
+            get(search::msearch).post(search::msearch),
+        )
         .route("/_count", get(search::count_all).post(search::count_all))
         .route("/{index}/_count", get(search::count).post(search::count))
         .route("/{index}/_doc", post(docs::index_auto_id))
@@ -375,6 +380,9 @@ mod bulk_tests;
 
 #[cfg(test)]
 mod search_tests;
+
+#[cfg(test)]
+mod msearch_tests;
 
 #[cfg(test)]
 mod aliases_tests;
