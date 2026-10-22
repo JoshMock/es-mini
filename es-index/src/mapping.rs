@@ -32,10 +32,12 @@ pub enum FieldMapping {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         locale: Option<String>,
     },
+    Ip,
 }
 
 impl FieldMapping {
-    /// The ES|QL-facing type name (`text`, `keyword`, `long`, `integer`, `double`, `boolean`, `date`).
+    /// The ES|QL-facing type name (`text`, `keyword`, `long`, `integer`, `double`, `boolean`, `date`,
+    /// `ip`).
     pub fn type_name(&self) -> &'static str {
         match self {
             Self::Text | Self::TextKeyword { .. } => "text",
@@ -45,6 +47,7 @@ impl FieldMapping {
             Self::Double | Self::Float => "double",
             Self::Boolean => "boolean",
             Self::Date { .. } => "date",
+            Self::Ip => "ip",
         }
     }
 

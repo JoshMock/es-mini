@@ -463,7 +463,7 @@ impl Index {
     }
 
     /// Reads the doc values of `field` for live on-disk documents by id: numbers (dates as
-    /// epoch millis), booleans, or keyword terms in order. `None` for a document in memory, or
+    /// epoch millis), booleans, or keyword terms and ips in order. `None` for a document in memory, or
     /// in a segment without doc values for the field. Each segment's column is decoded once.
     pub fn disk_values<'a>(
         &'a self,
@@ -498,6 +498,12 @@ impl Index {
                             .map(|o| String::from_utf8_lossy(&terms[*o]).into_owned().into())
                             .collect(),
                     ),
+                    _ => None,
+                },
+                M::Ip => match column {
+                    Some(D::Ordinals { ords, terms }) => (ords[doc].iter())
+                        .map(|o| Some(ip_string(terms[*o].as_slice().try_into().ok()?).into()))
+                        .collect(),
                     _ => None,
                 },
                 _ => None,
@@ -615,6 +621,23 @@ fn random_uuid() -> String {
 /// own inverse.
 fn sortable_double(v: i64) -> f64 {
     f64::from_bits((v ^ ((v >> 63) & i64::MAX)) as u64)
+}
+
+/// The 16-byte encoding of an `ip` value (IPv4 as IPv4-mapped IPv6), like Lucene's
+/// `InetAddressPoint.encode`; it sorts like Elasticsearch orders addresses.
+pub fn ip_bytes(v: &serde_json::Value) -> Option<[u8; 16]> {
+    let ip: std::net::IpAddr = v.as_str()?.parse().ok()?;
+    Some(match ip {
+        std::net::IpAddr::V4(v4) => v4.to_ipv6_mapped().octets(),
+        std::net::IpAddr::V6(v6) => v6.octets(),
+    })
+}
+
+/// The canonical string of an encoded `ip`, like Elasticsearch's `DocValueFormat.IP`.
+pub fn ip_string(bytes: [u8; 16]) -> String {
+    let v6 = std::net::Ipv6Addr::from(bytes);
+    v6.to_ipv4_mapped()
+        .map_or_else(|| v6.to_string(), |v4| v4.to_string())
 }
 
 /// Formats epoch milliseconds as ES's `date_optional_time` (`2024-01-15T10:30:00.000Z`).
@@ -1053,5 +1076,27 @@ mod tests {
         // text has no doc values; a document written since opening is in memory
         assert_eq!(read("t", "1"), None);
         assert_eq!(read("n", "3"), None);
+    }
+
+    #[test]
+    fn ip_fields_read_back_as_canonical_addresses() {
+        let m: FieldMapping = serde_json::from_value(json!({"type": "ip"})).unwrap();
+        assert_eq!(m.type_name(), "ip");
+        assert_eq!(
+            ip_bytes(&json!("127.0.0.1")).unwrap()[10..],
+            [255, 255, 127, 0, 0, 1]
+        );
+        assert_eq!(ip_bytes(&json!("nope")), None);
+        let dir = std::env::temp_dir().join(format!("esm-disk-ip-{}", std::process::id()));
+        let mut ix = Index::default();
+        ix.mappings.properties.insert("ip".into(), m);
+        ix.put("1", json!({"ip": ["127.0.0.1", "0:0::1", "::1"]}));
+        disk::save(&dir, &Indices::from([("i".to_owned(), ix)])).unwrap();
+        let opened = disk::open(&dir).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(
+            opened["i"].disk_values("ip")("1"),
+            Some(vec![json!("::1"), json!("127.0.0.1")])
+        );
     }
 }

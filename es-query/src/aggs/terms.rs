@@ -3,7 +3,7 @@
 
 use crate::hll::mix64;
 use crate::{QueryError, int};
-use es_index::{FieldMapping, iso_date, postings::text};
+use es_index::{FieldMapping, ip_bytes, ip_string, iso_date, postings::text};
 use serde_json::{Map, Value};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -143,7 +143,9 @@ impl Terms {
     /// one of the field's doc values.
     pub(super) fn buckets(&self, format: Format, parse: impl Fn(&str) -> Option<Value>) -> Buckets {
         let keys = |vals: &[String]| -> BTreeSet<Key> {
-            vals.iter().filter_map(|s| Key::of(&parse(s)?)).collect()
+            vals.iter()
+                .filter_map(|s| Key::of(&parse(s)?, format))
+                .collect()
         };
         Buckets {
             format,
@@ -204,6 +206,7 @@ impl Terms {
             let mut out = Map::new();
             let key = match (&k, b.format) {
                 (Key::Str(s), _) => Value::from(s.as_str()),
+                (Key::Ip(ip), _) => Value::from(ip_string(*ip)),
                 (k, Format::Double) => Value::from(k.f64()),
                 (Key::Long(x), _) => Value::from(*x),
                 (Key::Double(x), _) => Value::from(*x),
@@ -223,7 +226,7 @@ impl Terms {
         });
         body.insert("buckets".into(), buckets.collect());
         match b.format {
-            Format::Unmapped | Format::Str => "sterms",
+            Format::Unmapped | Format::Str | Format::Ip => "sterms",
             Format::Double => "dterms",
             Format::Long | Format::Bool | Format::Date => "lterms",
         }
@@ -328,6 +331,7 @@ pub(super) enum Format {
     Double,
     Bool,
     Date,
+    Ip,
 }
 
 impl Format {
@@ -339,22 +343,26 @@ impl Format {
             Some(M::Double | M::Float) => Format::Double,
             Some(M::Boolean) => Format::Bool,
             Some(M::Date { .. }) => Format::Date,
+            Some(M::Ip) => Format::Ip,
             Some(M::Keyword { .. } | M::Text | M::TextKeyword { .. }) => Format::Str,
         }
     }
 }
 
-/// A bucket key: a keyword's term, or a numeric doc value (booleans and dates are longs).
+/// A bucket key: a keyword's term, an ip's 16 bytes, or a numeric doc value (booleans and
+/// dates are longs).
 #[derive(Debug, Clone)]
 pub(super) enum Key {
     Long(i64),
     Double(f64),
     Str(String),
+    Ip([u8; 16]),
 }
 
 impl Key {
-    fn of(v: &Value) -> Option<Key> {
+    fn of(v: &Value, format: Format) -> Option<Key> {
         match v {
+            Value::String(_) if format == Format::Ip => ip_bytes(v).map(Key::Ip),
             Value::Bool(b) => Some(Key::Long(i64::from(*b))),
             Value::String(s) => Some(Key::Str(s.clone())),
             Value::Number(n) => (n.as_i64().map(Key::Long)).or_else(|| n.as_f64().map(Key::Double)),
@@ -366,7 +374,7 @@ impl Key {
         match self {
             Key::Long(x) => *x as f64,
             Key::Double(x) => *x,
-            Key::Str(_) => f64::NAN,
+            Key::Str(_) | Key::Ip(_) => f64::NAN,
         }
     }
 }
@@ -380,6 +388,9 @@ impl Ord for Key {
             (Key::Str(a), Key::Str(b)) => a.cmp(b),
             (Key::Str(_), _) => Ordering::Greater,
             (_, Key::Str(_)) => Ordering::Less,
+            (Key::Ip(a), Key::Ip(b)) => a.cmp(b),
+            (Key::Ip(_), _) => Ordering::Greater,
+            (_, Key::Ip(_)) => Ordering::Less,
             _ => self.f64().total_cmp(&o.f64()),
         }
     }
@@ -438,6 +449,7 @@ impl Filter {
             &Filter::Partition { partition, of } => {
                 let hash = match k {
                     Key::Str(s) => i64::from(murmur3_32(s.as_bytes(), 31) as i32),
+                    Key::Ip(ip) => i64::from(murmur3_32(ip, 31) as i32),
                     Key::Long(x) => mix64(*x as u64) as i64,
                     // NumericUtils.doubleToSortableLong
                     Key::Double(x) => {
@@ -467,7 +479,7 @@ pub(super) struct Buckets {
 
 impl Buckets {
     fn keys(&self, vals: Vec<Value>) -> BTreeSet<Key> {
-        (vals.iter().filter_map(Key::of))
+        (vals.iter().filter_map(|v| Key::of(v, self.format)))
             .filter(|k| self.include.as_ref().is_none_or(|f| f.accepts(k)))
             .filter(|k| !self.exclude.contains(k))
             .collect()
@@ -531,19 +543,20 @@ mod tests {
             locale: None,
         };
         props.insert("at".into(), date);
+        props.insert("ip".into(), FieldMapping::Ip);
         ix.put(
             "1",
-            json!({"k": "a", "n": 1, "d": 1.5, "b": true, "at": "2016-05-03"}),
+            json!({"k": "a", "n": 1, "d": 1.5, "b": true, "at": "2016-05-03", "ip": "::1"}),
         );
         ix.put(
             "2",
-            json!({"k": "b", "n": 2, "d": 1.5, "b": false, "at": "2014-09-01"}),
+            json!({"k": "b", "n": 2, "d": 1.5, "b": false, "at": "2014-09-01", "ip": "127.0.0.1"}),
         );
         ix.put(
             "3",
             json!({"k": ["b", "b"], "n": [2, 2], "d": 2.5, "b": true, "at": "2016-05-03"}),
         );
-        ix.put("4", json!({"k": "c", "n": 3, "b": true}));
+        ix.put("4", json!({"k": "c", "n": 3, "b": true, "ip": "0::1"}));
         ix.put("5", json!({}));
         ix
     }
@@ -600,7 +613,7 @@ mod tests {
         es_index::disk::save(&dir, &indices).unwrap();
         let opened = es_index::disk::open(&dir).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
-        for field in ["k", "n", "d", "b", "at"] {
+        for field in ["k", "n", "d", "b", "at", "ip"] {
             let body = json!({"aggs": {"t": {"terms": {"field": field, "min_doc_count": 0}}}});
             let want = run(&[&index()], body.clone()).unwrap();
             assert_eq!(run(&[&opened["i"]], body).unwrap(), want, "{field}");
@@ -622,6 +635,18 @@ mod tests {
                 {"key": 1_462_233_600_000_i64, "key_as_string": "2016-05-03T00:00:00.000Z", "doc_count": 2},
                 {"key": 1_409_529_600_000_i64, "key_as_string": "2014-09-01T00:00:00.000Z", "doc_count": 1},
             ])
+        );
+    }
+
+    #[test]
+    fn terms_on_ips_key_canonical_addresses_in_byte_order() {
+        assert_eq!(
+            buckets(json!({"field": "ip", "order": {"_key": "desc"}})),
+            json!([{"key": "127.0.0.1", "doc_count": 1}, {"key": "::1", "doc_count": 2}])
+        );
+        assert_eq!(
+            buckets(json!({"field": "ip", "include": ["0:0::1"]})),
+            json!([{"key": "::1", "doc_count": 2}])
         );
     }
 
@@ -791,6 +816,7 @@ mod tests {
             "s": {"terms": {"field": "k"}},
             "l": {"terms": {"field": "b"}},
             "d": {"terms": {"field": "d"}},
+            "ip": {"terms": {"field": "ip"}},
         }});
         let mut req = SearchRequest::parse(&body).unwrap();
         req.typed_keys = true;
@@ -805,7 +831,7 @@ mod tests {
             .cloned()
             .collect();
         names.sort();
-        assert_eq!(names, ["dterms#d", "lterms#l", "sterms#s"]);
+        assert_eq!(names, ["dterms#d", "lterms#l", "sterms#ip", "sterms#s"]);
     }
 
     #[test]

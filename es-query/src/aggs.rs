@@ -384,6 +384,7 @@ fn doc_value(s: &Searcher, field: &str, mapping: &FieldMapping, v: &Value) -> Op
                 .is_none_or(|n| t.chars().count() <= n as usize)
                 .then(|| t.into())
         }
+        M::Ip => es_index::ip_bytes(v).map(|ip| es_index::ip_string(ip).into()),
         M::Text | M::TextKeyword { .. } => None,
     }
 }
@@ -545,9 +546,9 @@ impl<'s, 'a> Collector<'s, 'a> {
                     .into_iter()
                     .filter_map(|v| doc_value(self.searcher, &agg.field, m, v))
                     .collect();
-                // keyword doc values are a sorted set, other doc values sorted numbers
+                // keyword and ip doc values are a sorted set, other doc values sorted numbers
                 v.sort_by(crate::scalar_cmp);
-                if matches!(m, FieldMapping::Keyword { .. }) {
+                if matches!(m, FieldMapping::Keyword { .. } | FieldMapping::Ip) {
                     v.dedup();
                 }
                 v

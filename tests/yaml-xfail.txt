@@ -75,19 +75,16 @@ aggregations/terms.yml/Date test
 aggregations/terms.yml/Double test
 aggregations/terms.yml/Global ordinals are loaded with the global_ordinals execution hint
 aggregations/terms.yml/Global ordinals are not loaded with the map execution hint
-aggregations/terms.yml/huge size
 aggregations/terms.yml/Integer test
 aggregations/terms.yml/IP test
 aggregations/terms.yml/min_doc_count
 aggregations/terms.yml/Mixing longs and doubles
-aggregations/terms.yml/No field or script
 aggregations/terms.yml/numeric profiler
 aggregations/terms.yml/order by sub agg
 aggregations/terms.yml/order by sub agg containing filter
 aggregations/terms.yml/order by sub agg containing nested
 aggregations/terms.yml/Partitioned integer test
 aggregations/terms.yml/Partitioned string test
-aggregations/terms.yml/precise size
 aggregations/terms.yml/string profiler via global ordinals filters implementation
 aggregations/terms.yml/string profiler via global ordinals native implementation
 aggregations/terms.yml/string profiler via map

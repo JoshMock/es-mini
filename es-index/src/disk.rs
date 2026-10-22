@@ -481,6 +481,24 @@ fn user_fields(
                 out.keyword.push((number, keys));
                 (IndexOptions::Docs, DocValuesType::SortedSet, true)
             }
+            M::Ip => {
+                // Like ES: points and sorted-set doc values of the 16-byte encoding, no postings.
+                let Some(ips) = typed(&values, &crate::ip_bytes) else {
+                    continue;
+                };
+                out.points.push((
+                    number,
+                    (ips.iter().enumerate())
+                        .flat_map(|(doc, ips)| ips.iter().map(move |ip| (doc as u32, ip.to_vec())))
+                        .collect(),
+                ));
+                point_width = 16;
+                let keys = ips
+                    .iter()
+                    .map(|ips| ips.iter().map(|ip| ip.to_vec()).collect());
+                out.keyword.push((number, dedup(keys.collect())));
+                (IndexOptions::None, DocValuesType::SortedSet, true)
+            }
             M::Boolean => {
                 let Some(bools) = typed(&values, &|v| v.as_bool()) else {
                     continue;
