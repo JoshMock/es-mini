@@ -41,12 +41,31 @@ pub enum AppError {
     ParsingException(String),
     Verification(String),
     Io(String),
+    /// A scroll or point-in-time id whose context expired or was freed.
+    SearchContextMissing(u64),
 }
 
 impl AppError {
     /// Status and the `error` object (with `root_cause`) of the ES envelope.
     pub(crate) fn parts(self) -> (StatusCode, Value) {
         let (status, kind, reason, index) = match self {
+            Self::SearchContextMissing(id) => {
+                let cause = json!({
+                    "type": "search_context_missing_exception",
+                    "reason": format!("No search context found for id [{id}]"),
+                });
+                return (
+                    StatusCode::NOT_FOUND,
+                    json!({
+                        "root_cause": [cause],
+                        "type": "search_phase_execution_exception",
+                        "reason": "all shards failed",
+                        "phase": "query",
+                        "grouped": true,
+                        "failed_shards": [{"shard": -1, "index": null, "reason": cause}],
+                    }),
+                );
+            }
             Self::IndexClosed(i) => (
                 StatusCode::BAD_REQUEST,
                 "index_closed_exception",

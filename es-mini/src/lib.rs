@@ -9,6 +9,7 @@ mod field_caps;
 mod filter_path;
 mod indices;
 mod params;
+mod scroll;
 mod search;
 
 use axum::{
@@ -176,6 +177,7 @@ pub fn app_persisted(dir: &std::path::Path) -> Result<Router, String> {
                         ["/_search", "/_count", "/_query", "/_field_caps"]
                             .iter()
                             .any(|s| r.as_str().ends_with(s))
+                            || r.as_str().starts_with("/_search/scroll")
                     });
                 let res = next.run(req).await;
                 if reads || !res.status().is_success() {
@@ -289,6 +291,14 @@ fn router(state: AppState) -> Router {
         )
         .route("/_search", get(search::search_all).post(search::search_all))
         .route("/{index}/_search", get(search::search).post(search::search))
+        .route(
+            "/_search/scroll",
+            get(scroll::next).post(scroll::next).delete(scroll::clear),
+        )
+        .route(
+            "/_search/scroll/{scroll_id}",
+            get(scroll::next).post(scroll::next).delete(scroll::clear),
+        )
         .route("/_msearch", get(search::msearch).post(search::msearch))
         .route(
             "/{index}/_msearch",
@@ -333,6 +343,7 @@ fn router(state: AppState) -> Router {
             },
         )
         .with_state(state)
+        .layer(axum::Extension(scroll::Contexts::default()))
         .layer(axum::middleware::from_fn(filter_response))
 }
 
@@ -398,6 +409,9 @@ mod search_tests;
 
 #[cfg(test)]
 mod msearch_tests;
+
+#[cfg(test)]
+mod scroll_tests;
 
 #[cfg(test)]
 mod aliases_tests;

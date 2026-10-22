@@ -1,6 +1,6 @@
-use crate::{AppState, error::AppError, indices::parse_body, params};
+use crate::{AppState, error::AppError, indices::parse_body, params, scroll::Contexts};
 use axum::{
-    Json,
+    Extension, Json,
     body::Bytes,
     extract::{Path, Query, State},
     http::Uri,
@@ -98,11 +98,12 @@ pub(crate) fn shards(n: usize) -> Value {
 
 pub async fn search_all(
     state: State<AppState>,
+    contexts: Extension<Contexts>,
     uri: Uri,
     params: Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
-    search(state, Path("_all".into()), uri, params, body).await
+    search(state, contexts, Path("_all".into()), uri, params, body).await
 }
 
 /// The `q`/`df`/`default_operator` URI query as a parsed query.
@@ -118,6 +119,7 @@ pub(crate) fn query_from_params(q: &str, params: &HashMap<String, String>) -> es
 
 pub async fn search(
     State(state): State<AppState>,
+    Extension(contexts): Extension<Contexts>,
     Path(name): Path<String>,
     uri: Uri,
     Query(params): Query<HashMap<String, String>>,
@@ -128,6 +130,15 @@ pub async fn search(
     let mut req = SearchRequest::parse(&parse_body(&body)?).map_err(AppError::from)?;
     if let Some(q) = params.get("q") {
         req.query = query_from_params(q, &params);
+    }
+    let scroll = params
+        .get("scroll")
+        .map(|v| crate::scroll::keep_alive(v))
+        .transpose()?;
+    if scroll.is_some() && req.from > 0 {
+        return Err(AppError::ActionRequestValidation(
+            "using [from] is not allowed in a scroll context".into(),
+        ));
     }
     let indices = state.read().expect("lock poisoned");
     let resolved = crate::indices::data_targets(&indices, &name, &params)?;
@@ -146,6 +157,10 @@ pub async fn search(
         }
     }
     es_query::check_sortable(&targets, &req)?;
+    let page = req.size;
+    if scroll.is_some() {
+        req.size = usize::MAX;
+    }
     let r = es_query::search_many(&targets, &req)?;
     let hits: Vec<Value> = r
         .hits
@@ -202,12 +217,16 @@ pub async fn search(
         "_shards": shards(targets.len()),
         "hits": hits
     });
-    Ok(Json(resp))
+    Ok(Json(match scroll {
+        Some(keep) => crate::scroll::open(&contexts, resp, page, keep),
+        None => resp,
+    }))
 }
 
 /// `_msearch`: NDJSON header/body pairs, each run as a `_search`; a failing search fails only its own entry.
 pub async fn msearch(
     State(state): State<AppState>,
+    Extension(contexts): Extension<Contexts>,
     path: Option<Path<String>>,
     uri: Uri,
     body: Bytes,
@@ -243,6 +262,7 @@ pub async fn msearch(
             }
             search(
                 State(state.clone()),
+                Extension(contexts.clone()),
                 Path(name),
                 uri.clone(),
                 Query(params),
