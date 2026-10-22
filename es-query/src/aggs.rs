@@ -16,6 +16,8 @@ enum Metric {
     Min,
     Max,
     ValueCount,
+    Stats,
+    ExtendedStats { sigma: f64 },
 }
 
 impl Metric {
@@ -26,6 +28,8 @@ impl Metric {
             Metric::Min => "min",
             Metric::Max => "max",
             Metric::ValueCount => "value_count",
+            Metric::Stats => "stats",
+            Metric::ExtendedStats { .. } => "extended_stats",
         }
     }
 }
@@ -77,12 +81,14 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
         }
     }
     let (t, params) = kind.ok_or_else(|| format!("Missing definition for aggregation [{name}]"))?;
-    let metric = match t {
+    let mut metric = match t {
         "avg" => Metric::Avg,
         "sum" => Metric::Sum,
         "min" => Metric::Min,
         "max" => Metric::Max,
         "value_count" => Metric::ValueCount,
+        "stats" => Metric::Stats,
+        "extended_stats" => Metric::ExtendedStats { sigma: 2.0 },
         _ => return Err(format!("Unknown aggregation type [{t}]").into()),
     };
     if subs {
@@ -93,11 +99,21 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
     let params = params
         .as_object()
         .ok_or_else(|| format!("Expected [START_OBJECT] under [{t}]"))?;
-    if let Some(k) = params
-        .keys()
-        .find(|k| !["field", "missing"].contains(&k.as_str()))
-    {
-        return Err(format!("[{t}] unknown field [{k}]").into());
+    for (k, v) in params {
+        match (k.as_str(), &mut metric) {
+            ("field" | "missing", _) => {}
+            ("sigma", Metric::ExtendedStats { sigma }) => {
+                *sigma = num(v).ok_or_else(|| {
+                    QueryError::x_content(format!("[{t}] failed to parse field [sigma]"))
+                })?;
+                if *sigma < 0.0 {
+                    return Err(QueryError::illegal(format!(
+                        "[sigma] must be greater than or equal to 0. Found [{sigma:?}] in [{name}]"
+                    )));
+                }
+            }
+            _ => return Err(format!("[{t}] unknown field [{k}]").into()),
+        }
     }
     let field = params
         .get("field")
@@ -119,6 +135,9 @@ pub(crate) struct Stats {
     /// Kahan-compensated, like ES's CompensatedSum.
     sum: f64,
     delta: f64,
+    /// The sum of squares, also compensated (only for `extended_stats`).
+    sum_sq: f64,
+    sq_delta: f64,
     min: f64,
     max: f64,
     /// The field is a date in some index, so values also render as dates.
@@ -131,6 +150,8 @@ impl Default for Stats {
             count: 0,
             sum: 0.0,
             delta: 0.0,
+            sum_sq: 0.0,
+            sq_delta: 0.0,
             min: f64::INFINITY,
             max: f64::NEG_INFINITY,
             date: false,
@@ -138,23 +159,30 @@ impl Default for Stats {
     }
 }
 
+/// Adds `x` to a Kahan-compensated `sum`.
+fn kahan(sum: &mut f64, delta: &mut f64, x: f64) {
+    if !x.is_finite() {
+        *sum += x;
+    }
+    if sum.is_finite() {
+        let corrected = x + *delta;
+        let updated = *sum + corrected;
+        *delta = corrected - (updated - *sum);
+        *sum = updated;
+    }
+}
+
 impl Stats {
     fn add(&mut self, x: f64) {
-        if !x.is_finite() {
-            self.sum += x;
-        }
-        if self.sum.is_finite() {
-            let corrected = x + self.delta;
-            let updated = self.sum + corrected;
-            self.delta = corrected - (updated - self.sum);
-            self.sum = updated;
-        }
+        kahan(&mut self.sum, &mut self.delta, x);
+        kahan(&mut self.sum_sq, &mut self.sq_delta, x * x);
     }
 
     /// Reduces one shard's result into this one, as ES reduces shard results.
     fn merge(&mut self, o: &Stats) {
         self.count += o.count;
-        self.add(o.sum);
+        kahan(&mut self.sum, &mut self.delta, o.sum);
+        kahan(&mut self.sum_sq, &mut self.sq_delta, o.sum_sq);
         self.min = self.min.min(o.min);
         self.max = self.max.max(o.max);
         self.date |= o.date;
@@ -312,20 +340,38 @@ pub(crate) fn render(aggs: &[Agg], stats: &[Stats], typed_keys: bool) -> Value {
         if let Some(m) = &agg.meta {
             body.insert("meta".into(), m.clone());
         }
-        let value = match agg.metric {
-            Metric::Avg => (st.count > 0).then(|| st.sum / st.count as f64),
-            Metric::Sum => Some(st.sum),
-            Metric::Min => st.min.is_finite().then_some(st.min),
-            Metric::Max => st.max.is_finite().then_some(st.max),
-            Metric::ValueCount => None,
+        let avg = (st.count > 0).then(|| st.sum / st.count as f64);
+        let min = st.min.is_finite().then_some(st.min);
+        let max = st.max.is_finite().then_some(st.max);
+        let date = st.date;
+        let put = |body: &mut Map<String, Value>, key: &str, v: Option<f64>| {
+            body.insert(key.into(), v.map_or(Value::Null, Value::from));
+            // ponytail: dates render in the default format, not a mapping's custom `format`
+            if let Some(v) = v.filter(|_| date) {
+                body.insert(format!("{key}_as_string"), iso_date(v as u64).into());
+            }
         };
         match agg.metric {
-            Metric::ValueCount => body.insert("value".into(), st.count.into()),
-            _ => body.insert("value".into(), value.map_or(Value::Null, Value::from)),
-        };
-        // ponytail: dates render in the default format, not a mapping's custom `format`
-        if let Some(v) = value.filter(|_| st.date) {
-            body.insert("value_as_string".into(), iso_date(v as u64).into());
+            Metric::Avg => put(&mut body, "value", avg),
+            Metric::Sum => put(&mut body, "value", Some(st.sum)),
+            Metric::Min => put(&mut body, "value", min),
+            Metric::Max => put(&mut body, "value", max),
+            Metric::ValueCount => {
+                body.insert("value".into(), st.count.into());
+            }
+            Metric::Stats | Metric::ExtendedStats { .. } => {
+                body.insert("count".into(), st.count.into());
+                put(&mut body, "min", min);
+                put(&mut body, "max", max);
+                put(&mut body, "avg", avg);
+                match st.count {
+                    0 => drop(body.insert("sum".into(), 0.0.into())),
+                    _ => put(&mut body, "sum", Some(st.sum)),
+                }
+            }
+        }
+        if let Metric::ExtendedStats { sigma } = agg.metric {
+            extended_stats(&mut body, st, sigma);
         }
         let key = match typed_keys {
             true => format!("{}#{}", agg.metric.name(), agg.name),
@@ -334,6 +380,46 @@ pub(crate) fn render(aggs: &[Agg], stats: &[Stats], typed_keys: bool) -> Value {
         out.insert(key, body.into());
     }
     out.into()
+}
+
+/// The fields `extended_stats` adds to `stats`, computed like ES's InternalExtendedStats.
+// ponytail: no `_as_string` variants for date fields
+fn extended_stats(body: &mut Map<String, Value>, st: &Stats, sigma: f64) {
+    let n = st.count as f64;
+    // ES's `variance < 0 ? 0 : variance` keeps NaN, which `f64::max` would not
+    let var = |d: f64| match (st.sum_sq - st.sum * st.sum / n) / d {
+        x if x < 0.0 => 0.0,
+        x => x,
+    };
+    let (pop, samp) = (var(n), var(n - 1.0));
+    let avg = st.sum / n;
+    // Jackson writes NaN (the sampling variance of one value) as a string.
+    let v = |x: f64| {
+        if st.count == 0 {
+            Value::Null
+        } else if x.is_nan() {
+            "NaN".into()
+        } else {
+            x.into()
+        }
+    };
+    body.insert("sum_of_squares".into(), v(st.sum_sq));
+    body.insert("variance".into(), v(pop));
+    body.insert("variance_population".into(), v(pop));
+    body.insert("variance_sampling".into(), v(samp));
+    body.insert("std_deviation".into(), v(pop.sqrt()));
+    body.insert("std_deviation_population".into(), v(pop.sqrt()));
+    body.insert("std_deviation_sampling".into(), v(samp.sqrt()));
+    let (upper, lower) = (avg + pop.sqrt() * sigma, avg - pop.sqrt() * sigma);
+    let (s_upper, s_lower) = (avg + samp.sqrt() * sigma, avg - samp.sqrt() * sigma);
+    body.insert(
+        "std_deviation_bounds".into(),
+        serde_json::json!({
+            "upper": v(upper), "lower": v(lower),
+            "upper_population": v(upper), "lower_population": v(lower),
+            "upper_sampling": v(s_upper), "lower_sampling": v(s_lower),
+        }),
+    );
 }
 
 #[cfg(test)]
@@ -446,6 +532,59 @@ mod tests {
     }
 
     #[test]
+    fn stats_and_extended_stats() {
+        let body = json!({"query": {"range": {"i": {"gte": 50}}}, "aggs": {
+            "s": {"stats": {"field": "i"}},
+            "e": {"extended_stats": {"field": "i"}},
+            "e3": {"extended_stats": {"field": "i", "sigma": 3}},
+            "d": {"stats": {"field": "at"}},
+            "none": {"extended_stats": {"field": "nope"}},
+        }});
+        let got = aggs_of(&index(), body);
+        assert_eq!(
+            got["s"],
+            json!({"count": 3, "min": 51.0, "max": 151.0, "avg": 101.0, "sum": 303.0})
+        );
+        // values from ES's extended_stats_metric.yml "Filtered test"
+        let e = &got["e"];
+        assert_eq!(e["count"], 3);
+        assert_eq!(e["sum_of_squares"], 35603.0);
+        assert_eq!(e["variance"], 1666.6666666666667);
+        assert_eq!(e["variance_population"], 1666.6666666666667);
+        assert_eq!(e["variance_sampling"], 2500.0);
+        assert_eq!(e["std_deviation"], 40.824829046386306);
+        assert_eq!(e["std_deviation_sampling"], 50.0);
+        assert_eq!(
+            e["std_deviation_bounds"],
+            json!({"upper": 182.6496580927726, "lower": 19.35034190722739,
+                "upper_population": 182.6496580927726, "lower_population": 19.35034190722739,
+                "upper_sampling": 201.0, "lower_sampling": 1.0})
+        );
+        assert_eq!(got["e3"]["std_deviation_bounds"]["upper_sampling"], 251.0);
+        assert_eq!(got["d"]["min_as_string"], "2021-05-02T00:00:00.000Z");
+        assert_eq!(got["d"]["max_as_string"], "2021-05-04T00:00:00.000Z");
+        let none = &got["none"];
+        assert_eq!(
+            (
+                &none["count"],
+                &none["min"],
+                &none["sum"],
+                &none["variance"]
+            ),
+            (&json!(0), &Value::Null, &json!(0.0), &Value::Null)
+        );
+        assert_eq!(none["std_deviation_bounds"]["lower_sampling"], Value::Null);
+        // Jackson quotes NaN, the sampling variance of one value
+        let body = json!({"query": {"term": {"i": 1}}, "aggs": {
+            "e": {"extended_stats": {"field": "i"}}}});
+        let one = &aggs_of(&index(), body)["e"];
+        assert_eq!(
+            (&one["variance"], &one["variance_sampling"]),
+            (&json!(0.0), &json!("NaN"))
+        );
+    }
+
+    #[test]
     fn aggs_reject_bad_requests() {
         let err = |aggs: Value| {
             let req = SearchRequest::parse(&json!({"aggs": aggs}));
@@ -475,6 +614,18 @@ mod tests {
         assert_eq!(
             err(json!({"a": {"avg": {"field": "i"}, "aggs": {"b": {"max": {"field": "i"}}}}})),
             "Aggregator [a] of type [avg] cannot accept sub-aggregations"
+        );
+        assert_eq!(
+            err(json!({"a": {"extended_stats": {"field": "i", "sigma": -1}}})),
+            "[sigma] must be greater than or equal to 0. Found [-1.0] in [a]"
+        );
+        assert_eq!(
+            err(json!({"a": {"extended_stats": {"field": "i", "sigma": "foo"}}})),
+            "[extended_stats] failed to parse field [sigma]"
+        );
+        assert_eq!(
+            err(json!({"a": {"stats": {"field": "i", "sigma": 1}}})),
+            "[stats] unknown field [sigma]"
         );
         assert_eq!(
             err(json!({"a": {"meta": {}}})),

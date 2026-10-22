@@ -33,14 +33,6 @@ aggregations/date_histogram.yml/Multi-value date histogram docvalues only
 aggregations/date_range.yml/Date range
 aggregations/date_range.yml/Date Range Missing
 aggregations/date_range.yml/Date range unmapped with children
-aggregations/extended_stats_metric.yml/Bad sigma test
-aggregations/extended_stats_metric.yml/Basic test
-aggregations/extended_stats_metric.yml/Filtered test
-aggregations/extended_stats_metric.yml/Metadata test
-aggregations/extended_stats_metric.yml/Missing field with missing param
-aggregations/extended_stats_metric.yml/Missing field without missing param
-aggregations/extended_stats_metric.yml/Only aggs test
-aggregations/extended_stats_metric.yml/Sigma test
 aggregations/filters_bucket.yml/Anonymous filters test
 aggregations/filters_bucket.yml/Bad params
 aggregations/filters_bucket.yml/Basic test
@@ -106,12 +98,6 @@ aggregations/range.yml/Min and max long range bounds
 aggregations/range.yml/Null to and from
 aggregations/range.yml/Range agg on long field
 aggregations/range.yml/Range aggregation on date field
-aggregations/stats_metric.yml/Basic test
-aggregations/stats_metric.yml/Filtered test
-aggregations/stats_metric.yml/Metadata test
-aggregations/stats_metric.yml/Missing field with missing param
-aggregations/stats_metric.yml/Missing field without missing param
-aggregations/stats_metric.yml/Only aggs test
 aggregations/terms.yml/Basic test
 aggregations/terms.yml/Boolean test
 aggregations/terms.yml/Date test
@@ -158,9 +144,7 @@ aggregations/top_hits.yml/synthetic _source
 aggregations/top_hits.yml/version
 aggregations/typed_keys.yml/Test typed keys parameter for cardinality aggregation
 aggregations/typed_keys.yml/Test typed keys parameter for date_histogram aggregation and max_bucket pipeline aggregation
-aggregations/typed_keys.yml/Test typed keys parameter for extended_stats aggregation
 aggregations/typed_keys.yml/Test typed keys parameter for percentile_ranks aggregation
 aggregations/typed_keys.yml/Test typed keys parameter for percentiles aggregation
-aggregations/typed_keys.yml/Test typed keys parameter for stats aggregation
 aggregations/typed_keys.yml/Test typed keys parameter for terms aggregation
 aggregations/typed_keys.yml/Test typed keys parameter for terms and top_hits aggregation

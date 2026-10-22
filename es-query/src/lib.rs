@@ -591,6 +591,8 @@ pub enum ErrorKind {
     Parsing,
     /// `illegal_argument_exception`
     IllegalArgument,
+    /// `x_content_parse_exception`
+    XContentParse,
 }
 
 /// A query failure: its Elasticsearch error type and reason.
@@ -604,6 +606,13 @@ impl QueryError {
     pub fn illegal(msg: impl Into<String>) -> Self {
         Self {
             kind: ErrorKind::IllegalArgument,
+            msg: msg.into(),
+        }
+    }
+
+    pub fn x_content(msg: impl Into<String>) -> Self {
+        Self {
+            kind: ErrorKind::XContentParse,
             msg: msg.into(),
         }
     }

@@ -39,6 +39,7 @@ pub enum AppError {
     ResourceNotFound(String),
     IllegalArgument(String),
     ParsingException(String),
+    XContentParse(String),
     Verification(String),
     Io(String),
     /// A scroll or point-in-time id whose context expired or was freed.
@@ -151,6 +152,12 @@ impl AppError {
                 None,
             ),
             Self::ParsingException(r) => (StatusCode::BAD_REQUEST, "parsing_exception", r, None),
+            Self::XContentParse(r) => (
+                StatusCode::BAD_REQUEST,
+                "x_content_parse_exception",
+                r,
+                None,
+            ),
             Self::Verification(r) => (StatusCode::BAD_REQUEST, "verification_exception", r, None),
             Self::Io(r) => (StatusCode::INTERNAL_SERVER_ERROR, "io_exception", r, None),
             Self::IllegalArgument(r) => (
@@ -207,6 +214,7 @@ impl From<es_query::QueryError> for AppError {
         match e.kind {
             es_query::ErrorKind::Parsing => Self::ParsingException(e.msg),
             es_query::ErrorKind::IllegalArgument => Self::IllegalArgument(e.msg),
+            es_query::ErrorKind::XContentParse => Self::XContentParse(e.msg),
         }
     }
 }
