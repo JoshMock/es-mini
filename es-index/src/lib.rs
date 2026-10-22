@@ -447,13 +447,55 @@ impl Index {
         use FieldMapping as M;
         let decode = match self.mappings.properties.get(field)? {
             M::Long | M::Integer | M::Short | M::Byte | M::Date { .. } => Value::from,
-            // a sortable long: flipping the non-sign bits of negatives is its own inverse
-            M::Double => |v: i64| Value::from(f64::from_bits((v ^ ((v >> 63) & i64::MAX)) as u64)),
+            M::Double => |v| Value::from(sortable_double(v)),
             _ => return None,
         };
         Some(self.disk.as_ref().map_or_else(BTreeSet::new, |d| {
             d.number_docs(field, |v| keep(&decode(v)))
         }))
+    }
+
+    /// Reads the doc values of `field` for live on-disk documents by id: numbers (dates as
+    /// epoch millis), booleans, or keyword terms in order. `None` for a document in memory, or
+    /// in a segment without doc values for the field. Each segment's column is decoded once.
+    pub fn disk_values<'a>(
+        &'a self,
+        field: &'a str,
+    ) -> impl FnMut(&str) -> Option<Vec<Value>> + 'a {
+        use FieldMapping as M;
+        use es_codec::doc_values::DocValues as D;
+        let mut columns: HashMap<usize, Option<D>> = HashMap::new();
+        move |id| {
+            let disk = self.disk.as_ref()?;
+            let (seg, doc) = disk.pos(id)?;
+            let column = &*columns
+                .entry(seg)
+                .or_insert_with(|| disk.column(seg, field));
+            let numbers = |f: fn(i64) -> Value| match column {
+                Some(D::Numbers(n)) => Some(n[doc].iter().map(|v| f(*v)).collect()),
+                _ => None,
+            };
+            match self.mappings.properties.get(field)? {
+                M::Long | M::Integer | M::Short | M::Byte | M::Date { .. } => numbers(Value::from),
+                M::Double => numbers(|v| Value::from(sortable_double(v))),
+                M::Float => numbers(|v| {
+                    let v = v as i32;
+                    Value::from(f64::from(f32::from_bits(
+                        (v ^ ((v >> 31) & i32::MAX)) as u32,
+                    )))
+                }),
+                M::Boolean => numbers(|v| Value::Bool(v != 0)),
+                M::Keyword { .. } => match column {
+                    Some(D::Ordinals { ords, terms }) => Some(
+                        (ords[doc].iter())
+                            .map(|o| String::from_utf8_lossy(&terms[*o]).into_owned().into())
+                            .collect(),
+                    ),
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
     }
 
     fn supersede(&mut self, old: Value) {
@@ -560,6 +602,12 @@ fn random_uuid() -> String {
     (0..22)
         .map(|i| es_codec::base64::URL[((bits >> (i * 6)) & 63) as usize] as char)
         .collect()
+}
+
+/// A double from its sortable-long doc value: flipping the non-sign bits of negatives is its
+/// own inverse.
+fn sortable_double(v: i64) -> f64 {
+    f64::from_bits((v ^ ((v >> 63) & i64::MAX)) as u64)
 }
 
 /// Formats epoch milliseconds as ES's `date_optional_time` (`2024-01-15T10:30:00.000Z`).
@@ -933,5 +981,43 @@ mod tests {
         let r = idx.update("1", &json!({"a": 1}), Some(json!({"u": 1})), true);
         assert_eq!(r, Some(w(DocResult::Created, 1, 0)));
         assert_eq!(idx.get("1").unwrap().source, json!({"u": 1}));
+    }
+
+    #[test]
+    fn disk_values_read_the_doc_values_of_on_disk_documents() {
+        let dir = std::env::temp_dir().join(format!("esm-disk-values-{}", std::process::id()));
+        let mut ix = Index::default();
+        let props = &mut ix.mappings.properties;
+        props.insert("n".into(), FieldMapping::Long);
+        props.insert("d".into(), FieldMapping::Double);
+        props.insert("f".into(), FieldMapping::Float);
+        props.insert("k".into(), FieldMapping::Keyword { ignore_above: None });
+        props.insert("ok".into(), FieldMapping::Boolean);
+        let date = FieldMapping::Date {
+            format: None,
+            locale: None,
+        };
+        props.insert("at".into(), date);
+        props.insert("t".into(), FieldMapping::Text);
+        let doc = json!({"n": [3, -2], "d": -1.5, "f": 1.1, "k": ["b", "a", "b"], "ok": true,
+            "at": "2021-05-01T00:00:00Z", "t": "x"});
+        ix.put("1", doc);
+        ix.put("2", json!({"n": 1}));
+        disk::save(&dir, &Indices::from([("i".to_owned(), ix)])).unwrap();
+        let mut opened = disk::open(&dir).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let ix = opened.get_mut("i").unwrap();
+        ix.put("3", json!({"n": 9}));
+        let read = |field: &str, id: &str| ix.disk_values(field)(id);
+        assert_eq!(read("n", "1"), Some(vec![json!(-2), json!(3)]));
+        assert_eq!(read("d", "1"), Some(vec![json!(-1.5)]));
+        assert_eq!(read("f", "1"), Some(vec![json!(f64::from(1.1f32))]));
+        assert_eq!(read("k", "1"), Some(vec![json!("a"), json!("b")]));
+        assert_eq!(read("ok", "1"), Some(vec![json!(true)]));
+        assert_eq!(read("at", "1"), Some(vec![json!(1_619_827_200_000i64)]));
+        assert_eq!(read("d", "2"), Some(vec![]));
+        // text has no doc values; a document written since opening is in memory
+        assert_eq!(read("t", "1"), None);
+        assert_eq!(read("n", "3"), None);
     }
 }

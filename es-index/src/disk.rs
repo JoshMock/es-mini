@@ -139,6 +139,16 @@ impl Shard {
         self.ids.get(id).copied()
     }
 
+    /// Where a live document is.
+    pub(crate) fn pos(&self, id: &str) -> Option<DiskPos> {
+        self.ids.get(id).map(|d| (d.segment, d.doc))
+    }
+
+    /// A segment's doc values of `field`; `None` if it has none the codec reads.
+    pub(crate) fn column(&self, segment: usize, field: &str) -> Option<DocValues> {
+        self.segments[segment].doc_values(field).ok()
+    }
+
     /// Forgets a document the index replaced or deleted.
     pub(crate) fn remove(&mut self, id: &str) -> Option<DiskDoc> {
         self.ids.remove(id)
@@ -154,11 +164,7 @@ impl Shard {
     /// segment without readable postings for the field. Some may no longer be live.
     pub(crate) fn term_docs(&self, field: &str, term: &str) -> BTreeSet<DiskPos> {
         if field == "_id" {
-            return self
-                .meta(term)
-                .map(|d| (d.segment, d.doc))
-                .into_iter()
-                .collect();
+            return self.pos(term).into_iter().collect();
         }
         let mut out = BTreeSet::new();
         for (s, seg) in self.segments.iter().enumerate() {
