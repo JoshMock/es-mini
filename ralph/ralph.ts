@@ -9,7 +9,7 @@
 // target and prompt without starting an agent. Unattended runs append to ralph/REPORT.md, read
 // agent escalations from ralph/NEEDS_HUMAN.md (both git-ignored), and send a notification at the end.
 import { execFileSync, spawnSync } from "node:child_process";
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 interface Suite {
@@ -56,15 +56,63 @@ const SUITES: Record<string, Suite> = {
 /** Planning docs: scope changes are reserved for a human (see AGENTS.md "Unattended runs"). */
 const ALL_FROZEN = ["z_old", ...Object.values(SUITES).flatMap((s) => s.frozen)];
 const LISTS = Object.values(SUITES).map((s) => s.list);
-const MAX_CONSECUTIVE_REJECTIONS = 3;
+/** Rejections in a row (across targets) that end a suite: something systemic is wrong. */
+const MAX_CONSECUTIVE_REJECTIONS = 6;
+/** Rejected attempts after which a goal is set aside for the rest of the run. */
+const MAX_GOAL_ATTEMPTS = 3;
+/** Stop when the temp filesystem (build cache, test scratch) has less free space than this. */
+const MIN_FREE_TMP_BYTES = 1.5e9;
+/** Marks an iteration in progress, so a restart after a crash can roll it back. */
+const IN_PROGRESS = "ralph/.iteration-start";
 const SONNET = "anthropic/claude-sonnet-5-5", OPUS = "anthropic/claude-opus-5-5";
 const REVIEW_MODEL = `${OPUS}:high`;
-/** Model per target (see models.md in the overnight bundle); --model overrides all. */
+/**
+ * Model and thinking level per goal, by how hard and how risky the work is. Opus high: Lucene and
+ * Elasticsearch formats, durability, concurrency, and new engines (aggregations, ES|QL
+ * expressions). Opus medium: new APIs and features with clear Elasticsearch behavior to match.
+ * Sonnet: small, well-scoped changes. A goal missing here runs on Opus medium with a warning.
+ */
+const GOAL_MODELS: Record<string, string> = Object.fromEntries(
+  Object.entries({
+    [`${OPUS}:high`]: [
+      "aggs-framework", "aggs-stats-cardinality", "translog-routing-and-batches",
+      "cross-engine-crash-recovery", "flush-by-size-and-idle", "group-commit", "merge-policy",
+      "superseded-per-segment", "count-from-postings", "score-from-postings", "points-tree",
+      "terms-dict-floor-blocks", "postings-positions", "pfor-exceptions", "doc-values-encodings",
+      "unsupported-codecs", "index-sorting", "date-semantics", "per-index-locks",
+      "esql-parity-harness", "esql-eval-functions", "esql-stats",
+    ],
+    [`${OPUS}:medium`]: [
+      "api-field-caps", "api-by-query", "api-scroll-pit", "api-search-template", "aggs-terms",
+      "aggs-histograms", "aggs-ranges-filters", "aggs-top-hits-typed-keys", "aggs-parity",
+      "stale-commit-files", "flush-on-shutdown", "range-from-doc-values-memory",
+      "disk-float-ranges", "real-deflate", "unreadable-segments", "nested-dynamic-mapping",
+      "missing-queries", "settings-validation", "refresh-interval", "multi-index-esql-types",
+      "esql-errors-grammar", "esql-source-commands",
+    ],
+    [`${SONNET}:medium`]: [
+      "api-node-stubs", "constant-score-boost", "auto-id-format", "alias-date-math",
+      "tidy-review-refactors", "perf-small-ceilings",
+    ],
+    [`${SONNET}:low`]: ["docs-translog-agents", "test-scratch-cleanup"],
+  }).flatMap(([spec, ids]) => ids.map((id) => [id, spec])),
+);
+
+/** Model per target; --model overrides all. */
 function modelFor(suite: string, id: string): string {
   if (flag("model")) return flag("model")!;
-  if (suite !== "goals") return `${SONNET}:low`;
-  if (/^(debt-full-postings|debt-incremental|debt-read-from-segments)/.test(id)) return `${OPUS}:high`;
-  return `${OPUS}:medium`;
+  switch (suite) {
+    case "goals": {
+      const spec = GOAL_MODELS[id.split(":")[0]];
+      if (!spec) console.log(`ralph: no model listed for goal ${id.split(":")[0]}; using Opus medium`);
+      return spec ?? `${OPUS}:medium`;
+    }
+    // Aggregation tests need engine work; the remaining YAML and parity targets are small fixes.
+    case "yaml":
+      return id.startsWith("aggregations/") ? `${SONNET}:high` : `${SONNET}:medium`;
+    default:
+      return `${SONNET}:medium`;
+  }
 }
 
 /** `provider/model-id:thinking`, e.g. `anthropic/claude-opus-5-5:high`; see models.md. */
@@ -206,43 +254,90 @@ async function runAgent(makePrompt: (model: string) => string, spec: string): Pr
       process.stdout.write(event.assistantMessageEvent.delta);
     }
   });
-  const timer = setTimeout(() => {
-    console.log(`\nralph: iteration exceeded ${timeoutMs / 60_000} minutes; aborting`);
-    void session.abort();
-  }, timeoutMs);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let hard: ReturnType<typeof setTimeout> | undefined;
+  // Abort at the limit; if the session does not wind down within 5 more minutes, give up on it.
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      console.log(`\nralph: iteration exceeded ${timeoutMs / 60_000} minutes; aborting`);
+      void session.abort();
+      hard = setTimeout(() => reject(new Error("session did not stop after abort")), 5 * 60_000);
+    }, timeoutMs);
+  });
   try {
-    await session.prompt(makePrompt(model));
+    await Promise.race([session.prompt(makePrompt(model)), deadline]);
   } finally {
     clearTimeout(timer);
+    clearTimeout(hard);
     session.dispose();
   }
   return model;
 }
 
-/** Runs one iteration and rolls it back if verification fails; returns whether it was accepted. */
+/** Removes what iterations leave outside git: Elasticsearch containers and test scratch dirs. */
+function cleanEnvironment() {
+  spawnSync("sh", ["-c", "docker ps -aq --filter name=es-mini | xargs -r docker rm -f"], { stdio: "ignore" });
+  spawnSync("sh", ["-c", "rm -rf /tmp/esm-save-* /tmp/esm-persist-* /tmp/esm-disk-meta-* /tmp/esm-incr-* /tmp/esm-tlog-* /tmp/esm-timing"], { stdio: "ignore" });
+}
+
+/** Discards everything since `start`: commits, edits, and untracked files (git-ignored ones stay). */
+function rollBack(start: string) {
+  git("reset", "--hard", start);
+  git("clean", "-fdq");
+  cleanEnvironment();
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Bytes free on the filesystem holding /tmp. */
+function freeTmpBytes(): number {
+  const out = spawnSync("df", ["-B1", "--output=avail", "/tmp"], { encoding: "utf8" }).stdout ?? "";
+  return Number(out.trim().split("\n").pop()) || Infinity;
+}
+
+/** Runs one iteration and rolls it back if verification fails or the agent errors; returns
+ * whether it was accepted. */
 async function iterate(label: string, makePrompt: (m: string) => string, opts: Parameters<typeof verify>[2], spec: string) {
   const start = git("rev-parse", "HEAD");
   if (dryRun) {
     console.log(makePrompt("<model from the session>"));
     return false;
   }
-  const model = await runAgent(makePrompt, spec);
-  const failure = verify(start, model, opts);
+  writeFileSync(join(repo, IN_PROGRESS), start);
+  let failure: string | undefined;
+  let model = "";
+  try {
+    model = await runAgent(makePrompt, spec);
+  } catch (e) {
+    failure = `agent error: ${e instanceof Error ? e.message : String(e)}`;
+  }
+  failure ??= verify(start, model, opts);
   if (failure) {
-    // Only discards this iteration's own commits and edits; the tree was clean at start.
-    git("reset", "--hard", start);
+    rollBack(start);
+    rmSync(join(repo, IN_PROGRESS), { force: true });
     report(`rejected ${label}: ${failure}`);
+    // Back off on agent errors (rate limits, outages) instead of burning through targets.
+    if (failure.startsWith("agent error")) await sleep(2 * 60_000);
     return false;
   }
+  rmSync(join(repo, IN_PROGRESS), { force: true });
+  cleanEnvironment();
   const made = git("log", "--oneline", `${start}..HEAD`);
   report(`accepted ${label}${made ? `: ${made.split("\n").join("; ")}` : " (no changes)"}`);
   return true;
 }
 
+if (!dryRun && existsSync(join(repo, IN_PROGRESS))) {
+  const start = readFileSync(join(repo, IN_PROGRESS), "utf8").trim();
+  report(`recovering: rolling back an iteration interrupted by a crash to ${start.slice(0, 8)}`);
+  rollBack(start);
+  rmSync(join(repo, IN_PROGRESS), { force: true });
+}
 if (git("status", "--porcelain")) throw new Error("working tree must be clean before starting");
 if (!dryRun && unattended && spawnSync("scripts/check.sh", [], { cwd: repo, stdio: "inherit" }).status !== 0) {
   notify("ralph: not started", "scripts/check.sh fails on main; fix it first.");
-  throw new Error("scripts/check.sh fails before the first iteration");
+  console.error("scripts/check.sh fails before the first iteration");
+  process.exit(3);
 }
 report(`started: suites ${suiteNames.join(",")}, max ${max}, until ${until?.toLocaleString() ?? "-"}`);
 
@@ -253,10 +348,15 @@ let stopReason = "all suites finished";
 outer: for (const name of suiteNames) {
   const suite = SUITES[name];
   const skipped = new Set<string>();
+  const attempts = new Map<string, number>();
   let rejections = 0;
   while (true) {
     if (done >= max) { stopReason = `reached --max ${max}`; break outer; }
     if (until && new Date() >= until) { stopReason = "reached --until"; break outer; }
+    if (!dryRun && freeTmpBytes() < MIN_FREE_TMP_BYTES) {
+      stopReason = "less than 1.5 GB free in /tmp";
+      break outer;
+    }
     const id = flag("target") ?? lines(suite.list).find((t) => !skipped.has(t));
     if (!id) { report(`${name}: no targets left`); break; }
     done++;
@@ -275,7 +375,15 @@ outer: for (const name of suiteNames) {
       break;
     } else if (suite.kind === "xfail") {
       skipped.add(id);
-    } // goals are ordered: a rejected goal is retried, never skipped
+    } else {
+      // Goals are retried a few times, then set aside so one hard goal cannot block the rest.
+      const n = (attempts.get(id) ?? 0) + 1;
+      attempts.set(id, n);
+      if (n >= MAX_GOAL_ATTEMPTS) {
+        report(`${name}: setting aside after ${n} rejected attempts: ${id.slice(0, 80)}`);
+        skipped.add(id);
+      }
+    }
     if (reviewEvery && accepted > 0 && accepted % reviewEvery === 0 && git("rev-parse", "HEAD") !== lastReview) {
       const since = lastReview;
       await iterate(`review of ${since.slice(0, 8)}..HEAD`, (m) => reviewPrompt(since, m), { requireCommit: false }, flag("model") ?? REVIEW_MODEL);
@@ -286,3 +394,5 @@ outer: for (const name of suiteNames) {
 const counts = LISTS.map((l) => `${l}: ${lines(l).length}`).join(", ");
 report(`finished (${stopReason}): ${accepted}/${done} iterations accepted; ${counts}`);
 notify("ralph finished", `${stopReason}. ${accepted}/${done} accepted. ${counts}. See ralph/REPORT.md and ralph/NEEDS_HUMAN.md.`);
+// Exit code 3 tells ralph/overnight.sh not to restart: the run ended on purpose.
+process.exitCode = 3;
