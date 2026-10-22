@@ -49,6 +49,8 @@ pub enum ResolveError {
     IndexClosed(String),
     /// A missing literal name that no index could have, e.g. one starting with `_`.
     InvalidIndexName(String),
+    /// A literal alias name where only concrete indices are allowed (index deletion).
+    AliasNotAllowed(String),
 }
 
 /// One concrete index to read, with the filter of the alias it was reached through.
@@ -77,10 +79,68 @@ pub fn is_alias(indices: &Indices, name: &str) -> bool {
     indices.values().any(|i| i.aliases.contains_key(name))
 }
 
-/// Resolves a read expression to concrete indices, in name order. Missing literal names fail;
-/// wildcards may match nothing.
-// ponytail: no hidden indices or expand_wildcards options
-pub fn resolve_read(indices: &Indices, expr: &str) -> Result<Vec<Target>, ResolveError> {
+/// How an index expression resolves, like Elasticsearch's `IndicesOptions`. Endpoints start
+/// from a preset and apply their request's `ignore_unavailable`, `allow_no_indices` and
+/// `expand_wildcards` with [`IndicesOptions::with_params`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct IndicesOptions {
+    /// Skip literal names that are missing (or closed, where closed indices are refused).
+    pub ignore_unavailable: bool,
+    /// Let a wildcard, or the whole expression, match nothing; otherwise that is `IndexNotFound`.
+    pub allow_no_indices: bool,
+    /// Which indices wildcards (and `_all`) expand to. Literal names are never filtered.
+    pub expand_open: bool,
+    pub expand_closed: bool,
+    /// Whether the expression may name aliases (deletion takes concrete indices only).
+    pub aliases: bool,
+    /// Document reads and searches refuse closed indices named directly or through an alias.
+    pub refuse_closed: bool,
+}
+
+impl IndicesOptions {
+    /// Metadata reads (GET index, mappings, settings, alias management): open and closed.
+    pub const READ: Self = Self {
+        ignore_unavailable: false,
+        allow_no_indices: true,
+        expand_open: true,
+        expand_closed: true,
+        aliases: true,
+        refuse_closed: false,
+    };
+    /// Document reads and searches: wildcards skip closed indices, named ones are refused.
+    pub const DATA: Self = Self {
+        expand_closed: false,
+        refuse_closed: true,
+        ..Self::READ
+    };
+    /// Index deletion: concrete indices only.
+    pub const DELETE: Self = Self {
+        aliases: false,
+        ..Self::READ
+    };
+
+    /// Applies a request's `ignore_unavailable`, `allow_no_indices` and `expand_wildcards`.
+    // ponytail: `hidden` is accepted and ignored; es-mini has no hidden indices
+    pub fn with_params(mut self, params: &std::collections::HashMap<String, String>) -> Self {
+        let flag = |k: &str| params.get(k).map(|v| v.is_empty() || v == "true");
+        self.ignore_unavailable = flag("ignore_unavailable").unwrap_or(self.ignore_unavailable);
+        self.allow_no_indices = flag("allow_no_indices").unwrap_or(self.allow_no_indices);
+        if let Some(w) = params.get("expand_wildcards") {
+            let has = |s: &str| w.split(',').any(|x| x == s || x == "all");
+            (self.expand_open, self.expand_closed) = (has("open"), has("closed"));
+        }
+        self
+    }
+}
+
+/// Resolves an index expression (comma list of names, `*` wildcards, `_all`, aliases, and
+/// `-exclusions` after the first part) to concrete indices in name order, each with the filter
+/// of the alias it was reached through (none if it was also reached directly).
+pub fn resolve(
+    indices: &Indices,
+    expr: &str,
+    o: &IndicesOptions,
+) -> Result<Vec<Target>, ResolveError> {
     // Per index: None once reached unfiltered, else the filters of the aliases that reached it.
     let mut hits: BTreeMap<&str, Option<Vec<Value>>> = BTreeMap::new();
     fn add<'a>(
@@ -95,35 +155,76 @@ pub fn resolve_read(indices: &Indices, expr: &str) -> Result<Vec<Target>, Resolv
             (None, Some(_)) => {}
         }
     }
+    let expands = |i: &crate::Index| {
+        if i.closed {
+            o.expand_closed && !o.refuse_closed
+        } else {
+            o.expand_open
+        }
+    };
     let parts = expr.split(',').map(str::trim).filter(|p| !p.is_empty());
-    for (i, part) in parts.enumerate() {
-        if let (true, Some(excluded)) = (i > 0, part.strip_prefix('-')) {
+    for (n, part) in parts.enumerate() {
+        if let (true, Some(excluded)) = (n > 0, part.strip_prefix('-')) {
             hits.retain(|name, _| {
-                !glob(excluded, name) && !indices[*name].aliases.keys().any(|a| glob(excluded, a))
+                !glob(excluded, name)
+                    && !(o.aliases && indices[*name].aliases.keys().any(|a| glob(excluded, a)))
             });
             continue;
         }
         let pattern = if part == "_all" { "*" } else { part };
-        let wildcard = pattern.contains('*');
-        let mut found = false;
-        for (name, index) in indices {
-            if glob(pattern, name) {
-                add(&mut hits, name, None);
-                found = true;
-            }
-            for (alias, meta) in &index.aliases {
-                if glob(pattern, alias) {
+        if pattern.contains('*') {
+            let mut found = false;
+            for (name, index) in indices.iter().filter(|(_, i)| expands(i)) {
+                if glob(pattern, name) {
+                    add(&mut hits, name, None);
+                    found = true;
+                }
+                for (_, meta) in index
+                    .aliases
+                    .iter()
+                    .filter(|(a, _)| o.aliases && glob(pattern, a))
+                {
                     add(&mut hits, name, meta.filter.as_ref());
                     found = true;
                 }
             }
-        }
-        if !found && !wildcard {
-            if part.starts_with('_') {
-                return Err(ResolveError::InvalidIndexName(part.to_owned()));
+            if !found && !o.allow_no_indices {
+                return Err(ResolveError::IndexNotFound(part.to_owned()));
             }
-            return Err(ResolveError::IndexNotFound(part.to_owned()));
+            continue;
         }
+        // A literal name: an index, or an alias over its indices.
+        let mut named: Vec<(&str, Option<&Value>)> = match indices.get_key_value(part) {
+            Some((name, _)) => vec![(name.as_str(), None)],
+            None => indices
+                .iter()
+                .filter_map(|(name, i)| Some((name.as_str(), i.aliases.get(part)?.filter.as_ref())))
+                .collect(),
+        };
+        let missing = match () {
+            _ if named.is_empty() && part.starts_with('_') => {
+                Some(ResolveError::InvalidIndexName(part.to_owned()))
+            }
+            _ if named.is_empty() => Some(ResolveError::IndexNotFound(part.to_owned())),
+            _ if !o.aliases && !indices.contains_key(part) => {
+                Some(ResolveError::AliasNotAllowed(part.to_owned()))
+            }
+            _ => named
+                .iter()
+                .find(|(name, _)| o.refuse_closed && indices[*name].closed)
+                .map(|(name, _)| ResolveError::IndexClosed((*name).to_owned())),
+        };
+        match missing {
+            Some(_) if o.ignore_unavailable => named.clear(),
+            Some(e) => return Err(e),
+            None => {}
+        }
+        for (name, filter) in named {
+            add(&mut hits, name, filter);
+        }
+    }
+    if hits.is_empty() && !o.allow_no_indices {
+        return Err(ResolveError::IndexNotFound(expr.to_owned()));
     }
     Ok(hits
         .into_iter()
@@ -138,22 +239,14 @@ pub fn resolve_read(indices: &Indices, expr: &str) -> Result<Vec<Target>, Resolv
         .collect())
 }
 
-/// Resolves an expression for document reads and searches, which closed indices refuse: a
-/// closed index named directly (or through an alias) is an error, and wildcards skip closed
-/// indices, like ES's default `expand_wildcards=open`.
-// ponytail: a list mixing names and wildcards errors on any closed target, not only named ones
+/// [`resolve`] with [`IndicesOptions::READ`]: metadata reads.
+pub fn resolve_read(indices: &Indices, expr: &str) -> Result<Vec<Target>, ResolveError> {
+    resolve(indices, expr, &IndicesOptions::READ)
+}
+
+/// [`resolve`] with [`IndicesOptions::DATA`]: document reads and searches.
 pub fn resolve_data(indices: &Indices, expr: &str) -> Result<Vec<Target>, ResolveError> {
-    let targets = resolve_read(indices, expr)?;
-    let wildcards_only = expr
-        .split(',')
-        .map(str::trim)
-        .enumerate()
-        .all(|(i, p)| p == "_all" || p.contains('*') || (i > 0 && p.starts_with('-')));
-    let is_closed = |t: &Target| indices[&t.index].closed;
-    match targets.iter().find(|t| is_closed(t)) {
-        Some(t) if !wildcards_only => Err(ResolveError::IndexClosed(t.index.clone())),
-        _ => Ok(targets.into_iter().filter(|t| !is_closed(t)).collect()),
-    }
+    resolve(indices, expr, &IndicesOptions::DATA)
 }
 
 /// Resolves a write target: an index (existing or to be auto-created) or an alias's write index.
@@ -335,6 +428,94 @@ mod tests {
             resolve_write(&all, "logs"),
             Err(ResolveError::IndexClosed("logs-2".into()))
         );
+    }
+
+    fn opts(base: IndicesOptions, params: &[(&str, &str)]) -> IndicesOptions {
+        let params: std::collections::HashMap<String, String> = params
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        base.with_params(&params)
+    }
+
+    #[test]
+    fn options_ignore_unavailable_drops_missing_and_closed_names() {
+        let mut all = indices();
+        all.get_mut("other").unwrap().closed = true;
+        let o = opts(IndicesOptions::DATA, &[("ignore_unavailable", "true")]);
+        assert_eq!(
+            names(&resolve(&all, "logs-1,nope,other", &o).unwrap()),
+            ["logs-1"]
+        );
+        let o = IndicesOptions::DATA;
+        assert_eq!(
+            resolve(&all, "logs-1,nope", &o),
+            Err(ResolveError::IndexNotFound("nope".into()))
+        );
+    }
+
+    #[test]
+    fn options_wildcards_skip_closed_even_next_to_names() {
+        let mut all = indices();
+        all.get_mut("other").unwrap().closed = true;
+        // A wildcard matching a closed index next to a literal name no longer errors.
+        assert_eq!(
+            names(&resolve(&all, "logs-1,o*", &IndicesOptions::DATA).unwrap()),
+            ["logs-1"]
+        );
+        assert_eq!(
+            resolve(&all, "other", &IndicesOptions::DATA),
+            Err(ResolveError::IndexClosed("other".into()))
+        );
+        let o = opts(IndicesOptions::READ, &[("expand_wildcards", "closed")]);
+        assert_eq!(names(&resolve(&all, "*", &o).unwrap()), ["other"]);
+        // expand_wildcards never filters literal names.
+        assert_eq!(names(&resolve(&all, "logs-1", &o).unwrap()), ["logs-1"]);
+    }
+
+    #[test]
+    fn options_allow_no_indices_is_per_wildcard() {
+        let all = indices();
+        let o = opts(IndicesOptions::READ, &[("allow_no_indices", "false")]);
+        assert_eq!(
+            resolve(&all, "other,nomatch*", &o),
+            Err(ResolveError::IndexNotFound("nomatch*".into()))
+        );
+        assert_eq!(
+            names(&resolve(&all, "other,nomatch*", &IndicesOptions::READ).unwrap()),
+            ["other"]
+        );
+        // ...and to the whole result, e.g. when ignore_unavailable dropped every name.
+        let o = opts(
+            IndicesOptions::READ,
+            &[
+                ("allow_no_indices", "false"),
+                ("ignore_unavailable", "true"),
+            ],
+        );
+        assert_eq!(
+            resolve(&all, "nope", &o),
+            Err(ResolveError::IndexNotFound("nope".into()))
+        );
+    }
+
+    #[test]
+    fn options_delete_matches_concrete_indices_only() {
+        let all = indices();
+        assert_eq!(
+            resolve(&all, "logs", &IndicesOptions::DELETE),
+            Err(ResolveError::AliasNotAllowed("logs".into()))
+        );
+        assert_eq!(
+            names(&resolve(&all, "filt*", &IndicesOptions::DELETE).unwrap()),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            names(&resolve(&all, "logs-*", &IndicesOptions::DELETE).unwrap()),
+            ["logs-1", "logs-2"]
+        );
+        let o = opts(IndicesOptions::DELETE, &[("ignore_unavailable", "true")]);
+        assert!(resolve(&all, "logs", &o).unwrap().is_empty());
     }
 
     #[test]

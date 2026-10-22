@@ -476,7 +476,8 @@ pub fn run(indices: &BTreeMap<String, Index>, query: &str) -> Result<Response, E
         ResolveError::IndexClosed(i) => EsqlError::IndexClosed(i),
         ResolveError::IndexNotFound(i)
         | ResolveError::NoWriteIndex(i)
-        | ResolveError::InvalidIndexName(i) => {
+        | ResolveError::InvalidIndexName(i)
+        | ResolveError::AliasNotAllowed(i) => {
             EsqlError::Verification(format!("Unknown index [{i}]"))
         }
     };

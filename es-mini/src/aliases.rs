@@ -82,7 +82,7 @@ pub fn parse_alias(v: &Value) -> Result<Alias, AppError> {
 }
 
 /// Concrete index names an expression refers to (aliases expand to their indices).
-fn index_names(indices: &Indices, expr: &str) -> Result<Vec<String>, AppError> {
+fn resolved_names(indices: &Indices, expr: &str) -> Result<Vec<String>, AppError> {
     Ok(aliases::resolve_read(indices, expr)?
         .into_iter()
         .map(|t| t.index)
@@ -122,7 +122,7 @@ pub async fn put(
     let meta = parse_alias(&parse_body(&body)?)?;
     let mut indices = state.write().expect("lock poisoned");
     check_alias_name(&indices, &alias)?;
-    for name in index_names(&indices, &index)? {
+    for name in resolved_names(&indices, &index)? {
         if let Some(i) = indices.get_mut(&name) {
             i.aliases.insert(alias.clone(), meta.clone());
         }
@@ -139,7 +139,7 @@ pub async fn delete(
     check(&uri, &params, &WRITE_PARAMS)?;
     let mut indices = state.write().expect("lock poisoned");
     let mut removed = false;
-    for name in index_names(&indices, &index)? {
+    for name in resolved_names(&indices, &index)? {
         if let Some(i) = indices.get_mut(&name) {
             let before = i.aliases.len();
             i.aliases
@@ -163,7 +163,7 @@ fn lookup(
     names: Option<&str>,
 ) -> Result<(Value, Vec<String>), AppError> {
     let selected = match index {
-        Some(expr) => index_names(indices, expr)?,
+        Some(expr) => resolved_names(indices, expr)?,
         None => indices.keys().cloned().collect(),
     };
     let patterns = names.map(split);
@@ -352,7 +352,7 @@ pub async fn update(
         };
         let targets: Vec<String> = names_of(a, "index", "indices")
             .iter()
-            .map(|e| index_names(&indices, e))
+            .map(|e| resolved_names(&indices, e))
             .collect::<Result<Vec<_>, _>>()?
             .concat();
         if targets.is_empty() {

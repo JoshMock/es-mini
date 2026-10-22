@@ -169,6 +169,9 @@ impl From<es_index::aliases::ResolveError> for AppError {
         match e {
             ResolveError::IndexNotFound(i) => Self::IndexNotFound(i),
             ResolveError::IndexClosed(i) => Self::IndexClosed(i),
+            ResolveError::AliasNotAllowed(n) => Self::IllegalArgument(format!(
+                "The provided expression [{n}] matches an alias, specify the corresponding concrete indices instead."
+            )),
             ResolveError::InvalidIndexName(index) => Self::InvalidIndexName {
                 index,
                 reason: "must not start with '_'.".into(),

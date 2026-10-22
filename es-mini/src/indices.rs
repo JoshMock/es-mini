@@ -189,104 +189,43 @@ pub async fn delete(
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, AppError> {
     check(&uri, &params, &["timeout", "master_timeout"])?;
-    let ignore = params
-        .get("ignore_unavailable")
-        .is_some_and(|v| v == "true");
     let mut indices = state.write().expect("lock poisoned");
-    let mut to_remove = Vec::new();
-    for n in name.split(',') {
-        if n.contains('*') {
-            // Wildcards match concrete indices only, never aliases.
-            let before = to_remove.len();
-            to_remove.extend(
-                indices
-                    .keys()
-                    .filter(|k| es_index::aliases::glob(n, k))
-                    .cloned(),
-            );
-            if to_remove.len() == before
-                && params.get("allow_no_indices").is_some_and(|v| v == "false")
-            {
-                return Err(AppError::IndexNotFound(n.to_string()));
-            }
-        } else if indices.contains_key(n) {
-            to_remove.push(n.to_string());
-        } else if ignore {
-            continue;
-        } else if es_index::aliases::is_alias(&indices, n) {
-            return Err(AppError::IllegalArgument(format!(
-                "The provided expression [{n}] matches an alias, specify the corresponding concrete indices instead."
-            )));
-        } else {
-            return Err(AppError::IndexNotFound(n.to_string()));
-        }
-    }
+    let opts = aliases::IndicesOptions::DELETE.with_params(&params);
+    let to_remove: Vec<String> = aliases::resolve(&indices, &name, &opts)?
+        .into_iter()
+        .map(|t| t.index)
+        .collect();
     for n in to_remove {
         indices.remove(&n);
     }
     Ok(Json(json!({"acknowledged": true})))
 }
 
-/// Concrete indices a read expression names, as GET index/_mapping/_settings resolve them:
-/// comma lists, wildcards, `_all`, and aliases, with `ignore_unavailable`/`allow_no_indices`.
+/// Concrete indices a metadata request names (GET index, mappings, settings, open/close, ...),
+/// honoring its `ignore_unavailable`, `allow_no_indices` and `expand_wildcards`.
 fn read_indices(
     indices: &Indices,
     expr: &str,
     params: &HashMap<String, String>,
 ) -> Result<Vec<String>, AppError> {
-    let flag = |k: &str| params.get(k).map(String::as_str);
-    let expr = available(expr, params, |p| aliases::resolve_read(indices, p).is_ok());
-    let names: Vec<String> = aliases::resolve_read(indices, &expr)?
+    let opts = aliases::IndicesOptions::READ.with_params(params);
+    Ok(aliases::resolve(indices, expr, &opts)?
         .into_iter()
         .map(|t| t.index)
-        // ponytail: filters literal names too, and only open/closed (no hidden, none)
-        .filter(|n| match flag("expand_wildcards") {
-            Some(w) => w.split(',').any(|s| match s {
-                "all" => true,
-                "open" => !indices[n].closed,
-                "closed" => indices[n].closed,
-                _ => false,
-            }),
-            None => true,
-        })
-        .collect();
-    if names.is_empty() && flag("allow_no_indices") == Some("false") {
-        return Err(AppError::IndexNotFound(expr));
-    }
-    Ok(names)
+        .collect())
 }
 
-/// `expr` without the parts `resolves` rejects, when `ignore_unavailable=true`. `-exclusions`
-/// stay, so the list still resolves as one expression.
-// ponytail: an exclusion left first (e.g. `missing,-x`) then reads as a literal name
-fn available(
-    expr: &str,
-    params: &HashMap<String, String>,
-    resolves: impl Fn(&str) -> bool,
-) -> String {
-    if params.get("ignore_unavailable").is_none_or(|v| v != "true") {
-        return expr.to_owned();
-    }
-    expr.split(',')
-        .enumerate()
-        .filter(|&(i, p)| (i > 0 && p.starts_with('-')) || resolves(p))
-        .map(|(_, p)| p)
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
-/// Search/count targets for `expr`, honoring `ignore_unavailable` and `allow_no_indices`.
+/// Search/count targets for `expr`, honoring the request's indices options.
 pub fn data_targets(
     indices: &Indices,
     expr: &str,
     params: &HashMap<String, String>,
 ) -> Result<Vec<aliases::Target>, AppError> {
-    let expr = available(expr, params, |p| aliases::resolve_data(indices, p).is_ok());
-    let out = aliases::resolve_data(indices, &expr)?;
-    if out.is_empty() && params.get("allow_no_indices").is_some_and(|v| v == "false") {
-        return Err(AppError::IndexNotFound(expr));
-    }
-    Ok(out)
+    Ok(aliases::resolve(
+        indices,
+        expr,
+        &aliases::IndicesOptions::DATA.with_params(params),
+    )?)
 }
 
 const GET_PARAMS: [&str; 5] = [
