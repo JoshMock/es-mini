@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Regenerates tests/data/* with Lucene 10.5.1 (needs Java 21+ and network for the jars).
 # Usage: gen.sh [data-dir-name...]; with no arguments, regenerates everything.
+# Where Java cannot start (e.g. the nono sandbox), use gen_docker.sh GenName data-dir-name.
 set -euo pipefail
 cd "$(dirname "$0")"
 cp=""
@@ -9,7 +10,7 @@ for m in core analysis-common; do
   [ -f "$jar" ] || curl -sfL -o "$jar" https://repo1.maven.org/maven2/org/apache/lucene/lucene-$m/10.5.1/lucene-$m-10.5.1.jar
   cp="$cp:$jar"
 done
-for gen in BigPostings:big-postings Positions:positions BinaryDocValues:binary-doc-values SortedDocValues:sorted-doc-values ManyTerms:many-terms StoredAndNumeric:stored-and-numeric; do
+for gen in BigPostings:big-postings Positions:positions BinaryDocValues:binary-doc-values SortedDocValues:sorted-doc-values ManyTerms:many-terms StoredAndNumeric:stored-and-numeric WideDocValues:wide-doc-values; do
   out=../data/${gen#*:}
   [ $# -eq 0 ] || [[ " $* " == *" ${gen#*:} "* ]] || continue
   rm -rf "$out"
