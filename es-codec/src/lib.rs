@@ -77,6 +77,27 @@ pub fn write_file_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     write().map_err(fail)
 }
 
+/// Writes a write-once file (a new segment's files, a new live-docs generation) and fsyncs it,
+/// without the rename and directory fsync of [`write_file_atomic`]: such files are only reachable
+/// once a later, atomically written `segments_N` names them, and [`sync_dir`] makes their
+/// directory entries durable first. A leftover from an interrupted commit is overwritten.
+pub fn write_file_new(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    let write = || -> std::io::Result<()> {
+        use std::io::Write;
+        let mut f = std::fs::File::create(path)?;
+        f.write_all(bytes)?;
+        f.sync_all()
+    };
+    write().map_err(|e| Error(format!("{}: {e}", path.display())))
+}
+
+/// Makes the entries of `dir` (files created or renamed in it) durable.
+pub fn sync_dir(dir: &std::path::Path) -> Result<()> {
+    std::fs::File::open(dir)
+        .and_then(|d| d.sync_all())
+        .map_err(|e| Error(format!("{}: {e}", dir.display())))
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

@@ -114,7 +114,7 @@ pub fn write_compound(
     }
     for (ext, out) in [("cfs", cfs), ("cfe", cfe)] {
         let path = dir.join(format!("{segment}.{ext}"));
-        crate::write_file_atomic(&path, &out.finish())?;
+        crate::write_file_new(&path, &out.finish())?;
     }
     Ok(())
 }

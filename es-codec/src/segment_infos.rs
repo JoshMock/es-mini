@@ -127,7 +127,9 @@ impl SegmentInfos {
         Self::parse(dir, &file, generation)
     }
 
-    /// Writes each segment's `.si` and `segments_<generation>` into `dir`.
+    /// Commits: writes the `.si` of each segment that lacks a valid one, makes the directory's
+    /// entries durable, then publishes `segments_<generation>` atomically. Lucene's protocol: a
+    /// crash before the rename leaves the previous commit as the latest readable one.
     pub fn write(&self, dir: &Path) -> Result<()> {
         let mut out = Output::default();
         out.index_header(
@@ -145,7 +147,15 @@ impl SegmentInfos {
             write_version(&mut out, min, true);
         }
         for s in &self.segments {
-            write_si(dir, &s.name, &s.info)?;
+            // `.si` files are write-once; an earlier commit's copy is kept unless it is damaged
+            // (e.g. left half-written by an interrupted commit that reused the name).
+            let si = dir.join(format!("{}.si", s.name));
+            if crate::read_file(&si)
+                .and_then(|b| crate::codec_util::check_footer(&b))
+                .is_err()
+            {
+                write_si(dir, &s.name, &s.info)?;
+            }
             out.string(&s.name);
             out.bytes(&s.info.id);
             out.string(&s.codec);
@@ -163,6 +173,7 @@ impl SegmentInfos {
             }
         }
         out.map_of_strings(&self.user_data);
+        crate::sync_dir(dir)?;
         let path = dir.join(format!("segments_{}", radix36(self.generation)));
         crate::write_file_atomic(&path, &out.finish())
     }
@@ -275,7 +286,7 @@ fn write_si(dir: &Path, name: &str, si: &SegmentInfo) -> Result<()> {
     out.map_of_strings(&si.attributes);
     out.vint(0); // no index sort
     let path = dir.join(format!("{name}.si"));
-    crate::write_file_atomic(&path, &out.finish())
+    crate::write_file_new(&path, &out.finish())
 }
 
 fn read_si(dir: &Path, name: &str, id: &[u8; ID_LEN]) -> Result<SegmentInfo> {
