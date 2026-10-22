@@ -554,3 +554,28 @@ fn postings_narrowed_queries_track_writes() {
         Vec::<String>::new()
     );
 }
+
+#[test]
+fn simple_query_string_matches_each_whitespace_term_across_fields() {
+    let q = |p: Value| sorted(ids(json!({"query": {"simple_query_string": p}})));
+    // Each term is analyzed on its own, so a keyword field matches single words.
+    assert_eq!(
+        q(json!({"fields": ["tag"], "query": "pet animal"})),
+        ["1", "2", "3"]
+    );
+    assert_eq!(
+        q(json!({"fields": ["title", "tag"], "query": "lazy animal", "minimum_should_match": 1})),
+        ["1", "2", "3"]
+    );
+    assert_eq!(
+        q(json!({"fields": ["title"], "query": "brown dog", "default_operator": "AND"})),
+        ["4"]
+    );
+    assert_eq!(
+        q(json!({"fields": ["title"], "query": "brown dog", "minimum_should_match": "100%"})),
+        ["4"]
+    );
+    let err = |p: Value| parse_query(&json!({"simple_query_string": p})).unwrap_err();
+    err(json!({"fields": ["title"], "query": "brown -dog"}));
+    err(json!({"query": "dog"}));
+}

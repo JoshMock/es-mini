@@ -365,6 +365,85 @@ pub fn parse_query(v: &Value) -> Result<Query, QueryError> {
                 min_should: if min_should > 0 { min_should } else { default },
             })
         }
+        "simple_query_string" => {
+            let o = body
+                .as_object()
+                .ok_or("[simple_query_string] query malformed")?;
+            check_keys(
+                "simple_query_string",
+                o,
+                &[
+                    "query",
+                    "fields",
+                    "default_operator",
+                    "minimum_should_match",
+                    "boost",
+                    "_name",
+                ],
+            )?;
+            let query = text(
+                o.get("query")
+                    .ok_or("[simple_query_string] requires query")?,
+            );
+            // ponytail: no `+ | - " * ( ) ~` operators, field boosts or default `*` fields
+            if query.contains(['+', '|', '"', '*', '(', ')', '~'])
+                || query.split_whitespace().any(|t| t.starts_with('-'))
+            {
+                return Err("[simple_query_string] operators are not supported".into());
+            }
+            let fields: Vec<&str> = o
+                .get("fields")
+                .and_then(Value::as_array)
+                .ok_or("[simple_query_string] requires fields")?
+                .iter()
+                .filter_map(Value::as_str)
+                .collect();
+            let and = match o.get("default_operator").and_then(Value::as_str) {
+                None => false,
+                Some(op) if op.eq_ignore_ascii_case("and") => true,
+                Some(op) if op.eq_ignore_ascii_case("or") => false,
+                Some(op) => return Err(format!("no [default_operator] for [{op}]").into()),
+            };
+            // Each term matches in any field (ES: dis_max with tie_breaker 1.0, a sum).
+            let terms: Vec<Query> = query
+                .split_whitespace()
+                .map(|t| Query::Bool {
+                    must: vec![],
+                    should: fields
+                        .iter()
+                        .map(|f| Query::Match {
+                            field: (*f).to_owned(),
+                            query: t.to_owned(),
+                            and: false,
+                        })
+                        .collect(),
+                    must_not: vec![],
+                    filter: vec![],
+                    min_should: 1,
+                })
+                .collect();
+            if and {
+                return Ok(Query::Bool {
+                    must: terms,
+                    should: vec![],
+                    must_not: vec![],
+                    filter: vec![],
+                    min_should: 0,
+                });
+            }
+            let min_should = match o.get("minimum_should_match") {
+                None | Some(Value::Null) => 0,
+                Some(Value::String(m)) => min_should_match(terms.len(), m)?,
+                Some(m) => min_should_match(terms.len(), &m.to_string())?,
+            };
+            Ok(Query::Bool {
+                min_should: min_should.max(1),
+                must: vec![],
+                should: terms,
+                must_not: vec![],
+                filter: vec![],
+            })
+        }
         other => Err(format!("unknown query [{other}]").into()),
     }
 }
