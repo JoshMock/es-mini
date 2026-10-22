@@ -1,0 +1,11 @@
+# name | method | path | body (JSON on one line, optional). Paths are relative to each server.
+info|GET|/|
+get_doc|GET|/bench/_doc/42|
+match_all|POST|/bench/_search|{"query":{"match_all":{}},"size":10}
+match|POST|/bench/_search|{"query":{"match":{"title":"quick fox"}}}
+term|POST|/bench/_search|{"query":{"term":{"tag":"tag7"}}}
+range_sort|POST|/bench/_search|{"query":{"range":{"views":{"gte":1000,"lt":5000}}},"sort":["views"]}
+bool|POST|/bench/_search|{"query":{"bool":{"must":{"match":{"title":"dog"}},"filter":{"term":{"published":true}},"must_not":{"term":{"tag":"tag1"}}}}}
+count|POST|/bench/_count|{"query":{"term":{"published":true}}}
+esql|POST|/_query|{"query":"FROM bench | WHERE views > 50000 | SORT views DESC | KEEP tag, views | LIMIT 10"}
+index_doc|PUT|/bench/_doc/bench-write|{"title":"benchmark write","tag":"tag1","views":1}

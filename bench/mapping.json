@@ -1,0 +1,3 @@
+{"settings":{"number_of_shards":1,"number_of_replicas":0},
+ "mappings":{"properties":{"title":{"type":"text"},"tag":{"type":"keyword"},"views":{"type":"long"},
+ "rating":{"type":"double"},"published":{"type":"boolean"},"date":{"type":"date"}}}}
