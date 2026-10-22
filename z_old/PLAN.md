@@ -36,7 +36,7 @@ Documents:
 
 Search:
 - `POST`/`GET /{index}/_search` (JSON DSL)
-- `POST /_query` (ES|QL)
+- `POST /_query` (ES|QL): source commands `FROM` (index patterns, `METADATA _id, _index, _version`), `ROW`, `SHOW INFO`; processing commands `WHERE`, `EVAL`, `RENAME`, `KEEP`, `DROP`, `SORT`, `LIMIT`, `STATS ... BY` (with `BUCKET`); scalar functions (arithmetic, string, date, conditional, multi-value basics) and `LIKE`/`RLIKE`/`IN`. Not yet: `DISSECT`, `GROK`, `MV_EXPAND`, `LOOKUP JOIN`, `ENRICH`
 - `POST /{index}/_count`
 
 Cluster (minimum viable):
