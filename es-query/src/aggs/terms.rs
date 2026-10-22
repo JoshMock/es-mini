@@ -25,6 +25,10 @@ pub(super) struct Terms {
     exclude: Vec<String>,
     /// How an unmapped field's `missing` value is typed.
     pub(super) value_type: Option<FieldMapping>,
+    /// `execution_hint: map`. ponytail: hints and modes pick only ES's profiled collector.
+    pub(super) map: bool,
+    /// `collect_mode`: `Some(true)` for `breadth_first`, `Some(false)` for `depth_first`.
+    breadth_first: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -60,6 +64,8 @@ impl Terms {
             include: None,
             exclude: vec![],
             value_type: None,
+            map: false,
+            breadth_first: None,
         };
         for (k, v) in params {
             let bad = || QueryError::x_content(format!("[terms] failed to parse field [{k}]"));
@@ -82,8 +88,14 @@ impl Terms {
             };
             match k.as_str() {
                 "field" | "missing" => {}
-                // ponytail: one collector for every hint and mode; they only change ES's speed
-                "execution_hint" | "collect_mode" => {}
+                "execution_hint" => t.map = v.as_str() == Some("map"),
+                "collect_mode" => {
+                    t.breadth_first = match v.as_str() {
+                        Some("breadth_first") => Some(true),
+                        Some("depth_first") => Some(false),
+                        _ => None,
+                    };
+                }
                 "size" => t.size = positive("size")?,
                 "shard_size" => t.shard_size = Some(positive("shardSize")?),
                 "min_doc_count" => t.min_doc_count = at_least_0("minDocCount")?,
@@ -119,6 +131,24 @@ impl Terms {
             ));
         }
         Ok(t)
+    }
+
+    /// The sub-aggregations ES's DeferableBucketAggregator defers: those not sorted on, when
+    /// collecting `breadth_first`, the default unless `shard_size` keeps every bucket.
+    /// ponytail: global ordinals default to `depth_first` when the field has at most
+    /// `shard_size` terms; not modelled, since they are not profiled.
+    pub(super) fn deferred<'a>(&self, subs: &'a [Agg]) -> Vec<&'a str> {
+        let breadth = (self.breadth_first).unwrap_or(self.shard_size() != i32::MAX as usize);
+        let sorted = |i: usize| {
+            (self.order.iter()).any(|(by, _)| matches!(by, By::Agg { index, .. } if *index == i))
+        };
+        match breadth {
+            true => (subs.iter().enumerate())
+                .filter(|&(i, _)| !sorted(i))
+                .map(|(_, s)| s.name.as_str())
+                .collect(),
+            false => vec![],
+        }
     }
 
     fn key_order(&self) -> bool {

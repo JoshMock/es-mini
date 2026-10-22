@@ -556,9 +556,8 @@ impl<'s, 'a> Collector<'s, 'a> {
                     ..Timings::default()
                 });
             }
-            // ponytail: sub-aggregations are not profiled
             let sub = match (&agg.metric, agg.subs.is_empty()) {
-                (Metric::Terms(_), false) => Some(Collector::new(&agg.subs, searcher, false)?),
+                (Metric::Terms(_), false) => Some(Collector::new(&agg.subs, searcher, profile)?),
                 _ => None,
             };
             let empty = sub.as_ref().map(|s| s.stats.clone()).unwrap_or_default();
@@ -711,7 +710,8 @@ impl Collector<'_, '_> {
                 }
             }
             if let Some(timings) = &mut self.timings {
-                timings[i].total_buckets = b.counts.len();
+                // a sub-aggregation's buckets add up over its parent's buckets
+                timings[i].total_buckets += b.counts.len();
             }
             t.finish_shard(b);
             if let Some(sub) = &mut self.subs[i] {
@@ -746,6 +746,7 @@ impl Collector<'_, '_> {
             Metric::Stats => "StatsAggregator",
             Metric::ExtendedStats { .. } => "ExtendedStatsAggregator",
             Metric::Percentiles { .. } => "TDigestPercentilesAggregator",
+            Metric::Terms(t) if keyword && t.map => "MapStringTermsAggregator",
             Metric::Terms(_) if keyword => "GlobalOrdinalsStringTermsAggregator",
             Metric::Terms(_) => "NumericTermsAggregator",
         };
@@ -781,14 +782,34 @@ impl Collector<'_, '_> {
                     "string_hashing_collectors_used": used((keyword || m.is_none()) && !ords),
                 });
             }
-            ("NumericTermsAggregator", _) => {
-                let floating = matches!(m, Some(FieldMapping::Double | FieldMapping::Float));
-                out["debug"] = serde_json::json!({
-                    "result_strategy": if floating { "double_terms" } else { "long_terms" },
-                    "total_buckets": t.total_buckets,
-                });
+            ("MapStringTermsAggregator" | "NumericTermsAggregator", Metric::Terms(terms)) => {
+                let mut debug = Map::new();
+                let deferred = terms.deferred(&agg.subs);
+                if !deferred.is_empty() {
+                    debug.insert("deferred_aggregators".into(), deferred.into());
+                }
+                debug.insert("total_buckets".into(), t.total_buckets.into());
+                let result = match ty {
+                    "MapStringTermsAggregator" => {
+                        let field = format!("from Field [{}] of type [keyword]", agg.field);
+                        debug.insert("collection_strategy".into(), field.into());
+                        "terms"
+                    }
+                    _ if matches!(m, Some(FieldMapping::Double | FieldMapping::Float)) => {
+                        "double_terms"
+                    }
+                    _ => "long_terms",
+                };
+                debug.insert("result_strategy".into(), result.into());
+                out["debug"] = debug.into();
             }
             _ => {}
+        }
+        if let Some(sub) = &self.subs[i]
+            && let Some(timings) = &sub.timings
+        {
+            let children = timings.iter().enumerate().map(|(j, t)| sub.profile(j, t));
+            out["children"] = children.collect();
         }
         out
     }
