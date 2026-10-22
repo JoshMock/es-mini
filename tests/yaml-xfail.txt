@@ -1,1 +1,212 @@
 # Known-failing YAML tests. Fix one, then delete its line.
+aggregations/avg_metric.yml/Basic test
+aggregations/avg_metric.yml/Filtered test
+aggregations/avg_metric.yml/Metadata test
+aggregations/avg_metric.yml/Missing field with missing param
+aggregations/avg_metric.yml/Missing field without missing param
+aggregations/avg_metric.yml/Only aggs test
+aggregations/avg_metric.yml/Partially unmapped
+aggregations/avg_metric.yml/Partially unmapped with missing
+aggregations/cardinality_metric.yml/Basic test
+aggregations/cardinality_metric.yml/Filtered test
+aggregations/cardinality_metric.yml/invalid execution hint throws
+aggregations/cardinality_metric.yml/Invalid Precision test
+aggregations/cardinality_metric.yml/Metadata test
+aggregations/cardinality_metric.yml/Missing field with missing param
+aggregations/cardinality_metric.yml/Missing field without missing param
+aggregations/cardinality_metric.yml/Only aggs test
+aggregations/cardinality_metric.yml/Partially unmapped
+aggregations/cardinality_metric.yml/Partially unmapped with missing
+aggregations/cardinality_metric.yml/profiler double
+aggregations/cardinality_metric.yml/profiler int
+aggregations/cardinality_metric.yml/profiler string
+aggregations/cardinality_metric.yml/profiler string direct hint
+aggregations/cardinality_metric.yml/profiler string global ords hint
+aggregations/cardinality_metric.yml/profiler string save memory hint
+aggregations/cardinality_metric.yml/profiler string save time hint
+aggregations/cardinality_metric.yml/profiler string segment ords hint
+aggregations/date_histogram.yml/date_histogram and date_histogram_composite timezone
+aggregations/date_histogram.yml/date_histogram on date_nanos without timezone calendar interval
+aggregations/date_histogram.yml/date_histogram on date_nanos without timezone fixed interval
+aggregations/date_histogram.yml/date_histogram on date_nanos with timezone calendar interval
+aggregations/date_histogram.yml/date_histogram on date_nanos with timezone fixed interval
+aggregations/date_histogram.yml/date_histogram on range with hard bounds
+aggregations/date_histogram.yml/Date histogram on two indices with same field but different date type
+aggregations/date_histogram.yml/Date histogram with contradicting filters
+aggregations/date_histogram.yml/date_histogram with hard_bounds outside data under a parent agg
+aggregations/date_histogram.yml/Daylight with offset date_histogram test
+aggregations/date_histogram.yml/Daylight without offset date_histogram test
+aggregations/date_histogram.yml/Multi-value date histogram
+aggregations/date_histogram.yml/Multi-value date histogram docvalues only
+aggregations/date_range.yml/Date range
+aggregations/date_range.yml/Date Range Missing
+aggregations/date_range.yml/Date range unmapped with children
+aggregations/extended_stats_metric.yml/Bad sigma test
+aggregations/extended_stats_metric.yml/Basic test
+aggregations/extended_stats_metric.yml/Filtered test
+aggregations/extended_stats_metric.yml/Metadata test
+aggregations/extended_stats_metric.yml/Missing field with missing param
+aggregations/extended_stats_metric.yml/Missing field without missing param
+aggregations/extended_stats_metric.yml/Only aggs test
+aggregations/extended_stats_metric.yml/Sigma test
+aggregations/filters_bucket.yml/Anonymous filters test
+aggregations/filters_bucket.yml/Bad params
+aggregations/filters_bucket.yml/Basic test
+aggregations/filters_bucket.yml/cache busting
+aggregations/filters_bucket.yml/cache hits
+aggregations/filters_bucket.yml/empty meta
+aggregations/filters_bucket.yml/Filtered test
+aggregations/filters_bucket.yml/Metadata test
+aggregations/filters_bucket.yml/named filters with bucket sort test
+aggregations/filters_bucket.yml/nested
+aggregations/filters_bucket.yml/no meta
+aggregations/filters_bucket.yml/null meta
+aggregations/filters_bucket.yml/Only aggs test
+aggregations/filter.yml/As a child of terms
+aggregations/filter.yml/Sorting terms
+aggregations/filter.yml/Standard queries get cached
+aggregations/filter.yml/Terms lookup gets cached
+aggregations/global.yml/profile
+aggregations/global.yml/simple
+aggregations/histogram.yml/Basic test
+aggregations/histogram.yml/date_histogram
+aggregations/histogram.yml/date_histogram on range
+aggregations/histogram.yml/date_histogram on range with offset
+aggregations/histogram.yml/date_histogram profiler
+aggregations/histogram.yml/date_histogram with extended_bounds and offset and unmapped
+aggregations/histogram.yml/date_histogram with offset
+aggregations/histogram.yml/date_histogram with pre-epoch daylight savings time transition
+aggregations/histogram.yml/Format test
+aggregations/histogram.yml/histogram profiler
+aggregations/histogram.yml/histogram with extended_bounds
+aggregations/histogram.yml/histogram with hard bounds
+aggregations/histogram.yml/histogram with min_doc_count
+aggregations/histogram.yml/histogram with missing field with missing param
+aggregations/histogram.yml/histogram with missing field without missing param
+aggregations/histogram.yml/histogram with offset and unmapped
+aggregations/histogram.yml/Show empty intervals
+aggregations/histogram.yml/Tiny tiny tiny date_range
+aggregations/histogram.yml/Tiny tiny tiny range
+aggregations/max_metric.yml/Basic test
+aggregations/max_metric.yml/Counter field
+aggregations/max_metric.yml/Filtered test
+aggregations/max_metric.yml/Merging results with unmapped fields
+aggregations/max_metric.yml/Metadata test
+aggregations/max_metric.yml/Missing field with missing param
+aggregations/max_metric.yml/Missing field without missing param
+aggregations/max_metric.yml/Only aggs test
+aggregations/max_metric.yml/Partially unmapped
+aggregations/max_metric.yml/Partially unmapped with missing
+aggregations/min_metric.yml/Basic test
+aggregations/min_metric.yml/Counter field
+aggregations/min_metric.yml/Filtered test
+aggregations/min_metric.yml/Metadata test
+aggregations/min_metric.yml/Missing field with missing param
+aggregations/min_metric.yml/Missing field without missing param
+aggregations/min_metric.yml/Only aggs test
+aggregations/min_metric.yml/Partially unmapped
+aggregations/min_metric.yml/Partially unmapped with missing
+aggregations/missing.yml/match all
+aggregations/missing.yml/match none
+aggregations/missing.yml/match some
+aggregations/missing.yml/missing param
+aggregations/percentiles_tdigest_metric.yml/Basic test
+aggregations/percentiles_tdigest_metric.yml/Basic test - approximate
+aggregations/percentiles_tdigest_metric.yml/Execution hint
+aggregations/percentiles_tdigest_metric.yml/Explicit Percents test
+aggregations/percentiles_tdigest_metric.yml/Filtered test
+aggregations/percentiles_tdigest_metric.yml/Invalid params test
+aggregations/percentiles_tdigest_metric.yml/Metadata test
+aggregations/percentiles_tdigest_metric.yml/Missing field with missing param
+aggregations/percentiles_tdigest_metric.yml/Missing field without missing param
+aggregations/percentiles_tdigest_metric.yml/Non-keyed test
+aggregations/percentiles_tdigest_metric.yml/Only aggs test
+aggregations/range.yml/Double range
+aggregations/range.yml/Double range default keyed response
+aggregations/range.yml/Double range no decimal
+aggregations/range.yml/Double range on long field
+aggregations/range.yml/Double range with missing value
+aggregations/range.yml/Float Endpoint Exclusive
+aggregations/range.yml/Float range
+aggregations/range.yml/Half Float Endpoint Exclusive
+aggregations/range.yml/Min and max long range bounds
+aggregations/range.yml/Null to and from
+aggregations/range.yml/Range agg on long field
+aggregations/range.yml/Range aggregation on date field
+aggregations/stats_metric.yml/Basic test
+aggregations/stats_metric.yml/Filtered test
+aggregations/stats_metric.yml/Metadata test
+aggregations/stats_metric.yml/Missing field with missing param
+aggregations/stats_metric.yml/Missing field without missing param
+aggregations/stats_metric.yml/Only aggs test
+aggregations/sum_metric.yml/Basic test
+aggregations/sum_metric.yml/Filtered test
+aggregations/sum_metric.yml/Metadata test
+aggregations/sum_metric.yml/Missing field with missing param
+aggregations/sum_metric.yml/Missing field without missing param
+aggregations/sum_metric.yml/Only aggs test
+aggregations/sum_metric.yml/Partially unmapped
+aggregations/sum_metric.yml/Partially unmapped with missing
+aggregations/terms.yml/Basic test
+aggregations/terms.yml/Boolean test
+aggregations/terms.yml/Date test
+aggregations/terms.yml/Double test
+aggregations/terms.yml/Global ordinals are loaded with the global_ordinals execution hint
+aggregations/terms.yml/Global ordinals are not loaded with the map execution hint
+aggregations/terms.yml/huge size
+aggregations/terms.yml/Integer test
+aggregations/terms.yml/IP test
+aggregations/terms.yml/min_doc_count
+aggregations/terms.yml/Mixing longs and doubles
+aggregations/terms.yml/No field or script
+aggregations/terms.yml/numeric profiler
+aggregations/terms.yml/order by sub agg
+aggregations/terms.yml/order by sub agg containing filter
+aggregations/terms.yml/order by sub agg containing nested
+aggregations/terms.yml/Partitioned integer test
+aggregations/terms.yml/Partitioned string test
+aggregations/terms.yml/precise size
+aggregations/terms.yml/string profiler via global ordinals filters implementation
+aggregations/terms.yml/string profiler via global ordinals native implementation
+aggregations/terms.yml/string profiler via map
+aggregations/terms.yml/Unmapped booleans
+aggregations/terms.yml/Unmapped dates
+aggregations/terms.yml/Unmapped doubles
+aggregations/terms.yml/Unmapped longs
+aggregations/terms.yml/Unmapped strings
+aggregations/terms.yml/Value type mismatch fails shard
+aggregations/terms.yml/Value type mismatch fails shard with no docs
+aggregations/top_hits.yml/docvalue fields
+aggregations/top_hits.yml/explain
+aggregations/top_hits.yml/fetch fields
+aggregations/top_hits.yml/from
+aggregations/top_hits.yml/having
+aggregations/top_hits.yml/highlight
+aggregations/top_hits.yml/highlight_query
+aggregations/top_hits.yml/named queries
+aggregations/top_hits.yml/runtime fields
+aggregations/top_hits.yml/sequence number and primary term
+aggregations/top_hits.yml/size
+aggregations/top_hits.yml/source filtering
+aggregations/top_hits.yml/stored fields
+aggregations/top_hits.yml/synthetic _source
+aggregations/top_hits.yml/version
+aggregations/typed_keys.yml/Test typed keys parameter for avg aggregation
+aggregations/typed_keys.yml/Test typed keys parameter for cardinality aggregation
+aggregations/typed_keys.yml/Test typed keys parameter for date_histogram aggregation and max_bucket pipeline aggregation
+aggregations/typed_keys.yml/Test typed keys parameter for extended_stats aggregation
+aggregations/typed_keys.yml/Test typed keys parameter for max aggregation
+aggregations/typed_keys.yml/Test typed keys parameter for min aggregation
+aggregations/typed_keys.yml/Test typed keys parameter for percentile_ranks aggregation
+aggregations/typed_keys.yml/Test typed keys parameter for percentiles aggregation
+aggregations/typed_keys.yml/Test typed keys parameter for stats aggregation
+aggregations/typed_keys.yml/Test typed keys parameter for sum aggregation
+aggregations/typed_keys.yml/Test typed keys parameter for terms aggregation
+aggregations/typed_keys.yml/Test typed keys parameter for terms and top_hits aggregation
+aggregations/typed_keys.yml/Test typed keys parameter for value_count aggregation
+aggregations/value_count_metric.yml/Basic test
+aggregations/value_count_metric.yml/Filtered test
+aggregations/value_count_metric.yml/Metadata test
+aggregations/value_count_metric.yml/Missing field with missing param
+aggregations/value_count_metric.yml/Missing field without missing param
+aggregations/value_count_metric.yml/Only aggs test

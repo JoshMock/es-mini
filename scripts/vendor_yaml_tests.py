@@ -22,7 +22,6 @@ ALLOW = {"bulk/10_basic.yml", "cluster.health/10_basic.yml", "count/10_basic.yml
          "indices.get/10_basic.yml", "indices.get_settings/10_basic.yml", "indices.put_settings/10_basic.yml",
          "search/20_default_values.yml", "update/10_doc.yml"}
 OUT_OF_SCOPE = {
-    "aggregations": r"\baggs\b|\baggregations\b",
     "highlighting": r"\bhighlight\b",
     "suggesters": r"\bsuggest\b",
     "scripting": r"\bscript\b|\bpainless\b",
@@ -50,6 +49,13 @@ def gh(path):
     return json.loads(subprocess.check_output(["gh", "api", f"{path}?ref={TAG}"]))
 
 
+# In-scope aggregation suites live in the aggregations module, vendored as aggregations/<file>.
+AGG_API = "repos/elastic/elasticsearch/contents/modules/aggregations/src/yamlRestTest/resources/rest-api-spec/test/aggregations"
+AGG_FILES = ["avg_metric.yml", "sum_metric.yml", "min_metric.yml", "max_metric.yml", "value_count_metric.yml",
+             "stats_metric.yml", "extended_stats_metric.yml", "cardinality_metric.yml", "percentiles_tdigest_metric.yml",
+             "top_hits.yml", "terms.yml", "histogram.yml", "date_histogram.yml", "range.yml", "date_range.yml",
+             "filter.yml", "filters_bucket.yml", "missing.yml", "global.yml", "typed_keys.yml"]
+
 root = Path(__file__).parent.parent / "tests/yaml"
 included, excluded = [], []
 for d in DIRS:
@@ -66,6 +72,17 @@ for d in DIRS:
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(text)
         included.append((name, reasons))
+
+for entry in gh(AGG_API):
+    if entry["type"] != "file" or entry["name"] not in AGG_FILES:
+        continue
+    name = f"aggregations/{entry['name']}"
+    text = urllib.request.urlopen(entry["download_url"]).read()
+    reasons = [k for k, p in OUT_OF_SCOPE.items() if re.search(p, text.decode())]
+    out = root / name
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_bytes(text)
+    included.append((name, reasons))
 
 lines = [f"# Vendored YAML REST tests", "",
          f"Source: `elastic/elasticsearch` tag `{TAG}`, `rest-api-spec/src/yamlRestTest/resources/rest-api-spec/test/`.",

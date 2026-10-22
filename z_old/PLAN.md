@@ -42,6 +42,11 @@ Search:
 Cluster (minimum viable):
 - `GET /` (info), `GET /_cluster/health`
 
+Aggregations (in `_search` and `_count`-free searches with `size: 0`):
+- metrics: `avg`, `sum`, `min`, `max`, `value_count`, `stats`, `extended_stats`, `cardinality`, `percentiles` (TDigest), `top_hits`
+- buckets: `terms`, `histogram`, `date_histogram`, `range`, `date_range`, `filter`, `filters`, `missing`, `global`
+- sub-aggregations, `typed_keys`, and on-disk indices (doc values) as well as in-memory ones
+
 ### Elasticsearch features that are out of scope
 
 This is a non-exhaustive list:
@@ -56,7 +61,7 @@ This is a non-exhaustive list:
 - highlighting, suggesters, percolator, geo queries
 - nested/join field types (flat mappings first)
 - cross-cluster search, snapshots/restore
-- all aggregations deferred to a post-MVP iteration
+- aggregations not listed under "Aggregations" above (pipeline, geo, significant terms, scripted, matrix, sampler, composite, ...)
 
 In-scope query core: `match`, `term`, `terms`, `ids`, `exists`, `wildcard`, `bool`, `constant_score`, `range`, pagination (`from`/`size`), basic `sort`.
 

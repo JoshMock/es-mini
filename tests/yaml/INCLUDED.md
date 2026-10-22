@@ -3,7 +3,7 @@
 Source: `elastic/elasticsearch` tag `v9.5.5`, `rest-api-spec/src/yamlRestTest/resources/rest-api-spec/test/`.
 Files are verbatim; regenerate with `scripts/vendor_yaml_tests.py`. Never edit them.
 
-## Included (71)
+## Included (91)
 
 - `bulk/10_basic.yml`
 - `bulk/20_list_of_strings.yml`
@@ -76,6 +76,26 @@ Files are verbatim; regenerate with `scripts/vendor_yaml_tests.py`. Never edit t
 - `indices.exists_alias/10_basic.yml`
 - `indices.update_aliases/30_remove_index_and_replace_with_alias.yml`
 - `indices.update_aliases/40_must_exist.yml`
+- `aggregations/avg_metric.yml` (allowlisted core file; also touches: out-of-scope queries)
+- `aggregations/cardinality_metric.yml` (allowlisted core file; also touches: out-of-scope queries, out-of-scope search options)
+- `aggregations/date_histogram.yml` (allowlisted core file; also touches: multi-shard/routing, out-of-scope search options, out-of-scope field types)
+- `aggregations/date_range.yml` (allowlisted core file; also touches: out-of-scope queries)
+- `aggregations/extended_stats_metric.yml` (allowlisted core file; also touches: out-of-scope queries)
+- `aggregations/filter.yml` (allowlisted core file; also touches: out-of-scope APIs, out-of-scope queries)
+- `aggregations/filters_bucket.yml` (allowlisted core file; also touches: nested/join fields, out-of-scope APIs, out-of-scope queries)
+- `aggregations/global.yml` (allowlisted core file; also touches: out-of-scope queries, out-of-scope search options)
+- `aggregations/histogram.yml` (allowlisted core file; also touches: nested/join fields, multi-shard/routing, out-of-scope queries, out-of-scope search options, out-of-scope field types)
+- `aggregations/max_metric.yml` (allowlisted core file; also touches: out-of-scope queries, index modes / synthetic source)
+- `aggregations/min_metric.yml` (allowlisted core file; also touches: out-of-scope queries, index modes / synthetic source)
+- `aggregations/missing.yml`
+- `aggregations/percentiles_tdigest_metric.yml` (allowlisted core file; also touches: out-of-scope queries)
+- `aggregations/range.yml` (allowlisted core file; also touches: out-of-scope field types)
+- `aggregations/stats_metric.yml` (allowlisted core file; also touches: out-of-scope queries)
+- `aggregations/sum_metric.yml` (allowlisted core file; also touches: out-of-scope queries)
+- `aggregations/terms.yml` (allowlisted core file; also touches: scripting, nested/join fields, multi-shard/routing, out-of-scope APIs, out-of-scope queries, out-of-scope search options, out-of-scope field types)
+- `aggregations/top_hits.yml` (allowlisted core file; also touches: highlighting, scripting, runtime fields, out-of-scope APIs, out-of-scope queries, out-of-scope search options, index modes / synthetic source)
+- `aggregations/typed_keys.yml` (allowlisted core file; also touches: ingest pipelines, out-of-scope queries)
+- `aggregations/value_count_metric.yml` (allowlisted core file; also touches: out-of-scope queries)
 
 ## Excluded (120)
 
@@ -122,7 +142,7 @@ Excluded files exercise features outside the MVP scope (see z_old/PLAN.md).
 - `index/36_external_gte_version.yml`: external versioning / CAS
 - `index/40_routing.yml`: multi-shard/routing, out-of-scope search options
 - `index/80_date_nanos.yml`: multi-shard/routing, out-of-scope field types
-- `index/90_geo_point.yml`: aggregations, geo, out-of-scope field types
+- `index/90_geo_point.yml`: geo, out-of-scope field types
 - `index/91_metrics_no_subobjects.yml`: out-of-scope APIs, out-of-scope field types, index modes / synthetic source, analysis config
 - `indices.create/20_synthetic_source.yml`: nested/join fields, runtime fields, vectors, geo, out-of-scope search options, out-of-scope field types, index modes / synthetic source, analysis config
 - `indices.create/21_synthetic_source_stored.yml`: nested/join fields, geo, out-of-scope field types, index modes / synthetic source
@@ -140,8 +160,8 @@ Excluded files exercise features outside the MVP scope (see z_old/PLAN.md).
 - `search/111_field_collapsing_with_max_score.yml`: out-of-scope search options
 - `search/112_field_collapsing_with_rescore.yml`: scripting, multi-shard/routing, out-of-scope search options
 - `search/115_multiple_field_collapsing.yml`: out-of-scope search options
-- `search/120_batch_reduce_size.yml`: aggregations, multi-shard/routing, out-of-scope queries
-- `search/140_pre_filter_search_shards.yml`: aggregations, out-of-scope queries, out-of-scope field types
+- `search/120_batch_reduce_size.yml`: multi-shard/routing, out-of-scope queries
+- `search/140_pre_filter_search_shards.yml`: out-of-scope queries, out-of-scope field types
 - `search/150_rewrite_on_coordinator.yml`: multi-shard/routing, out-of-scope APIs, out-of-scope queries
 - `search/160_exists_query.yml`: multi-shard/routing, geo, out-of-scope queries, out-of-scope field types
 - `search/161_exists_query_within_nested_query.yml`: nested/join fields, multi-shard/routing, geo, out-of-scope queries, out-of-scope field types
@@ -151,7 +171,7 @@ Excluded files exercise features outside the MVP scope (see z_old/PLAN.md).
 - `search/200_index_phrase_search.yml`: out-of-scope queries
 - `search/210_rescore_explain.yml`: out-of-scope APIs, out-of-scope search options
 - `search/230_interval_query.yml`: out-of-scope queries, analysis config
-- `search/240_date_nanos.yml`: aggregations, multi-shard/routing, out-of-scope search options, out-of-scope field types
+- `search/240_date_nanos.yml`: multi-shard/routing, out-of-scope search options, out-of-scope field types
 - `search/250_distance_feature.yml`: geo, out-of-scope queries, out-of-scope field types
 - `search/260_parameter_validation.yml`: out-of-scope search options
 - `search/300_sequence_numbers.yml`: out-of-scope search options
@@ -160,14 +180,14 @@ Excluded files exercise features outside the MVP scope (see z_old/PLAN.md).
 - `search/310_sequence_numbers_disabled.yml`: out-of-scope search options
 - `search/320_disallow_queries.yml`: nested/join fields, out-of-scope APIs, out-of-scope queries, analysis config
 - `search/330_fetch_fields.yml`: nested/join fields, geo, out-of-scope search options, out-of-scope field types, analysis config
-- `search/340_flattened.yml`: aggregations, out-of-scope APIs, out-of-scope queries, out-of-scope field types, index modes / synthetic source
+- `search/340_flattened.yml`: out-of-scope APIs, out-of-scope queries, out-of-scope field types, index modes / synthetic source
 - `search/350_binary_field.yml`: out-of-scope search options, out-of-scope field types, index modes / synthetic source
 - `search/350_point_in_time.yml`: multi-shard/routing, scroll/PIT/async, out-of-scope APIs, out-of-scope queries
 - `search/360_combined_fields.yml`: out-of-scope queries
 - `search/370_profile.yml`: nested/join fields, multi-shard/routing, vectors, remote clusters, out-of-scope search options
 - `search/380_sort_segments_on_timestamp.yml`: multi-shard/routing, out-of-scope APIs
 - `search/390_doc_values_search.yml`: geo, out-of-scope queries, out-of-scope field types
-- `search/390_lookup_fields.yml`: aggregations, runtime fields, out-of-scope queries
+- `search/390_lookup_fields.yml`: runtime fields, out-of-scope queries
 - `search/395_binary_doc_values_search.yml`: out-of-scope queries, out-of-scope field types
 - `search/396_text_doc_values_multiterm_search.yml`: out-of-scope queries
 - `search/397_match_only_text_doc_values_multiterm_search.yml`: out-of-scope queries, out-of-scope field types
@@ -186,7 +206,7 @@ Excluded files exercise features outside the MVP scope (see z_old/PLAN.md).
 - `search/610_function_score.yml`: out-of-scope queries
 - `search/620_rescore_script.yml`: scripting, out-of-scope APIs, out-of-scope search options
 - `search/630_format_sort_missing_dates.yml`: out-of-scope field types
-- `search/630_ids_query.yml`: aggregations, highlighting, out-of-scope queries
+- `search/630_ids_query.yml`: highlighting, out-of-scope queries
 - `search/80_indices_options.yml`: out-of-scope APIs
 - `search/90_search_after.yml`: scroll/PIT/async, out-of-scope field types
 - `search/95_sort_mixed_numeric_types.yml`: scroll/PIT/async
@@ -202,6 +222,6 @@ Excluded files exercise features outside the MVP scope (see z_old/PLAN.md).
 - `indices.update_aliases/10_basic.yml`: multi-shard/routing, out-of-scope queries
 - `indices.update_aliases/20_routing.yml`: multi-shard/routing
 
-## API specs (25)
+## API specs (27)
 
-`api/` holds the matching `rest-api-spec/api/*.json` files: bulk, cluster.health, count, create, delete, exists, get, get_source, index, indices.close, indices.create, indices.delete, indices.exists, indices.exists_alias, indices.get, indices.get_alias, indices.get_mapping, indices.get_settings, indices.open, indices.put_alias, indices.put_settings, indices.refresh, indices.update_aliases, search, update.
+`api/` holds the matching `rest-api-spec/api/*.json` files: bulk, cluster.health, count, create, delete, exists, get, get_source, index, indices.close, indices.create, indices.delete, indices.exists, indices.exists_alias, indices.get, indices.get_alias, indices.get_mapping, indices.get_settings, indices.open, indices.put_alias, indices.put_mapping, indices.put_settings, indices.refresh, indices.stats, indices.update_aliases, search, update.
