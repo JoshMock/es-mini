@@ -1,14 +1,5 @@
 # Known-failing YAML tests. Fix one, then delete its line.
-aggregations/cardinality_metric.yml/Basic test
-aggregations/cardinality_metric.yml/Filtered test
 aggregations/cardinality_metric.yml/invalid execution hint throws
-aggregations/cardinality_metric.yml/Invalid Precision test
-aggregations/cardinality_metric.yml/Metadata test
-aggregations/cardinality_metric.yml/Missing field with missing param
-aggregations/cardinality_metric.yml/Missing field without missing param
-aggregations/cardinality_metric.yml/Only aggs test
-aggregations/cardinality_metric.yml/Partially unmapped
-aggregations/cardinality_metric.yml/Partially unmapped with missing
 aggregations/cardinality_metric.yml/profiler double
 aggregations/cardinality_metric.yml/profiler int
 aggregations/cardinality_metric.yml/profiler string
@@ -142,7 +133,6 @@ aggregations/top_hits.yml/source filtering
 aggregations/top_hits.yml/stored fields
 aggregations/top_hits.yml/synthetic _source
 aggregations/top_hits.yml/version
-aggregations/typed_keys.yml/Test typed keys parameter for cardinality aggregation
 aggregations/typed_keys.yml/Test typed keys parameter for date_histogram aggregation and max_bucket pipeline aggregation
 aggregations/typed_keys.yml/Test typed keys parameter for percentile_ranks aggregation
 aggregations/typed_keys.yml/Test typed keys parameter for percentiles aggregation

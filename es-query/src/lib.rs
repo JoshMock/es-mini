@@ -8,6 +8,8 @@
 
 mod aggs;
 pub mod esql;
+mod hll;
+mod hll_tables;
 mod parse;
 
 pub use parse::{Query, parse_query, parse_query_string};

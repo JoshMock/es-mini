@@ -5,6 +5,7 @@
 //! Values come from what the field's doc values hold: read from disk for documents in
 //! segments, and converted the same way from the source for documents in memory.
 
+use crate::hll::{self, Hll};
 use crate::{QueryError, Searcher, fielddata_disabled, int, num, source_path};
 use es_index::{Document, FieldMapping, Index, iso_date, postings::values};
 use serde_json::{Map, Value};
@@ -18,6 +19,7 @@ enum Metric {
     ValueCount,
     Stats,
     ExtendedStats { sigma: f64 },
+    Cardinality { precision: u32 },
 }
 
 impl Metric {
@@ -30,6 +32,7 @@ impl Metric {
             Metric::ValueCount => "value_count",
             Metric::Stats => "stats",
             Metric::ExtendedStats { .. } => "extended_stats",
+            Metric::Cardinality { .. } => "cardinality",
         }
     }
 }
@@ -89,6 +92,9 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
         "value_count" => Metric::ValueCount,
         "stats" => Metric::Stats,
         "extended_stats" => Metric::ExtendedStats { sigma: 2.0 },
+        "cardinality" => Metric::Cardinality {
+            precision: hll::DEFAULT_PRECISION,
+        },
         _ => return Err(format!("Unknown aggregation type [{t}]").into()),
     };
     if subs {
@@ -112,6 +118,33 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
                     )));
                 }
             }
+            ("precision_threshold", Metric::Cardinality { precision }) => {
+                let n = int(v).ok_or_else(|| {
+                    QueryError::x_content(format!("[{t}] failed to parse field [{k}]"))
+                })?;
+                *precision = u64::try_from(n).map(hll::precision_from_threshold).map_err(|_| {
+                    QueryError::illegal(format!(
+                        "[precisionThreshold] must be greater than or equal to 0. Found [{n}] in [{name}]"
+                    ))
+                })?;
+            }
+            // ponytail: every mode counts the same; the hint only picks ES's collector
+            ("execution_hint", Metric::Cardinality { .. }) => {
+                let hint = v.as_str().unwrap_or_default().to_ascii_lowercase();
+                let modes = [
+                    "global_ordinals",
+                    "segment_ordinals",
+                    "direct",
+                    "save_memory_heuristic",
+                    "save_time_heuristic",
+                ];
+                if !modes.contains(&hint.as_str()) {
+                    return Err(QueryError::illegal(format!(
+                        "Invalid execution mode for cardinality aggregation.  Got [{}]expected one of [global_ordinal, segment_ordinal, direct]",
+                        es_index::postings::text(v)
+                    )));
+                }
+            }
             _ => return Err(format!("[{t}] unknown field [{k}]").into()),
         }
     }
@@ -129,7 +162,7 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
 }
 
 /// What a metric aggregation accumulates: every metric is read from it.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct Stats {
     count: u64,
     /// Kahan-compensated, like ES's CompensatedSum.
@@ -142,6 +175,8 @@ pub(crate) struct Stats {
     max: f64,
     /// The field is a date in some index, so values also render as dates.
     date: bool,
+    /// The distinct values (only for `cardinality`).
+    hll: Option<Hll>,
 }
 
 impl Default for Stats {
@@ -155,6 +190,7 @@ impl Default for Stats {
             min: f64::INFINITY,
             max: f64::NEG_INFINITY,
             date: false,
+            hll: None,
         }
     }
 }
@@ -186,6 +222,10 @@ impl Stats {
         self.min = self.min.min(o.min);
         self.max = self.max.max(o.max);
         self.date |= o.date;
+        match (&mut self.hll, &o.hll) {
+            (Some(h), Some(o)) => h.merge(o),
+            (h, o) => *h = h.take().or_else(|| o.clone()),
+        }
     }
 }
 
@@ -258,7 +298,9 @@ impl<'s, 'a> Collector<'s, 'a> {
                 Some(FieldMapping::Text | FieldMapping::TextKeyword { .. }) => {
                     return Err(fielddata_disabled(&agg.field));
                 }
-                Some(FieldMapping::Keyword { .. }) if agg.metric != Metric::ValueCount => {
+                Some(FieldMapping::Keyword { .. })
+                    if !matches!(agg.metric, Metric::ValueCount | Metric::Cardinality { .. }) =>
+                {
                     return Err(QueryError::illegal(format!(
                         "Field [{}] of type [keyword] is not supported for aggregation [{}]",
                         agg.field,
@@ -277,6 +319,10 @@ impl<'s, 'a> Collector<'s, 'a> {
             c.disk.push(Box::new(index.disk_values(&agg.field)));
             c.stats.push(Stats {
                 date: matches!(m, Some(FieldMapping::Date { .. })),
+                hll: match agg.metric {
+                    Metric::Cardinality { precision } => Some(Hll::new(precision)),
+                    _ => None,
+                },
                 ..Stats::default()
             });
         }
@@ -316,12 +362,30 @@ impl<'s, 'a> Collector<'s, 'a> {
             if self.aggs[i].metric == Metric::ValueCount {
                 continue;
             }
+            if let Some(h) = &mut st.hll {
+                h.collect(hash(self.mappings[i], &v));
+                continue;
+            }
             let Some(x) = num(&v).or_else(|| v.as_bool().map(f64::from)) else {
                 continue;
             };
             st.add(x);
             st.min = st.min.min(x);
             st.max = st.max.max(x);
+        }
+    }
+}
+
+/// A doc value's hash for `cardinality`, as ES's CardinalityAggregator computes it; unmapped
+/// fields count their `missing` value as a keyword.
+fn hash(m: Option<&FieldMapping>, v: &Value) -> u64 {
+    use FieldMapping as M;
+    match m {
+        Some(M::Double | M::Float) => hll::mix64(num(v).unwrap_or_default().to_bits()),
+        Some(M::Keyword { .. }) | None => hll::murmur3(es_index::postings::text(v).as_bytes()),
+        Some(_) => {
+            let x = int(v).or_else(|| v.as_bool().map(i64::from));
+            hll::mix64(x.unwrap_or_default() as u64)
         }
     }
 }
@@ -358,6 +422,10 @@ pub(crate) fn render(aggs: &[Agg], stats: &[Stats], typed_keys: bool) -> Value {
             Metric::Max => put(&mut body, "value", max),
             Metric::ValueCount => {
                 body.insert("value".into(), st.count.into());
+            }
+            Metric::Cardinality { .. } => {
+                let n = st.hll.as_ref().map_or(0, Hll::cardinality);
+                body.insert("value".into(), n.into());
             }
             Metric::Stats | Metric::ExtendedStats { .. } => {
                 body.insert("count".into(), st.count.into());
@@ -585,6 +653,72 @@ mod tests {
     }
 
     #[test]
+    fn cardinality_counts_like_elasticsearch() {
+        let mut ix = Index::default();
+        let props = &mut ix.mappings.properties;
+        props.insert("k".into(), FieldMapping::Keyword { ignore_above: None });
+        props.insert("ks".into(), FieldMapping::Keyword { ignore_above: None });
+        props.insert("i".into(), FieldMapping::Long);
+        props.insert("d".into(), FieldMapping::Double);
+        props.insert("f".into(), FieldMapping::Float);
+        let date = FieldMapping::Date {
+            format: None,
+            locale: None,
+        };
+        props.insert("dt".into(), date);
+        // ES indexed these values as one document; spread them so the disk save fits a chunk
+        let f = |n: u64| format!("{}.{}", n / 10, n % 10).parse::<f64>().unwrap();
+        for d in 0..20u64 {
+            let n = d * 1000..(d + 1) * 1000;
+            ix.put(
+                &d.to_string(),
+                json!({
+                    "k": n.clone().map(|n| format!("v{n}")).collect::<Vec<_>>(),
+                    "i": n.clone().map(|n| n * 7).collect::<Vec<_>>(),
+                    "d": n.clone().map(|n| n as f64 / 4.0).collect::<Vec<_>>(),
+                    "f": n.clone().map(f).collect::<Vec<_>>(),
+                    "dt": n.map(|n| 1_600_000_000_000 + n * 1000).collect::<Vec<_>>(),
+                    "ks": (0..30).map(|n| format!("s{n}")).collect::<Vec<_>>(),
+                }),
+            );
+        }
+        let thresholds = [Some(0), Some(10), Some(100), Some(1000), None, Some(40000)];
+        let mut aggs = serde_json::Map::new();
+        for field in ["k", "i", "d", "f", "dt", "ks"] {
+            for t in thresholds {
+                let mut c = json!({"field": field});
+                if let Some(t) = t {
+                    c["precision_threshold"] = t.into();
+                }
+                let name = format!("{field}_{}", t.map_or("None".into(), |t| t.to_string()));
+                aggs.insert(name, json!({"cardinality": c}));
+            }
+        }
+        // Elasticsearch 9.5.5's response to the same document and request
+        let want = json!({
+            "k_0": 22845, "k_10": 24377, "k_100": 20243, "k_1000": 20095, "k_None": 19858,
+            "k_40000": 19998, "i_0": 16119, "i_10": 17317, "i_100": 20676, "i_1000": 19778,
+            "i_None": 19822, "i_40000": 19999, "d_0": 17108, "d_10": 22787, "d_100": 20404,
+            "d_1000": 20041, "d_None": 19809, "d_40000": 19994, "f_0": 16317, "f_10": 18057,
+            "f_100": 20877, "f_1000": 20017, "f_None": 19830, "f_40000": 20002,
+            "dt_0": 15135, "dt_10": 18210, "dt_100": 20486, "dt_1000": 20057,
+            "dt_None": 19839, "dt_40000": 19995, "ks_0": 35, "ks_10": 30, "ks_100": 30,
+            "ks_1000": 30, "ks_None": 30, "ks_40000": 30,
+        });
+        let values = |got: Value| -> Value {
+            let got = got.as_object().unwrap().iter();
+            got.map(|(k, v)| (k.clone(), v["value"].clone())).collect()
+        };
+        let body = json!({"size": 0, "aggs": aggs});
+        assert_eq!(values(aggs_of(&ix, body.clone())), want);
+        let dir = std::env::temp_dir().join(format!("esm-card-{}", std::process::id()));
+        disk::save(&dir, &Indices::from([("c".to_owned(), ix)])).unwrap();
+        let opened = disk::open(&dir).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(values(aggs_of(&opened["c"], body)), want);
+    }
+
+    #[test]
     fn aggs_reject_bad_requests() {
         let err = |aggs: Value| {
             let req = SearchRequest::parse(&json!({"aggs": aggs}));
@@ -626,6 +760,14 @@ mod tests {
         assert_eq!(
             err(json!({"a": {"stats": {"field": "i", "sigma": 1}}})),
             "[stats] unknown field [sigma]"
+        );
+        assert_eq!(
+            err(json!({"a": {"cardinality": {"field": "i", "precision_threshold": -1}}})),
+            "[precisionThreshold] must be greater than or equal to 0. Found [-1] in [a]"
+        );
+        assert!(
+            err(json!({"a": {"cardinality": {"field": "k", "execution_hint": "x"}}}))
+                .starts_with("Invalid execution mode for cardinality aggregation.  Got [x]")
         );
         assert_eq!(
             err(json!({"a": {"meta": {}}})),
