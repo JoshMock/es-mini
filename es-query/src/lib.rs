@@ -6,6 +6,7 @@
 //! ponytail: matched documents are still scored from their sources; score from postings and
 //! norms if loading the hits shows up.
 
+mod aggs;
 pub mod esql;
 mod parse;
 
@@ -578,6 +579,9 @@ pub struct SearchRequest {
     pub sort: Vec<SortField>,
     /// Body `track_total_hits` (`true`, `false` or a number) as the URL-parameter spelling.
     pub track_total_hits: Option<String>,
+    pub aggs: Vec<aggs::Agg>,
+    /// The `typed_keys` URL parameter: aggregation names are prefixed with their type.
+    pub typed_keys: bool,
 }
 
 /// Which Elasticsearch error type a query failure maps to.
@@ -631,7 +635,16 @@ impl SearchRequest {
     pub fn parse(body: &Value) -> Result<Self, QueryError> {
         if let Some(k) = body.as_object().and_then(|o| {
             o.keys().find(|k| {
-                !["query", "from", "size", "sort", "track_total_hits"].contains(&k.as_str())
+                ![
+                    "query",
+                    "from",
+                    "size",
+                    "sort",
+                    "track_total_hits",
+                    "aggs",
+                    "aggregations",
+                ]
+                .contains(&k.as_str())
             })
         }) {
             return Err(format!("Unknown key for a START_OBJECT in [{k}].").into());
@@ -657,7 +670,16 @@ impl SearchRequest {
             Some(v) if v.is_boolean() || v.is_i64() => Some(v.to_string()),
             Some(_) => return Err("[track_total_hits] must be a boolean or a number".into()),
         };
+        let aggs = match (body.get("aggs"), body.get("aggregations")) {
+            (Some(_), Some(_)) => {
+                return Err("Found two aggregation definitions: [aggs] and [aggregations]".into());
+            }
+            (Some(a), _) | (_, Some(a)) => aggs::parse(a)?,
+            (None, None) => vec![],
+        };
         Ok(Self {
+            aggs,
+            typed_keys: false,
             query,
             track_total_hits,
             from: usize_of("from", 0)?,
@@ -717,6 +739,8 @@ pub struct SearchResult<'a> {
     pub total: usize,
     pub max_score: Option<f32>,
     pub hits: Vec<Hit<'a>>,
+    /// The rendered `aggregations`, if the request had any.
+    pub aggregations: Option<Value>,
 }
 
 /// One index to search, with the filter of the alias it was reached through.
@@ -763,14 +787,18 @@ pub fn check_sortable(targets: &[Target], req: &SearchRequest) -> Result<(), Que
             if let Some(FieldMapping::Text | FieldMapping::TextKeyword { .. }) =
                 index.mappings.properties.get(&f.field)
             {
-                return Err(QueryError::illegal(format!(
-                    "Text fields are not optimised for operations that require per-document field data like aggregations and sorting, so these operations are disabled by default. Please use a keyword field instead. Alternatively, set fielddata=true on [{}] in order to load field data by uninverting the inverted index. Note that this can use significant memory.",
-                    f.field
-                )));
+                return Err(fielddata_disabled(&f.field));
             }
         }
     }
     Ok(())
+}
+
+/// ES refuses to sort or aggregate on a `text` field: fielddata is off by default.
+fn fielddata_disabled(field: &str) -> QueryError {
+    QueryError::illegal(format!(
+        "Text fields are not optimised for operations that require per-document field data like aggregations and sorting, so these operations are disabled by default. Please use a keyword field instead. Alternatively, set fielddata=true on [{field}] in order to load field data by uninverting the inverted index. Note that this can use significant memory."
+    ))
 }
 
 pub fn search<'a>(index: &'a Index, req: &SearchRequest) -> SearchResult<'a> {
@@ -786,13 +814,16 @@ pub fn search_many<'a>(
     let by_score = req.sort.is_empty() || req.sort.iter().any(|f| f.field == "_score");
     // (target position, hit, score, sort values)
     let mut hits = Vec::new();
+    let mut aggs = vec![aggs::Stats::default(); req.aggs.len()];
     for (pos, (name, index, filter)) in targets.iter().enumerate() {
         let query = with_filter(&req.query, *filter)?;
         let s = Searcher::new(index, &query);
+        let mut collector = aggs::Collector::new(&req.aggs, &s)?;
         for (id, doc) in s.docs().filter(|(_, d)| index.searchable(d)) {
             let Some(score) = s.score(&query, id, &doc) else {
                 continue;
             };
+            collector.collect(id, &doc);
             let sort: Vec<Value> = req
                 .sort
                 .iter()
@@ -827,6 +858,7 @@ pub fn search_many<'a>(
                 score,
             ));
         }
+        aggs::reduce(&mut aggs, &collector.stats);
     }
     hits.sort_by(|(pa, a, sa), (pb, b, sb)| {
         let fields = if req.sort.is_empty() {
@@ -857,6 +889,8 @@ pub fn search_many<'a>(
         .then(|| hits.iter().map(|h| h.2 as f32).reduce(f32::max))
         .flatten();
     Ok(SearchResult {
+        aggregations: (!req.aggs.is_empty())
+            .then(|| aggs::render(&req.aggs, &aggs, req.typed_keys)),
         total: hits.len(),
         max_score,
         hits: hits

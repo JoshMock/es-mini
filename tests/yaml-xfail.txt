@@ -1,12 +1,4 @@
 # Known-failing YAML tests. Fix one, then delete its line.
-aggregations/avg_metric.yml/Basic test
-aggregations/avg_metric.yml/Filtered test
-aggregations/avg_metric.yml/Metadata test
-aggregations/avg_metric.yml/Missing field with missing param
-aggregations/avg_metric.yml/Missing field without missing param
-aggregations/avg_metric.yml/Only aggs test
-aggregations/avg_metric.yml/Partially unmapped
-aggregations/avg_metric.yml/Partially unmapped with missing
 aggregations/cardinality_metric.yml/Basic test
 aggregations/cardinality_metric.yml/Filtered test
 aggregations/cardinality_metric.yml/invalid execution hint throws
@@ -87,25 +79,6 @@ aggregations/histogram.yml/histogram with offset and unmapped
 aggregations/histogram.yml/Show empty intervals
 aggregations/histogram.yml/Tiny tiny tiny date_range
 aggregations/histogram.yml/Tiny tiny tiny range
-aggregations/max_metric.yml/Basic test
-aggregations/max_metric.yml/Counter field
-aggregations/max_metric.yml/Filtered test
-aggregations/max_metric.yml/Merging results with unmapped fields
-aggregations/max_metric.yml/Metadata test
-aggregations/max_metric.yml/Missing field with missing param
-aggregations/max_metric.yml/Missing field without missing param
-aggregations/max_metric.yml/Only aggs test
-aggregations/max_metric.yml/Partially unmapped
-aggregations/max_metric.yml/Partially unmapped with missing
-aggregations/min_metric.yml/Basic test
-aggregations/min_metric.yml/Counter field
-aggregations/min_metric.yml/Filtered test
-aggregations/min_metric.yml/Metadata test
-aggregations/min_metric.yml/Missing field with missing param
-aggregations/min_metric.yml/Missing field without missing param
-aggregations/min_metric.yml/Only aggs test
-aggregations/min_metric.yml/Partially unmapped
-aggregations/min_metric.yml/Partially unmapped with missing
 aggregations/missing.yml/match all
 aggregations/missing.yml/match none
 aggregations/missing.yml/match some
@@ -139,14 +112,6 @@ aggregations/stats_metric.yml/Metadata test
 aggregations/stats_metric.yml/Missing field with missing param
 aggregations/stats_metric.yml/Missing field without missing param
 aggregations/stats_metric.yml/Only aggs test
-aggregations/sum_metric.yml/Basic test
-aggregations/sum_metric.yml/Filtered test
-aggregations/sum_metric.yml/Metadata test
-aggregations/sum_metric.yml/Missing field with missing param
-aggregations/sum_metric.yml/Missing field without missing param
-aggregations/sum_metric.yml/Only aggs test
-aggregations/sum_metric.yml/Partially unmapped
-aggregations/sum_metric.yml/Partially unmapped with missing
 aggregations/terms.yml/Basic test
 aggregations/terms.yml/Boolean test
 aggregations/terms.yml/Date test
@@ -191,22 +156,11 @@ aggregations/top_hits.yml/source filtering
 aggregations/top_hits.yml/stored fields
 aggregations/top_hits.yml/synthetic _source
 aggregations/top_hits.yml/version
-aggregations/typed_keys.yml/Test typed keys parameter for avg aggregation
 aggregations/typed_keys.yml/Test typed keys parameter for cardinality aggregation
 aggregations/typed_keys.yml/Test typed keys parameter for date_histogram aggregation and max_bucket pipeline aggregation
 aggregations/typed_keys.yml/Test typed keys parameter for extended_stats aggregation
-aggregations/typed_keys.yml/Test typed keys parameter for max aggregation
-aggregations/typed_keys.yml/Test typed keys parameter for min aggregation
 aggregations/typed_keys.yml/Test typed keys parameter for percentile_ranks aggregation
 aggregations/typed_keys.yml/Test typed keys parameter for percentiles aggregation
 aggregations/typed_keys.yml/Test typed keys parameter for stats aggregation
-aggregations/typed_keys.yml/Test typed keys parameter for sum aggregation
 aggregations/typed_keys.yml/Test typed keys parameter for terms aggregation
 aggregations/typed_keys.yml/Test typed keys parameter for terms and top_hits aggregation
-aggregations/typed_keys.yml/Test typed keys parameter for value_count aggregation
-aggregations/value_count_metric.yml/Basic test
-aggregations/value_count_metric.yml/Filtered test
-aggregations/value_count_metric.yml/Metadata test
-aggregations/value_count_metric.yml/Missing field with missing param
-aggregations/value_count_metric.yml/Missing field without missing param
-aggregations/value_count_metric.yml/Only aggs test

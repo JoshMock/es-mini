@@ -139,6 +139,7 @@ pub async fn search(
     if let Some(q) = params.get("q") {
         req.query = query_from_params(q, &params);
     }
+    req.typed_keys = params.get("typed_keys").is_some_and(|v| v == "true");
     let scroll = params
         .get("scroll")
         .map(|v| crate::scroll::keep_alive(v))
@@ -235,6 +236,9 @@ pub async fn search(
         "_shards": shards(targets.len()),
         "hits": hits
     });
+    if let Some(a) = r.aggregations {
+        resp["aggregations"] = a;
+    }
     if let Some(p) = &pit_id {
         resp["pit_id"] = p.clone();
     }
