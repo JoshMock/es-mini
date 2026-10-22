@@ -73,6 +73,7 @@ entry with the target and the decision needed), then stop or move on. Never wait
 - Docker is allowed only for Elasticsearch 9.5.5 verification: one container at a time, capped
   at 1 CPU and 1 GB, requests via `docker exec` (the sandbox cannot reach ports Docker
   publishes), and always removed afterwards (`docker rm -f`), even on failure.
-- Keep CPU low: cargo at `-j 2` (scripts/check.sh's default) under `nice`; no benchmarks or
-  release builds.
+- Keep CPU low: cargo at `-j 2` (scripts/check.sh's default) under `nice`. Release builds and
+  `bench/run.sh` are allowed only for goals about performance: run the benchmark before and
+  after the change and put both numbers in the commit message.
 - Never regenerate `fixtures/es-9.5.5/` or `fixtures/expected/`; other tests depend on their bytes.
