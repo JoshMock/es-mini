@@ -115,6 +115,14 @@ fn by_query(
             })? as usize),
             (None, None) => None,
         };
+    let batch = match params.get("scroll_size") {
+        Some(v) => v.parse().ok().filter(|&n| n > 0).ok_or_else(|| {
+            AppError::IllegalArgument(format!(
+                "Failed to parse int parameter [scroll_size] with value [{v}]"
+            ))
+        })?,
+        None => BATCH,
+    };
     let mut req = SearchRequest::parse(&body).map_err(AppError::from)?;
     if let Some(q) = params.get("q") {
         req.query = query_from_params(q, &params);
@@ -155,7 +163,7 @@ fn by_query(
         "timed_out": false,
         "total": total,
         "deleted": if delete { total } else { 0 },
-        "batches": total.div_ceil(BATCH),
+        "batches": total.div_ceil(batch),
         "version_conflicts": 0,
         "noops": 0,
         "retries": {"bulk": 0, "search": 0},

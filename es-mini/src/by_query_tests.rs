@@ -100,6 +100,22 @@ async fn by_query_max_docs_limits_body_and_param() {
 }
 
 #[tokio::test]
+async fn by_query_scroll_size_sets_the_batch_size() {
+    let app = seeded().await;
+    let uri = "/idx/_update_by_query?scroll_size=2";
+    let (_, r) = call(&app, Method::POST, uri, None).await;
+    assert_eq!((&r["total"], &r["batches"]), (&json!(3), &json!(2)), "{r}");
+    let (s, r) = call(
+        &app,
+        Method::POST,
+        "/idx/_delete_by_query?scroll_size=x",
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{r}");
+}
+
+#[tokio::test]
 async fn by_query_q_param_selects_docs() {
     let app = seeded().await;
     let (_, r) = call(&app, Method::POST, "/idx/_delete_by_query?q=t:pear", None).await;
