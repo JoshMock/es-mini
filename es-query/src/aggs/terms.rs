@@ -1,6 +1,7 @@
 //! The `terms` bucket aggregation: each shard counts the documents of every value, keeps its
 //! top `shard_size` buckets, and the reduce merges them like ES's AbstractInternalTerms.
 
+use super::{Agg, Stats};
 use crate::hll::mix64;
 use crate::{QueryError, int};
 use es_index::{FieldMapping, ip_bytes, ip_string, iso_date, postings::text};
@@ -26,10 +27,16 @@ pub(super) struct Terms {
     pub(super) value_type: Option<FieldMapping>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 enum By {
     Count,
     Key,
+    /// A metric of the sub-aggregation at `index`.
+    Agg {
+        index: usize,
+        agg: Box<Agg>,
+        key: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -39,7 +46,11 @@ enum Include {
 }
 
 impl Terms {
-    pub(super) fn parse(name: &str, params: &Map<String, Value>) -> Result<Terms, QueryError> {
+    pub(super) fn parse(
+        name: &str,
+        params: &Map<String, Value>,
+        subs: &[Agg],
+    ) -> Result<Terms, QueryError> {
         let mut t = Terms {
             size: 10,
             shard_size: None,
@@ -77,7 +88,7 @@ impl Terms {
                 "shard_size" => t.shard_size = Some(positive("shardSize")?),
                 "min_doc_count" => t.min_doc_count = at_least_0("minDocCount")?,
                 "shard_min_doc_count" => t.shard_min_doc_count = at_least_0("shardMinDocCount")?,
-                "order" => t.order = parse_order(v)?,
+                "order" => t.order = parse_order(v, subs)?,
                 "include" => {
                     t.include = Some(match v {
                         Value::Object(o) => parse_partition(o)?,
@@ -114,7 +125,7 @@ impl Terms {
     }
 
     fn count_desc(&self) -> bool {
-        self.order[0] == (By::Count, false)
+        matches!(self.order[0], (By::Count, false))
     }
 
     /// ES's BucketCountThresholds after `adjustBucketCountThresholds` and `ensureValidity`.
@@ -126,13 +137,21 @@ impl Terms {
         self.shard_size.unwrap_or(default).max(self.size)
     }
 
-    fn cmp(&self, a: &(Key, u64), b: &(Key, u64)) -> Ordering {
-        let by = |&(by, asc): &(By, bool)| {
+    fn cmp(&self, a: &(Key, Bucket), b: &(Key, Bucket)) -> Ordering {
+        let by = |(by, asc): &(By, bool)| {
             let o = match by {
-                By::Count => a.1.cmp(&b.1),
+                By::Count => a.1.count.cmp(&b.1.count),
                 By::Key => a.0.cmp(&b.0),
+                // ponytail: NaN sorts as Java's Double.compare (last ascending, first
+                // descending); ES's shards instead always put NaN last
+                By::Agg { index, agg, key } => {
+                    let v = |b: &Bucket| {
+                        super::sort_value(agg, key.as_deref(), &b.subs[*index]).unwrap_or(f64::NAN)
+                    };
+                    v(&a.1).total_cmp(&v(&b.1))
+                }
             };
-            if asc { o } else { o.reverse() }
+            if *asc { o } else { o.reverse() }
         };
         (self.order.iter().map(by))
             .find(|o| o.is_ne())
@@ -140,8 +159,13 @@ impl Terms {
     }
 
     /// A shard's buckets of a field with `format`; `parse` reads an include/exclude value as
-    /// one of the field's doc values.
-    pub(super) fn buckets(&self, format: Format, parse: impl Fn(&str) -> Option<Value>) -> Buckets {
+    /// one of the field's doc values; `empty` is a new bucket's sub-aggregation results.
+    pub(super) fn buckets(
+        &self,
+        format: Format,
+        parse: impl Fn(&str) -> Option<Value>,
+        empty: Vec<Stats>,
+    ) -> Buckets {
         let keys = |vals: &[String]| -> BTreeSet<Key> {
             vals.iter()
                 .filter_map(|s| Key::of(&parse(s)?, format))
@@ -158,6 +182,7 @@ impl Terms {
                 }),
             },
             exclude: keys(&self.exclude),
+            empty,
             ..Buckets::default()
         }
     }
@@ -171,17 +196,17 @@ impl Terms {
     pub(super) fn finish_shard(&self, b: &mut Buckets) {
         let shard_size = self.shard_size();
         let min = self.shard_min_doc_count.min(self.min_doc_count);
-        let mut v: Vec<(Key, u64)> = std::mem::take(&mut b.counts).into_iter().collect();
-        let total: u64 = v.iter().map(|b| b.1).sum();
-        v.retain(|b| b.1 >= min);
+        let mut v: Vec<(Key, Bucket)> = std::mem::take(&mut b.counts).into_iter().collect();
+        let total: u64 = v.iter().map(|b| b.1.count).sum();
+        v.retain(|b| b.1.count >= min);
         v.sort_by(|a, b| self.cmp(a, b));
         v.truncate(shard_size);
-        b.other += total - v.iter().map(|b| b.1).sum::<u64>();
+        b.other += total - v.iter().map(|b| b.1.count).sum::<u64>();
         // AbstractInternalTerms.getDocCountError
         b.error = if v.len() < shard_size || self.key_order() {
             0
         } else if self.count_desc() {
-            v.iter().map(|b| b.1).min().unwrap_or(0) as i64
+            v.iter().map(|b| b.1.count).min().unwrap_or(0) as i64
         } else {
             -1
         };
@@ -189,20 +214,25 @@ impl Terms {
         b.counts = v.into_iter().collect();
     }
 
-    /// The rendered result and its `typed_keys` type.
-    pub(super) fn render(&self, b: &Buckets, body: &mut Map<String, Value>) -> &'static str {
-        let mut v: Vec<(Key, u64)> = (b.counts.iter())
-            .filter(|b| *b.1 >= self.min_doc_count)
-            .map(|(k, c)| (k.clone(), *c))
+    /// The rendered result and its `typed_keys` type; `sub` renders a bucket's
+    /// sub-aggregations into it.
+    pub(super) fn render(
+        &self,
+        b: &mut Buckets,
+        body: &mut Map<String, Value>,
+        mut sub: impl FnMut(&mut [Stats], &mut Map<String, Value>),
+    ) -> &'static str {
+        let mut v: Vec<(Key, Bucket)> = (std::mem::take(&mut b.counts).into_iter())
+            .filter(|b| b.1.count >= self.min_doc_count)
             .collect();
         v.sort_by(|a, b| self.cmp(a, b));
         let rest = v.split_off(self.size.min(v.len()));
         // a single shard's counts are exact
         let error = if b.shards > 1 { b.error } else { 0 };
         body.insert("doc_count_error_upper_bound".into(), error.into());
-        let other = b.other + rest.iter().map(|b| b.1).sum::<u64>();
+        let other = b.other + rest.iter().map(|b| b.1.count).sum::<u64>();
         body.insert("sum_other_doc_count".into(), other.into());
-        let buckets = v.into_iter().map(|(k, c)| {
+        let buckets = v.into_iter().map(|(k, mut bucket)| {
             let mut out = Map::new();
             let key = match (&k, b.format) {
                 (Key::Str(s), _) => Value::from(s.as_str()),
@@ -221,7 +251,8 @@ impl Terms {
                 }
                 _ => {}
             }
-            out.insert("doc_count".into(), c.into());
+            out.insert("doc_count".into(), bucket.count.into());
+            sub(&mut bucket.subs, &mut out);
             Value::Object(out)
         });
         body.insert("buckets".into(), buckets.collect());
@@ -233,7 +264,7 @@ impl Terms {
     }
 }
 
-fn parse_order(v: &Value) -> Result<Vec<(By, bool)>, QueryError> {
+fn parse_order(v: &Value, subs: &[Agg]) -> Result<Vec<(By, bool)>, QueryError> {
     let objects = match v {
         Value::Array(a) => a.iter().collect(),
         v => vec![v],
@@ -256,12 +287,22 @@ fn parse_order(v: &Value) -> Result<Vec<(By, bool)>, QueryError> {
         let by = match key.as_str() {
             "_count" => By::Count,
             "_key" => By::Key,
-            // ponytail: no sub-aggregations yet, so no path can name one
+            // ponytail: paths name a direct sub-aggregation (`agg` or `agg.metric`); no
+            // single-bucket aggregations exist to path through with `>`
             path => {
-                let agg = path.split(['>', '.', '[']).next().unwrap_or(path);
-                return Err(QueryError::illegal(format!(
-                    "Invalid aggregation order path [{path}]. The provided aggregation [{agg}] either does not exist, or is a pipeline aggregation and cannot be used to sort the buckets."
-                )));
+                let (agg, key) = match path.rsplit_once('.') {
+                    Some((a, k)) if !path.contains(['>', '[']) => (a, Some(k.to_owned())),
+                    _ => (path.split(['>', '.', '[']).next().unwrap_or(path), None),
+                };
+                let invalid = |e: String| {
+                    QueryError::illegal(format!("Invalid aggregation order path [{path}]. {e}"))
+                };
+                let index = (subs.iter().position(|s| s.name == agg))
+                    .filter(|_| !path.contains(['>', '[']))
+                    .ok_or_else(|| invalid(format!("The provided aggregation [{agg}] either does not exist, or is a pipeline aggregation and cannot be used to sort the buckets.")))?;
+                let agg = Box::new(subs[index].clone());
+                super::sort_value(&agg, key.as_deref(), &Stats::default()).map_err(invalid)?;
+                By::Agg { index, agg, key }
             }
         };
         order.push((by, asc));
@@ -463,10 +504,17 @@ impl Filter {
     }
 }
 
+/// One bucket: its document count and its sub-aggregations' results.
+#[derive(Debug, Clone, Default)]
+pub(super) struct Bucket {
+    count: u64,
+    pub(super) subs: Vec<Stats>,
+}
+
 /// One shard's buckets, or several shards' merged.
 #[derive(Debug, Clone, Default)]
 pub(super) struct Buckets {
-    counts: BTreeMap<Key, u64>,
+    pub(super) counts: BTreeMap<Key, Bucket>,
     /// Documents counted in buckets left out.
     other: u64,
     /// The upper bound of counts missed by shards' truncation; -1 when unbounded.
@@ -475,6 +523,8 @@ pub(super) struct Buckets {
     format: Format,
     include: Option<Filter>,
     exclude: BTreeSet<Key>,
+    /// A new bucket's sub-aggregation results.
+    empty: Vec<Stats>,
 }
 
 impl Buckets {
@@ -485,23 +535,40 @@ impl Buckets {
             .collect()
     }
 
-    /// Counts one document with doc values `vals`.
-    pub(super) fn add(&mut self, vals: Vec<Value>) {
+    fn bucket(&mut self, k: Key) -> &mut Bucket {
+        let empty = &self.empty;
+        (self.counts.entry(k)).or_insert_with(|| Bucket {
+            count: 0,
+            subs: empty.clone(),
+        })
+    }
+
+    /// Counts one document with doc values `vals`; `sub` collects it into each of its buckets'
+    /// sub-aggregations.
+    pub(super) fn add(&mut self, vals: Vec<Value>, mut sub: impl FnMut(&mut Vec<Stats>)) {
         for k in self.keys(vals) {
-            *self.counts.entry(k).or_default() += 1;
+            let b = self.bucket(k);
+            b.count += 1;
+            sub(&mut b.subs);
         }
     }
 
     /// Adds empty buckets for the values of a document the query did not match.
     pub(super) fn add_zero(&mut self, vals: Vec<Value>) {
         for k in self.keys(vals) {
-            self.counts.entry(k).or_default();
+            self.bucket(k);
         }
     }
 
     pub(super) fn merge(&mut self, o: Buckets) {
-        for (k, c) in o.counts {
-            *self.counts.entry(k).or_default() += c;
+        for (k, b) in o.counts {
+            match self.counts.get_mut(&k) {
+                Some(mine) => {
+                    mine.count += b.count;
+                    super::reduce(&mut mine.subs, b.subs);
+                }
+                None => drop(self.counts.insert(k, b)),
+            }
         }
         self.other += o.other;
         self.error = match (self.error, o.error) {
@@ -807,6 +874,55 @@ mod tests {
             json!({"doc_count_error_upper_bound": 4, "sum_other_doc_count": 4, "buckets": [
                 {"key": "a", "doc_count": 2},
             ]})
+        );
+    }
+
+    #[test]
+    fn terms_buckets_hold_sub_aggregations() {
+        let body = json!({"query": {"term": {"k": "b"}}, "aggs": {"t": {
+            "terms": {"field": "k", "min_doc_count": 0, "size": 2},
+            "aggs": {"m": {"max": {"field": "n"}}, "in": {"terms": {"field": "b"}}},
+        }}});
+        let mut req = SearchRequest::parse(&body).unwrap();
+        req.typed_keys = true;
+        let ix = index();
+        let got = search_many(&[("i", &ix, None)], &req).unwrap();
+        let no_in =
+            json!({"doc_count_error_upper_bound": 0, "sum_other_doc_count": 0, "buckets": []});
+        assert_eq!(
+            got.aggregations.unwrap()["sterms#t"]["buckets"],
+            json!([
+                {"key": "b", "doc_count": 2, "max#m": {"value": 2.0}, "lterms#in": {
+                    "doc_count_error_upper_bound": 0, "sum_other_doc_count": 0, "buckets": [
+                        {"key": 0, "key_as_string": "false", "doc_count": 1},
+                        {"key": 1, "key_as_string": "true", "doc_count": 1},
+                    ]}},
+                {"key": "a", "doc_count": 0, "max#m": {"value": null}, "lterms#in": no_in},
+            ])
+        );
+    }
+
+    #[test]
+    fn terms_order_by_sub_aggregation() {
+        let keys = |order: Value, subs: Value| {
+            let body =
+                json!({"aggs": {"t": {"terms": {"field": "k", "order": order}, "aggs": subs}}});
+            let b = run(&[&index()], body).unwrap()["t"]["buckets"].take();
+            (b.as_array().unwrap().iter())
+                .map(|b| b["key"].clone())
+                .collect::<Vec<_>>()
+        };
+        let max = json!({"m": {"max": {"field": "d"}}});
+        // c has no d: an empty max is -Infinity
+        assert_eq!(keys(json!({"m": "desc"}), max.clone()), ["b", "a", "c"]);
+        assert_eq!(keys(json!({"m.value": "asc"}), max), ["c", "a", "b"]);
+        let stats = json!({"s": {"stats": {"field": "n"}}});
+        assert_eq!(keys(json!([{"s.sum": "desc"}]), stats), ["b", "c", "a"]);
+        let body = json!({"aggs": {"t": {"terms": {"field": "k", "order": {"m.x": "asc"}},
+            "aggs": {"m": {"max": {"field": "n"}}}}}});
+        assert_eq!(
+            run(&[&index()], body).unwrap_err(),
+            "Invalid aggregation order path [m.x]. Ordering on a single-value metrics aggregation can only be done on its value. Either drop the key (a la \"m\") or change it to \"value\" (a la \"m.value\")"
         );
     }
 

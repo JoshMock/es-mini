@@ -79,6 +79,8 @@ pub struct Agg {
     metric: Metric,
     field: String,
     missing: Option<Value>,
+    /// Sub-aggregations, computed per bucket.
+    subs: Vec<Agg>,
 }
 
 /// Parses the object under `aggs`/`aggregations`.
@@ -98,14 +100,11 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
     let body = body
         .as_object()
         .ok_or_else(|| format!("Expected [START_OBJECT] under [{name}]"))?;
-    let (mut meta, mut kind, mut subs) = (None, None, false);
+    let (mut meta, mut kind, mut subs) = (None, None, vec![]);
     for (k, v) in body {
         match k.as_str() {
             "meta" => meta = Some(v.clone()),
-            "aggs" | "aggregations" => {
-                parse(v)?;
-                subs = true;
-            }
+            "aggs" | "aggregations" => subs = parse(v)?,
             t => match kind {
                 Some((prev, _)) => {
                     return Err(format!(
@@ -140,11 +139,10 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
             percents: vec![1.0, 5.0, 25.0, 50.0, 75.0, 95.0, 99.0],
             keyed: true,
         },
-        "terms" => Metric::Terms(Box::new(Terms::parse(name, object()?)?)),
+        "terms" => Metric::Terms(Box::new(Terms::parse(name, object()?, &subs)?)),
         _ => return Err(format!("Unknown aggregation type [{t}]").into()),
     };
-    // ponytail: terms buckets cannot hold sub-aggregations yet
-    if subs {
+    if !subs.is_empty() && !matches!(metric, Metric::Terms(_)) {
         return Err(QueryError::illegal(format!(
             "Aggregator [{name}] of type [{t}] cannot accept sub-aggregations"
         )));
@@ -270,7 +268,43 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
         metric,
         field: field.to_owned(),
         missing: params.get("missing").cloned(),
+        subs,
     })
+}
+
+/// The value `terms` buckets sort by for the order path `agg.key` into a metric, like ES's
+/// NumericMetricsAggregator `bucketComparator`; `Err` explains an invalid path.
+// ponytail: multi-value metrics sort by stats names only, not by percentiles
+fn sort_value(agg: &Agg, key: Option<&str>, st: &Stats) -> Result<f64, String> {
+    let name = &agg.name;
+    let avg = st.sum / st.count as f64;
+    let single = match agg.metric {
+        Metric::Avg => avg,
+        Metric::Sum => st.sum,
+        Metric::Min => st.min,
+        Metric::Max => st.max,
+        Metric::ValueCount => st.count as f64,
+        Metric::Cardinality { .. } => st.hll.as_ref().map_or(0, Hll::cardinality) as f64,
+        Metric::Terms(_) => return Err("Buckets can only be sorted on a sub-aggregator path that is built out of zero or more single-bucket aggregations within the path and a final single-bucket or a metrics aggregation at the path end.".into()),
+        Metric::Stats | Metric::ExtendedStats { .. } | Metric::Percentiles { .. } => {
+            let stats = !matches!(agg.metric, Metric::Percentiles { .. });
+            return match key {
+                None => Err("When ordering on a multi-value metrics aggregation a metric name must be specified.".into()),
+                Some("count") if stats => Ok(st.count as f64),
+                Some("sum") if stats => Ok(st.sum),
+                Some("min") if stats => Ok(st.min),
+                Some("max") if stats => Ok(st.max),
+                Some("avg") if stats => Ok(avg),
+                Some(k) => Err(format!("Unknown metric name [{k}] on multi-value metrics aggregation [{name}]")),
+            };
+        }
+    };
+    match key {
+        None | Some("value") => Ok(single),
+        Some(_) => Err(format!(
+            "Ordering on a single-value metrics aggregation can only be done on its value. Either drop the key (a la \"{name}\") or change it to \"value\" (a la \"{name}.value\")"
+        )),
+    }
 }
 
 /// What a metric aggregation accumulates: every metric is read from it.
@@ -414,6 +448,8 @@ pub(crate) struct Collector<'s, 'a> {
     /// Per aggregation: its `missing` value as a doc value of the field.
     missing: Vec<Option<Value>>,
     stats: Vec<Stats>,
+    /// Per `terms` aggregation with sub-aggregations: their collector.
+    subs: Vec<Option<Collector<'s, 'a>>>,
     /// Per aggregation, with `profile: true`: where its time went.
     timings: Option<Vec<Timings>>,
 }
@@ -447,6 +483,7 @@ impl<'s, 'a> Collector<'s, 'a> {
             disk: vec![],
             missing: vec![],
             stats: vec![],
+            subs: vec![],
             timings: profile.then(Vec::new),
         };
         for agg in aggs {
@@ -492,6 +529,13 @@ impl<'s, 'a> Collector<'s, 'a> {
                     ..Timings::default()
                 });
             }
+            // ponytail: sub-aggregations are not profiled
+            let sub = match (&agg.metric, agg.subs.is_empty()) {
+                (Metric::Terms(_), false) => Some(Collector::new(&agg.subs, searcher, false)?),
+                _ => None,
+            };
+            let empty = sub.as_ref().map(|s| s.stats.clone()).unwrap_or_default();
+            c.subs.push(sub);
             c.stats.push(Stats {
                 date: matches!(m, Some(FieldMapping::Date { .. })),
                 hll: match agg.metric {
@@ -506,7 +550,7 @@ impl<'s, 'a> Collector<'s, 'a> {
                     Metric::Terms(t) => {
                         let has_values = m.is_some() || agg.missing.is_some();
                         let format = Format::of(typed.filter(|_| has_values));
-                        Some(t.buckets(format, |s| as_doc_value(&Value::from(s))))
+                        Some(t.buckets(format, |s| as_doc_value(&Value::from(s)), empty))
                     }
                     _ => None,
                 },
@@ -530,9 +574,16 @@ impl<'s, 'a> Collector<'s, 'a> {
     fn collect_one(&mut self, i: usize, id: &str, doc: &Document) {
         let vals = self.values(i, id, doc);
         match vals.is_empty() {
-            true => self.add(i, self.missing[i].iter().cloned().collect()),
-            false => self.add(i, vals),
+            true => self.add(i, self.missing[i].iter().cloned().collect(), id, doc),
+            false => self.add(i, vals, id, doc),
         }
+    }
+
+    /// Collects a document into `stats`, one bucket's results of these aggregations.
+    fn collect_into(&mut self, stats: &mut Vec<Stats>, id: &str, doc: &Document) {
+        std::mem::swap(&mut self.stats, stats);
+        self.collect(id, doc);
+        std::mem::swap(&mut self.stats, stats);
     }
 
     /// A document's doc values of aggregation `i`'s field.
@@ -556,10 +607,15 @@ impl<'s, 'a> Collector<'s, 'a> {
         }
     }
 
-    fn add(&mut self, i: usize, vals: Vec<Value>) {
+    fn add(&mut self, i: usize, vals: Vec<Value>, id: &str, doc: &Document) {
         let st = &mut self.stats[i];
         if let Some(t) = &mut st.terms {
-            t.add(vals);
+            let sub = &mut self.subs[i];
+            t.add(vals, |stats| {
+                if let Some(sub) = sub {
+                    sub.collect_into(stats, id, doc);
+                }
+            });
             return;
         }
         for v in vals {
@@ -590,7 +646,9 @@ impl Collector<'_, '_> {
     /// aggregation, like ES's (post collection releases the doc values readers, building the
     /// aggregation takes its result).
     pub(crate) fn finish(mut self) -> (Vec<Stats>, Option<Value>) {
-        self.finish_terms();
+        let mut stats = std::mem::take(&mut self.stats);
+        self.finish_terms(&mut stats);
+        self.stats = stats;
         let Some(mut timings) = self.timings.take() else {
             return (self.stats, None);
         };
@@ -608,24 +666,28 @@ impl Collector<'_, '_> {
         (stats, Some(profile.collect()))
     }
 
-    /// Keeps each `terms` aggregation's top buckets of this shard, first adding empty buckets
-    /// for the values of unmatched documents if `min_doc_count` is 0.
-    fn finish_terms(&mut self) {
+    /// Keeps each `terms` aggregation's top buckets of this shard in `stats` (and so on in
+    /// their sub-aggregations), first adding empty buckets for the values of unmatched
+    /// documents if `min_doc_count` is 0.
+    fn finish_terms(&mut self, stats: &mut [Stats]) {
         let index = self.searcher.index;
-        for i in 0..self.aggs.len() {
+        for (i, st) in stats.iter_mut().enumerate() {
             let Metric::Terms(t) = &self.aggs[i].metric else {
                 continue;
             };
-            if (self.stats[i].terms.as_ref()).is_some_and(|b| t.wants_zero_buckets(b)) {
+            let Some(b) = &mut st.terms else {
+                continue;
+            };
+            if t.wants_zero_buckets(b) {
                 for (id, doc) in index.docs().filter(|(_, d)| index.searchable(d)) {
-                    let vals = self.values(i, id, &doc);
-                    if let Some(b) = &mut self.stats[i].terms {
-                        b.add_zero(vals);
-                    }
+                    b.add_zero(self.values(i, id, &doc));
                 }
             }
-            if let Some(b) = &mut self.stats[i].terms {
-                t.finish_shard(b);
+            t.finish_shard(b);
+            if let Some(sub) = &mut self.subs[i] {
+                for bucket in b.counts.values_mut() {
+                    sub.finish_terms(&mut bucket.subs);
+                }
             }
         }
     }
@@ -737,8 +799,12 @@ pub(crate) fn render(aggs: &[Agg], stats: &mut [Stats], typed_keys: bool) -> Val
         let mut ty = agg.metric.name();
         match &agg.metric {
             Metric::Terms(t) => {
-                if let Some(b) = &st.terms {
-                    ty = t.render(b, &mut body);
+                if let Some(b) = &mut st.terms {
+                    ty = t.render(b, &mut body, |subs, out| {
+                        if let Value::Object(m) = render(&agg.subs, subs, typed_keys) {
+                            out.extend(m);
+                        }
+                    });
                 }
             }
             Metric::Avg => put(&mut body, "value", avg),
