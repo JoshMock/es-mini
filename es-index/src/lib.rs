@@ -399,7 +399,8 @@ impl Index {
         disk.load(&disk.meta(id)?).ok().map(Cow::Owned)
     }
 
-    /// All live documents, in no particular order; those on disk are read as iterated.
+    /// All live documents, those on disk first, then those in memory in indexing order (as ES
+    /// visits older segments first); those on disk are read as iterated.
     pub fn docs(&self) -> impl Iterator<Item = (&str, Cow<'_, Document>)> {
         self.docs_at(None, None)
     }
@@ -413,18 +414,24 @@ impl Index {
     ) -> impl Iterator<Item = (&'a str, Cow<'a, Document>)> + 'k {
         let keep = move |p| on_disk.is_none_or(|at| at.contains(&p));
         let on_disk = self.disk.iter().flat_map(move |d| d.docs(keep));
-        let memory: Box<dyn Iterator<Item = (&'a String, &'a Document)> + 'k> = match in_memory {
+        let mut memory: Vec<(&'a String, &'a Document)> = match in_memory {
             // Few candidates: look them up instead of walking every document.
-            Some(ids) => Box::new(ids.iter().filter_map(|id| self.docs.get_key_value(id))),
-            None => Box::new(self.docs.iter()),
+            Some(ids) => ids
+                .iter()
+                .filter_map(|id| self.docs.get_key_value(id))
+                .collect(),
+            None => self.docs.iter().collect(),
         };
-        memory
-            .map(|(id, d)| (id.as_str(), Cow::Borrowed(d)))
+        // results that depend on the visiting order (floating-point sums) are then deterministic
+        memory.sort_unstable_by_key(|(_, d)| d.seq_no);
+        on_disk
             // ponytail: documents whose segment cannot be read are skipped
+            .filter_map(Result::ok)
+            .map(|(id, d)| (id, Cow::Owned(d)))
             .chain(
-                on_disk
-                    .filter_map(Result::ok)
-                    .map(|(id, d)| (id, Cow::Owned(d))),
+                memory
+                    .into_iter()
+                    .map(|(id, d)| (id.as_str(), Cow::Borrowed(d))),
             )
     }
 
@@ -726,6 +733,33 @@ pub type Indices = BTreeMap<String, Index>;
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn docs_are_visited_in_indexing_order() {
+        let mut ix = Index::default();
+        let ids: Vec<String> = (0..40).map(|i| format!("d{}", (i * 7) % 40)).collect();
+        for id in &ids {
+            ix.put(id, json!({}));
+        }
+        ix.put("d7", json!({"updated": true}));
+        let mut want: Vec<&str> = ids
+            .iter()
+            .map(String::as_str)
+            .filter(|&id| id != "d7")
+            .collect();
+        want.push("d7");
+        let got: Vec<&str> = ix.docs().map(|(id, _)| id).collect();
+        assert_eq!(got, want);
+        // older documents on disk come first, like older segments
+        let dir = std::env::temp_dir().join(format!("esm-order-{}", std::process::id()));
+        disk::save(&dir, &Indices::from([("i".to_owned(), ix)])).unwrap();
+        let mut ix = disk::open(&dir).unwrap().remove("i").unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        ix.put("new2", json!({}));
+        ix.put("new1", json!({}));
+        let got: Vec<String> = ix.docs().map(|(id, _)| id.to_owned()).collect();
+        assert_eq!(got[40..], ["new2", "new1"]);
+    }
 
     #[test]
     fn field_mapping_type_name_and_numeric() {
