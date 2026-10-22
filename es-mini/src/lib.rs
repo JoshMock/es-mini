@@ -17,7 +17,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{StatusCode, Uri},
     response::IntoResponse,
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
 };
 use error::AppError;
 use es_index::Indices;
@@ -178,6 +178,7 @@ pub fn app_persisted(dir: &std::path::Path) -> Result<Router, String> {
                             .iter()
                             .any(|s| r.as_str().ends_with(s))
                             || r.as_str().starts_with("/_search/scroll")
+                            || r.as_str().ends_with("/_pit")
                     });
                 let res = next.run(req).await;
                 if reads || !res.status().is_success() {
@@ -291,6 +292,8 @@ fn router(state: AppState) -> Router {
         )
         .route("/_search", get(search::search_all).post(search::search_all))
         .route("/{index}/_search", get(search::search).post(search::search))
+        .route("/{index}/_pit", post(scroll::open_pit))
+        .route("/_pit", delete(scroll::close_pit))
         .route(
             "/_search/scroll",
             get(scroll::next).post(scroll::next).delete(scroll::clear),

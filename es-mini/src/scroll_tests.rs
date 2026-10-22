@@ -138,3 +138,126 @@ async fn scroll_rejects_from_and_bad_ids() {
         (StatusCode::BAD_REQUEST, &json!("Cannot parse scroll id"))
     );
 }
+
+async fn open_pit(app: &axum::Router, keep_alive: &str) -> String {
+    let (s, r) = call(
+        app,
+        Method::POST,
+        &format!("/idx/_pit?keep_alive={keep_alive}"),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    assert_eq!(r["_shards"]["successful"], 1);
+    r["id"].as_str().unwrap().to_owned()
+}
+
+#[tokio::test]
+async fn pit_searches_a_snapshot() {
+    let app = seeded().await;
+    let id = open_pit(&app, "1m").await;
+
+    call(&app, Method::DELETE, "/idx/_doc/3", None).await;
+    call(&app, Method::PUT, "/idx/_doc/0", Some(json!({"n": 0}))).await;
+    call(&app, Method::PUT, "/idx/_doc/1", Some(json!({"n": 9}))).await;
+
+    let body = json!({
+        "pit": {"id": id, "keep_alive": "1m"},
+        "query": {"range": {"n": {"lte": 3}}},
+        "sort": ["n"],
+    });
+    let (s, r) = call(&app, Method::POST, "/_search", Some(body)).await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    assert_eq!(ids(&r), ["1", "2", "3"]);
+    assert_eq!(r["hits"]["hits"][0]["_index"], "idx");
+    assert_eq!(r["hits"]["hits"][0]["_source"], json!({"n": 1}));
+    assert_eq!(r["pit_id"], json!(id));
+
+    // The live index has moved on.
+    let (_, r) = call(
+        &app,
+        Method::POST,
+        "/idx/_search",
+        Some(json!({"sort": ["n"]})),
+    )
+    .await;
+    assert_eq!(ids(&r), ["0", "2", "4", "5", "1"]);
+}
+
+#[tokio::test]
+async fn pit_close_frees_it() {
+    let app = seeded().await;
+    let id = open_pit(&app, "1m").await;
+    let (s, r) = call(&app, Method::DELETE, "/_pit", Some(json!({"id": id}))).await;
+    assert_eq!(
+        (s, r),
+        (StatusCode::OK, json!({"succeeded": true, "num_freed": 1}))
+    );
+    let body = json!({"pit": {"id": id}});
+    let (s, r) = call(&app, Method::POST, "/_search", Some(body)).await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "{r}");
+    assert_eq!(
+        r["error"]["root_cause"][0]["type"],
+        "search_context_missing_exception"
+    );
+    let (s, r) = call(&app, Method::DELETE, "/_pit", Some(json!({"id": id}))).await;
+    assert_eq!(
+        (s, r),
+        (
+            StatusCode::NOT_FOUND,
+            json!({"succeeded": true, "num_freed": 0})
+        )
+    );
+}
+
+#[tokio::test]
+async fn pit_expires_after_its_keep_alive() {
+    let app = seeded().await;
+    let id = open_pit(&app, "1ms").await;
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let body = json!({"pit": {"id": id}});
+    let (s, _) = call(&app, Method::POST, "/_search", Some(body)).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn pit_rejects_indices_and_missing_keep_alive() {
+    let app = seeded().await;
+    let (s, r) = call(&app, Method::POST, "/idx/_pit", None).await;
+    assert_eq!(
+        (s, &r["error"]["reason"]),
+        (
+            StatusCode::BAD_REQUEST,
+            &json!("Validation Failed: 1: [keep_alive] is not specified;")
+        )
+    );
+    let id = open_pit(&app, "1m").await;
+    let body = json!({"pit": {"id": id}});
+    let (s, r) = call(&app, Method::POST, "/idx/_search", Some(body)).await;
+    assert_eq!(
+        (s, &r["error"]["reason"]),
+        (
+            StatusCode::BAD_REQUEST,
+            &json!(
+                "Validation Failed: 1: [indices] cannot be used with point in time. Do not specify any index with point in time.;"
+            )
+        )
+    );
+}
+
+#[tokio::test]
+async fn pit_keeps_on_disk_documents_across_saves() {
+    let dir = std::env::temp_dir().join(format!("esm-pit-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let app = crate::app_persisted(&dir).unwrap();
+    call(&app, Method::PUT, "/idx/_doc/1", Some(json!({"n": 1}))).await;
+    // Reopen so the document is served from its segment.
+    let app = crate::app_persisted(&dir).unwrap();
+    let id = open_pit(&app, "1m").await;
+    call(&app, Method::DELETE, "/idx/_doc/1", None).await;
+    let body = json!({"pit": {"id": id}});
+    let (s, r) = call(&app, Method::POST, "/_search", Some(body)).await;
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(s, StatusCode::OK, "{r}");
+    assert_eq!(r["hits"]["hits"][0]["_source"], json!({"n": 1}));
+}

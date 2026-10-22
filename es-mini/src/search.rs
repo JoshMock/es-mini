@@ -127,7 +127,15 @@ pub async fn search(
 ) -> Result<Json<Value>, AppError> {
     params::check(&uri, &params, &SEARCH_PARAMS)?;
     let start = Instant::now();
-    let mut req = SearchRequest::parse(&parse_body(&body)?).map_err(AppError::from)?;
+    let mut body = parse_body(&body)?;
+    let pit = body.as_object_mut().and_then(|o| o.remove("pit"));
+    let pit_id = pit.as_ref().map(|p| p["id"].clone());
+    if pit.is_some() && name != "_all" {
+        return Err(AppError::ActionRequestValidation(
+            "[indices] cannot be used with point in time. Do not specify any index with point in time.".into(),
+        ));
+    }
+    let mut req = SearchRequest::parse(&body).map_err(AppError::from)?;
     if let Some(q) = params.get("q") {
         req.query = query_from_params(q, &params);
     }
@@ -140,9 +148,19 @@ pub async fn search(
             "using [from] is not allowed in a scroll context".into(),
         ));
     }
-    let indices = state.read().expect("lock poisoned");
-    let resolved = crate::indices::data_targets(&indices, &name, &params)?;
-    let targets = targets(&indices, &resolved);
+    let snapshot = pit.map(|p| crate::scroll::pit(&contexts, &p)).transpose()?;
+    let (indices, resolved);
+    let targets = match &snapshot {
+        Some(s) => s
+            .iter()
+            .map(|(n, i, f)| (n.as_str(), i, f.as_ref()))
+            .collect(),
+        None => {
+            indices = state.read().expect("lock poisoned");
+            resolved = crate::indices::data_targets(&indices, &name, &params)?;
+            targets(&indices, &resolved)
+        }
+    };
     for (_, index, _) in &targets {
         let max = index
             .settings
@@ -211,12 +229,15 @@ pub async fn search(
     if total.is_null() {
         hits.as_object_mut().unwrap().remove("total");
     }
-    let resp = json!({
+    let mut resp = json!({
         "took": start.elapsed().as_millis() as u64,
         "timed_out": false,
         "_shards": shards(targets.len()),
         "hits": hits
     });
+    if let Some(p) = &pit_id {
+        resp["pit_id"] = p.clone();
+    }
     Ok(Json(match scroll {
         Some(keep) => crate::scroll::open(&contexts, resp, page, keep),
         None => resp,

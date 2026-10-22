@@ -170,7 +170,7 @@ pub struct WriteResult {
 
 /// Lucene term statistics read from disk. They keep counting documents that were updated or
 /// deleted but not yet merged away, which BM25 scores depend on.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct TermStats {
     /// Per indexed field: (docs with the field, sum of term frequencies).
     pub fields: HashMap<String, (f64, f64)>,
@@ -356,6 +356,25 @@ impl Index {
         match self.meta(id) {
             Some((version, _)) => Err(version),
             None => Ok(self.put(id, source)),
+        }
+    }
+
+    /// A copy for point-in-time searches: later writes to `self` do not change it.
+    // ponytail: copies every document into memory (on-disk segments may be deleted by later
+    // saves); memory grows with the index size times open snapshots
+    pub fn snapshot(&self) -> Index {
+        Index {
+            stats: self.stats.clone(),
+            settings: self.settings.clone(),
+            mappings: self.mappings.clone(),
+            docs: self
+                .docs()
+                .map(|(id, d)| (id.to_owned(), d.into_owned()))
+                .collect(),
+            superseded: self.superseded.clone(),
+            next_seq_no: self.next_seq_no,
+            refreshed_seq_no: self.refreshed_seq_no,
+            ..Index::default()
         }
     }
 
