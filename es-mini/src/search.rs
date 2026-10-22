@@ -14,7 +14,10 @@ use es_query::{
 use serde_json::{Value, json};
 use std::{collections::HashMap, time::Instant};
 
-fn targets<'a>(indices: &'a Indices, resolved: &'a [aliases::Target]) -> Vec<es_query::Target<'a>> {
+pub(crate) fn targets<'a>(
+    indices: &'a Indices,
+    resolved: &'a [aliases::Target],
+) -> Vec<es_query::Target<'a>> {
     resolved
         .iter()
         .map(|t| (t.index.as_str(), &indices[&t.index], t.filter.as_ref()))
@@ -103,7 +106,7 @@ pub async fn search_all(
 }
 
 /// The `q`/`df`/`default_operator` URI query as a parsed query.
-fn query_from_params(q: &str, params: &HashMap<String, String>) -> es_query::Query {
+pub(crate) fn query_from_params(q: &str, params: &HashMap<String, String>) -> es_query::Query {
     es_query::parse_query_string(
         q,
         params.get("df").map_or("_all", String::as_str),

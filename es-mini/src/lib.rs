@@ -2,6 +2,7 @@
 
 mod aliases;
 mod bulk;
+mod by_query;
 mod docs;
 mod error;
 mod field_caps;
@@ -319,6 +320,8 @@ fn router(state: AppState) -> Router {
             put(docs::create).post(docs::create),
         )
         .route("/{index}/_update/{id}", post(docs::update))
+        .route("/{index}/_update_by_query", post(by_query::update_by_query))
+        .route("/{index}/_delete_by_query", post(by_query::delete_by_query))
         // Like Java's `RestController.handleBadRequest`: a bare string error, no `status` field.
         .fallback(
             |method: axum::http::Method, uri: axum::http::Uri| async move {
@@ -386,6 +389,9 @@ mod docs_tests;
 
 #[cfg(test)]
 mod bulk_tests;
+
+#[cfg(test)]
+mod by_query_tests;
 
 #[cfg(test)]
 mod search_tests;
