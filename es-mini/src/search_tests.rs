@@ -218,3 +218,32 @@ async fn profile_times_each_aggregation_per_shard() {
     .await;
     assert!(r.get("profile").is_none());
 }
+
+#[tokio::test]
+async fn value_type_mismatch_fails_only_that_shard() {
+    let app = app();
+    for (index, ty) in [("a", "keyword"), ("b", "ip")] {
+        let mappings = json!({"mappings": {"properties": {"ip": {"type": ty}}}});
+        call(&app, Method::PUT, &format!("/{index}"), Some(mappings)).await;
+        let doc = json!({"ip": "127.0.0.1"});
+        call(&app, Method::PUT, &format!("/{index}/_doc/1"), Some(doc)).await;
+    }
+    let aggs = json!({"aggs": {"t": {"terms": {"field": "ip", "value_type": "ip"}}}});
+    let (s, r) = call(&app, Method::POST, "/a,b/_search", Some(aggs.clone())).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(r["_shards"]["successful"], 1);
+    assert_eq!(r["_shards"]["failed"], 1);
+    assert_eq!(
+        r["_shards"]["failures"][0]["reason"],
+        json!({"type": "illegal_argument_exception", "reason": "Field type [keyword] is incompatible with specified value_type [ip]"})
+    );
+    assert_eq!(r["_shards"]["failures"][0]["index"], "a");
+    assert_eq!(r["hits"]["total"]["value"], 1);
+    assert_eq!(
+        r["aggregations"]["t"]["buckets"],
+        json!([{"key": "127.0.0.1", "doc_count": 1}])
+    );
+    // with every shard failed, the search fails
+    let (s, _) = call(&app, Method::POST, "/a/_search", Some(aggs)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+}

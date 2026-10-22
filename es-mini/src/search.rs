@@ -255,11 +255,26 @@ pub async fn search(
         "_shards": shards(targets.len()),
         "hits": hits
     });
+    if !r.failures.is_empty() {
+        let s = &mut resp["_shards"];
+        s["successful"] = (targets.len() - r.failures.len()).into();
+        s["failed"] = r.failures.len().into();
+        let failures = r.failures.iter().map(|(index, e)| {
+            let (_, mut reason) = AppError::from(e.clone()).parts();
+            reason.as_object_mut().unwrap().remove("root_cause");
+            json!({"shard": 0, "index": index, "node": crate::nodes::NODE_ID, "reason": reason})
+        });
+        s["failures"] = failures.collect();
+    }
     if let Some(a) = r.aggregations {
         resp["aggregations"] = a;
     }
     if let Some(p) = r.profile {
-        resp["profile"] = profile(&targets, p);
+        let searched: Vec<_> = (targets.iter())
+            .filter(|(n, ..)| !r.failures.iter().any(|(f, _)| f == n))
+            .cloned()
+            .collect();
+        resp["profile"] = profile(&searched, p);
     }
     if let Some(p) = &pit_id {
         resp["pit_id"] = p.clone();

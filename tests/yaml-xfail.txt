@@ -78,8 +78,6 @@ aggregations/terms.yml/order by sub agg containing nested
 aggregations/terms.yml/string profiler via global ordinals filters implementation
 aggregations/terms.yml/string profiler via global ordinals native implementation
 aggregations/terms.yml/string profiler via map
-aggregations/terms.yml/Value type mismatch fails shard
-aggregations/terms.yml/Value type mismatch fails shard with no docs
 aggregations/top_hits.yml/docvalue fields
 aggregations/top_hits.yml/explain
 aggregations/top_hits.yml/fetch fields

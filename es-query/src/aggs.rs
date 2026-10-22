@@ -423,6 +423,15 @@ fn doc_value(s: &Searcher, field: &str, mapping: &FieldMapping, v: &Value) -> Op
     }
 }
 
+/// ES's ValuesSourceType of a field: every number is `numeric`.
+fn values_source(m: &FieldMapping) -> &'static str {
+    if m.is_numeric() {
+        "numeric"
+    } else {
+        m.type_name()
+    }
+}
+
 /// The mapping of `field`, including a `keyword` multi-field of a text field.
 fn mapping<'a>(index: &'a Index, field: &str) -> Option<&'a FieldMapping> {
     let props = &index.mappings.properties;
@@ -506,6 +515,22 @@ impl<'s, 'a> Collector<'s, 'a> {
                     )));
                 }
                 _ => {}
+            }
+            if let (Some(m), Metric::Terms(t)) = (m, &agg.metric)
+                && let Some(hint) = t.value_type.as_ref()
+                && values_source(m) != values_source(hint)
+            {
+                // ES's ValuesSourceConfig fails the shard, so correctly mapped shards still answer
+                return Err(QueryError::illegal(format!(
+                    "Field type [{}] is incompatible with specified value_type [{}]",
+                    m.type_name(),
+                    match hint {
+                        FieldMapping::Keyword { .. } => "string",
+                        FieldMapping::Long => "byte|short|integer|long",
+                        FieldMapping::Double => "float|double",
+                        h => h.type_name(),
+                    }
+                )));
             }
             // terms type an unmapped field's values by `value_type`, else as keywords
             let typed = m.or(match &agg.metric {

@@ -106,6 +106,7 @@ impl Terms {
                             format: None,
                             locale: None,
                         },
+                        "ip" => FieldMapping::Ip,
                         _ => return Err(format!("Unknown value type [{}]", text(v)).into()),
                     });
                 }

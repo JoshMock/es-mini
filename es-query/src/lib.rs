@@ -761,8 +761,11 @@ pub struct SearchResult<'a> {
     pub hits: Vec<Hit<'a>>,
     /// The rendered `aggregations`, if the request had any.
     pub aggregations: Option<Value>,
-    /// With `profile: true`, each target's `aggregations` profile (an array), in target order.
+    /// With `profile: true`, each searched target's `aggregations` profile (an array), in
+    /// target order.
     pub profile: Option<Vec<Value>>,
+    /// The targets whose shard failed, with why; their documents are left out.
+    pub failures: Vec<(&'a str, QueryError)>,
 }
 
 /// One index to search, with the filter of the alias it was reached through.
@@ -838,10 +841,17 @@ pub fn search_many<'a>(
     let mut hits = Vec::new();
     let mut aggs = vec![aggs::Stats::default(); req.aggs.len()];
     let mut profile = req.profile.then(Vec::new);
+    let mut failures = Vec::new();
     for (pos, (name, index, filter)) in targets.iter().enumerate() {
         let query = with_filter(&req.query, *filter)?;
         let s = Searcher::new(index, &query);
-        let mut collector = aggs::Collector::new(&req.aggs, &s, req.profile)?;
+        let mut collector = match aggs::Collector::new(&req.aggs, &s, req.profile) {
+            Ok(c) => c,
+            Err(e) => {
+                failures.push((*name, e));
+                continue;
+            }
+        };
         for (id, doc) in s.docs().filter(|(_, d)| index.searchable(d)) {
             let Some(score) = s.score(&query, id, &doc) else {
                 continue;
@@ -912,10 +922,15 @@ pub fn search_many<'a>(
             .then(pa.cmp(pb))
             .then(a.doc.seq_no.cmp(&b.doc.seq_no))
     });
+    if !failures.is_empty() && failures.len() == targets.len() {
+        // ponytail: ES wraps this in an all-shards-failed search_phase_execution_exception
+        return Err(failures.swap_remove(0).1);
+    }
     let max_score = by_score
         .then(|| hits.iter().map(|h| h.2 as f32).reduce(f32::max))
         .flatten();
     Ok(SearchResult {
+        failures,
         aggregations: (!req.aggs.is_empty())
             .then(|| aggs::render(&req.aggs, &mut aggs, req.typed_keys)),
         profile,
