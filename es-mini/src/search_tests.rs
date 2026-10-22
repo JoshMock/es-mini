@@ -220,6 +220,22 @@ async fn profile_times_each_aggregation_per_shard() {
 }
 
 #[tokio::test]
+async fn profile_numeric_terms_debug_counts_shard_buckets() {
+    let app = seeded().await;
+    let aggs = json!({"n": {"terms": {"field": "n", "size": 1, "shard_size": 1}}});
+    let body = json!({"profile": true, "size": 0, "aggs": aggs});
+    let (s, r) = call(&app, Method::POST, "/idx/_search", Some(body)).await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    let a = &r["profile"]["shards"][0]["aggregations"][0];
+    assert_eq!(a["type"], "NumericTermsAggregator");
+    // every collected value, not only the shard_size kept
+    assert_eq!(
+        a["debug"],
+        json!({"result_strategy": "long_terms", "total_buckets": 3})
+    );
+}
+
+#[tokio::test]
 async fn value_type_mismatch_fails_only_that_shard() {
     let app = app();
     for (index, ty) in [("a", "keyword"), ("b", "ip")] {

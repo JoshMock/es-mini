@@ -472,6 +472,8 @@ struct Timings {
     collect_count: u64,
     post_collection: u64,
     build_aggregation: u64,
+    /// `terms`: the buckets this shard collected, before keeping its top `shard_size`.
+    total_buckets: usize,
 }
 
 fn nanos(since: Instant) -> u64 {
@@ -708,6 +710,9 @@ impl Collector<'_, '_> {
                     b.add_zero(self.values(i, id, &doc));
                 }
             }
+            if let Some(timings) = &mut self.timings {
+                timings[i].total_buckets = b.counts.len();
+            }
             t.finish_shard(b);
             if let Some(sub) = &mut self.subs[i] {
                 for bucket in b.counts.values_mut() {
@@ -774,6 +779,13 @@ impl Collector<'_, '_> {
                     "ordinals_collectors_used": used(ords),
                     "ordinals_collectors_overhead_too_high": 0,
                     "string_hashing_collectors_used": used((keyword || m.is_none()) && !ords),
+                });
+            }
+            ("NumericTermsAggregator", _) => {
+                let floating = matches!(m, Some(FieldMapping::Double | FieldMapping::Float));
+                out["debug"] = serde_json::json!({
+                    "result_strategy": if floating { "double_terms" } else { "long_terms" },
+                    "total_buckets": t.total_buckets,
                 });
             }
             _ => {}
