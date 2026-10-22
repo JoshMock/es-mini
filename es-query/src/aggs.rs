@@ -438,6 +438,14 @@ mod tests {
     }
 
     #[test]
+    fn request_doubles_parse_exactly() {
+        // serde_json's default float parser can be one ulp off this value
+        let body = r#"{"aggs": {"m": {"max": {"field": "nope", "missing": -91.70509831248421}}}}"#;
+        let got = aggs_of(&index(), serde_json::from_str(body).unwrap());
+        assert_eq!(got["m"]["value"].as_f64(), Some(-91.705_098_312_484_21));
+    }
+
+    #[test]
     fn aggs_reject_bad_requests() {
         let err = |aggs: Value| {
             let req = SearchRequest::parse(&json!({"aggs": aggs}));
