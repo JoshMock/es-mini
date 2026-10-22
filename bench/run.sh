@@ -16,6 +16,7 @@ WORK=$(mktemp -d)
 stop() {
   docker rm -f es-mini-bench-es es-mini-bench-mini es-mini-bench-client >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
+  docker volume rm es-mini-bench-es-data es-mini-bench-mini-data >/dev/null 2>&1 || true
 }
 trap 'stop; rm -rf "$WORK"' EXIT
 stop
@@ -31,10 +32,14 @@ docker network create "$NET" >/dev/null
 limits=(--cpus "$CPUS" --memory "$MEMORY" --network "$NET")
 docker run -d --name es-mini-bench-es --network-alias es "${limits[@]}" \
   -e discovery.type=single-node -e xpack.security.enabled=false -e xpack.ml.enabled=false \
-  -e ES_JAVA_OPTS="-Xms512m -Xmx512m" docker.elastic.co/elasticsearch/elasticsearch:9.5.5 >/dev/null
+  -e ES_JAVA_OPTS="-Xms512m -Xmx512m" -v es-mini-bench-es-data:/usr/share/elasticsearch/data \
+  docker.elastic.co/elasticsearch/elasticsearch:9.5.5 >/dev/null
+# Both servers keep data on a Docker volume, as deployments do. Keep it on a real disk:
+# es-mini fsyncs about 35 times per save, so tmpfs would hide most of its write cost.
 # Stock images with mounted binaries: nothing to build (es-mini needs glibc >= 2.34).
 docker run -d --name es-mini-bench-mini --network-alias es-mini "${limits[@]}" \
-  -e ES_MINI_HOST=0.0.0.0 -e ES_MINI_PORT=9200 -e ES_MINI_DATA=/tmp/data \
+  -e ES_MINI_HOST=0.0.0.0 -e ES_MINI_PORT=9200 -e ES_MINI_DATA=/data/es-mini \
+  -v es-mini-bench-mini-data:/data \
   -v "$BIN:/usr/local/bin/es-mini:ro" debian:bookworm-slim es-mini >/dev/null
 
 mkdir -p "$OUT"
