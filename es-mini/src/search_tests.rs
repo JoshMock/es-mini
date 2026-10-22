@@ -236,6 +236,18 @@ async fn profile_numeric_terms_debug_counts_shard_buckets() {
 }
 
 #[tokio::test]
+async fn profile_histogram_counts_collected_buckets() {
+    let app = seeded().await;
+    let aggs = json!({"h": {"histogram": {"field": "n", "interval": 1}}});
+    let body = json!({"profile": true, "size": 0, "aggs": aggs});
+    let (s, r) = call(&app, Method::POST, "/idx/_search", Some(body)).await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    let a = &r["profile"]["shards"][0]["aggregations"][0];
+    assert_eq!(a["type"], "NumericHistogramAggregator");
+    assert_eq!(a["debug"], json!({"total_buckets": 3}));
+}
+
+#[tokio::test]
 async fn profile_map_terms_defers_sub_aggregations_not_sorted_on() {
     let app = seeded().await;
     let aggs = json!({"k": {

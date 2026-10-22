@@ -457,7 +457,7 @@ impl Key {
         }
     }
 
-    fn f64(&self) -> f64 {
+    pub(super) fn f64(&self) -> f64 {
         match self {
             Key::Long(x) => *x as f64,
             Key::Double(x) => *x,
@@ -553,7 +553,7 @@ impl Filter {
 /// One bucket: its document count and its sub-aggregations' results.
 #[derive(Debug, Clone, Default)]
 pub(super) struct Bucket {
-    count: u64,
+    pub(super) count: u64,
     pub(super) subs: Vec<Stats>,
 }
 
@@ -566,11 +566,11 @@ pub(super) struct Buckets {
     /// The upper bound of counts missed by shards' truncation; -1 when unbounded.
     error: i64,
     shards: u32,
-    format: Format,
+    pub(super) format: Format,
     include: Option<Filter>,
     exclude: BTreeSet<Key>,
     /// A new bucket's sub-aggregation results.
-    empty: Vec<Stats>,
+    pub(super) empty: Vec<Stats>,
 }
 
 impl Buckets {

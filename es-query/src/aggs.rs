@@ -5,12 +5,14 @@
 //! Values come from what the field's doc values hold: read from disk for documents in
 //! segments, and converted the same way from the source for documents in memory.
 
+mod histogram;
 mod terms;
 
 use crate::hll::{self, Hll};
 use crate::tdigest::TDigest;
 use crate::{QueryError, Searcher, fielddata_disabled, int, num, source_path};
 use es_index::{Document, FieldMapping, Index, iso_date, postings::values};
+use histogram::Histogram;
 use serde_json::{Map, Value};
 use std::time::Instant;
 use terms::{Buckets, Format, Terms};
@@ -39,6 +41,7 @@ enum Metric {
         keyed: bool,
     },
     Terms(Box<Terms>),
+    Histogram(Box<Histogram>),
 }
 
 impl Metric {
@@ -54,7 +57,13 @@ impl Metric {
             Metric::Cardinality { .. } => "cardinality",
             Metric::Percentiles { .. } => "percentiles",
             Metric::Terms(_) => "terms",
+            Metric::Histogram(_) => "histogram",
         }
+    }
+
+    /// Whether this aggregation buckets documents (and so may have sub-aggregations).
+    fn buckets(&self) -> bool {
+        matches!(self, Metric::Terms(_) | Metric::Histogram(_))
     }
 }
 
@@ -140,9 +149,10 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
             keyed: true,
         },
         "terms" => Metric::Terms(Box::new(Terms::parse(name, object()?, &subs)?)),
+        "histogram" => Metric::Histogram(Box::new(Histogram::parse(name, object()?)?)),
         _ => return Err(format!("Unknown aggregation type [{t}]").into()),
     };
-    if !subs.is_empty() && !matches!(metric, Metric::Terms(_)) {
+    if !subs.is_empty() && !metric.buckets() {
         return Err(QueryError::illegal(format!(
             "Aggregator [{name}] of type [{t}] cannot accept sub-aggregations"
         )));
@@ -150,7 +160,7 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
     let params = object()?;
     for (k, v) in params {
         match (k.as_str(), &mut metric) {
-            ("field" | "missing", _) | (_, Metric::Terms(_)) => {}
+            ("field" | "missing", _) | (_, Metric::Terms(_) | Metric::Histogram(_)) => {}
             ("sigma", Metric::ExtendedStats { sigma }) => {
                 *sigma = num(v).ok_or_else(|| {
                     QueryError::x_content(format!("[{t}] failed to parse field [sigma]"))
@@ -285,7 +295,7 @@ fn sort_value(agg: &Agg, key: Option<&str>, st: &Stats) -> Result<f64, String> {
         Metric::Max => st.max,
         Metric::ValueCount => st.count as f64,
         Metric::Cardinality { .. } => st.hll.as_ref().map_or(0, Hll::cardinality) as f64,
-        Metric::Terms(_) => return Err("Buckets can only be sorted on a sub-aggregator path that is built out of zero or more single-bucket aggregations within the path and a final single-bucket or a metrics aggregation at the path end.".into()),
+        Metric::Terms(_) | Metric::Histogram(_) => return Err("Buckets can only be sorted on a sub-aggregator path that is built out of zero or more single-bucket aggregations within the path and a final single-bucket or a metrics aggregation at the path end.".into()),
         Metric::Stats | Metric::ExtendedStats { .. } | Metric::Percentiles { .. } => {
             let stats = !matches!(agg.metric, Metric::Percentiles { .. });
             return match key {
@@ -325,7 +335,7 @@ pub(crate) struct Stats {
     hll: Option<Hll>,
     /// The value distribution (only for `percentiles`).
     digest: Option<TDigest>,
-    /// The buckets (only for `terms`).
+    /// The buckets (only for `terms` and `histogram`).
     terms: Option<Buckets>,
 }
 
@@ -560,9 +570,9 @@ impl<'s, 'a> Collector<'s, 'a> {
                     ..Timings::default()
                 });
             }
-            let sub = match (&agg.metric, agg.subs.is_empty()) {
-                (Metric::Terms(_), false) => Some(Collector::new(&agg.subs, searcher, profile)?),
-                _ => None,
+            let sub = match agg.metric.buckets() && !agg.subs.is_empty() {
+                true => Some(Collector::new(&agg.subs, searcher, profile)?),
+                false => None,
             };
             let empty = sub.as_ref().map(|s| s.stats.clone()).unwrap_or_default();
             c.subs.push(sub);
@@ -582,6 +592,7 @@ impl<'s, 'a> Collector<'s, 'a> {
                         let format = Format::of(typed.filter(|_| has_values));
                         Some(t.buckets(format, |s| as_doc_value(&Value::from(s)), empty))
                     }
+                    Metric::Histogram(_) => Some(histogram::buckets(Format::of(m), empty)),
                     _ => None,
                 },
                 ..Stats::default()
@@ -641,6 +652,10 @@ impl<'s, 'a> Collector<'s, 'a> {
     }
 
     fn add(&mut self, i: usize, vals: Vec<Value>, id: &str, doc: &Document) {
+        let vals = match &self.aggs[i].metric {
+            Metric::Histogram(h) => h.keys(vals),
+            _ => vals,
+        };
         let st = &mut self.stats[i];
         if let Some(t) = &mut st.terms {
             let sub = &mut self.subs[i];
@@ -706,13 +721,16 @@ impl Collector<'_, '_> {
     fn finish_terms(&mut self, stats: &mut [Stats]) {
         let index = self.searcher.index;
         for (i, st) in stats.iter_mut().enumerate() {
-            let Metric::Terms(t) = &self.aggs[i].metric else {
-                continue;
-            };
             let Some(b) = &mut st.terms else {
                 continue;
             };
-            if t.wants_zero_buckets(b) {
+            let terms = match &self.aggs[i].metric {
+                Metric::Terms(t) => Some(t),
+                _ => None,
+            };
+            if let Some(t) = terms
+                && t.wants_zero_buckets(b)
+            {
                 for (id, doc) in index.docs().filter(|(_, d)| index.searchable(d)) {
                     b.add_zero(self.values(i, id, &doc));
                 }
@@ -727,7 +745,9 @@ impl Collector<'_, '_> {
                     })
                     .collect();
             }
-            t.finish_shard(b);
+            if let Some(t) = terms {
+                t.finish_shard(b);
+            }
             if let Some(sub) = &mut self.subs[i] {
                 for bucket in b.counts.values_mut() {
                     sub.finish_terms(&mut bucket.subs);
@@ -751,6 +771,7 @@ impl Collector<'_, '_> {
             && matches!(&agg.metric, Metric::Terms(terms) if !terms.map)
             && (1..=1000).contains(&t.keys.len());
         let ty = match &agg.metric {
+            Metric::Histogram(_) => "NumericHistogramAggregator",
             _ if m.is_none() && agg.missing.is_none() => match agg.metric {
                 Metric::Stats | Metric::ExtendedStats { .. } | Metric::Percentiles { .. } => {
                     "NonCollectingMultiMetricAggregator"
@@ -829,6 +850,9 @@ impl Collector<'_, '_> {
                     "ordinals_collectors_overhead_too_high": 0,
                     "string_hashing_collectors_used": used((keyword || m.is_none()) && !ords),
                 });
+            }
+            (_, Metric::Histogram(_)) => {
+                out["debug"] = serde_json::json!({"total_buckets": t.total_buckets});
             }
             (_, Metric::Terms(terms)) => {
                 let mut debug = Map::new();
@@ -919,14 +943,20 @@ pub(crate) fn render(aggs: &[Agg], stats: &mut [Stats], typed_keys: bool) -> Val
             }
         };
         let mut ty = agg.metric.name();
+        let sub = |subs: &mut [Stats], out: &mut Map<String, Value>| {
+            if let Value::Object(m) = render(&agg.subs, subs, typed_keys) {
+                out.extend(m);
+            }
+        };
         match &agg.metric {
             Metric::Terms(t) => {
                 if let Some(b) = &mut st.terms {
-                    ty = t.render(b, &mut body, |subs, out| {
-                        if let Value::Object(m) = render(&agg.subs, subs, typed_keys) {
-                            out.extend(m);
-                        }
-                    });
+                    ty = t.render(b, &mut body, sub);
+                }
+            }
+            Metric::Histogram(h) => {
+                if let Some(b) = &mut st.terms {
+                    h.render(b, &mut body, sub);
                 }
             }
             Metric::Avg => put(&mut body, "value", avg),
