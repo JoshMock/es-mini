@@ -4,6 +4,7 @@ mod aliases;
 mod bulk;
 mod docs;
 mod error;
+mod field_caps;
 mod filter_path;
 mod indices;
 mod params;
@@ -171,7 +172,7 @@ pub fn app_persisted(dir: &std::path::Path) -> Result<Router, String> {
                 let route = req.extensions().get::<axum::extract::MatchedPath>();
                 let reads = req.method().is_safe()
                     || route.is_some_and(|r| {
-                        ["/_search", "/_count", "/_query"]
+                        ["/_search", "/_count", "/_query", "/_field_caps"]
                             .iter()
                             .any(|s| r.as_str().ends_with(s))
                     });
@@ -292,6 +293,14 @@ fn router(state: AppState) -> Router {
             "/{index}/_msearch",
             get(search::msearch).post(search::msearch),
         )
+        .route(
+            "/_field_caps",
+            get(field_caps::field_caps_all).post(field_caps::field_caps_all),
+        )
+        .route(
+            "/{index}/_field_caps",
+            get(field_caps::field_caps).post(field_caps::field_caps),
+        )
         .route("/_count", get(search::count_all).post(search::count_all))
         .route("/{index}/_count", get(search::count).post(search::count))
         .route("/{index}/_doc", post(docs::index_auto_id))
@@ -386,6 +395,9 @@ mod msearch_tests;
 
 #[cfg(test)]
 mod aliases_tests;
+
+#[cfg(test)]
+mod field_caps_tests;
 
 #[cfg(test)]
 mod tests {
