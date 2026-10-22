@@ -1,6 +1,2 @@
 # YAML tests es-mini deliberately does not implement, grouped by reason.
 # The runner skips these. Changing this file requires a human decision; Ralph may not edit it.
-
-# GET /{index}/_source/{id} is not a supported endpoint.
-get_source/15_default_values.yml/Default values
-get_source/60_realtime_refresh.yml/Realtime
