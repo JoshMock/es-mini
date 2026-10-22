@@ -11,6 +11,7 @@ mod indices;
 mod params;
 mod scroll;
 mod search;
+mod template;
 
 use axum::{
     Json, Router,
@@ -292,6 +293,22 @@ fn router(state: AppState) -> Router {
         )
         .route("/_search", get(search::search_all).post(search::search_all))
         .route("/{index}/_search", get(search::search).post(search::search))
+        .route(
+            "/_search/template",
+            get(search::search_template_all).post(search::search_template_all),
+        )
+        .route(
+            "/{index}/_search/template",
+            get(search::search_template).post(search::search_template),
+        )
+        .route(
+            "/_msearch/template",
+            get(search::msearch_template).post(search::msearch_template),
+        )
+        .route(
+            "/{index}/_msearch/template",
+            get(search::msearch_template).post(search::msearch_template),
+        )
         .route("/{index}/_pit", post(scroll::open_pit))
         .route("/_pit", delete(scroll::close_pit))
         .route(
@@ -412,6 +429,9 @@ mod search_tests;
 
 #[cfg(test)]
 mod msearch_tests;
+
+#[cfg(test)]
+mod search_template_tests;
 
 #[cfg(test)]
 mod scroll_tests;

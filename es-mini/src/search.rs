@@ -244,13 +244,58 @@ pub async fn search(
     }))
 }
 
-/// `_msearch`: NDJSON header/body pairs, each run as a `_search`; a failing search fails only its own entry.
+pub async fn search_template_all(
+    state: State<AppState>,
+    contexts: Extension<Contexts>,
+    uri: Uri,
+    params: Query<HashMap<String, String>>,
+    body: Bytes,
+) -> Result<Json<Value>, AppError> {
+    search_template(state, contexts, Path("_all".into()), uri, params, body).await
+}
+
+/// `_search/template`: renders the inline template, then runs it as a `_search`.
+pub async fn search_template(
+    state: State<AppState>,
+    contexts: Extension<Contexts>,
+    name: Path<String>,
+    uri: Uri,
+    params: Query<HashMap<String, String>>,
+    body: Bytes,
+) -> Result<Json<Value>, AppError> {
+    let body = crate::template::search_body(&body)?;
+    search(state, contexts, name, uri, params, body).await
+}
+
 pub async fn msearch(
+    state: State<AppState>,
+    contexts: Extension<Contexts>,
+    path: Option<Path<String>>,
+    uri: Uri,
+    body: Bytes,
+) -> Result<Json<Value>, AppError> {
+    msearch_impl(state, contexts, path, uri, body, false).await
+}
+
+pub async fn msearch_template(
+    state: State<AppState>,
+    contexts: Extension<Contexts>,
+    path: Option<Path<String>>,
+    uri: Uri,
+    body: Bytes,
+) -> Result<Json<Value>, AppError> {
+    msearch_impl(state, contexts, path, uri, body, true).await
+}
+
+/// `_msearch`: NDJSON header/body pairs, each run as a `_search`; a failing search fails only its own entry.
+/// With `template`, each body is a search template rendered first.
+async fn msearch_impl(
     State(state): State<AppState>,
     Extension(contexts): Extension<Contexts>,
     path: Option<Path<String>>,
     uri: Uri,
     body: Bytes,
+    template: bool,
 ) -> Result<Json<Value>, AppError> {
     let start = Instant::now();
     let default = path.map_or("_all".to_string(), |Path(p)| p);
@@ -281,13 +326,17 @@ pub async fn msearch(
                     _ => drop(params.insert(k.clone(), v)),
                 }
             }
+            let mut search_body = Bytes::copy_from_slice(search_body.as_bytes());
+            if template {
+                search_body = crate::template::search_body(&search_body)?;
+            }
             search(
                 State(state.clone()),
                 Extension(contexts.clone()),
                 Path(name),
                 uri.clone(),
                 Query(params),
-                Bytes::copy_from_slice(search_body.as_bytes()),
+                search_body,
             )
             .await
         }
