@@ -29,7 +29,8 @@ Aliases:
 
 Documents:
 - `POST`/`PUT /{index}/_doc`, `/{index}/_doc/{id}`, `/{index}/_create/{id}`
-- `GET`/`DELETE /{index}/_doc/{id}`
+- `GET`/`HEAD`/`DELETE /{index}/_doc/{id}`, `GET /{index}/_source/{id}`
+- `GET`/`POST /_mget`, `/{index}/_mget`
 - `POST /{index}/_update/{id}`
 - `POST /_bulk`, `/{index}/_bulk`
 
@@ -49,7 +50,7 @@ This is a non-exhaustive list:
 - `_cat` APIs
 - index lifecycle management
 - vector storage (for now, unless it's easy to support "for free")
-- multi-search, multi-get, async search
+- multi-search, async search
 - any other search dialect aside from JSON DSL and ES|QL
 - scripting (Painless), runtime fields, ingest pipelines/processors
 - highlighting, suggesters, percolator, geo queries
@@ -57,7 +58,7 @@ This is a non-exhaustive list:
 - cross-cluster search, snapshots/restore
 - all aggregations deferred to a post-MVP iteration
 
-In-scope query core: `match`, `term`, `bool`, `range`, pagination (`from`/`size`), basic `sort`.
+In-scope query core: `match`, `term`, `terms`, `ids`, `exists`, `wildcard`, `bool`, `constant_score`, `range`, pagination (`from`/`size`), basic `sort`.
 
 ## Tech stack
 
