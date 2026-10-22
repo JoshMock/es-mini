@@ -149,7 +149,7 @@ pub fn app() -> Router {
 
 /// The full HTTP API over `indices`, e.g. ones opened with [`es_index::disk::open`].
 pub fn app_with(indices: Indices) -> Router {
-    router(Arc::new(RwLock::new(indices)))
+    with_es_405(router(Arc::new(RwLock::new(indices))))
 }
 
 /// The full HTTP API over the data directory `dir` (created if missing): its indices are loaded
@@ -163,7 +163,7 @@ pub fn app_persisted(dir: &std::path::Path) -> Result<Router, String> {
     };
     let state = Arc::new(RwLock::new(indices));
     let (dir, saved) = (dir.to_owned(), state.clone());
-    Ok(router(state).layer(axum::middleware::from_fn(
+    Ok(with_es_405(router(state).layer(axum::middleware::from_fn(
         move |req: axum::extract::Request, next: axum::middleware::Next| {
             let (dir, state) = (dir.clone(), saved.clone());
             async move {
@@ -193,7 +193,7 @@ pub fn app_persisted(dir: &std::path::Path) -> Result<Router, String> {
                 }
             }
         },
-    )))
+    ))))
 }
 
 /// Applies `filter_path` to every JSON response, errors included, as Java's `RestController` does.
@@ -315,6 +315,51 @@ fn router(state: AppState) -> Router {
         )
         .with_state(state)
         .layer(axum::middleware::from_fn(filter_response))
+}
+
+/// Wraps finished routes (route layers included) so 405s get Elasticsearch's body: axum adds
+/// `Allow` around the routes, after any layer on them runs.
+fn with_es_405(routes: Router) -> Router {
+    Router::new()
+        .fallback_service(routes)
+        .layer(axum::middleware::from_fn(method_not_allowed))
+}
+
+/// Rewrites axum's empty 405 into Elasticsearch's `RestController` response: `{error, status}`
+/// naming the allowed methods, with the `Allow` header kept.
+// ponytail: axum adds HEAD wherever GET is routed, so `allowed` may list HEAD where ES does not
+async fn method_not_allowed(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::http::{StatusCode, header::ALLOW};
+    let uri = req
+        .uri()
+        .path_and_query()
+        .map_or("", |p| p.as_str())
+        .to_owned();
+    let method = req.method().to_string();
+    let res = next.run(req).await;
+    if res.status() != StatusCode::METHOD_NOT_ALLOWED {
+        return res;
+    }
+    let allow = res.headers().get(ALLOW).cloned();
+    let listed = allow
+        .as_ref()
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .replace(',', ", ");
+    let error =
+        format!("Incorrect HTTP method for uri [{uri}] and method [{method}], allowed: [{listed}]");
+    let mut out = (
+        StatusCode::METHOD_NOT_ALLOWED,
+        Json(json!({"error": error, "status": 405})),
+    )
+        .into_response();
+    if let Some(h) = allow {
+        out.headers_mut().insert(ALLOW, h);
+    }
+    out
 }
 
 #[cfg(test)]

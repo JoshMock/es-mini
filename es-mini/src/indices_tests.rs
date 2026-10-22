@@ -392,3 +392,28 @@ async fn invalid_index_names_are_rejected() {
         )
     );
 }
+
+#[tokio::test]
+async fn wrong_method_is_es_405() {
+    let req = axum::http::Request::builder()
+        .method(Method::PATCH)
+        .uri("/idx/_mapping")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let resp = tower::ServiceExt::oneshot(app(), req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert!(resp.headers().get("allow").is_some());
+    let bytes = http_body_util::BodyExt::collect(resp.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    let r: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(r["status"], 405);
+    let e = r["error"].as_str().unwrap();
+    assert!(
+        e.starts_with(
+            "Incorrect HTTP method for uri [/idx/_mapping] and method [PATCH], allowed: [GET"
+        ),
+        "{e}"
+    );
+}
