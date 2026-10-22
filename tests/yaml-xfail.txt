@@ -116,5 +116,4 @@ aggregations/top_hits.yml/version
 aggregations/typed_keys.yml/Test typed keys parameter for date_histogram aggregation and max_bucket pipeline aggregation
 aggregations/typed_keys.yml/Test typed keys parameter for percentile_ranks aggregation
 aggregations/typed_keys.yml/Test typed keys parameter for percentiles aggregation
-aggregations/typed_keys.yml/Test typed keys parameter for terms aggregation
 aggregations/typed_keys.yml/Test typed keys parameter for terms and top_hits aggregation

@@ -5,12 +5,15 @@
 //! Values come from what the field's doc values hold: read from disk for documents in
 //! segments, and converted the same way from the source for documents in memory.
 
+mod terms;
+
 use crate::hll::{self, Hll};
 use crate::tdigest::TDigest;
 use crate::{QueryError, Searcher, fielddata_disabled, int, num, source_path};
 use es_index::{Document, FieldMapping, Index, iso_date, postings::values};
 use serde_json::{Map, Value};
 use std::time::Instant;
+use terms::{Buckets, Format, Terms};
 
 #[derive(Debug, Clone, PartialEq)]
 enum Metric {
@@ -35,6 +38,7 @@ enum Metric {
         percents: Vec<f64>,
         keyed: bool,
     },
+    Terms(Box<Terms>),
 }
 
 impl Metric {
@@ -49,6 +53,7 @@ impl Metric {
             Metric::ExtendedStats { .. } => "extended_stats",
             Metric::Cardinality { .. } => "cardinality",
             Metric::Percentiles { .. } => "percentiles",
+            Metric::Terms(_) => "terms",
         }
     }
 }
@@ -113,6 +118,11 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
         }
     }
     let (t, params) = kind.ok_or_else(|| format!("Missing definition for aggregation [{name}]"))?;
+    let object = || {
+        params
+            .as_object()
+            .ok_or_else(|| QueryError::from(format!("Expected [START_OBJECT] under [{t}]")))
+    };
     let mut metric = match t {
         "avg" => Metric::Avg,
         "sum" => Metric::Sum,
@@ -130,19 +140,19 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
             percents: vec![1.0, 5.0, 25.0, 50.0, 75.0, 95.0, 99.0],
             keyed: true,
         },
+        "terms" => Metric::Terms(Box::new(Terms::parse(name, object()?)?)),
         _ => return Err(format!("Unknown aggregation type [{t}]").into()),
     };
+    // ponytail: terms buckets cannot hold sub-aggregations yet
     if subs {
         return Err(QueryError::illegal(format!(
             "Aggregator [{name}] of type [{t}] cannot accept sub-aggregations"
         )));
     }
-    let params = params
-        .as_object()
-        .ok_or_else(|| format!("Expected [START_OBJECT] under [{t}]"))?;
+    let params = object()?;
     for (k, v) in params {
         match (k.as_str(), &mut metric) {
-            ("field" | "missing", _) => {}
+            ("field" | "missing", _) | (_, Metric::Terms(_)) => {}
             ("sigma", Metric::ExtendedStats { sigma }) => {
                 *sigma = num(v).ok_or_else(|| {
                     QueryError::x_content(format!("[{t}] failed to parse field [sigma]"))
@@ -281,6 +291,8 @@ pub(crate) struct Stats {
     hll: Option<Hll>,
     /// The value distribution (only for `percentiles`).
     digest: Option<TDigest>,
+    /// The buckets (only for `terms`).
+    terms: Option<Buckets>,
 }
 
 impl Default for Stats {
@@ -296,6 +308,7 @@ impl Default for Stats {
             date: false,
             hll: None,
             digest: None,
+            terms: None,
         }
     }
 }
@@ -331,6 +344,10 @@ impl Stats {
             (Some(h), Some(o)) => h.merge(&o),
             (h, o) => *h = h.take().or(o),
         }
+        match (&mut self.terms, o.terms) {
+            (Some(t), Some(o)) => t.merge(o),
+            (t, o) => *t = t.take().or(o),
+        }
         // like a data node, reduce shard results into a new digest (see TDigest::coordinated)
         if let Some(mut o) = o.digest {
             let d = self
@@ -350,7 +367,12 @@ fn doc_value(s: &Searcher, field: &str, mapping: &FieldMapping, v: &Value) -> Op
         }
         M::Double => num(v).map(Value::from),
         M::Float => num(v).map(|f| Value::from(f64::from(f as f32))),
-        M::Date { .. } => s.instant(field).and_then(|i| i(v)).map(Value::from),
+        M::Date { .. } => match s.instant(field) {
+            Some(instant) => instant(v),
+            // an unmapped field's `value_type`
+            None => es_index::parse_date_millis(v),
+        }
+        .map(Value::from),
         M::Boolean => match v {
             Value::Bool(_) => Some(v.clone()),
             Value::String(b) => b.parse::<bool>().ok().map(Value::Bool),
@@ -434,7 +456,10 @@ impl<'s, 'a> Collector<'s, 'a> {
                     return Err(fielddata_disabled(&agg.field));
                 }
                 Some(FieldMapping::Keyword { .. })
-                    if !matches!(agg.metric, Metric::ValueCount | Metric::Cardinality { .. }) =>
+                    if !matches!(
+                        agg.metric,
+                        Metric::ValueCount | Metric::Cardinality { .. } | Metric::Terms(_)
+                    ) =>
                 {
                     return Err(QueryError::illegal(format!(
                         "Field [{}] of type [keyword] is not supported for aggregation [{}]",
@@ -444,10 +469,15 @@ impl<'s, 'a> Collector<'s, 'a> {
                 }
                 _ => {}
             }
-            c.missing.push(match m {
-                Some(m) => {
-                    (agg.missing.as_ref()).and_then(|v| doc_value(searcher, &agg.field, m, v))
-                }
+            // terms type an unmapped field's values by `value_type`, else as keywords
+            let typed = m.or(match &agg.metric {
+                Metric::Terms(t) => Some(t.value_type.as_ref().unwrap_or(&terms::KEYWORD)),
+                _ => None,
+            });
+            let as_doc_value =
+                |v: &Value| typed.and_then(|m| doc_value(searcher, &agg.field, m, v));
+            c.missing.push(match typed {
+                Some(_) => agg.missing.as_ref().and_then(as_doc_value),
                 None => agg.missing.clone(),
             });
             c.mappings.push(m);
@@ -471,6 +501,14 @@ impl<'s, 'a> Collector<'s, 'a> {
                     Metric::Percentiles { compression, .. } => Some(TDigest::new(compression)),
                     _ => None,
                 },
+                terms: match &agg.metric {
+                    Metric::Terms(t) => {
+                        let has_values = m.is_some() || agg.missing.is_some();
+                        let format = Format::of(typed.filter(|_| has_values));
+                        Some(t.buckets(format, |s| as_doc_value(&Value::from(s))))
+                    }
+                    _ => None,
+                },
                 ..Stats::default()
             });
         }
@@ -489,8 +527,17 @@ impl<'s, 'a> Collector<'s, 'a> {
     }
 
     fn collect_one(&mut self, i: usize, id: &str, doc: &Document) {
+        let vals = self.values(i, id, doc);
+        match vals.is_empty() {
+            true => self.add(i, self.missing[i].iter().cloned().collect()),
+            false => self.add(i, vals),
+        }
+    }
+
+    /// A document's doc values of aggregation `i`'s field.
+    fn values(&mut self, i: usize, id: &str, doc: &Document) -> Vec<Value> {
         let (index, agg) = (self.searcher.index, &self.aggs[i]);
-        let vals = match self.mappings[i] {
+        match self.mappings[i] {
             None => vec![],
             Some(m) => self.disk[i](id).unwrap_or_else(|| {
                 let path = source_path(index, &agg.field);
@@ -505,15 +552,15 @@ impl<'s, 'a> Collector<'s, 'a> {
                 }
                 v
             }),
-        };
-        match vals.is_empty() {
-            true => self.add(i, self.missing[i].iter().cloned().collect()),
-            false => self.add(i, vals),
         }
     }
 
     fn add(&mut self, i: usize, vals: Vec<Value>) {
         let st = &mut self.stats[i];
+        if let Some(t) = &mut st.terms {
+            t.add(vals);
+            return;
+        }
         for v in vals {
             st.count += 1;
             if self.aggs[i].metric == Metric::ValueCount {
@@ -542,6 +589,7 @@ impl Collector<'_, '_> {
     /// aggregation, like ES's (post collection releases the doc values readers, building the
     /// aggregation takes its result).
     pub(crate) fn finish(mut self) -> (Vec<Stats>, Option<Value>) {
+        self.finish_terms();
         let Some(mut timings) = self.timings.take() else {
             return (self.stats, None);
         };
@@ -557,6 +605,28 @@ impl Collector<'_, '_> {
         }
         let profile = timings.iter().enumerate().map(|(i, t)| self.profile(i, t));
         (stats, Some(profile.collect()))
+    }
+
+    /// Keeps each `terms` aggregation's top buckets of this shard, first adding empty buckets
+    /// for the values of unmatched documents if `min_doc_count` is 0.
+    fn finish_terms(&mut self) {
+        let index = self.searcher.index;
+        for i in 0..self.aggs.len() {
+            let Metric::Terms(t) = &self.aggs[i].metric else {
+                continue;
+            };
+            if (self.stats[i].terms.as_ref()).is_some_and(|b| t.wants_zero_buckets(b)) {
+                for (id, doc) in index.docs().filter(|(_, d)| index.searchable(d)) {
+                    let vals = self.values(i, id, &doc);
+                    if let Some(b) = &mut self.stats[i].terms {
+                        b.add_zero(vals);
+                    }
+                }
+            }
+            if let Some(b) = &mut self.stats[i].terms {
+                t.finish_shard(b);
+            }
+        }
     }
 
     /// One aggregation's profile: ES's aggregator class, its timings and its debug counters
@@ -583,6 +653,8 @@ impl Collector<'_, '_> {
             Metric::Stats => "StatsAggregator",
             Metric::ExtendedStats { .. } => "ExtendedStatsAggregator",
             Metric::Percentiles { .. } => "TDigestPercentilesAggregator",
+            Metric::Terms(_) if keyword => "GlobalOrdinalsStringTermsAggregator",
+            Metric::Terms(_) => "NumericTermsAggregator",
         };
         let mut out = serde_json::json!({
             "type": ty,
@@ -661,7 +733,13 @@ pub(crate) fn render(aggs: &[Agg], stats: &mut [Stats], typed_keys: bool) -> Val
                 body.insert(format!("{key}_as_string"), iso_date(v as u64).into());
             }
         };
+        let mut ty = agg.metric.name();
         match &agg.metric {
+            Metric::Terms(t) => {
+                if let Some(b) = &st.terms {
+                    ty = t.render(b, &mut body);
+                }
+            }
             Metric::Avg => put(&mut body, "value", avg),
             Metric::Sum => put(&mut body, "value", Some(st.sum)),
             Metric::Min => put(&mut body, "value", min),
@@ -710,7 +788,7 @@ pub(crate) fn render(aggs: &[Agg], stats: &mut [Stats], typed_keys: bool) -> Val
             extended_stats(&mut body, st, sigma);
         }
         let key = match typed_keys {
-            true => format!("{}#{}", agg.metric.name(), agg.name),
+            true => format!("{ty}#{}", agg.name),
             false => agg.name.clone(),
         };
         out.insert(key, body.into());
