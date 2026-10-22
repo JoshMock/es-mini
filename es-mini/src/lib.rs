@@ -153,7 +153,8 @@ pub fn app_with(indices: Indices) -> Router {
 }
 
 /// The full HTTP API over the data directory `dir` (created if missing): its indices are loaded
-/// now, and every successful write request saves them back before it is answered.
+/// now (replaying their translogs), and every successful write request is made durable before
+/// it is answered (see [`es_index::disk::persist`]).
 pub fn app_persisted(dir: &std::path::Path) -> Result<Router, String> {
     es_index::disk::recover(dir).map_err(|e| e.0)?;
     let indices = if dir.join("_state").is_dir() {
@@ -178,7 +179,8 @@ pub fn app_persisted(dir: &std::path::Path) -> Result<Router, String> {
                 if reads || !res.status().is_success() {
                     return res;
                 }
-                let saved = es_index::disk::save(&dir, &state.read().expect("lock poisoned"));
+                let saved =
+                    es_index::disk::persist(&dir, &mut state.write().expect("lock poisoned"));
                 match saved {
                     Ok(()) => res,
                     // ponytail: the change stays applied in memory; a later successful save persists it
