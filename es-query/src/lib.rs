@@ -11,6 +11,7 @@ mod parse;
 
 pub use parse::{Query, parse_query, parse_query_string};
 
+use es_index::postings::{text, values};
 use es_index::{
     Document, FieldMapping, Index, analysis::Analyzer, disk::DiskPos, parse_date_millis,
 };
@@ -19,7 +20,7 @@ use std::{
     borrow::Cow,
     cell::RefCell,
     cmp::Ordering,
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet},
 };
 
 /// Lucene wildcard syntax: `*` any run, `?` one char, `\\` escapes.
@@ -30,14 +31,6 @@ fn wildcard_match(p: &[char], t: &[char]) -> bool {
         Some(('?', rest)) => !t.is_empty() && wildcard_match(rest, &t[1..]),
         Some(('\\', [c, rest @ ..])) => t.first() == Some(c) && wildcard_match(rest, &t[1..]),
         Some((c, rest)) => t.first() == Some(c) && wildcard_match(rest, &t[1..]),
-    }
-}
-
-/// A JSON scalar as the string ES would index (`5` → "5", `true` → "true").
-fn text(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        v => v.to_string(),
     }
 }
 
@@ -76,44 +69,9 @@ fn resolve(index: &Index, field: &str, sample: impl Fn(&str) -> Option<Value>) -
     }
 }
 
-/// Scalar values at a dotted path, with arrays flattened.
-fn values<'a>(source: &'a Value, path: &str) -> Vec<&'a Value> {
-    let mut out = Vec::new();
-    collect(source, path, &mut out);
-    out
-}
-
-fn collect<'a>(v: &'a Value, path: &str, out: &mut Vec<&'a Value>) {
-    match v {
-        Value::Array(a) => a.iter().for_each(|x| collect(x, path, out)),
-        _ if path.is_empty() => {
-            if !v.is_null() {
-                out.push(v);
-            }
-        }
-        Value::Object(o) => {
-            if let Some(x) = o.get(path) {
-                collect(x, "", out);
-            }
-            for (i, _) in path.match_indices('.') {
-                if let Some(x) = o.get(&path[..i]) {
-                    collect(x, &path[i + 1..], out);
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Indexed terms of a field in one document.
+/// Indexed terms of a field in one document (see [`es_index::postings::terms`]).
 fn terms(kind: Kind, vals: &[&Value]) -> Vec<String> {
-    match kind {
-        Kind::Text => vals
-            .iter()
-            .flat_map(|v| Analyzer::Standard.analyze(&text(v)))
-            .collect(),
-        _ => vals.iter().map(|v| text(v)).collect(),
-    }
+    es_index::postings::terms(kind == Kind::Text, vals)
 }
 
 fn num(v: &Value) -> Option<f64> {
@@ -196,6 +154,8 @@ struct Searcher<'a> {
     kinds: RefCell<HashMap<String, (Kind, bool)>>,
     /// The on-disk documents the query can match (see `candidates`).
     on_disk: Option<BTreeSet<DiskPos>>,
+    /// The in-memory documents the query can match (see `memory_candidates`).
+    in_memory: Option<HashSet<String>>,
 }
 
 const K1: f64 = 1.2;
@@ -209,9 +169,11 @@ impl<'a> Searcher<'a> {
             doc_freq: HashMap::new(),
             kinds: RefCell::default(),
             on_disk: None,
+            in_memory: None,
         };
         s.gather(q);
         s.on_disk = s.candidates(q);
+        s.in_memory = s.memory_candidates(q);
         s
     }
 
@@ -273,6 +235,18 @@ impl<'a> Searcher<'a> {
                     .and_then(|s| s.doc_freq.get(&(field.clone(), w.clone())));
                 self.doc_freq
                     .insert((field.clone(), w), df.copied().unwrap_or(0.0));
+            }
+            return;
+        }
+        if let Some(m) = self.index.memory_stats(path, kind == Kind::Text, &wanted) {
+            let avg = if m.docs > 0.0 {
+                m.total_terms / m.docs
+            } else {
+                1.0
+            };
+            self.field_stats.insert(field.clone(), (m.docs, avg));
+            for (w, df) in m.doc_freq {
+                self.doc_freq.insert((field.clone(), w), df);
             }
             return;
         }
@@ -354,6 +328,52 @@ impl<'a> Searcher<'a> {
         }
     }
 
+    /// The in-memory documents `q` can match, from in-memory postings; `None` if it cannot
+    /// narrow them (numbers and ranges scan).
+    fn memory_candidates(&self, q: &Query) -> Option<HashSet<String>> {
+        let lookup = |field: &str, terms: &[String], all: bool| {
+            let (kind, path) = self.kind(field);
+            match kind {
+                Kind::Number => None,
+                _ => self.index.memory_docs(path, kind == Kind::Text, terms, all),
+            }
+        };
+        match q {
+            // An `_id` term matches the document's id, not a source field.
+            Query::Term { field, value } if field == "_id" => Some(HashSet::from([text(value)])),
+            Query::Term { field, value } => lookup(field, &[text(value)], true),
+            Query::Match { field, query, and } => {
+                lookup(field, &query_terms(self.kind(field).0, query), *and)
+            }
+            Query::Bool {
+                must,
+                should,
+                filter,
+                min_should,
+                ..
+            } => {
+                let required = must
+                    .iter()
+                    .chain(filter)
+                    .filter_map(|c| self.memory_candidates(c))
+                    .reduce(|a, b| &a & &b);
+                let any = match min_should {
+                    0 => None,
+                    _ => should
+                        .iter()
+                        .map(|c| self.memory_candidates(c))
+                        .collect::<Option<Vec<_>>>()
+                        .map(|s| s.into_iter().flatten().collect()),
+                };
+                match (required, any) {
+                    (Some(a), Some(b)) => Some(&a & &b),
+                    (a, b) => a.or(b),
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// The on-disk documents indexing all (or any) of `terms` in `field`.
     fn term_docs(&self, field: &str, terms: &[String], all: bool) -> BTreeSet<DiskPos> {
         let (kind, _) = self.kind(field);
@@ -398,7 +418,8 @@ impl<'a> Searcher<'a> {
 
     /// The documents the query may match: all in memory, and on disk those its postings allow.
     fn docs(&self) -> impl Iterator<Item = (&'a str, Cow<'a, Document>)> + '_ {
-        self.index.docs_at(self.on_disk.as_ref())
+        self.index
+            .docs_at(self.in_memory.as_ref(), self.on_disk.as_ref())
     }
 
     fn bm25(&self, field: &str, term: &str, freq: f64, len: f64) -> f64 {
@@ -905,7 +926,7 @@ mod tests {
         let read = |q: Value| {
             let q = parse_query(&q).unwrap();
             let on_disk = Searcher::new(ix, &q).candidates(&q).expect("narrowed");
-            let mut ids: Vec<_> = ix.docs_at(Some(&on_disk)).map(|(id, _)| id).collect();
+            let mut ids: Vec<_> = ix.docs_at(None, Some(&on_disk)).map(|(id, _)| id).collect();
             ids.sort_by_key(|id| id.parse::<u32>().unwrap());
             ids.join(",")
         };
@@ -945,7 +966,7 @@ mod tests {
         let read = |q: Value| {
             let q = parse_query(&q).unwrap();
             let on_disk = Searcher::new(ix, &q).candidates(&q).expect("narrowed");
-            let mut ids: Vec<_> = ix.docs_at(Some(&on_disk)).map(|(id, _)| id).collect();
+            let mut ids: Vec<_> = ix.docs_at(None, Some(&on_disk)).map(|(id, _)| id).collect();
             ids.sort_by_key(|id| id.parse::<u32>().unwrap());
             ids.join(",")
         };

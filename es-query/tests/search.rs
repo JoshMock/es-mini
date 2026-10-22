@@ -521,3 +521,36 @@ fn parse_query_error_messages() {
         "Unsupported defaultOperator [xor], can either be 'and' or 'or'"
     );
 }
+
+/// In-memory postings narrow term, match and bool queries; these must find exactly what a scan
+/// would, including `_id` terms, arrays, nested paths, and documents replaced or deleted after
+/// the postings were built.
+#[test]
+fn postings_narrowed_queries_track_writes() {
+    let mut idx = index();
+    let run = |idx: &Index, q: Value| -> Vec<String> {
+        let mut v: Vec<String> = search(idx, &SearchRequest::parse(&json!({"query": q})).unwrap())
+            .hits
+            .iter()
+            .map(|h| h.id.to_owned())
+            .collect();
+        v.sort();
+        v
+    };
+    assert_eq!(run(&idx, json!({"term": {"_id": "3"}})), ["3"]);
+    assert_eq!(run(&idx, json!({"match": {"title": "dog"}})), ["3", "4"]);
+    idx.put("3", json!({"title": "Lazy cat", "tag": "pet", "n": 1}));
+    idx.put("5", json!({"title": "dog days", "tag": "pet", "n": 2}));
+    idx.delete("4");
+    assert_eq!(run(&idx, json!({"match": {"title": "dog"}})), ["5"]);
+    assert_eq!(
+        run(&idx, json!({"term": {"nested.x": "deep"}})),
+        Vec::<String>::new()
+    );
+    let q = json!({"bool": {"must": {"match": {"title": "cat dog"}}, "filter": {"term": {"tag": "pet"}}}});
+    assert_eq!(run(&idx, q), ["3", "5"]);
+    assert_eq!(
+        run(&idx, json!({"term": {"_id": "4"}})),
+        Vec::<String>::new()
+    );
+}

@@ -4,6 +4,7 @@ pub mod aliases;
 pub mod analysis;
 pub mod disk;
 pub mod mapping;
+pub mod postings;
 
 pub use mapping::{FieldMapping, Mappings};
 
@@ -189,6 +190,8 @@ pub struct Index {
     pub commit: BTreeMap<String, String>,
     /// Documents written since the index was opened; they replace any on disk.
     docs: HashMap<String, Document>,
+    /// Postings over `docs`, built per field as queries need them (see [`postings`]).
+    postings: std::sync::Mutex<postings::Postings>,
     /// The segments of an index opened from disk, serving the documents not written since.
     disk: Option<disk::Shard>,
     /// Sources of updated/deleted docs, kept for BM25 statistics like Lucene's unmerged segments.
@@ -223,6 +226,10 @@ impl Index {
     /// Removes a live document, returning its source.
     fn take(&mut self, id: &str) -> Option<Value> {
         if let Some(d) = self.docs.remove(id) {
+            self.postings
+                .get_mut()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(id);
             return Some(d.source);
         }
         let disk = self.disk.as_mut()?;
@@ -273,6 +280,10 @@ impl Index {
         let seq_no = self.next_seq_no();
         self.deleted_versions.remove(id);
         let old = self.take(id);
+        self.postings
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .add(id, &source);
         self.docs.insert(
             id.to_owned(),
             Document {
@@ -325,18 +336,24 @@ impl Index {
 
     /// All live documents, in no particular order; those on disk are read as iterated.
     pub fn docs(&self) -> impl Iterator<Item = (&str, Cow<'_, Document>)> {
-        self.docs_at(None)
+        self.docs_at(None, None)
     }
 
-    /// The live documents in memory, and those on disk at `on_disk` (all if `None`).
+    /// The live documents in memory with ids in `in_memory`, and those on disk at `on_disk`
+    /// (all of either if `None`).
     pub fn docs_at<'a: 'k, 'k>(
         &'a self,
+        in_memory: Option<&'k std::collections::HashSet<String>>,
         on_disk: Option<&'k BTreeSet<disk::DiskPos>>,
     ) -> impl Iterator<Item = (&'a str, Cow<'a, Document>)> + 'k {
         let keep = move |p| on_disk.is_none_or(|at| at.contains(&p));
         let on_disk = self.disk.iter().flat_map(move |d| d.docs(keep));
-        self.docs
-            .iter()
+        let memory: Box<dyn Iterator<Item = (&'a String, &'a Document)> + 'k> = match in_memory {
+            // Few candidates: look them up instead of walking every document.
+            Some(ids) => Box::new(ids.iter().filter_map(|id| self.docs.get_key_value(id))),
+            None => Box::new(self.docs.iter()),
+        };
+        memory
             .map(|(id, d)| (id.as_str(), Cow::Borrowed(d)))
             // ponytail: documents whose segment cannot be read are skipped
             .chain(
@@ -379,6 +396,10 @@ impl Index {
         // superseded / (live + superseded) > 1/3
         if self.superseded.len() * 2 > self.len() {
             self.superseded.clear();
+            self.postings
+                .get_mut()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .merge();
         }
     }
 
