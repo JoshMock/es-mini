@@ -1,13 +1,4 @@
 # Known-failing YAML tests. Fix one, then delete its line.
-aggregations/cardinality_metric.yml/invalid execution hint throws
-aggregations/cardinality_metric.yml/profiler double
-aggregations/cardinality_metric.yml/profiler int
-aggregations/cardinality_metric.yml/profiler string
-aggregations/cardinality_metric.yml/profiler string direct hint
-aggregations/cardinality_metric.yml/profiler string global ords hint
-aggregations/cardinality_metric.yml/profiler string save memory hint
-aggregations/cardinality_metric.yml/profiler string save time hint
-aggregations/cardinality_metric.yml/profiler string segment ords hint
 aggregations/date_histogram.yml/date_histogram and date_histogram_composite timezone
 aggregations/date_histogram.yml/date_histogram on date_nanos without timezone calendar interval
 aggregations/date_histogram.yml/date_histogram on date_nanos without timezone fixed interval

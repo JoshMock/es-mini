@@ -585,6 +585,8 @@ pub struct SearchRequest {
     pub aggs: Vec<aggs::Agg>,
     /// The `typed_keys` URL parameter: aggregation names are prefixed with their type.
     pub typed_keys: bool,
+    /// Body `profile`: report where each shard's aggregation time went.
+    pub profile: bool,
 }
 
 /// Which Elasticsearch error type a query failure maps to.
@@ -655,6 +657,7 @@ impl SearchRequest {
                     "track_total_hits",
                     "aggs",
                     "aggregations",
+                    "profile",
                 ]
                 .contains(&k.as_str())
             })
@@ -692,6 +695,7 @@ impl SearchRequest {
         Ok(Self {
             aggs,
             typed_keys: false,
+            profile: body.get("profile").and_then(Value::as_bool) == Some(true),
             query,
             track_total_hits,
             from: usize_of("from", 0)?,
@@ -753,6 +757,8 @@ pub struct SearchResult<'a> {
     pub hits: Vec<Hit<'a>>,
     /// The rendered `aggregations`, if the request had any.
     pub aggregations: Option<Value>,
+    /// With `profile: true`, each target's `aggregations` profile (an array), in target order.
+    pub profile: Option<Vec<Value>>,
 }
 
 /// One index to search, with the filter of the alias it was reached through.
@@ -827,10 +833,11 @@ pub fn search_many<'a>(
     // (target position, hit, score, sort values)
     let mut hits = Vec::new();
     let mut aggs = vec![aggs::Stats::default(); req.aggs.len()];
+    let mut profile = req.profile.then(Vec::new);
     for (pos, (name, index, filter)) in targets.iter().enumerate() {
         let query = with_filter(&req.query, *filter)?;
         let s = Searcher::new(index, &query);
-        let mut collector = aggs::Collector::new(&req.aggs, &s)?;
+        let mut collector = aggs::Collector::new(&req.aggs, &s, req.profile)?;
         for (id, doc) in s.docs().filter(|(_, d)| index.searchable(d)) {
             let Some(score) = s.score(&query, id, &doc) else {
                 continue;
@@ -870,7 +877,11 @@ pub fn search_many<'a>(
                 score,
             ));
         }
-        aggs::reduce(&mut aggs, collector.stats);
+        let (stats, p) = collector.finish();
+        aggs::reduce(&mut aggs, stats);
+        if let (Some(all), Some(p)) = (&mut profile, p) {
+            all.push(p);
+        }
     }
     hits.sort_by(|(pa, a, sa), (pb, b, sb)| {
         let fields = if req.sort.is_empty() {
@@ -903,6 +914,7 @@ pub fn search_many<'a>(
     Ok(SearchResult {
         aggregations: (!req.aggs.is_empty())
             .then(|| aggs::render(&req.aggs, &mut aggs, req.typed_keys)),
+        profile,
         total: hits.len(),
         max_score,
         hits: hits

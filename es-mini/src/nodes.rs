@@ -4,7 +4,7 @@ use crate::{AppState, CLUSTER_NAME};
 use axum::{Json, extract::State};
 use serde_json::{Value, json};
 
-const NODE_ID: &str = "es-mini-node";
+pub(crate) const NODE_ID: &str = "es-mini-node";
 
 fn nodes_header() -> Value {
     json!({"total": 1, "successful": 1, "failed": 0})

@@ -96,6 +96,25 @@ pub(crate) fn shards(n: usize) -> Value {
     json!({"total": n, "successful": n, "skipped": 0, "failed": 0})
 }
 
+/// The `profile` section: one shard per target, ordered by id like ES. ponytail: only
+/// aggregations are profiled; there is no `searches` (query) or `fetch` profile.
+fn profile(targets: &[es_query::Target], aggs: Vec<Value>) -> Value {
+    let mut shards: Vec<Value> = (targets.iter().zip(aggs))
+        .map(|((index, ..), aggs)| {
+            json!({
+                "id": format!("[{}][{index}][0]", crate::nodes::NODE_ID),
+                "node_id": crate::nodes::NODE_ID,
+                "shard_id": 0,
+                "index": index,
+                "cluster": "(local)",
+                "aggregations": aggs,
+            })
+        })
+        .collect();
+    shards.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+    json!({"shards": shards})
+}
+
 pub async fn search_all(
     state: State<AppState>,
     contexts: Extension<Contexts>,
@@ -238,6 +257,9 @@ pub async fn search(
     });
     if let Some(a) = r.aggregations {
         resp["aggregations"] = a;
+    }
+    if let Some(p) = r.profile {
+        resp["profile"] = profile(&targets, p);
     }
     if let Some(p) = &pit_id {
         resp["pit_id"] = p.clone();

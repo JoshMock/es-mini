@@ -160,3 +160,61 @@ async fn esql_query() {
     let (s, _) = call(&app, Method::POST, "/_query", Some(json!({}))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn profile_times_each_aggregation_per_shard() {
+    let app = seeded().await;
+    let aggs = json!({
+        "n": {"cardinality": {"field": "n"}},
+        "k": {"cardinality": {"field": "t.keyword"}},
+        "d": {"cardinality": {"field": "t.keyword", "execution_hint": "direct"}},
+        "a": {"avg": {"field": "n"}}
+    });
+    let body = json!({"profile": true, "size": 0, "aggs": aggs});
+    let (s, r) = call(&app, Method::POST, "/idx/_search", Some(body)).await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    let shard = &r["profile"]["shards"][0];
+    assert_eq!(shard["id"], "[es-mini-node][idx][0]");
+    assert_eq!(shard["index"], "idx");
+    assert_eq!(shard["shard_id"], 0);
+    let profiled = shard["aggregations"].as_array().unwrap();
+    let types: Vec<_> = profiled
+        .iter()
+        .map(|a| (&a["description"], &a["type"]))
+        .collect();
+    assert_eq!(
+        types,
+        [
+            (&json!("a"), &json!("AvgAggregator")),
+            (&json!("d"), &json!("CardinalityAggregator")),
+            (&json!("k"), &json!("GlobalOrdCardinalityAggregator")),
+            (&json!("n"), &json!("CardinalityAggregator")),
+        ]
+    );
+    for a in profiled {
+        let b = &a["breakdown"];
+        for phase in [
+            "initialize",
+            "build_leaf_collector",
+            "collect",
+            "post_collection",
+            "build_aggregation",
+        ] {
+            assert!(b[phase].as_u64().unwrap() > 0, "{phase} of {a}");
+        }
+        assert_eq!(b["collect_count"], 3);
+        assert_eq!(b["reduce"], 0);
+    }
+    assert_eq!(profiled[1]["debug"]["string_hashing_collectors_used"], 1);
+    assert_eq!(profiled[3]["debug"]["numeric_collectors_used"], 1);
+    assert_eq!(r["aggregations"]["n"]["value"], 3);
+
+    let (_, r) = call(
+        &app,
+        Method::POST,
+        "/idx/_search",
+        Some(json!({"aggs": aggs})),
+    )
+    .await;
+    assert!(r.get("profile").is_none());
+}

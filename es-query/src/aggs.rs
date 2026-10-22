@@ -10,6 +10,7 @@ use crate::tdigest::TDigest;
 use crate::{QueryError, Searcher, fielddata_disabled, int, num, source_path};
 use es_index::{Document, FieldMapping, Index, iso_date, postings::values};
 use serde_json::{Map, Value};
+use std::time::Instant;
 
 #[derive(Debug, Clone, PartialEq)]
 enum Metric {
@@ -24,6 +25,9 @@ enum Metric {
     },
     Cardinality {
         precision: u32,
+        /// The `execution_hint` picks ES's collector for keywords: global ordinals, else
+        /// segment ordinals (`Some(true)`) or hashing (`Some(false)`). Only profiles show it.
+        segment_ords: Option<bool>,
     },
     Percentiles {
         compression: f64,
@@ -119,6 +123,7 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
         "extended_stats" => Metric::ExtendedStats { sigma: 2.0 },
         "cardinality" => Metric::Cardinality {
             precision: hll::DEFAULT_PRECISION,
+            segment_ords: None,
         },
         "percentiles" => Metric::Percentiles {
             compression: 100.0,
@@ -148,7 +153,7 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
                     )));
                 }
             }
-            ("precision_threshold", Metric::Cardinality { precision }) => {
+            ("precision_threshold", Metric::Cardinality { precision, .. }) => {
                 let n = int(v).ok_or_else(|| {
                     QueryError::x_content(format!("[{t}] failed to parse field [{k}]"))
                 })?;
@@ -158,22 +163,21 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
                     ))
                 })?;
             }
-            // ponytail: every mode counts the same; the hint only picks ES's collector
-            ("execution_hint", Metric::Cardinality { .. }) => {
-                let hint = v.as_str().unwrap_or_default().to_ascii_lowercase();
-                let modes = [
-                    "global_ordinals",
-                    "segment_ordinals",
-                    "direct",
-                    "save_memory_heuristic",
-                    "save_time_heuristic",
-                ];
-                if !modes.contains(&hint.as_str()) {
-                    return Err(QueryError::illegal(format!(
-                        "Invalid execution mode for cardinality aggregation.  Got [{}]expected one of [global_ordinal, segment_ordinal, direct]",
-                        es_index::postings::text(v)
-                    )));
-                }
+            // ponytail: every mode counts the same; the hint only picks ES's collector. The
+            // heuristics assume few terms (ES switches off global ordinals at 4 x terms >= HLL
+            // memory); count a shard's terms if profiles must match there.
+            ("execution_hint", Metric::Cardinality { segment_ords, .. }) => {
+                *segment_ords = match v.as_str().unwrap_or_default().to_ascii_lowercase().as_str() {
+                    "global_ordinals" | "save_memory_heuristic" | "save_time_heuristic" => None,
+                    "segment_ordinals" => Some(true),
+                    "direct" => Some(false),
+                    _ => {
+                        return Err(QueryError::illegal(format!(
+                            "Invalid execution mode for cardinality aggregation.  Got [{}]expected one of [global_ordinal, segment_ordinal, direct]",
+                            es_index::postings::text(v)
+                        )));
+                    }
+                };
             }
             ("percents", Metric::Percentiles { percents, .. }) => {
                 let bad = || QueryError::x_content(format!("[{t}] failed to parse field [{k}]"));
@@ -386,11 +390,32 @@ pub(crate) struct Collector<'s, 'a> {
     disk: Vec<DiskValues<'s>>,
     /// Per aggregation: its `missing` value as a doc value of the field.
     missing: Vec<Option<Value>>,
-    pub(crate) stats: Vec<Stats>,
+    stats: Vec<Stats>,
+    /// Per aggregation, with `profile: true`: where its time went.
+    timings: Option<Vec<Timings>>,
+}
+
+/// Nanoseconds one aggregation spent in each phase of ES's aggregation profile on one shard.
+#[derive(Debug, Default)]
+struct Timings {
+    initialize: u64,
+    build_leaf_collector: u64,
+    collect: u64,
+    collect_count: u64,
+    post_collection: u64,
+    build_aggregation: u64,
+}
+
+fn nanos(since: Instant) -> u64 {
+    since.elapsed().as_nanos() as u64
 }
 
 impl<'s, 'a> Collector<'s, 'a> {
-    pub(crate) fn new(aggs: &'s [Agg], searcher: &'s Searcher<'a>) -> Result<Self, QueryError> {
+    pub(crate) fn new(
+        aggs: &'s [Agg],
+        searcher: &'s Searcher<'a>,
+        profile: bool,
+    ) -> Result<Self, QueryError> {
         let index = searcher.index;
         let mut c = Collector {
             searcher,
@@ -399,8 +424,10 @@ impl<'s, 'a> Collector<'s, 'a> {
             disk: vec![],
             missing: vec![],
             stats: vec![],
+            timings: profile.then(Vec::new),
         };
         for agg in aggs {
+            let start = Instant::now();
             let m = mapping(index, &agg.field);
             match m {
                 Some(FieldMapping::Text | FieldMapping::TextKeyword { .. }) => {
@@ -424,11 +451,20 @@ impl<'s, 'a> Collector<'s, 'a> {
                 None => agg.missing.clone(),
             });
             c.mappings.push(m);
+            let initialize = nanos(start);
+            let start = Instant::now();
             c.disk.push(Box::new(index.disk_values(&agg.field)));
+            if let Some(t) = &mut c.timings {
+                t.push(Timings {
+                    initialize,
+                    build_leaf_collector: nanos(start),
+                    ..Timings::default()
+                });
+            }
             c.stats.push(Stats {
                 date: matches!(m, Some(FieldMapping::Date { .. })),
                 hll: match agg.metric {
-                    Metric::Cardinality { precision } => Some(Hll::new(precision)),
+                    Metric::Cardinality { precision, .. } => Some(Hll::new(precision)),
                     _ => None,
                 },
                 digest: match agg.metric {
@@ -442,28 +478,37 @@ impl<'s, 'a> Collector<'s, 'a> {
     }
 
     pub(crate) fn collect(&mut self, id: &str, doc: &Document) {
-        let index = self.searcher.index;
-        for (i, agg) in self.aggs.iter().enumerate() {
-            let vals = match self.mappings[i] {
-                None => vec![],
-                Some(m) => self.disk[i](id).unwrap_or_else(|| {
-                    let path = source_path(index, &agg.field);
-                    let mut v: Vec<Value> = values(&doc.source, path)
-                        .into_iter()
-                        .filter_map(|v| doc_value(self.searcher, &agg.field, m, v))
-                        .collect();
-                    // keyword doc values are a sorted set, other doc values sorted numbers
-                    v.sort_by(crate::scalar_cmp);
-                    if matches!(m, FieldMapping::Keyword { .. }) {
-                        v.dedup();
-                    }
-                    v
-                }),
-            };
-            match vals.is_empty() {
-                true => self.add(i, self.missing[i].iter().cloned().collect()),
-                false => self.add(i, vals),
+        for i in 0..self.aggs.len() {
+            let start = self.timings.is_some().then(Instant::now);
+            self.collect_one(i, id, doc);
+            if let (Some(t), Some(start)) = (&mut self.timings, start) {
+                t[i].collect += nanos(start);
+                t[i].collect_count += 1;
             }
+        }
+    }
+
+    fn collect_one(&mut self, i: usize, id: &str, doc: &Document) {
+        let (index, agg) = (self.searcher.index, &self.aggs[i]);
+        let vals = match self.mappings[i] {
+            None => vec![],
+            Some(m) => self.disk[i](id).unwrap_or_else(|| {
+                let path = source_path(index, &agg.field);
+                let mut v: Vec<Value> = values(&doc.source, path)
+                    .into_iter()
+                    .filter_map(|v| doc_value(self.searcher, &agg.field, m, v))
+                    .collect();
+                // keyword doc values are a sorted set, other doc values sorted numbers
+                v.sort_by(crate::scalar_cmp);
+                if matches!(m, FieldMapping::Keyword { .. }) {
+                    v.dedup();
+                }
+                v
+            }),
+        };
+        match vals.is_empty() {
+            true => self.add(i, self.missing[i].iter().cloned().collect()),
+            false => self.add(i, vals),
         }
     }
 
@@ -489,6 +534,91 @@ impl<'s, 'a> Collector<'s, 'a> {
             st.min = st.min.min(x);
             st.max = st.max.max(x);
         }
+    }
+}
+
+impl Collector<'_, '_> {
+    /// This shard's results, and with `profile: true` its `aggregations` profile: one entry per
+    /// aggregation, like ES's (post collection releases the doc values readers, building the
+    /// aggregation takes its result).
+    pub(crate) fn finish(mut self) -> (Vec<Stats>, Option<Value>) {
+        let Some(mut timings) = self.timings.take() else {
+            return (self.stats, None);
+        };
+        let mut stats = vec![];
+        let disk = std::mem::take(&mut self.disk);
+        for ((t, d), st) in timings.iter_mut().zip(disk).zip(&mut self.stats) {
+            let start = Instant::now();
+            drop(d);
+            t.post_collection = nanos(start);
+            let start = Instant::now();
+            stats.push(std::mem::take(st));
+            t.build_aggregation = nanos(start);
+        }
+        let profile = timings.iter().enumerate().map(|(i, t)| self.profile(i, t));
+        (stats, Some(profile.collect()))
+    }
+
+    /// One aggregation's profile: ES's aggregator class, its timings and its debug counters
+    /// (this shard is one leaf).
+    fn profile(&self, i: usize, t: &Timings) -> Value {
+        let (agg, m) = (&self.aggs[i], self.mappings[i]);
+        let keyword = matches!(m, Some(FieldMapping::Keyword { .. }));
+        let ty = match &agg.metric {
+            _ if m.is_none() && agg.missing.is_none() => match agg.metric {
+                Metric::Stats | Metric::ExtendedStats { .. } | Metric::Percentiles { .. } => {
+                    "NonCollectingMultiMetricAggregator"
+                }
+                _ => "NonCollectingSingleMetricAggregator",
+            },
+            Metric::Cardinality {
+                segment_ords: None, ..
+            } if keyword => "GlobalOrdCardinalityAggregator",
+            Metric::Cardinality { .. } => "CardinalityAggregator",
+            Metric::Avg => "AvgAggregator",
+            Metric::Sum => "SumAggregator",
+            Metric::Min => "MinAggregator",
+            Metric::Max => "MaxAggregator",
+            Metric::ValueCount => "ValueCountAggregator",
+            Metric::Stats => "StatsAggregator",
+            Metric::ExtendedStats { .. } => "ExtendedStatsAggregator",
+            Metric::Percentiles { .. } => "TDigestPercentilesAggregator",
+        };
+        let mut out = serde_json::json!({
+            "type": ty,
+            "description": agg.name,
+            "time_in_nanos": t.initialize + t.build_leaf_collector + t.collect
+                + t.post_collection + t.build_aggregation,
+            "breakdown": {
+                "initialize": t.initialize, "initialize_count": 1,
+                "build_leaf_collector": t.build_leaf_collector, "build_leaf_collector_count": 1,
+                "collect": t.collect, "collect_count": t.collect_count,
+                "post_collection": t.post_collection, "post_collection_count": 1,
+                "build_aggregation": t.build_aggregation, "build_aggregation_count": 1,
+                "reduce": 0, "reduce_count": 0,
+            },
+        });
+        let used = |b: bool| u32::from(b);
+        match (ty, &agg.metric) {
+            ("GlobalOrdCardinalityAggregator", _) => {
+                out["debug"] = serde_json::json!({
+                    "dynamic_pruning_attempted": 0, "dynamic_pruning_used": 0,
+                    "brute_force_used": 1, "skipped_due_to_no_data": 0,
+                });
+            }
+            ("CardinalityAggregator", Metric::Cardinality { segment_ords, .. }) => {
+                let ords = keyword && *segment_ords == Some(true);
+                out["debug"] = serde_json::json!({
+                    "empty_collectors_used": 0,
+                    "numeric_collectors_used": used(m.is_some() && !keyword),
+                    "ordinals_collectors_used": used(ords),
+                    "ordinals_collectors_overhead_too_high": 0,
+                    "string_hashing_collectors_used": used((keyword || m.is_none()) && !ords),
+                });
+            }
+            _ => {}
+        }
+        out
     }
 }
 
