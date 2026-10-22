@@ -8,6 +8,7 @@ mod error;
 mod field_caps;
 mod filter_path;
 mod indices;
+mod nodes;
 mod params;
 mod scroll;
 mod search;
@@ -237,6 +238,11 @@ fn router(state: AppState) -> Router {
         .route("/", get(info))
         .route("/_cluster/health", get(health))
         .route("/_cluster/health/{index}", get(health))
+        .route("/_cluster/stats", get(nodes::cluster_stats))
+        .route("/_cluster/settings", get(nodes::cluster_settings))
+        .route("/_nodes", get(nodes::info))
+        .route("/_nodes/stats", get(nodes::stats))
+        .route("/_nodes/{filter}", get(nodes::info))
         .route(
             "/{index}",
             put(indices::create)
