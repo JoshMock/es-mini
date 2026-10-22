@@ -296,6 +296,10 @@ fn router(state: AppState) -> Router {
         )
         .route("/{index}/_mapping", get(indices::get_mapping))
         .route("/_mapping", get(indices::get_all_mappings))
+        .route("/_stats", get(indices::stats))
+        .route("/_stats/{metric}", get(indices::stats))
+        .route("/{index}/_stats", get(indices::stats))
+        .route("/{index}/_stats/{metric}", get(indices::stats))
         .route("/_query", post(search::esql))
         .route("/_bulk", post(bulk::bulk).put(bulk::bulk))
         .route(

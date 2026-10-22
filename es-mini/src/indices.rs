@@ -537,3 +537,61 @@ pub async fn get_all_mappings(
 ) -> Result<Json<Value>, AppError> {
     get_mapping(state, Path("_all".to_string()), uri, Query(params)).await
 }
+
+/// `GET [/{index}]/_stats[/{metric}]`: the `docs` and `fielddata` metrics.
+// ponytail: other metrics (store, indexing, search, ...) are left out of the response.
+pub async fn stats(
+    State(state): State<AppState>,
+    path: Option<Path<HashMap<String, String>>>,
+    uri: Uri,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, AppError> {
+    check(
+        &uri,
+        &params,
+        &[
+            "fielddata_fields",
+            "fields",
+            "level",
+            "completion_fields",
+            "groups",
+        ],
+    )?;
+    let path = path.map(|Path(p)| p).unwrap_or_default();
+    let metric = path.get("metric").map_or("_all", String::as_str);
+    let wanted = |m: &str| metric == "_all" || metric.split(',').any(|x| x == m);
+    let indices = state.read().expect("lock poisoned");
+    let names = read_indices(
+        &indices,
+        path.get("index").map_or("_all", String::as_str),
+        &params,
+    )?;
+    let section = |docs: usize| {
+        let mut s = Map::new();
+        if wanted("docs") {
+            s.insert("docs".into(), json!({"count": docs, "deleted": 0}));
+        }
+        if wanted("fielddata") {
+            // es-mini reads keyword values from doc values and builds no fielddata.
+            s.insert(
+                "fielddata".into(),
+                json!({"memory_size_in_bytes": 0, "evictions": 0}),
+            );
+        }
+        Value::Object(s)
+    };
+    let mut total = 0;
+    let mut per_index = Map::new();
+    for n in &names {
+        let docs = indices[n].docs().count();
+        total += docs;
+        let s = section(docs);
+        per_index.insert(n.clone(), json!({"primaries": s, "total": s}));
+    }
+    let all = section(total);
+    Ok(Json(json!({
+        "_shards": {"total": names.len(), "successful": names.len(), "failed": 0},
+        "_all": {"primaries": all, "total": all},
+        "indices": per_index,
+    })))
+}
