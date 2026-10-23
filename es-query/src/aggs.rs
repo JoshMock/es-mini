@@ -10,7 +10,7 @@ mod terms;
 
 use crate::hll::{self, Hll};
 use crate::tdigest::TDigest;
-use crate::{QueryError, Searcher, fielddata_disabled, int, num, source_path};
+use crate::{Query, QueryError, Searcher, fielddata_disabled, int, num, parse_query, source_path};
 use es_index::{Document, FieldMapping, Index, iso_date, postings::values};
 use histogram::Histogram;
 use serde_json::{Map, Value};
@@ -42,6 +42,8 @@ enum Metric {
     },
     Terms(Box<Terms>),
     Histogram(Box<Histogram>),
+    /// The single bucket of the documents matching a query.
+    Filter(Box<Query>),
 }
 
 impl Metric {
@@ -58,12 +60,16 @@ impl Metric {
             Metric::Percentiles { .. } => "percentiles",
             Metric::Terms(_) => "terms",
             Metric::Histogram(_) => "histogram",
+            Metric::Filter(_) => "filter",
         }
     }
 
     /// Whether this aggregation buckets documents (and so may have sub-aggregations).
     fn buckets(&self) -> bool {
-        matches!(self, Metric::Terms(_) | Metric::Histogram(_))
+        matches!(
+            self,
+            Metric::Terms(_) | Metric::Histogram(_) | Metric::Filter(_)
+        )
     }
 }
 
@@ -150,12 +156,23 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
         },
         "terms" => Metric::Terms(Box::new(Terms::parse(name, object()?, &subs)?)),
         "histogram" => Metric::Histogram(Box::new(Histogram::parse(name, object()?)?)),
+        "filter" => Metric::Filter(Box::new(parse_query(params)?)),
         _ => return Err(format!("Unknown aggregation type [{t}]").into()),
     };
     if !subs.is_empty() && !metric.buckets() {
         return Err(QueryError::illegal(format!(
             "Aggregator [{name}] of type [{t}] cannot accept sub-aggregations"
         )));
+    }
+    if let Metric::Filter(_) = metric {
+        return Ok(Agg {
+            name: name.to_owned(),
+            meta,
+            metric,
+            field: String::new(),
+            missing: None,
+            subs,
+        });
     }
     let params = object()?;
     for (k, v) in params {
@@ -282,20 +299,59 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
     })
 }
 
-/// The value `terms` buckets sort by for the order path `agg.key` into a metric, like ES's
-/// NumericMetricsAggregator `bucketComparator`; `Err` explains an invalid path.
+/// Splits an order path into its first aggregation's name and the rest: `>` and the path into
+/// that single-bucket aggregation, `.` and a metric key, or nothing.
+fn split_path(path: &str) -> (&str, &str) {
+    path.split_at(
+        path.find('>')
+            .or_else(|| path.rfind('.'))
+            .unwrap_or(path.len()),
+    )
+}
+
+/// The message of an order path into an aggregation that has no single value.
+const NOT_SORTABLE: &str = "Buckets can only be sorted on a sub-aggregator path that is built out of zero or more single-bucket aggregations within the path and a final single-bucket or a metrics aggregation at the path end.";
+
+/// The value `terms` buckets sort by for an order path into `agg` (`rest` is the path after
+/// its name, see `split_path`), like ES's aggregators' `bucketComparator`; `st` is `agg`'s
+/// result, `None` to only check the path. `Err` explains an invalid path.
 // ponytail: multi-value metrics sort by stats names only, not by percentiles
-fn sort_value(agg: &Agg, key: Option<&str>, st: &Stats) -> Result<f64, String> {
+fn sort_value(agg: &Agg, rest: &str, st: Option<&Stats>) -> Result<f64, String> {
     let name = &agg.name;
+    if let Some(path) = rest.strip_prefix('>') {
+        if !matches!(agg.metric, Metric::Filter(_)) {
+            return Err(NOT_SORTABLE.into());
+        }
+        let (sub, rest) = split_path(path);
+        let j = (agg.subs.iter().position(|s| s.name == sub)).ok_or_else(|| format!("The provided aggregation [{sub}] either does not exist, or is a pipeline aggregation and cannot be used to sort the buckets."))?;
+        return sort_value(&agg.subs[j], rest, st.and_then(|s| s.subs.get(j)));
+    }
+    let key = rest.strip_prefix('.');
+    let empty;
+    let st = match st {
+        Some(st) => st,
+        None => {
+            empty = Stats::default();
+            &empty
+        }
+    };
     let avg = st.sum / st.count as f64;
     let single = match agg.metric {
+        Metric::Filter(_) => {
+            return match key {
+                None | Some("doc_count") => Ok(st.count as f64),
+                Some(_) => Err(format!(
+                    "Ordering on a single-bucket aggregation can only be done on its doc_count. Either drop the key (a la \"{name}\") or change it to \"doc_count\" (a la \"{name}.doc_count\") or \"key\"."
+                )),
+            };
+        }
         Metric::Avg => avg,
         Metric::Sum => st.sum,
         Metric::Min => st.min,
         Metric::Max => st.max,
         Metric::ValueCount => st.count as f64,
         Metric::Cardinality { .. } => st.hll.as_ref().map_or(0, Hll::cardinality) as f64,
-        Metric::Terms(_) | Metric::Histogram(_) => return Err("Buckets can only be sorted on a sub-aggregator path that is built out of zero or more single-bucket aggregations within the path and a final single-bucket or a metrics aggregation at the path end.".into()),
+        Metric::Terms(_) | Metric::Histogram(_) => return Err(NOT_SORTABLE.into()),
         Metric::Stats | Metric::ExtendedStats { .. } | Metric::Percentiles { .. } => {
             let stats = !matches!(agg.metric, Metric::Percentiles { .. });
             return match key {
@@ -337,6 +393,8 @@ pub(crate) struct Stats {
     digest: Option<TDigest>,
     /// The buckets (only for `terms` and `histogram`).
     terms: Option<Buckets>,
+    /// The sub-aggregations' results (only for `filter`).
+    subs: Vec<Stats>,
 }
 
 impl Default for Stats {
@@ -353,6 +411,7 @@ impl Default for Stats {
             hll: None,
             digest: None,
             terms: None,
+            subs: vec![],
         }
     }
 }
@@ -391,6 +450,10 @@ impl Stats {
         match (&mut self.terms, o.terms) {
             (Some(t), Some(o)) => t.merge(o),
             (t, o) => *t = t.take().or(o),
+        }
+        match self.subs.is_empty() {
+            true => self.subs = o.subs,
+            false => reduce(&mut self.subs, o.subs),
         }
         // like a data node, reduce shard results into a new digest (see TDigest::coordinated)
         if let Some(mut o) = o.digest {
@@ -578,6 +641,10 @@ impl<'s, 'a> Collector<'s, 'a> {
             c.subs.push(sub);
             c.stats.push(Stats {
                 date: matches!(m, Some(FieldMapping::Date { .. })),
+                subs: match agg.metric {
+                    Metric::Filter(_) => empty.clone(),
+                    _ => vec![],
+                },
                 hll: match agg.metric {
                     Metric::Cardinality { precision, .. } => Some(Hll::new(precision)),
                     _ => None,
@@ -613,6 +680,16 @@ impl<'s, 'a> Collector<'s, 'a> {
     }
 
     fn collect_one(&mut self, i: usize, id: &str, doc: &Document) {
+        if let Metric::Filter(q) = &self.aggs[i].metric {
+            if self.searcher.score(q, id, doc).is_some() {
+                let st = &mut self.stats[i];
+                st.count += 1;
+                if let Some(sub) = &mut self.subs[i] {
+                    sub.collect_into(&mut st.subs, id, doc);
+                }
+            }
+            return;
+        }
         let vals = self.values(i, id, doc);
         if let Some(t) = &mut self.timings {
             t[i].multi_valued |= vals.len() > 1;
@@ -721,6 +798,9 @@ impl Collector<'_, '_> {
     fn finish_terms(&mut self, stats: &mut [Stats]) {
         let index = self.searcher.index;
         for (i, st) in stats.iter_mut().enumerate() {
+            if let (Metric::Filter(_), Some(sub)) = (&self.aggs[i].metric, &mut self.subs[i]) {
+                sub.finish_terms(&mut st.subs);
+            }
             let Some(b) = &mut st.terms else {
                 continue;
             };
@@ -772,6 +852,8 @@ impl Collector<'_, '_> {
             && (1..=1000).contains(&t.keys.len());
         let ty = match &agg.metric {
             Metric::Histogram(_) => "NumericHistogramAggregator",
+            // ponytail: ES may run a filter as FilterByFilterAggregator; not profiled yet
+            Metric::Filter(_) => "FilterAggregator",
             _ if m.is_none() && agg.missing.is_none() => match agg.metric {
                 Metric::Stats | Metric::ExtendedStats { .. } | Metric::Percentiles { .. } => {
                     "NonCollectingMultiMetricAggregator"
@@ -958,6 +1040,10 @@ pub(crate) fn render(aggs: &[Agg], stats: &mut [Stats], typed_keys: bool) -> Val
                 if let Some(b) = &mut st.terms {
                     h.render(b, &mut body, sub);
                 }
+            }
+            Metric::Filter(_) => {
+                body.insert("doc_count".into(), st.count.into());
+                sub(&mut st.subs, &mut body);
             }
             Metric::Avg => put(&mut body, "value", avg),
             Metric::Sum => put(&mut body, "value", Some(st.sum)),
@@ -1154,6 +1240,19 @@ mod tests {
             "value_count#c": {"value": 0},
         });
         assert_eq!(got, want);
+    }
+
+    #[test]
+    fn filter_counts_matches_and_aggregates_them() {
+        let body = json!({"query": {"range": {"i": {"gte": 50}}}, "aggs": {
+            "f": {"filter": {"term": {"k": "b"}}, "aggs": {"m": {"max": {"field": "i"}}}},
+            "none": {"filter": {"term": {"k": "zzz"}}},
+        }});
+        let want = json!({
+            "f": {"doc_count": 2, "m": {"value": 101.0}},
+            "none": {"doc_count": 0},
+        });
+        assert_eq!(aggs_of(&index(), body), want);
     }
 
     #[test]

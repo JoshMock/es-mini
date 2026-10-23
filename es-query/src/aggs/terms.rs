@@ -35,11 +35,11 @@ pub(super) struct Terms {
 enum By {
     Count,
     Key,
-    /// A metric of the sub-aggregation at `index`.
+    /// The value at an order path into the sub-aggregation at `index` (see `sort_value`).
     Agg {
         index: usize,
         agg: Box<Agg>,
-        key: Option<String>,
+        rest: String,
     },
 }
 
@@ -190,9 +190,9 @@ impl Terms {
                 By::Key => a.0.cmp(&b.0),
                 // ponytail: NaN sorts as Java's Double.compare (last ascending, first
                 // descending); ES's shards instead always put NaN last
-                By::Agg { index, agg, key } => {
+                By::Agg { index, agg, rest } => {
                     let v = |b: &Bucket| {
-                        super::sort_value(agg, key.as_deref(), &b.subs[*index]).unwrap_or(f64::NAN)
+                        super::sort_value(agg, rest, Some(&b.subs[*index])).unwrap_or(f64::NAN)
                     };
                     v(&a.1).total_cmp(&v(&b.1))
                 }
@@ -333,22 +333,21 @@ fn parse_order(v: &Value, subs: &[Agg]) -> Result<Vec<(By, bool)>, QueryError> {
         let by = match key.as_str() {
             "_count" => By::Count,
             "_key" => By::Key,
-            // ponytail: paths name a direct sub-aggregation (`agg` or `agg.metric`); no
-            // single-bucket aggregations exist to path through with `>`
+            // ponytail: no `[bucket key]` path elements
             path => {
-                let (agg, key) = match path.rsplit_once('.') {
-                    Some((a, k)) if !path.contains(['>', '[']) => (a, Some(k.to_owned())),
-                    _ => (path.split(['>', '.', '[']).next().unwrap_or(path), None),
-                };
+                let (agg, rest) = super::split_path(path);
                 let invalid = |e: String| {
                     QueryError::illegal(format!("Invalid aggregation order path [{path}]. {e}"))
                 };
                 let index = (subs.iter().position(|s| s.name == agg))
-                    .filter(|_| !path.contains(['>', '[']))
                     .ok_or_else(|| invalid(format!("The provided aggregation [{agg}] either does not exist, or is a pipeline aggregation and cannot be used to sort the buckets.")))?;
                 let agg = Box::new(subs[index].clone());
-                super::sort_value(&agg, key.as_deref(), &Stats::default()).map_err(invalid)?;
-                By::Agg { index, agg, key }
+                super::sort_value(&agg, rest, None).map_err(invalid)?;
+                By::Agg {
+                    index,
+                    agg,
+                    rest: rest.to_owned(),
+                }
             }
         };
         order.push((by, asc));
@@ -964,6 +963,31 @@ mod tests {
         assert_eq!(keys(json!({"m.value": "asc"}), max), ["c", "a", "b"]);
         let stats = json!({"s": {"stats": {"field": "n"}}});
         assert_eq!(keys(json!([{"s.sum": "desc"}]), stats), ["b", "c", "a"]);
+        // through a single-bucket aggregation: only b has a false b; a bucket's own doc_count
+        let filtered = json!({"f": {"filter": {"term": {"b": false}},
+            "aggs": {"m": {"max": {"field": "n"}}}}});
+        assert_eq!(
+            keys(json!({"f>m": "desc"}), filtered.clone()),
+            ["b", "a", "c"]
+        );
+        assert_eq!(
+            keys(json!({"f>m.value": "desc"}), filtered.clone()),
+            ["b", "a", "c"]
+        );
+        assert_eq!(
+            keys(json!({"f": "desc"}), filtered.clone()),
+            ["b", "a", "c"]
+        );
+        assert_eq!(
+            keys(json!({"f.doc_count": "asc"}), filtered.clone()),
+            ["a", "c", "b"]
+        );
+        let body = json!({"aggs": {"t": {"terms": {"field": "k", "order": {"f>x": "asc"}},
+            "aggs": filtered}}});
+        assert_eq!(
+            run(&[&index()], body).unwrap_err(),
+            "Invalid aggregation order path [f>x]. The provided aggregation [x] either does not exist, or is a pipeline aggregation and cannot be used to sort the buckets."
+        );
         let body = json!({"aggs": {"t": {"terms": {"field": "k", "order": {"m.x": "asc"}},
             "aggs": {"m": {"max": {"field": "n"}}}}}});
         assert_eq!(
