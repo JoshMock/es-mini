@@ -103,6 +103,63 @@ impl TDigest {
             Digest::Merging(m) => m.quantile(q),
         }
     }
+
+    /// The fraction of values at or below `x`, NaN without values: `MergingDigest.cdf`, which
+    /// `Dist.cdf` matches with unit weights.
+    pub(crate) fn cdf(&mut self, x: f64) -> f64 {
+        let c = self.centroids();
+        let (min, max) = match &self.digest {
+            Digest::Merging(m) => (m.min, m.max),
+            Digest::Sorting(_) => (
+                c.first().map_or(f64::NAN, |c| c.0),
+                c.last().map_or(f64::NAN, |c| c.0),
+            ),
+        };
+        let n = c.len();
+        let size = c.iter().map(|&(_, w)| w as f64).sum::<f64>();
+        let interpolate = |x: f64, x0: f64, x1: f64| (x - x0) / (x1 - x0);
+        match n {
+            0 => return f64::NAN,
+            1 if x < min => return 0.0,
+            1 if x > max => return 1.0,
+            1 => return 0.5,
+            _ if x < min => return 0.0,
+            _ if x == min => {
+                let dw: u64 = c
+                    .iter()
+                    .take_while(|&&(m, _)| m == x)
+                    .map(|&(_, w)| w)
+                    .sum();
+                return dw as f64 / 2.0 / size;
+            }
+            _ if x > max => return 1.0,
+            _ if x == max => {
+                let dw: u64 = (c.iter().rev().take_while(|&&(m, _)| m == x))
+                    .map(|&(_, w)| w)
+                    .sum();
+                return (size - dw as f64 / 2.0) / size;
+            }
+            _ => {}
+        }
+        let mut left = (c[1].0 - c[0].0) / 2.0;
+        let mut so_far = 0.0;
+        for i in 0..n - 1 {
+            let (mean, w) = (c[i].0, c[i].1 as f64);
+            let right = (c[i + 1].0 - mean) / 2.0;
+            if x < mean + right {
+                let v = (so_far + w * interpolate(x, mean - left, mean + right)) / size;
+                return v.max(0.0);
+            }
+            so_far += w;
+            left = right;
+        }
+        let (mean, w) = (c[n - 1].0, c[n - 1].1 as f64);
+        let right = (mean - c[n - 2].0) / 2.0;
+        match x < mean + right {
+            true => (so_far + w * interpolate(x, mean - right, mean + right)) / size,
+            false => 1.0,
+        }
+    }
 }
 
 /// `Dist.quantile`: linear interpolation between the sorted values around `q`.

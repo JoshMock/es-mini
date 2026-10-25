@@ -40,9 +40,11 @@ enum Metric {
     },
     Percentiles {
         compression: f64,
-        /// Sorted, distinct, in `[0, 100]`.
+        /// Sorted, distinct, in `[0, 100]`; for ranks, the sorted values to rank.
         percents: Vec<f64>,
         keyed: bool,
+        /// `percentile_ranks`: the percentage of values at or below each of `percents`.
+        ranks: bool,
     },
     Terms(Box<Terms>),
     Histogram(Box<Histogram>),
@@ -382,7 +384,8 @@ impl Metric {
             Metric::Stats => "stats",
             Metric::ExtendedStats { .. } => "extended_stats",
             Metric::Cardinality { .. } => "cardinality",
-            Metric::Percentiles { .. } => "percentiles",
+            Metric::Percentiles { ranks: false, .. } => "percentiles",
+            Metric::Percentiles { .. } => "percentile_ranks",
             Metric::Terms(_) => "terms",
             Metric::Histogram(h) if h.date => "date_histogram",
             Metric::Histogram(_) => "histogram",
@@ -531,6 +534,13 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
             compression: 100.0,
             percents: vec![1.0, 5.0, 25.0, 50.0, 75.0, 95.0, 99.0],
             keyed: true,
+            ranks: false,
+        },
+        "percentile_ranks" => Metric::Percentiles {
+            compression: 100.0,
+            percents: vec![],
+            keyed: true,
+            ranks: true,
         },
         "terms" => Metric::Terms(Box::new(Terms::parse(name, object()?, &subs)?)),
         "histogram" | "date_histogram" => {
@@ -601,7 +611,14 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
                     }
                 };
             }
-            ("percents", Metric::Percentiles { percents, .. }) => {
+            (
+                "percents",
+                Metric::Percentiles {
+                    percents,
+                    ranks: false,
+                    ..
+                },
+            ) => {
                 let bad = || QueryError::x_content(format!("[{t}] failed to parse field [{k}]"));
                 let mut p: Vec<f64> = (v.as_array().ok_or_else(bad)?.iter())
                     .map(|v| num(v).ok_or_else(bad))
@@ -627,6 +644,25 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
                     }
                 }
                 *percents = p;
+            }
+            (
+                "values",
+                Metric::Percentiles {
+                    percents,
+                    ranks: true,
+                    ..
+                },
+            ) => {
+                let bad = || QueryError::x_content(format!("[{t}] failed to parse field [{k}]"));
+                *percents = (v.as_array().ok_or_else(bad)?.iter())
+                    .map(|v| num(v).ok_or_else(bad))
+                    .collect::<Result<_, _>>()?;
+                if percents.is_empty() {
+                    return Err(QueryError::illegal(format!(
+                        "[values] must not be an empty array: [{name}]"
+                    )));
+                }
+                percents.sort_by(f64::total_cmp);
             }
             ("keyed", Metric::Percentiles { keyed, .. }) => {
                 *keyed = v.as_bool().ok_or_else(|| {
@@ -671,6 +707,17 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
             }
             _ => return Err(format!("[{t}] unknown field [{k}]").into()),
         }
+    }
+    if let Metric::Percentiles {
+        percents,
+        ranks: true,
+        ..
+    } = &metric
+        && percents.is_empty()
+    {
+        return Err(QueryError::illegal(format!(
+            "[values] must not be null: [{name}]"
+        )));
     }
     let field = params
         .get("field")
@@ -1408,7 +1455,8 @@ impl Collector<'_, '_> {
             Metric::ValueCount => "ValueCountAggregator",
             Metric::Stats => "StatsAggregator",
             Metric::ExtendedStats { .. } => "ExtendedStatsAggregator",
-            Metric::Percentiles { .. } => "TDigestPercentilesAggregator",
+            Metric::Percentiles { ranks: false, .. } => "TDigestPercentilesAggregator",
+            Metric::Percentiles { .. } => "TDigestPercentileRanksAggregator",
             Metric::Terms(_) if from_filters => "StringTermsAggregatorFromFilters",
             Metric::Terms(t) if keyword && t.map => "MapStringTermsAggregator",
             Metric::Terms(_) if keyword => "GlobalOrdinalsStringTermsAggregator",
@@ -1598,7 +1646,8 @@ fn render_counted(
         };
         // the result's type: ES's InternalTDigestPercentiles names its digest
         let mut ty = match agg.metric {
-            Metric::Percentiles { .. } => "tdigest_percentiles",
+            Metric::Percentiles { ranks: false, .. } => "tdigest_percentiles",
+            Metric::Percentiles { .. } => "tdigest_percentile_ranks",
             _ => agg.metric.name(),
         };
         let sub = |subs: &mut [Stats], out: &mut Map<String, Value>| {
@@ -1680,13 +1729,20 @@ fn render_counted(
                 body.insert("value".into(), n.into());
             }
             Metric::Percentiles {
-                percents, keyed, ..
+                percents,
+                keyed,
+                ranks,
+                ..
             } => {
                 let mut d = st.digest.take().map(TDigest::coordinated);
                 let mut d = d.as_mut().filter(|d| d.size() > 0);
                 let (mut keyed_values, mut list) = (Map::new(), vec![]);
                 for &p in percents {
-                    let v = d.as_mut().map(|d| d.quantile(p / 100.0));
+                    let v = (d.as_mut()).map(|d| match ranks {
+                        // InternalTDigestPercentileRanks.percentileRank
+                        true => d.cdf(p).clamp(0.0, 1.0) * 100.0,
+                        false => d.quantile(p / 100.0),
+                    });
                     if *keyed {
                         put(&mut keyed_values, &java_double(p), v);
                         continue;
@@ -1912,6 +1968,31 @@ mod tests {
         req.typed_keys = true;
         let got = search(&index(), &req).aggregations.unwrap();
         assert!(got.get("tdigest_percentiles#p").is_some(), "{got}");
+    }
+
+    #[test]
+    fn percentile_ranks_interpolate_between_values() {
+        let body = json!({"aggs": {"r": {"percentile_ranks": {"field": "i",
+            "values": [51, 1, 200, 0, 76]}}}});
+        let mut req = SearchRequest::parse(&body).unwrap();
+        req.typed_keys = true;
+        let got = search(&index(), &req).aggregations.unwrap();
+        // MergingDigest.cdf by hand over 1, 51, 101, 151: half the weight at a value
+        let want = json!({"tdigest_percentile_ranks#r": {"values": {
+            "0.0": 0.0, "1.0": 12.5, "51.0": 37.5, "76.0": 50.0, "200.0": 100.0}}});
+        assert_eq!(got, want);
+        let err = |v: Value| SearchRequest::parse(&json!({"aggs": {"r": v}})).unwrap_err();
+        let e = err(json!({"percentile_ranks": {"field": "i"}}));
+        assert!(
+            e.to_string().contains("[values] must not be null: [r]"),
+            "{e}"
+        );
+        let e = err(json!({"percentile_ranks": {"field": "i", "values": []}}));
+        assert!(
+            e.to_string()
+                .contains("[values] must not be an empty array: [r]"),
+            "{e}"
+        );
     }
 
     #[test]
