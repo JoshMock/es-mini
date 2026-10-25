@@ -46,8 +46,10 @@ Do not weaken lints or add `#[allow(...)]` to get it passing without stating why
 
 ## Durability
 
-`es_index::disk::save` must never leave a data directory half-written. Document-only saves
-commit in place with Lucene's protocol (write-once files under new names, fsynced, then an
+Document writes go through `es_index::disk::persist` as translog appends (fsynced append plus an
+in-place checkpoint); `disk::open` replays the translog. Segments are committed on flush or on a
+metadata change. `es_index::disk::save` must never leave a data directory half-written. Segment
+commits happen in place with Lucene's protocol (write-once files under new names, fsynced, then an
 atomically renamed `segments_N`; unreferenced files are deleted after); saves that change
 cluster metadata build the snapshot beside the directory and swap it in (`disk::recover`
 completes interrupted swaps). Saves are serialized, and a failed save fails the request. Keep those properties in any change to
