@@ -6,7 +6,6 @@ aggregations/filters_bucket.yml/cache busting
 aggregations/filters_bucket.yml/cache hits
 aggregations/filters_bucket.yml/named filters with bucket sort test
 aggregations/filters_bucket.yml/nested
-aggregations/filters_bucket.yml/null meta
 aggregations/filter.yml/Standard queries get cached
 aggregations/filter.yml/Terms lookup gets cached
 aggregations/histogram.yml/date_histogram with extended_bounds and offset and unmapped

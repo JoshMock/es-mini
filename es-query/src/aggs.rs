@@ -220,6 +220,19 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
     let (mut meta, mut kind, mut subs) = (None, None, vec![]);
     for (k, v) in body {
         match k.as_str() {
+            "meta" if !v.is_object() => {
+                let token = match v {
+                    Value::Null => "VALUE_NULL",
+                    Value::Bool(_) => "VALUE_BOOLEAN",
+                    Value::Number(_) => "VALUE_NUMBER",
+                    Value::String(_) => "VALUE_STRING",
+                    _ => "START_ARRAY",
+                };
+                return Err(format!(
+                    "Expected [START_OBJECT] under [meta], but got a [{token}] in [{name}]"
+                )
+                .into());
+            }
             "meta" => meta = Some(v.clone()),
             "aggs" | "aggregations" => subs = parse(v)?,
             t => match kind {
@@ -1830,6 +1843,10 @@ mod tests {
         assert_eq!(
             err(json!({"a": {"nope": {}}})),
             "Unknown aggregation type [nope]"
+        );
+        assert_eq!(
+            err(json!({"a": {"meta": null, "global": {}}})),
+            "Expected [START_OBJECT] under [meta], but got a [VALUE_NULL] in [a]"
         );
         assert_eq!(
             err(json!({"a": {"avg": {"field": "i"}, "aggs": {"b": {"max": {"field": "i"}}}}})),
