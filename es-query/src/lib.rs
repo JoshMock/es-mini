@@ -428,8 +428,15 @@ impl<'a> Searcher<'a> {
         match self.index.mappings.field(field)? {
             FieldMapping::Date { format, locale, .. }
             | FieldMapping::DateNanos { format, locale } => Some(move |v: &Value| match format {
+                // ponytail: named formats (`strict_date_time`, ...) parse as the default format
                 Some(f) => (v.as_str())
-                    .and_then(|s| f.split("||").find_map(|f| es_index::parse_pattern(f, s)))
+                    .and_then(|s| {
+                        f.split("||")
+                            .find_map(|f| match es_index::format_pattern(f, 0) {
+                                Some(_) => es_index::parse_pattern(f, s),
+                                None => parse_date_millis(v),
+                            })
+                    })
                     .or_else(|| parse_dated(v, locale.as_deref().unwrap_or("en"))),
                 None => parse_date_millis(v),
             }),

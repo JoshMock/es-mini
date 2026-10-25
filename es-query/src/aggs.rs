@@ -1563,6 +1563,20 @@ mod tests {
     }
 
     #[test]
+    fn named_date_formats_parse_iso_dates() {
+        let mut ix = Index::default();
+        let at = FieldMapping::Date {
+            format: Some("strict_date_time||strict_date".into()),
+            locale: None,
+            fields: Default::default(),
+        };
+        ix.mappings.properties.insert("at".into(), at);
+        ix.put("1", json!({"at": "2021-05-01T07:10:00Z"}));
+        let aggs = aggs_of(&ix, json!({"aggs": {"max": {"max": {"field": "at"}}}}));
+        assert_eq!(aggs["max"]["value"], 1_619_853_000_000.0);
+    }
+
+    #[test]
     fn missing_counts_documents_without_values() {
         let body = json!({"aggs": {
             "i": {"missing": {"field": "i"}, "aggs": {"c": {"value_count": {"field": "k"}}}},
