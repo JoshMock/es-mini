@@ -1,7 +1,7 @@
 # Ordered goals for the Ralph loop's `goals` suite. One line each; an iteration deletes a line
 # only when that goal's done-criteria hold. The loop then runs the line's Done-check itself and
 # rejects the iteration if it fails. Later goals assume earlier ones are done.
-aggs-histograms: histogram and date_histogram (interval, calendar_interval, fixed_interval, offset, time_zone, min_doc_count, extended_bounds, hard_bounds, keyed, format). Done-check: `! grep -qE '^aggregations/(date_)?histogram.yml/' tests/yaml-xfail.txt`
+aggs-histograms: histogram and date_histogram (interval, calendar_interval, fixed_interval, offset, time_zone, min_doc_count, extended_bounds, hard_bounds, keyed, format). Like ES, fail with too_many_buckets_exception past search.max_buckets (65,536) instead of allocating them. Done-check: `! grep -qE '^aggregations/(date_)?histogram.yml/' tests/yaml-xfail.txt`
 aggs-ranges-filters: range, date_range, filter, filters, missing and global aggregations. Done-check: `! grep -qE '^aggregations/(range|date_range|filter|filters_bucket|missing|global).yml/' tests/yaml-xfail.txt`
 aggs-top-hits-typed-keys: top_hits (size, sort, _source filtering) and typed_keys across every supported aggregation. Done-check: `! grep -qE '^aggregations/(top_hits|typed_keys).yml/' tests/yaml-xfail.txt`
 aggs-parity: aggregations verified against real Elasticsearch: add aggregation requests to fixtures/generate.sh's recorded set only if that needs no fixture regeneration (otherwise a separate generator like fixtures/generate.sh writing fixtures/expected-aggs/), and compare es-mini's responses in memory and from disk. Done-check: `cargo test -p es-mini --test fixture_parity && cargo test -p es-mini --test disk_parity`
