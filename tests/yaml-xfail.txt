@@ -16,4 +16,3 @@ aggregations/top_hits.yml/runtime fields
 aggregations/top_hits.yml/stored fields
 aggregations/typed_keys.yml/Test typed keys parameter for date_histogram aggregation and max_bucket pipeline aggregation
 aggregations/typed_keys.yml/Test typed keys parameter for percentile_ranks aggregation
-aggregations/typed_keys.yml/Test typed keys parameter for percentiles aggregation

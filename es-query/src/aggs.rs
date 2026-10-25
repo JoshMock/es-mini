@@ -1596,7 +1596,11 @@ fn render_counted(
                 body.insert(format!("{key}_as_string"), iso_date(v as i64).into());
             }
         };
-        let mut ty = agg.metric.name();
+        // the result's type: ES's InternalTDigestPercentiles names its digest
+        let mut ty = match agg.metric {
+            Metric::Percentiles { .. } => "tdigest_percentiles",
+            _ => agg.metric.name(),
+        };
         let sub = |subs: &mut [Stats], out: &mut Map<String, Value>| {
             if let Value::Object(m) = render_counted(&agg.subs, subs, typed_keys, buckets)? {
                 out.extend(m);
@@ -1899,6 +1903,15 @@ mod tests {
             "value_count#c": {"value": 0},
         });
         assert_eq!(got, want);
+    }
+
+    #[test]
+    fn typed_keys_name_percentiles_by_their_digest() {
+        let body = json!({"aggs": {"p": {"percentiles": {"field": "i", "percents": [50]}}}});
+        let mut req = SearchRequest::parse(&body).unwrap();
+        req.typed_keys = true;
+        let got = search(&index(), &req).aggregations.unwrap();
+        assert!(got.get("tdigest_percentiles#p").is_some(), "{got}");
     }
 
     #[test]
