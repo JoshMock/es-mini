@@ -8,19 +8,12 @@ aggregations/terms.yml/order by sub agg containing nested
 aggregations/top_hits.yml/docvalue fields
 aggregations/top_hits.yml/explain
 aggregations/top_hits.yml/fetch fields
-aggregations/top_hits.yml/from
 aggregations/top_hits.yml/having
 aggregations/top_hits.yml/highlight
 aggregations/top_hits.yml/highlight_query
 aggregations/top_hits.yml/named queries
 aggregations/top_hits.yml/runtime fields
-aggregations/top_hits.yml/sequence number and primary term
-aggregations/top_hits.yml/size
-aggregations/top_hits.yml/source filtering
 aggregations/top_hits.yml/stored fields
-aggregations/top_hits.yml/synthetic _source
-aggregations/top_hits.yml/version
 aggregations/typed_keys.yml/Test typed keys parameter for date_histogram aggregation and max_bucket pipeline aggregation
 aggregations/typed_keys.yml/Test typed keys parameter for percentile_ranks aggregation
 aggregations/typed_keys.yml/Test typed keys parameter for percentiles aggregation
-aggregations/typed_keys.yml/Test typed keys parameter for terms and top_hits aggregation

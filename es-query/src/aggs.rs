@@ -11,7 +11,7 @@ mod terms;
 use crate::hll::{self, Hll};
 use crate::tdigest::TDigest;
 use crate::{
-    MAX_BUCKETS, Query, QueryError, Searcher, fielddata_disabled, int, num, parse_query,
+    MAX_BUCKETS, Query, QueryError, Searcher, SortField, fielddata_disabled, int, num, parse_query,
     source_path,
 };
 use es_index::{Document, FieldMapping, iso_date, postings::values};
@@ -56,6 +56,136 @@ enum Metric {
     Filters(Box<Filters>),
     /// A bucket per range of values.
     Range(Box<Ranges>),
+    TopHits(Box<TopHits>),
+}
+
+/// The `top_hits` aggregation's request, like ES's TopHitsAggregationBuilder.
+#[derive(Debug, Clone, PartialEq)]
+struct TopHits {
+    from: usize,
+    size: usize,
+    sort: Vec<SortField>,
+    /// The `_source` filter as `filter_path` patterns (empty keeps it whole); `None` leaves
+    /// `_source` out.
+    source: Option<String>,
+    version: bool,
+    seq_no: bool,
+}
+
+/// A document `top_hits` collected.
+#[derive(Debug, Clone)]
+struct TopHit {
+    index: String,
+    id: String,
+    score: f64,
+    sort: Vec<Value>,
+    doc: Document,
+}
+
+impl TopHits {
+    fn parse(params: &Map<String, Value>) -> Result<Self, QueryError> {
+        let bad =
+            |k: &str| QueryError::x_content(format!("[top_hits] failed to parse field [{k}]"));
+        let mut t = TopHits {
+            from: 0,
+            size: 3,
+            sort: vec![],
+            source: Some(String::new()),
+            version: false,
+            seq_no: false,
+        };
+        // patterns of a string or an array of strings
+        let patterns = |k: &str, v: &Value| match v {
+            Value::String(s) => Ok(vec![s.clone()]),
+            Value::Array(a) => (a.iter())
+                .map(|p| p.as_str().map(String::from).ok_or_else(|| bad(k)))
+                .collect(),
+            _ => Err(bad(k)),
+        };
+        for (k, v) in params {
+            match k.as_str() {
+                "from" | "size" => {
+                    let n = int(v).and_then(|n| usize::try_from(n).ok());
+                    *(if k == "from" {
+                        &mut t.from
+                    } else {
+                        &mut t.size
+                    }) = n.ok_or_else(|| bad(k))?;
+                }
+                "sort" => t.sort = crate::parse_sorts(v)?,
+                "version" => t.version = v.as_bool().ok_or_else(|| bad(k))?,
+                "seq_no_primary_term" => t.seq_no = v.as_bool().ok_or_else(|| bad(k))?,
+                "_source" => {
+                    t.source = match v {
+                        Value::Bool(b) => b.then(String::new),
+                        Value::Object(o) => {
+                            let mut filter = vec![];
+                            for (k, v) in o {
+                                let exclude = match k.as_str() {
+                                    "includes" | "include" => "",
+                                    "excludes" | "exclude" => "-",
+                                    _ => return Err(bad("_source")),
+                                };
+                                filter
+                                    .extend(patterns(k, v)?.iter().map(|p| exclude.to_owned() + p));
+                            }
+                            Some(filter.join(","))
+                        }
+                        v => Some(patterns(k, v)?.join(",")),
+                    }
+                }
+                _ => return Err(format!("[top_hits] unknown field [{k}]").into()),
+            }
+        }
+        Ok(t)
+    }
+
+    /// Keeps the hits this aggregation may render, best first.
+    fn keep_top(&self, hits: &mut Vec<TopHit>) {
+        hits.sort_by(|a, b| {
+            crate::cmp_sorted(&self.sort, (&a.sort, a.score), (&b.sort, b.score))
+                .then_with(|| a.index.cmp(&b.index))
+                .then(a.doc.seq_no.cmp(&b.doc.seq_no))
+        });
+        hits.truncate(self.from.saturating_add(self.size));
+    }
+
+    /// The `hits` object of `total` matches, like a search response's.
+    fn render(&self, mut hits: Vec<TopHit>, total: u64) -> Value {
+        let by_score = self.sort.is_empty() || self.sort.iter().any(|f| f.field == "_score");
+        let score = |h: &TopHit| by_score.then_some(h.score as f32);
+        let max_score = hits.iter().filter_map(score).reduce(f32::max);
+        self.keep_top(&mut hits);
+        let hits = hits.iter().skip(self.from).map(|h| {
+            let mut hit = Map::new();
+            hit.insert("_index".into(), h.index.clone().into());
+            hit.insert("_id".into(), h.id.clone().into());
+            if self.version {
+                hit.insert("_version".into(), h.doc.version.into());
+            }
+            if self.seq_no {
+                hit.insert("_seq_no".into(), h.doc.seq_no.into());
+                hit.insert("_primary_term".into(), 1.into());
+            }
+            hit.insert("_score".into(), score(h).into());
+            if let Some(filter) = &self.source {
+                let source = match filter.is_empty() {
+                    true => h.doc.source.clone(),
+                    false => es_index::filter_path::apply(&h.doc.source, filter),
+                };
+                hit.insert("_source".into(), source);
+            }
+            if !self.sort.is_empty() {
+                hit.insert("sort".into(), h.sort.clone().into());
+            }
+            Value::from(hit)
+        });
+        serde_json::json!({
+            "total": {"value": total, "relation": "eq"},
+            "max_score": max_score,
+            "hits": hits.collect::<Vec<_>>(),
+        })
+    }
 }
 
 /// The `range` or `date_range` aggregation's ranges, like ES's RangeAggregationBuilder and
@@ -262,6 +392,7 @@ impl Metric {
             Metric::Filters(_) => "filters",
             Metric::Range(r) if r.date => "date_range",
             Metric::Range(_) => "range",
+            Metric::TopHits(_) => "top_hits",
         }
     }
 
@@ -411,6 +542,7 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
         "global" => Metric::Global,
         "filters" => Metric::Filters(Box::new(Filters::parse(object()?)?)),
         "range" | "date_range" => Metric::Range(Box::new(Ranges::parse(name, t, object()?)?)),
+        "top_hits" => Metric::TopHits(Box::new(TopHits::parse(object()?)?)),
         _ => return Err(format!("Unknown aggregation type [{t}]").into()),
     };
     if !subs.is_empty() && !metric.buckets() {
@@ -418,7 +550,7 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
             "Aggregator [{name}] of type [{t}] cannot accept sub-aggregations"
         )));
     }
-    if let Metric::Filter(_) | Metric::Global | Metric::Filters(_) = metric {
+    if let Metric::Filter(_) | Metric::Global | Metric::Filters(_) | Metric::TopHits(_) = metric {
         return Ok(Agg {
             name: name.to_owned(),
             meta,
@@ -606,7 +738,11 @@ fn sort_value(agg: &Agg, rest: &str, st: Option<&Stats>) -> Result<f64, String> 
         Metric::Max => st.max,
         Metric::ValueCount => st.count as f64,
         Metric::Cardinality { .. } => st.hll.as_ref().map_or(0, Hll::cardinality) as f64,
-        Metric::Terms(_) | Metric::Histogram(_) | Metric::Filters(_) | Metric::Range(_) => {
+        Metric::Terms(_)
+        | Metric::Histogram(_)
+        | Metric::Filters(_)
+        | Metric::Range(_)
+        | Metric::TopHits(_) => {
             return Err(NOT_SORTABLE.into());
         }
         Metric::Stats | Metric::ExtendedStats { .. } | Metric::Percentiles { .. } => {
@@ -656,6 +792,8 @@ pub(crate) struct Stats {
     buckets: Vec<Stats>,
     /// A `range` bucket's key and bounds.
     range: Option<RangeBucket>,
+    /// The best hits so far (only for `top_hits`).
+    top: Vec<TopHit>,
 }
 
 impl Default for Stats {
@@ -675,6 +813,7 @@ impl Default for Stats {
             subs: vec![],
             buckets: vec![],
             range: None,
+            top: vec![],
         }
     }
 }
@@ -707,6 +846,7 @@ impl Stats {
         self.max = self.max.max(o.max);
         self.date |= o.date;
         self.range = self.range.take().or(o.range);
+        self.top.extend(o.top);
         match (&mut self.hll, o.hll) {
             (Some(h), Some(o)) => h.merge(&o),
             (h, o) => *h = h.take().or(o),
@@ -805,6 +945,8 @@ type DiskValues<'s> = Box<dyn FnMut(&str) -> Option<Vec<Value>> + 's>;
 /// Collects one index's matches for every aggregation of a request.
 pub(crate) struct Collector<'s, 'a> {
     searcher: &'s Searcher<'a>,
+    /// The searched index's name, which `top_hits` report.
+    index_name: &'s str,
     aggs: &'s [Agg],
     /// Per aggregation: its field's mapping in this index, `None` if unmapped.
     mappings: Vec<Option<&'a FieldMapping>>,
@@ -843,11 +985,13 @@ impl<'s, 'a> Collector<'s, 'a> {
     pub(crate) fn new(
         aggs: &'s [Agg],
         searcher: &'s Searcher<'a>,
+        index_name: &'s str,
         profile: bool,
     ) -> Result<Self, QueryError> {
         let index = searcher.index;
         let mut c = Collector {
             searcher,
+            index_name,
             aggs,
             mappings: vec![],
             disk: vec![],
@@ -919,7 +1063,7 @@ impl<'s, 'a> Collector<'s, 'a> {
                 });
             }
             let sub = match agg.metric.buckets() && !agg.subs.is_empty() {
-                true => Some(Collector::new(&agg.subs, searcher, profile)?),
+                true => Some(Collector::new(&agg.subs, searcher, index_name, profile)?),
                 false => None,
             };
             let empty = sub.as_ref().map(|s| s.stats.clone()).unwrap_or_default();
@@ -968,10 +1112,11 @@ impl<'s, 'a> Collector<'s, 'a> {
         Ok(c)
     }
 
-    pub(crate) fn collect(&mut self, id: &str, doc: &Document) {
+    /// Collects a matching document (`score` its query score).
+    pub(crate) fn collect(&mut self, id: &str, doc: &Document, score: f64) {
         for i in 0..self.aggs.len() {
             let start = self.timings.is_some().then(Instant::now);
-            self.collect_one(i, id, doc);
+            self.collect_one(i, id, doc, score);
             if let (Some(t), Some(start)) = (&mut self.timings, start) {
                 t[i].collect += nanos(start);
                 t[i].collect_count += 1;
@@ -979,8 +1124,24 @@ impl<'s, 'a> Collector<'s, 'a> {
         }
     }
 
-    fn collect_one(&mut self, i: usize, id: &str, doc: &Document) {
+    fn collect_one(&mut self, i: usize, id: &str, doc: &Document, score: f64) {
         let matches = match &self.aggs[i].metric {
+            Metric::TopHits(t) => {
+                let st = &mut self.stats[i];
+                st.count += 1;
+                st.top.push(TopHit {
+                    index: self.index_name.to_owned(),
+                    id: id.to_owned(),
+                    score,
+                    sort: self.searcher.sort_values(&t.sort, score, doc),
+                    doc: doc.clone(),
+                });
+                // ponytail: re-sorts at twice the kept hits; a heap if top_hits get large
+                if st.top.len() > 2 * t.from.saturating_add(t.size).max(8) {
+                    t.keep_top(&mut st.top);
+                }
+                return;
+            }
             Metric::Filter(q) => self.searcher.score(q, id, doc).is_some(),
             Metric::Missing => self.values(i, id, doc).is_empty() && self.missing[i].is_none(),
             // collected over every document by `finish_terms`
@@ -996,7 +1157,7 @@ impl<'s, 'a> Collector<'s, 'a> {
                 for (b, _) in st.buckets.iter_mut().zip(hits).filter(|(_, hit)| *hit) {
                     b.count += 1;
                     if let Some(sub) = &mut self.subs[i] {
-                        sub.collect_into(&mut b.subs, id, doc);
+                        sub.collect_into(&mut b.subs, id, doc, score);
                     }
                 }
                 return;
@@ -1024,7 +1185,7 @@ impl<'s, 'a> Collector<'s, 'a> {
                 for (b, _) in st.buckets.iter_mut().zip(hits).filter(|(_, hit)| *hit) {
                     b.count += 1;
                     if let Some(sub) = &mut self.subs[i] {
-                        sub.collect_into(&mut b.subs, id, doc);
+                        sub.collect_into(&mut b.subs, id, doc, score);
                     }
                 }
                 return;
@@ -1035,8 +1196,8 @@ impl<'s, 'a> Collector<'s, 'a> {
                     t[i].multi_valued |= vals.len() > 1;
                 }
                 match vals.is_empty() {
-                    true => self.add(i, self.missing[i].iter().cloned().collect(), id, doc),
-                    false => self.add(i, vals, id, doc),
+                    true => self.add(i, self.missing[i].iter().cloned().collect(), id, doc, score),
+                    false => self.add(i, vals, id, doc, score),
                 }
                 return;
             }
@@ -1045,15 +1206,15 @@ impl<'s, 'a> Collector<'s, 'a> {
             let st = &mut self.stats[i];
             st.count += 1;
             if let Some(sub) = &mut self.subs[i] {
-                sub.collect_into(&mut st.subs, id, doc);
+                sub.collect_into(&mut st.subs, id, doc, score);
             }
         }
     }
 
     /// Collects a document into `stats`, one bucket's results of these aggregations.
-    fn collect_into(&mut self, stats: &mut Vec<Stats>, id: &str, doc: &Document) {
+    fn collect_into(&mut self, stats: &mut Vec<Stats>, id: &str, doc: &Document, score: f64) {
         std::mem::swap(&mut self.stats, stats);
-        self.collect(id, doc);
+        self.collect(id, doc, score);
         std::mem::swap(&mut self.stats, stats);
     }
 
@@ -1078,7 +1239,7 @@ impl<'s, 'a> Collector<'s, 'a> {
         }
     }
 
-    fn add(&mut self, i: usize, vals: Vec<Value>, id: &str, doc: &Document) {
+    fn add(&mut self, i: usize, vals: Vec<Value>, id: &str, doc: &Document, score: f64) {
         let vals = match &self.aggs[i].metric {
             Metric::Histogram(h) => h.keys(vals),
             _ => vals,
@@ -1088,7 +1249,7 @@ impl<'s, 'a> Collector<'s, 'a> {
             let sub = &mut self.subs[i];
             t.add(vals, |stats| {
                 if let Some(sub) = sub {
-                    sub.collect_into(stats, id, doc);
+                    sub.collect_into(stats, id, doc, score);
                 }
             });
             return;
@@ -1153,9 +1314,13 @@ impl Collector<'_, '_> {
                 for (id, doc) in index.docs().filter(|(_, d)| index.searchable(d)) {
                     st.count += 1;
                     if let Some(sub) = &mut self.subs[i] {
-                        sub.collect_into(&mut st.subs, id, &doc);
+                        // ES scores `global` matches as match_all does
+                        sub.collect_into(&mut st.subs, id, &doc, 1.0);
                     }
                 }
+            }
+            if let Metric::TopHits(t) = &self.aggs[i].metric {
+                t.keep_top(&mut st.top);
             }
             if let (true, Some(sub)) = (self.aggs[i].metric.single(), &mut self.subs[i]) {
                 sub.finish_terms(&mut st.subs);
@@ -1225,6 +1390,7 @@ impl Collector<'_, '_> {
             Metric::Filters(_) => "FiltersAggregator",
             // ponytail: ES runs ranges as NoOverlap, Overlap or from filters; not profiled yet
             Metric::Range(_) => "NoOverlap",
+            Metric::TopHits(_) => "TopHitsAggregator",
             _ if m.is_none() && agg.missing.is_none() => match agg.metric {
                 Metric::Stats | Metric::ExtendedStats { .. } | Metric::Percentiles { .. } => {
                     "NonCollectingMultiMetricAggregator"
@@ -1494,6 +1660,10 @@ fn render_counted(
                 }
                 body.insert("buckets".into(), keyed_buckets(r.keyed, list));
             }
+            Metric::TopHits(t) => {
+                let hits = t.render(std::mem::take(&mut st.top), st.count);
+                body.insert("hits".into(), hits);
+            }
             Metric::Avg => put(&mut body, "value", avg),
             Metric::Sum => put(&mut body, "value", Some(st.sum)),
             Metric::Min => put(&mut body, "value", min),
@@ -1729,6 +1899,35 @@ mod tests {
             "value_count#c": {"value": 0},
         });
         assert_eq!(got, want);
+    }
+
+    #[test]
+    fn top_hits_keep_the_top_documents_of_each_bucket() {
+        let body = json!({"query": {"range": {"i": {"gte": 50}}}, "aggs": {
+            "k": {"terms": {"field": "k"}, "aggs": {"top": {"top_hits": {
+                "size": 1, "sort": [{"i": "desc"}], "_source": ["i"], "version": true,
+            }}}},
+            "all": {"top_hits": {"from": 1, "seq_no_primary_term": true,
+                "_source": {"excludes": ["t", "at", "k", "f"]}}},
+            "none": {"top_hits": {"_source": false}},
+        }});
+        let aggs = aggs_of(&index(), body);
+        let top = json!({"hits": {"total": {"value": 2, "relation": "eq"}, "max_score": null,
+            "hits": [{"_index": "", "_id": "3", "_version": 1, "_score": null,
+                "_source": {"i": 101}, "sort": [101]}]}});
+        assert_eq!(aggs["k"]["buckets"][0]["top"], top);
+        // a constant-score query ties every hit, so they keep their index order
+        let hit = |id: &str, seq_no: u64, i: u64| {
+            json!({"_index": "", "_id": id, "_seq_no": seq_no, "_primary_term": 1,
+                "_score": 1.0, "_source": {"i": i}})
+        };
+        let all = json!({"hits": {"total": {"value": 3, "relation": "eq"}, "max_score": 1.0,
+            "hits": [hit("3", 2, 101), hit("4", 3, 151)]}});
+        assert_eq!(aggs["all"], all);
+        assert!(aggs["none"]["hits"]["hits"][0].get("_source").is_none());
+        let body = json!({"aggs": {"t": {"top_hits": {"highlight": {}}}}});
+        let err = SearchRequest::parse(&body).unwrap_err();
+        assert_eq!(err.msg, "[top_hits] unknown field [highlight]");
     }
 
     #[test]

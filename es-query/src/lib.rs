@@ -714,11 +714,7 @@ impl SearchRequest {
                 None => Err(format!("[{k}] must be a number").into()),
             },
         };
-        let sort = match body.get("sort") {
-            None => vec![],
-            Some(Value::Array(a)) => a.iter().map(parse_sort).collect::<Result<_, _>>()?,
-            Some(s) => vec![parse_sort(s)?],
-        };
+        let sort = body.get("sort").map_or(Ok(vec![]), parse_sorts)?;
         let track_total_hits = match body.get("track_total_hits") {
             None => None,
             Some(v) if v.is_boolean() || v.is_i64() => Some(v.to_string()),
@@ -741,6 +737,14 @@ impl SearchRequest {
             size: usize_of("size", 10)?,
             sort,
         })
+    }
+}
+
+/// A `sort`: one sort field or an array of them.
+fn parse_sorts(v: &Value) -> Result<Vec<SortField>, QueryError> {
+    match v {
+        Value::Array(a) => a.iter().map(parse_sort).collect(),
+        s => Ok(vec![parse_sort(s)?]),
     }
 }
 
@@ -861,6 +865,51 @@ fn fielddata_disabled(field: &str) -> QueryError {
     ))
 }
 
+impl Searcher<'_> {
+    /// A matching document's values for `sort` (`score` its query score).
+    fn sort_values(&self, sort: &[SortField], score: f64, doc: &Document) -> Vec<Value> {
+        sort.iter()
+            .map(|f| match f.field.as_str() {
+                "_score" => Value::from(score as f32),
+                field => {
+                    let (_, path) = self.kind(field);
+                    let mut v = values(&doc.source, path);
+                    v.sort_by(|a, b| scalar_cmp(a, b));
+                    let pick = if f.desc { v.last() } else { v.first() };
+                    pick.map_or_else(
+                        || match &f.missing {
+                            Some(m) if !matches!(m.as_str(), Some("_first" | "_last")) => m.clone(),
+                            _ => Value::Null,
+                        },
+                        |v| (*v).clone(),
+                    )
+                }
+            })
+            .collect()
+    }
+}
+
+/// Orders two hits, given as their `sort_values` and score, by `sort` (by score if empty).
+fn cmp_sorted(sort: &[SortField], (a, sa): (&[Value], f64), (b, sb): (&[Value], f64)) -> Ordering {
+    if sort.is_empty() {
+        return sb.total_cmp(&sa);
+    }
+    sort.iter()
+        .zip(a.iter().zip(b))
+        .fold(Ordering::Equal, |acc, (f, (x, y))| {
+            let first = f.missing.as_ref().and_then(Value::as_str) == Some("_first");
+            acc.then_with(|| match (x.is_null(), y.is_null()) {
+                // Missing values sort last in both directions unless `missing: _first`.
+                (true, false) if first => Ordering::Less,
+                (false, true) if first => Ordering::Greater,
+                (true, false) => Ordering::Greater,
+                (false, true) => Ordering::Less,
+                _ if f.desc => scalar_cmp(y, x),
+                _ => scalar_cmp(x, y),
+            })
+        })
+}
+
 pub fn search<'a>(index: &'a Index, req: &SearchRequest) -> SearchResult<'a> {
     search_many(&[("", index, None)], req).expect("no alias filter to parse")
 }
@@ -880,7 +929,7 @@ pub fn search_many<'a>(
     for (pos, (name, index, filter)) in targets.iter().enumerate() {
         let query = with_filter(&req.query, *filter)?;
         let s = Searcher::new(index, &query);
-        let mut collector = match aggs::Collector::new(&req.aggs, &s, req.profile) {
+        let mut collector = match aggs::Collector::new(&req.aggs, &s, name, req.profile) {
             Ok(c) => c,
             Err(e) => {
                 failures.push((*name, e));
@@ -891,29 +940,8 @@ pub fn search_many<'a>(
             let Some(score) = s.score(&query, id, &doc) else {
                 continue;
             };
-            collector.collect(id, &doc);
-            let sort: Vec<Value> = req
-                .sort
-                .iter()
-                .map(|f| match f.field.as_str() {
-                    "_score" => Value::from(score as f32),
-                    field => {
-                        let (_, path) = s.kind(field);
-                        let mut v = values(&doc.source, path);
-                        v.sort_by(|a, b| scalar_cmp(a, b));
-                        let pick = if f.desc { v.last() } else { v.first() };
-                        pick.map_or_else(
-                            || match &f.missing {
-                                Some(m) if !matches!(m.as_str(), Some("_first" | "_last")) => {
-                                    m.clone()
-                                }
-                                _ => Value::Null,
-                            },
-                            |v| (*v).clone(),
-                        )
-                    }
-                })
-                .collect();
+            collector.collect(id, &doc, score);
+            let sort = s.sort_values(&req.sort, score, &doc);
             hits.push((
                 pos,
                 Hit {
@@ -933,27 +961,8 @@ pub fn search_many<'a>(
         }
     }
     hits.sort_by(|(pa, a, sa), (pb, b, sb)| {
-        let fields = if req.sort.is_empty() {
-            sb.total_cmp(sa)
-        } else {
-            req.sort.iter().zip(a.sort.iter().zip(&b.sort)).fold(
-                Ordering::Equal,
-                |acc, (f, (x, y))| {
-                    let first = f.missing.as_ref().and_then(Value::as_str) == Some("_first");
-                    acc.then_with(|| match (x.is_null(), y.is_null()) {
-                        // Missing values sort last in both directions unless `missing: _first`.
-                        (true, false) if first => Ordering::Less,
-                        (false, true) if first => Ordering::Greater,
-                        (true, false) => Ordering::Greater,
-                        (false, true) => Ordering::Less,
-                        _ if f.desc => scalar_cmp(y, x),
-                        _ => scalar_cmp(x, y),
-                    })
-                },
-            )
-        };
         // ponytail: ties fall back to index order then write order, standing in for shard/doc order
-        fields
+        cmp_sorted(&req.sort, (&a.sort, *sa), (&b.sort, *sb))
             .then(pa.cmp(pb))
             .then(a.doc.seq_no.cmp(&b.doc.seq_no))
     });
