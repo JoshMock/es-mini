@@ -90,6 +90,34 @@ fn java_double(x: f64) -> String {
     }
 }
 
+/// Java's `DecimalFormat` (HALF_EVEN) of `x`: a literal prefix and suffix around `0`/`#`
+/// integer and fraction digits.
+// ponytail: no grouping, quoting, exponents, percent or negative subpatterns; add when needed
+fn decimal_format(pattern: &str, x: f64) -> String {
+    let digit = |c: char| matches!(c, '#' | '0' | ',' | '.');
+    let start = pattern.find(digit).unwrap_or(pattern.len());
+    let end = (pattern[start..].find(|c| !digit(c))).map_or(pattern.len(), |i| start + i);
+    let (int, frac) = pattern[start..end]
+        .split_once('.')
+        .unwrap_or((&pattern[start..end], ""));
+    let min_int = int.matches('0').count();
+    let (min_frac, max_frac) = (frac.matches('0').count(), frac.len());
+    // Rust rounds the exact binary value half to even, as DecimalFormat does
+    let s = format!("{:.max_frac$}", x.abs());
+    let (i, f) = s.split_once('.').unwrap_or((&s, ""));
+    let f = f.trim_end_matches('0');
+    let f = format!("{f:0<min_frac$}");
+    let i = i.trim_start_matches('0');
+    let mut num = format!("{i:0>min_int$}");
+    if !f.is_empty() {
+        num = format!("{num}.{f}");
+    } else if num.is_empty() {
+        num = "0".into();
+    }
+    let sign = if x < 0.0 { "-" } else { "" };
+    format!("{sign}{}{num}{}", &pattern[..start], &pattern[end..])
+}
+
 /// One named aggregation of a request.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Agg {
@@ -1171,6 +1199,21 @@ mod tests {
     use crate::{SearchRequest, search};
     use es_index::{FieldMapping, Index, Indices, disk};
     use serde_json::{Value, json};
+
+    #[test]
+    fn decimal_format_follows_java() {
+        let f = super::decimal_format;
+        assert_eq!(f("Value is ##0.0", 150.0), "Value is 150.0");
+        assert_eq!(f("Value is ##0.0", 0.0), "Value is 0.0");
+        assert_eq!(f("0.0#", 1.0), "1.0");
+        assert_eq!(f("0.0#", 1.256), "1.26");
+        assert_eq!(f("0.0###", 2.5), "2.5");
+        assert_eq!(f("#.#", 0.5), ".5");
+        assert_eq!(f("000", 7.0), "007");
+        assert_eq!(f("0 units", -3.4), "-3 units");
+        // HALF_EVEN
+        assert_eq!(f("0", 2.5), "2");
+    }
 
     fn index() -> Index {
         let mut ix = Index::default();

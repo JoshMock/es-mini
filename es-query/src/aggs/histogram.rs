@@ -21,6 +21,8 @@ pub(super) struct Histogram {
     keyed: bool,
     extended_bounds: Bounds,
     hard_bounds: Option<Bounds>,
+    /// A DecimalFormat pattern for numeric keys.
+    format: Option<String>,
 }
 
 /// ES's DoubleBounds: either end may be open.
@@ -81,6 +83,7 @@ impl Histogram {
             keyed: false,
             extended_bounds: Bounds::default(),
             hard_bounds: None,
+            format: None,
         };
         for (k, v) in params {
             let bad = || QueryError::x_content(format!("[histogram] failed to parse field [{k}]"));
@@ -95,6 +98,7 @@ impl Histogram {
                     }
                 }
                 "offset" => h.offset = num(v).ok_or_else(bad)?,
+                "format" => h.format = Some(v.as_str().ok_or_else(bad)?.into()),
                 "keyed" => h.keyed = v.as_bool().ok_or_else(bad)?,
                 "min_doc_count" => {
                     let n = int(v).ok_or_else(bad)?;
@@ -210,8 +214,9 @@ impl Histogram {
         }
         let rendered = v.into_iter().map(|(key, count, mut subs)| {
             let mut out = Map::new();
-            let key_as_string = match b.format {
-                Format::Date => Some(iso_date(key as u64)),
+            let key_as_string = match (b.format, &self.format) {
+                (Format::Date, _) => Some(iso_date(key as u64)),
+                (_, Some(p)) => Some(super::decimal_format(p, key)),
                 _ => None,
             };
             if let Some(s) = &key_as_string {
@@ -357,6 +362,21 @@ mod tests {
             got.unwrap()["h"]["buckets"],
             json!([{"key_as_string": "2021-05-01T10:00:00.000Z", "key": 1_619_863_200_000.0,
                 "doc_count": 1}])
+        );
+    }
+
+    #[test]
+    fn histogram_format_renders_key_as_string() {
+        let got = run(
+            &[&index(&[json!(1), json!(51)])],
+            json!({"h": {"histogram": {"field": "n", "interval": 50, "format": "Value is ##0.0"}}}),
+        );
+        assert_eq!(
+            got.unwrap()["h"]["buckets"],
+            json!([
+                {"key_as_string": "Value is 0.0", "key": 0.0, "doc_count": 1},
+                {"key_as_string": "Value is 50.0", "key": 50.0, "doc_count": 1},
+            ])
         );
     }
 
