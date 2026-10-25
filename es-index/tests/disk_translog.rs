@@ -143,6 +143,30 @@ fn async_durability_defers_fsync() {
 }
 
 #[test]
+fn flushes_idle_shards() {
+    let dir = scratch("idle");
+    let mut indices = created();
+    disk::persist(&dir, &mut indices).unwrap();
+    let first = ckp(&dir).generation;
+    indices.get_mut("idx").unwrap().put("2", json!({}));
+    disk::persist(&dir, &mut indices).unwrap();
+    disk::sync(&dir, &mut indices).unwrap();
+    assert_eq!((ckp(&dir).generation, ckp(&dir).num_ops), (first, 1));
+    // No writes for 5 minutes (Elasticsearch's indices.memory.shard_inactive_time): a flush.
+    let ago = std::time::SystemTime::now() - std::time::Duration::from_secs(301);
+    let file = std::fs::File::options()
+        .write(true)
+        .open(shard(&dir).join("translog/translog.ckp"))
+        .unwrap();
+    file.set_modified(ago).unwrap();
+    disk::sync(&dir, &mut indices).unwrap();
+    let cp = ckp(&dir);
+    assert!(cp.generation > first, "no flush");
+    assert_eq!(cp.num_ops, 0);
+    assert_eq!(disk::open(&dir).unwrap()["idx"].docs().count(), 2);
+}
+
+#[test]
 fn creating_an_index_commits() {
     let dir = scratch("create");
     let mut indices = created();

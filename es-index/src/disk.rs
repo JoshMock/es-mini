@@ -690,14 +690,16 @@ pub fn persist(data_dir: &Path, indices: &mut Indices) -> es_codec::Result<()> {
     log(data_dir, indices, false)
 }
 
-/// Like [`persist`], also logging the writes of `async` durability indices; run it every
-/// [`sync_interval`], as Elasticsearch syncs their translogs.
+/// Like [`persist`], also logging the writes of `async` durability indices, and flushing once a
+/// shard with translog operations has had no writes for 5 minutes (Elasticsearch's
+/// `indices.memory.shard_inactive_time`). Run it every [`sync_interval`]. It commits no cluster
+/// metadata: that is [`persist`]'s job.
 pub fn sync(data_dir: &Path, indices: &mut Indices) -> es_codec::Result<()> {
-    if indices.values().all(|ix| ix.unlogged.is_empty()) {
-        return Ok(());
-    }
     log(data_dir, indices, true)
 }
+
+/// Elasticsearch's default `indices.memory.shard_inactive_time`.
+const INACTIVE: Duration = Duration::from_secs(300);
 
 /// The shortest `index.translog.sync_interval` (default 5s) of all indices.
 // ponytail: one timer for all indices, so some sync more often than they ask (never less)
@@ -733,6 +735,9 @@ fn log(data_dir: &Path, indices: &mut Indices, all: bool) -> es_codec::Result<()
         }
     }
     let mut flush = !unchanged || logs.len() != indices.len();
+    if flush && all {
+        return Ok(());
+    }
     if !flush {
         for ((dir, cp), ix) in logs.into_iter().zip(indices.values_mut()) {
             let deferred = ix.settings.get("index.translog.durability") == Some("async");
@@ -741,6 +746,13 @@ fn log(data_dir: &Path, indices: &mut Indices, all: bool) -> es_codec::Result<()
             } else {
                 vec![]
             };
+            // The checkpoint is rewritten on every append, so its age is the shard's idle time.
+            let idle = || {
+                std::fs::metadata(dir.join("translog.ckp"))
+                    .and_then(|m| m.modified())
+                    .is_ok_and(|t| t.elapsed().is_ok_and(|e| e >= INACTIVE))
+            };
+            flush |= all && ops.is_empty() && cp.num_ops > 0 && idle();
             let size = if ops.is_empty() {
                 cp.offset
             } else {
