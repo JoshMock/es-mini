@@ -204,6 +204,11 @@ Fix only real problems, with a failing test first for behavior fixes. Making no 
 Rules:${COMMON_RULES(model)}`;
 }
 
+/** Runs a test command in its own memory-capped cgroup, so a runaway test is killed alone instead
+ * of the OOM killer taking down the loop. Swap is capped too, or the test just swaps. */
+const capped = (...cmd: string[]) =>
+  spawnSync("systemd-run", ["--user", "--scope", "-q", "-p", "MemoryMax=10G", "-p", "MemorySwapMax=0", "--", ...cmd], { cwd: repo, stdio: "inherit" });
+
 /** Returns the reason an iteration is rejected, or undefined if it holds. */
 function verify(
   start: string,
@@ -227,9 +232,9 @@ function verify(
   if (opts.goal && !lines(opts.goal[0]).includes(opts.goal[1])) {
     const cmd = opts.goal[1].match(/Done-check: `([^`]+)`/)?.[1];
     if (!cmd) return "goal removed, but it has no Done-check to verify it";
-    if (spawnSync("sh", ["-c", cmd], { cwd: repo, stdio: "inherit" }).status !== 0) return `goal removed, but its Done-check failed: ${cmd}`;
+    if (capped("sh", "-c", cmd).status !== 0) return `goal removed, but its Done-check failed: ${cmd}`;
   }
-  const check = spawnSync("scripts/check.sh", [], { cwd: repo, stdio: "inherit" });
+  const check = capped("scripts/check.sh");
   if (check.status !== 0) return "scripts/check.sh failed";
   return undefined;
 }
@@ -334,7 +339,7 @@ if (!dryRun && existsSync(join(repo, IN_PROGRESS))) {
   rmSync(join(repo, IN_PROGRESS), { force: true });
 }
 if (git("status", "--porcelain")) throw new Error("working tree must be clean before starting");
-if (!dryRun && unattended && spawnSync("scripts/check.sh", [], { cwd: repo, stdio: "inherit" }).status !== 0) {
+if (!dryRun && unattended && capped("scripts/check.sh").status !== 0) {
   notify("ralph: not started", "scripts/check.sh fails on main; fix it first.");
   console.error("scripts/check.sh fails before the first iteration");
   process.exit(3);
