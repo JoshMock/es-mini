@@ -436,7 +436,11 @@ impl Histogram {
                     }
                     fill(self.next(last.0), &|k| k <= max)?;
                 }
-                _ => fill(self.round(min.unwrap_or(f64::INFINITY)), &|k| k <= max)?,
+                _ => {
+                    if let Some(min) = min {
+                        fill(self.round(min), &|k| k <= max)?;
+                    }
+                }
             }
             v.extend(keys.into_iter().map(|k| (k, 0, b.empty.clone())));
             v.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -833,6 +837,9 @@ mod tests {
             date_histo(&["2020-01-01T00:00:00Z"], fixed).unwrap(),
             json!([["2020-01-01T05:00:00.000+05:30", 1]])
         );
+        // no documents: no buckets (and no rounding of an open end)
+        let none = json!({"field": "at", "calendar_interval": "hour", "time_zone": "Asia/Jakarta"});
+        assert_eq!(date_histo(&[], none).unwrap(), json!([]));
         let bad = json!({"field": "at", "fixed_interval": "1h", "time_zone": "../../etc/passwd"});
         assert_eq!(
             date_histo(&[], bad).unwrap_err(),
