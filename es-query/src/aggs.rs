@@ -1870,6 +1870,21 @@ mod tests {
     }
 
     #[test]
+    fn localized_dates_aggregate_as_millis() {
+        let mut ix = Index::default();
+        let at = FieldMapping::Date {
+            format: Some("E, d MMM yyyy HH:mm:ss Z".into()),
+            locale: Some("fr".into()),
+            fields: Default::default(),
+        };
+        ix.mappings.properties.insert("at".into(), at);
+        ix.put("1", json!({"at": "mer., 6 déc. 2000 02:55:00 -0800"}));
+        let aggs = aggs_of(&ix, json!({"aggs": {"max": {"max": {"field": "at"}}}}));
+        // 2000-12-06T10:55:00Z
+        assert_eq!(aggs["max"]["value"], 976_100_100_000.0);
+    }
+
+    #[test]
     fn range_bounds_take_the_field_precision() {
         // like ES's "Float Endpoint Exclusive": 0.04 as a float is below 0.04 as a double
         let mut ix = Index::default();

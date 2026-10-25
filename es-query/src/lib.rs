@@ -112,7 +112,7 @@ const MONTHS: [(&str, [&str; 12]); 2] = [
     ),
 ];
 
-/// Epoch seconds of `"E, d MMM yyyy HH:mm:ss Z"` with localized month names.
+/// Epoch millis of `"E, d MMM yyyy HH:mm:ss Z"` with localized month names.
 // ponytail: only this one custom format; generalize to a token-driven parser when another is needed.
 fn parse_dated(v: &Value, locale: &str) -> Option<i64> {
     let months = MONTHS.iter().find(|(l, _)| *l == locale)?.1;
@@ -126,13 +126,7 @@ fn parse_dated(v: &Value, locale: &str) -> Option<i64> {
     let z = p.next()?;
     let off = (z[1..3].parse::<i64>().ok()? * 3600 + z[3..5].parse::<i64>().ok()? * 60)
         * if z.starts_with('-') { -1 } else { 1 };
-    // days from civil (Howard Hinnant)
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    Some((era * 146097 + doe - 719468) * 86400 + secs - off)
+    Some((es_index::days_from_civil(y, m, d) * 86400 + secs - off) * 1000)
 }
 
 /// Epoch millis of a value of a date field with `format` and `locale`.
