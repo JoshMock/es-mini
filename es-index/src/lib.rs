@@ -492,6 +492,10 @@ impl Index {
                         (v ^ ((v >> 31) & i32::MAX)) as u32,
                     )))
                 }),
+                M::HalfFloat => numbers(|v| {
+                    let s = v as i16;
+                    Value::from(f64::from(half_float(s ^ ((s >> 15) & 0x7fff))))
+                }),
                 M::Boolean => numbers(|v| Value::Bool(v != 0)),
                 M::Keyword { .. } => match column {
                     Some(D::Ordinals { ords, terms }) => Some(
@@ -622,6 +626,52 @@ fn random_uuid() -> String {
 /// own inverse.
 fn sortable_double(v: i64) -> f64 {
     f64::from_bits((v ^ ((v >> 63) & i64::MAX)) as u64)
+}
+
+/// The IEEE half-precision bits nearest `v` (ties to even), like Lucene's
+/// `HalfFloatPoint.halfFloatToShortBits`.
+pub fn half_float_bits(v: f32) -> i16 {
+    let round_shift = |i: i32, shift: i32| {
+        let i = i + (1 << (shift - 1));
+        ((i - ((i as u32 >> shift) as i32 & 1)) as u32 >> shift) as i32
+    };
+    let bits = v.to_bits() as i32;
+    let (sign, exp, mantissa) = (bits >> 31 & 1, bits >> 23 & 0xff, bits & 0x7f_ffff);
+    let (exp, mantissa) = match exp {
+        0xff => (0x1f, mantissa >> 13),
+        // even the largest denormal float is below the smallest half float
+        0 => (0, 0),
+        _ => match exp - 127 + 15 {
+            e if e >= 0x1f => (0x1f, 0),
+            e if 23 - 10 - e + 1 >= 32 => (0, 0),
+            e => {
+                let m = match e <= 0 {
+                    true => round_shift(mantissa | 0x80_0000, 23 - 10 - e + 1),
+                    false => round_shift(e << 23 | mantissa, 23 - 10),
+                };
+                (m >> 10, m & 0x3ff)
+            }
+        },
+    };
+    (sign << 15 | exp << 10 | mantissa) as i16
+}
+
+/// The float of half-precision `bits` (exact).
+pub fn half_float(bits: i16) -> f32 {
+    let (exp, mantissa) = (i32::from(bits) >> 10 & 0x1f, f32::from(bits as u16 & 0x3ff));
+    let v = match exp {
+        0x1f if mantissa == 0.0 => f32::INFINITY,
+        0x1f => f32::NAN,
+        0 => mantissa * 2f32.powi(-24),
+        e => (1024.0 + mantissa) * 2f32.powi(e - 25),
+    };
+    if bits < 0 { -v } else { v }
+}
+
+/// The sortable short ES stores as a `half_float` doc value (`halfFloatToSortableShort`).
+pub fn half_float_sortable(v: f32) -> i64 {
+    let s = half_float_bits(v);
+    i64::from(s ^ ((s >> 15) & 0x7fff))
 }
 
 /// The 16-byte encoding of an `ip` value (IPv4 as IPv4-mapped IPv6), like Lucene's
@@ -1190,6 +1240,38 @@ mod tests {
         // text has no doc values; a document written since opening is in memory
         assert_eq!(read("t", "1"), None);
         assert_eq!(read("n", "3"), None);
+    }
+
+    #[test]
+    fn half_floats_round_like_lucene() {
+        let half = |f: f32| f64::from(half_float(half_float_bits(f)));
+        assert_eq!(half(0.0152), 0.01519775390625);
+        assert_eq!(half(0.04), 0.040008544921875);
+        assert_eq!(half(-2.5), -2.5);
+        assert_eq!(half(1e-6), 1.0132789611816406e-6);
+        assert_eq!(half(65520.0), f64::INFINITY);
+        assert_eq!(half_float_bits(0.0152), 0x23c8);
+        // sortable: negative values sort before positive ones
+        assert!(half_float_sortable(-1.0) < half_float_sortable(-0.5));
+        assert!(half_float_sortable(-0.5) < half_float_sortable(2.0));
+    }
+
+    #[test]
+    fn half_float_fields_keep_half_precision_on_disk() {
+        let dir = std::env::temp_dir().join(format!("esm-half-float-{}", std::process::id()));
+        let m: FieldMapping = serde_json::from_value(json!({"type": "half_float"})).unwrap();
+        assert_eq!(
+            serde_json::to_value(&m).unwrap(),
+            json!({"type": "half_float"})
+        );
+        let mut ix = Index::default();
+        ix.mappings.properties.insert("h".into(), m);
+        ix.put("1", json!({"h": [0.0152, -2.5]}));
+        disk::save(&dir, &Indices::from([("i".to_owned(), ix)])).unwrap();
+        let opened = disk::open(&dir).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let read = opened["i"].disk_values("h")("1");
+        assert_eq!(read, Some(vec![json!(-2.5), json!(0.01519775390625)]));
     }
 
     #[test]

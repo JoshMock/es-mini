@@ -2,11 +2,14 @@
 
 use crate::{codec_util::ID_LEN, output::Output};
 
-/// Sortable big-endian bytes for `v` in a `width`-byte field (`LongPoint` is 8, `IntPoint` is 4).
+/// Sortable big-endian bytes for `v` in a `width`-byte field (`LongPoint` is 8, `IntPoint` is 4,
+/// `HalfFloatPoint` is 2).
 pub fn sortable_bytes(v: i64, width: usize) -> Vec<u8> {
     let be = ((v as u64) ^ (1 << 63)).to_be_bytes();
     if width == 8 {
         be.to_vec()
+    } else if width == 2 {
+        (((v as i16) as u16) ^ (1 << 15)).to_be_bytes().to_vec()
     } else {
         (((v as i32) as u32) ^ (1 << 31)).to_be_bytes().to_vec()
     }
@@ -109,6 +112,7 @@ mod tests {
     fn sortable_bytes_order_like_numbers() {
         assert_eq!(sortable_bytes(4, 8), [0x80, 0, 0, 0, 0, 0, 0, 4]);
         assert_eq!(sortable_bytes(-1, 4), [0x7f, 0xff, 0xff, 0xff]);
+        assert_eq!(sortable_bytes(-1, 2), [0x7f, 0xff]);
         assert!(sortable_bytes(-5, 8) < sortable_bytes(3, 8));
     }
 

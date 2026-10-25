@@ -525,7 +525,14 @@ fn user_fields(
                 ));
                 (IndexOptions::Docs, DocValuesType::SortedNumeric, true)
             }
-            M::Long | M::Integer | M::Short | M::Byte | M::Double | M::Float | M::Date { .. } => {
+            M::Long
+            | M::Integer
+            | M::Short
+            | M::Byte
+            | M::Double
+            | M::Float
+            | M::HalfFloat
+            | M::Date { .. } => {
                 // Doc values are the sortable longs ES stores; points are their big-endian bytes.
                 let sortable_long = |f: f64| {
                     let b = f.to_bits() as i64;
@@ -541,6 +548,12 @@ fn user_fields(
                     M::Float => (
                         4,
                         typed(&values, &|v| v.as_f64().map(|f| sortable_int(f as f32))),
+                    ),
+                    M::HalfFloat => (
+                        2,
+                        typed(&values, &|v| {
+                            v.as_f64().map(|f| crate::half_float_sortable(f as f32))
+                        }),
                     ),
                     M::Date { .. } => (8, typed(&values, &crate::parse_date_millis)),
                     _ => (4, typed(&values, &|v| v.as_i64())),

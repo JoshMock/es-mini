@@ -25,6 +25,7 @@ pub enum FieldMapping {
     Byte,
     Double,
     Float,
+    HalfFloat,
     Boolean,
     Date {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -62,7 +63,7 @@ impl FieldMapping {
             Self::Keyword { .. } => "keyword",
             Self::Long => "long",
             Self::Integer | Self::Short | Self::Byte => "integer",
-            Self::Double | Self::Float => "double",
+            Self::Double | Self::Float | Self::HalfFloat => "double",
             Self::Boolean => "boolean",
             Self::Date { .. } => "date",
             Self::DateNanos { .. } => "date_nanos",

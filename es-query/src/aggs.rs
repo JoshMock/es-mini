@@ -604,6 +604,11 @@ fn doc_value(s: &Searcher, field: &str, mapping: &FieldMapping, v: &Value) -> Op
         }
         M::Double => num(v).map(Value::from),
         M::Float => num(v).map(|f| Value::from(f64::from(f as f32))),
+        M::HalfFloat => num(v).map(|f| {
+            Value::from(f64::from(es_index::half_float(es_index::half_float_bits(
+                f as f32,
+            ))))
+        }),
         M::Date { .. } | M::DateNanos { .. } => match s.instant(field) {
             Some(instant) => instant(v),
             // an unmapped field's `value_type`
@@ -1155,7 +1160,11 @@ impl Collector<'_, '_> {
                         debug.insert("collection_strategy".into(), field.into());
                         "terms"
                     }
-                    _ if matches!(m, Some(FieldMapping::Double | FieldMapping::Float)) => {
+                    _ if matches!(
+                        m,
+                        Some(FieldMapping::Double | FieldMapping::Float | FieldMapping::HalfFloat)
+                    ) =>
+                    {
                         "double_terms"
                     }
                     _ => "long_terms",
@@ -1187,7 +1196,9 @@ impl Collector<'_, '_> {
 fn hash(m: Option<&FieldMapping>, v: &Value) -> u64 {
     use FieldMapping as M;
     match m {
-        Some(M::Double | M::Float) => hll::mix64(num(v).unwrap_or_default().to_bits()),
+        Some(M::Double | M::Float | M::HalfFloat) => {
+            hll::mix64(num(v).unwrap_or_default().to_bits())
+        }
         Some(M::Keyword { .. }) | None => hll::murmur3(es_index::postings::text(v).as_bytes()),
         Some(_) => {
             let x = int(v).or_else(|| v.as_bool().map(i64::from));
