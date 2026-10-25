@@ -409,3 +409,34 @@ async fn value_type_mismatch_fails_only_that_shard() {
     let (s, _) = call(&app, Method::POST, "/a/_search", Some(aggs)).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn terms_lookup_reads_terms_from_a_document() {
+    let app = seeded().await;
+    call(
+        &app,
+        Method::PUT,
+        "/lists/_doc/fruit",
+        Some(json!({"wanted": {"n": [1, 3]}})),
+    )
+    .await;
+    let lookup = |id: &str| {
+        json!({"size": 0, "query": {"terms": {"n": {"index": "lists", "id": id, "path": "wanted.n"}}},
+            "aggs": {"f": {"filter": {"terms": {"n": {"index": "lists", "id": id, "path": "wanted.n"}}}}}})
+    };
+    let (s, r) = call(&app, Method::POST, "/idx/_search", Some(lookup("fruit"))).await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    assert_eq!(r["hits"]["total"]["value"], 2);
+    assert_eq!(r["aggregations"]["f"]["doc_count"], 2);
+    // A missing lookup document has no terms, so it matches nothing.
+    let (_, r) = call(&app, Method::POST, "/idx/_search", Some(lookup("none"))).await;
+    assert_eq!(r["hits"]["total"]["value"], 0);
+    let (s, _) = call(
+        &app,
+        Method::POST,
+        "/idx/_search",
+        Some(json!({"query": {"terms": {"n": {"index": "nope", "id": "x", "path": "n"}}}})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}

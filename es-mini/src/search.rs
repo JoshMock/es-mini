@@ -115,6 +115,37 @@ fn profile(targets: &[es_query::Target], aggs: Vec<Value>) -> Value {
     json!({"shards": shards})
 }
 
+/// Replaces each terms lookup (`"terms": {field: {"index", "id", "path"}}`) in a request body
+/// with the values at `path` in that document (none if it is missing), as Elasticsearch fetches
+/// them before searching.
+fn terms_lookups(indices: &Indices, v: &mut Value) -> Result<(), AppError> {
+    match v {
+        Value::Array(a) => a.iter_mut().try_for_each(|x| terms_lookups(indices, x)),
+        Value::Object(o) => {
+            if let Some(Value::Object(terms)) = o.get_mut("terms") {
+                for spec in terms.values_mut() {
+                    let Some((Some(index), Some(id), Some(path))) = spec.as_object().map(|l| {
+                        let s = |k| l.get(k).and_then(Value::as_str);
+                        (s("index"), s("id"), s("path"))
+                    }) else {
+                        continue;
+                    };
+                    let index = &indices[&crate::docs::single_index(indices, index)?];
+                    *spec = match index.get(id) {
+                        Some(d) => es_index::postings::values(&d.source, path)
+                            .into_iter()
+                            .cloned()
+                            .collect(),
+                        None => Value::Array(vec![]),
+                    };
+                }
+            }
+            o.values_mut().try_for_each(|x| terms_lookups(indices, x))
+        }
+        _ => Ok(()),
+    }
+}
+
 pub async fn search_all(
     state: State<AppState>,
     contexts: Extension<Contexts>,
@@ -154,6 +185,7 @@ pub async fn search(
             "[indices] cannot be used with point in time. Do not specify any index with point in time.".into(),
         ));
     }
+    terms_lookups(&state.read().expect("lock poisoned"), &mut body)?;
     let mut req = SearchRequest::parse(&body).map_err(AppError::from)?;
     if let Some(q) = params.get("q") {
         req.query = query_from_params(q, &params);
@@ -429,7 +461,7 @@ pub async fn count(
             "terminateAfter must be > 0".into(),
         ));
     }
-    let body = parse_body(&body)?;
+    let mut body = parse_body(&body)?;
     if let Some(k) = body
         .as_object()
         .and_then(|o| o.keys().find(|k| *k != "query"))
@@ -438,13 +470,14 @@ pub async fn count(
             "request does not support [{k}]"
         )));
     }
+    let indices = state.read().expect("lock poisoned");
+    terms_lookups(&indices, &mut body)?;
     let query = match params.get("q") {
         Some(q) => query_from_params(q, &params),
         None => body
             .get("query")
             .map_or(Ok(es_query::Query::MatchAll), parse_query)?,
     };
-    let indices = state.read().expect("lock poisoned");
     let resolved = crate::indices::data_targets(&indices, &name, &params)?;
     let n = es_query::count_many(&targets(&indices, &resolved), &query)?;
     let resp = json!({"count": n, "_shards": shards(resolved.len())});
