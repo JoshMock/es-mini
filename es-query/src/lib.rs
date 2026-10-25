@@ -1142,7 +1142,8 @@ pub fn search_many<'a>(
         // ponytail: ES wraps this in an all-shards-failed search_phase_execution_exception
         return Err(failures.swap_remove(0).1);
     }
-    let max_score = by_score
+    // Elasticsearch collects no top docs for size 0, so it reports no max_score.
+    let max_score = (by_score && req.size > 0)
         .then(|| hits.iter().map(|h| h.2 as f32).reduce(f32::max))
         .flatten();
     Ok(SearchResult {

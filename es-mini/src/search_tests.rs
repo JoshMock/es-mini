@@ -462,3 +462,12 @@ async fn hits_fetch_the_requested_fields() {
     let hit = &r["hits"]["hits"][0];
     assert_eq!(hit["fields"], json!({"t": ["green apple"], "n": [1]}));
 }
+
+#[tokio::test]
+async fn size_zero_has_no_max_score() {
+    let app = seeded().await;
+    let body = json!({"size": 0, "query": {"match": {"t": "apple"}}});
+    let (_, r) = call(&app, Method::POST, "/idx/_search", Some(body)).await;
+    assert_eq!(r["hits"]["total"]["value"], 2);
+    assert_eq!(r["hits"]["max_score"], json!(null));
+}
