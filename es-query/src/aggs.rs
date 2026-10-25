@@ -63,6 +63,7 @@ impl Metric {
             Metric::Cardinality { .. } => "cardinality",
             Metric::Percentiles { .. } => "percentiles",
             Metric::Terms(_) => "terms",
+            Metric::Histogram(h) if h.date => "date_histogram",
             Metric::Histogram(_) => "histogram",
             Metric::Filter(_) => "filter",
         }
@@ -187,7 +188,10 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
             keyed: true,
         },
         "terms" => Metric::Terms(Box::new(Terms::parse(name, object()?, &subs)?)),
-        "histogram" => Metric::Histogram(Box::new(Histogram::parse(name, object()?)?)),
+        "histogram" | "date_histogram" => {
+            let h = Histogram::parse(name, object()?, t == "date_histogram")?;
+            Metric::Histogram(Box::new(h))
+        }
         "filter" => Metric::Filter(Box::new(parse_query(params)?)),
         _ => return Err(format!("Unknown aggregation type [{t}]").into()),
     };
@@ -874,6 +878,7 @@ impl Collector<'_, '_> {
             && matches!(&agg.metric, Metric::Terms(terms) if !terms.map)
             && (1..=1000).contains(&t.keys.len());
         let ty = match &agg.metric {
+            Metric::Histogram(h) if h.date => "DateHistogramAggregator",
             Metric::Histogram(_) => "NumericHistogramAggregator",
             // ponytail: ES may run a filter as FilterByFilterAggregator; not profiled yet
             Metric::Filter(_) => "FilterAggregator",

@@ -32,15 +32,11 @@ aggregations/filter.yml/Standard queries get cached
 aggregations/filter.yml/Terms lookup gets cached
 aggregations/global.yml/profile
 aggregations/global.yml/simple
-aggregations/histogram.yml/date_histogram
 aggregations/histogram.yml/date_histogram on range
 aggregations/histogram.yml/date_histogram on range with offset
-aggregations/histogram.yml/date_histogram profiler
 aggregations/histogram.yml/date_histogram with extended_bounds and offset and unmapped
-aggregations/histogram.yml/date_histogram with offset
 aggregations/histogram.yml/date_histogram with pre-epoch daylight savings time transition
 aggregations/histogram.yml/histogram with hard bounds
-aggregations/histogram.yml/Tiny tiny tiny date_range
 aggregations/missing.yml/match all
 aggregations/missing.yml/match none
 aggregations/missing.yml/match some

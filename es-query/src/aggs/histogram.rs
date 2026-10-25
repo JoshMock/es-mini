@@ -1,21 +1,25 @@
-//! The `histogram` bucket aggregation: each value falls in the bucket of
-//! `floor((value - offset) / interval)`; the reduce fills empty buckets like ES's
-//! InternalHistogram when `min_doc_count` is 0.
+//! The `histogram` and `date_histogram` bucket aggregations: each value falls in the bucket of
+//! `floor((value - offset) / interval)` (or of its calendar unit); the reduce fills empty buckets
+//! like ES's InternalHistogram and InternalDateHistogram when `min_doc_count` is 0.
 
 use super::Stats;
 use super::terms::{Buckets, Format};
 use crate::{QueryError, int, num};
-use es_index::iso_date;
+use es_index::{civil_from_days, days_from_civil, iso_date, parse_date_millis};
 use serde_json::{Map, Value};
 use std::cell::Cell;
 
 /// InternalMultiBucketAggregation.REPORT_EMPTY_EVERY.
 const REPORT_EMPTY_EVERY: usize = 10_000;
 
-/// A `histogram` request.
+/// A `histogram` or `date_histogram` request.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct Histogram {
+    /// Whether this is a `date_histogram`: its keys are epoch millis.
+    pub(super) date: bool,
+    /// The fixed interval (in millis for dates) unless `calendar`.
     interval: f64,
+    calendar: Option<Unit>,
     offset: f64,
     min_doc_count: u64,
     keyed: bool,
@@ -25,7 +29,60 @@ pub(super) struct Histogram {
     format: Option<String>,
 }
 
-/// ES's DoubleBounds: either end may be open.
+/// A `calendar_interval`'s Rounding.DateTimeUnit.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Unit {
+    Second,
+    Minute,
+    Hour,
+    Day,
+    Week,
+    Month,
+    Quarter,
+    Year,
+}
+
+impl Unit {
+    /// DateHistogramAggregationBuilder.DATE_FIELD_UNITS.
+    // ponytail: no `years`/`months` (multiples of a unit)
+    fn parse(s: &str) -> Option<Unit> {
+        Some(match s {
+            "second" | "1s" => Unit::Second,
+            "minute" | "1m" => Unit::Minute,
+            "hour" | "1h" => Unit::Hour,
+            "day" | "1d" => Unit::Day,
+            "week" | "1w" => Unit::Week,
+            "month" | "1M" => Unit::Month,
+            "quarter" | "1q" => Unit::Quarter,
+            "year" | "1y" => Unit::Year,
+            _ => return None,
+        })
+    }
+
+    /// The start of the unit holding epoch millis `t`, or of the next one.
+    fn round(self, t: i64, next: bool) -> i64 {
+        const DAY: i64 = 86_400_000;
+        let fixed = |ms: i64| t.div_euclid(ms) * ms + if next { ms } else { 0 };
+        let (y, m, _) = civil_from_days(t.div_euclid(DAY));
+        let month = |y: i64, m: i64| {
+            days_from_civil(y + (m - 1).div_euclid(12), (m - 1).rem_euclid(12) + 1, 1) * DAY
+        };
+        let n = i64::from(next);
+        match self {
+            Unit::Second => fixed(1000),
+            Unit::Minute => fixed(60_000),
+            Unit::Hour => fixed(3_600_000),
+            Unit::Day => fixed(DAY),
+            // 1970-01-01 was a Thursday; weeks start on Monday
+            Unit::Week => (t + 3 * DAY).div_euclid(7 * DAY) * 7 * DAY - 3 * DAY + 7 * DAY * n,
+            Unit::Month => month(y, m + n),
+            Unit::Quarter => month(y, (m - 1) / 3 * 3 + 1 + 3 * n),
+            Unit::Year => month(y + n, 1),
+        }
+    }
+}
+
+/// ES's DoubleBounds (or LongBounds of dates): either end may be open.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 struct Bounds {
     min: Option<f64>,
@@ -33,7 +90,7 @@ struct Bounds {
 }
 
 impl Bounds {
-    fn parse(o: &Value, field: &str) -> Result<Bounds, QueryError> {
+    fn parse(o: &Value, field: &str, date: bool) -> Result<Bounds, QueryError> {
         let o =
             (o.as_object()).ok_or_else(|| format!("Expected [START_OBJECT] under [{field}]"))?;
         let mut b = Bounds::default();
@@ -42,6 +99,7 @@ impl Bounds {
                 || QueryError::x_content(format!("[double_bounds] failed to parse field [{k}]"));
             let x = match v {
                 Value::Null => None,
+                v if date => Some(parse_date_millis(v).ok_or_else(bad)? as f64),
                 v => Some(num(v).ok_or_else(bad)?),
             };
             match k.as_str() {
@@ -69,15 +127,23 @@ impl Bounds {
         Ok(b)
     }
 
-    fn contains(&self, x: f64) -> bool {
-        self.min.is_none_or(|m| x >= m) && self.max.is_none_or(|m| x <= m)
+    /// Whether `x` is in the bounds; LongBounds exclude `max`.
+    fn contains(&self, x: f64, date: bool) -> bool {
+        self.min.is_none_or(|m| x >= m) && self.max.is_none_or(|m| x < m || !date && x == m)
     }
 }
 
 impl Histogram {
-    pub(super) fn parse(name: &str, params: &Map<String, Value>) -> Result<Histogram, QueryError> {
+    pub(super) fn parse(
+        name: &str,
+        params: &Map<String, Value>,
+        date: bool,
+    ) -> Result<Histogram, QueryError> {
+        let ty = if date { "date_histogram" } else { "histogram" };
         let mut h = Histogram {
+            date,
             interval: 0.0,
+            calendar: None,
             offset: 0.0,
             min_doc_count: 0,
             keyed: false,
@@ -86,10 +152,50 @@ impl Histogram {
             format: None,
         };
         for (k, v) in params {
-            let bad = || QueryError::x_content(format!("[histogram] failed to parse field [{k}]"));
+            let bad = || QueryError::x_content(format!("[{ty}] failed to parse field [{k}]"));
+            // DateIntervalWrapper.setIntervalType
+            let other = |set: &str| {
+                QueryError::illegal(format!(
+                    "Cannot use [{k}] with [{set}] configuration option."
+                ))
+            };
             match k.as_str() {
                 "field" | "missing" => {}
-                "interval" => {
+                "calendar_interval" if date => {
+                    let s = v.as_str().ok_or_else(bad)?;
+                    if h.interval > 0.0 {
+                        return Err(other("fixed_interval"));
+                    }
+                    h.calendar = Some(Unit::parse(s).ok_or_else(|| {
+                        QueryError::illegal(format!(
+                            "The supplied interval [{s}] could not be parsed as a calendar interval."
+                        ))
+                    })?);
+                }
+                "fixed_interval" if date => {
+                    let s = v.as_str().ok_or_else(bad)?;
+                    if h.calendar.is_some() {
+                        return Err(other("calendar_interval"));
+                    }
+                    h.interval = time_millis(s).ok_or_else(|| {
+                        QueryError::illegal(format!(
+                            "failed to parse setting [date_histogram.fixedInterval] with value [{s}] as a time value: unit is missing or unrecognized"
+                        ))
+                    })?;
+                }
+                "offset" if date => {
+                    h.offset = match v.as_str() {
+                        Some(s) => {
+                            let (sign, s) = match s.strip_prefix('-') {
+                                Some(s) => (-1.0, s),
+                                None => (1.0, s.strip_prefix('+').unwrap_or(s)),
+                            };
+                            sign * time_millis(s).ok_or_else(bad)?
+                        }
+                        None => int(v).ok_or_else(bad)? as f64,
+                    }
+                }
+                "interval" if !date => {
                     h.interval = num(v).ok_or_else(bad)?;
                     if h.interval <= 0.0 {
                         return Err(QueryError::illegal(format!(
@@ -108,12 +214,17 @@ impl Histogram {
                         ))
                     })?;
                 }
-                "extended_bounds" => h.extended_bounds = Bounds::parse(v, k)?,
-                "hard_bounds" => h.hard_bounds = Some(Bounds::parse(v, k)?),
-                _ => return Err(format!("[histogram] unknown field [{k}]").into()),
+                "extended_bounds" => h.extended_bounds = Bounds::parse(v, k, date)?,
+                "hard_bounds" => h.hard_bounds = Some(Bounds::parse(v, k, date)?),
+                _ => return Err(format!("[{ty}] unknown field [{k}]").into()),
             }
         }
-        if h.interval <= 0.0 {
+        if date && h.interval <= 0.0 && h.calendar.is_none() {
+            return Err(QueryError::illegal(
+                "Invalid interval specified, must be non-null and non-empty",
+            ));
+        }
+        if !date && h.interval <= 0.0 {
             let interval = super::java_double(h.interval);
             return Err(QueryError::illegal(format!(
                 "interval must be positive, got: {interval}"
@@ -141,13 +252,15 @@ impl Histogram {
     /// The bucket keys of a document's doc values (sorted, so equal keys are adjacent), as
     /// NumericHistogramAggregator collects them.
     pub(super) fn keys(&self, vals: Vec<Value>) -> Vec<Value> {
+        // NumericHistogramAggregator tests hard bounds on the unshifted key, DateHistogramAggregator
+        // on the rounded one
+        let unshifted = |k: f64| match self.date {
+            true => k,
+            false => k - self.offset,
+        };
         let mut keys: Vec<f64> = (vals.iter().filter_map(num))
-            .map(|x| ((x - self.offset) / self.interval).floor())
-            .filter(|k| {
-                self.hard_bounds
-                    .is_none_or(|b| b.contains(k * self.interval))
-            })
-            .map(|k| k * self.interval + self.offset)
+            .map(|x| self.round(x))
+            .filter(|&k| (self.hard_bounds).is_none_or(|b| b.contains(unshifted(k), self.date)))
             .collect();
         keys.dedup();
         keys.into_iter().map(Value::from).collect()
@@ -155,11 +268,23 @@ impl Histogram {
 
     /// The key of the bucket holding `key`.
     fn round(&self, key: f64) -> f64 {
-        ((key - self.offset) / self.interval).floor() * self.interval + self.offset
+        self.round_from(key - self.offset, false) + self.offset
     }
 
+    /// The bucket key after `key`.
     fn next(&self, key: f64) -> f64 {
-        self.round(key + self.interval + self.interval / 2.0)
+        match self.calendar {
+            Some(_) => self.round_from(key - self.offset, true) + self.offset,
+            None => self.round(key + self.interval + self.interval / 2.0),
+        }
+    }
+
+    /// The start of the interval holding `x` without the offset, or of the `next` one.
+    fn round_from(&self, x: f64, next: bool) -> f64 {
+        match self.calendar {
+            Some(unit) => unit.round(x as i64, next) as f64,
+            None => ((x / self.interval).floor() + f64::from(u8::from(next))) * self.interval,
+        }
     }
 
     /// The reduced result; `sub` renders a bucket's sub-aggregations into it.
@@ -178,7 +303,12 @@ impl Histogram {
         super::consume_buckets(buckets, v.len())?;
         if self.min_doc_count == 0 {
             // InternalHistogram.iterateEmptyBuckets
-            let (min, max) = (self.extended_bounds.min, self.extended_bounds.max);
+            let (mut min, mut max) = (self.extended_bounds.min, self.extended_bounds.max);
+            if self.date {
+                // LongBounds.round: dates round without the offset, then shift by it
+                let round = |x: f64| self.round_from(x, false) + self.offset;
+                (min, max) = (min.map(round), max.map(round));
+            }
             let mut keys = vec![];
             // ES counts empty buckets before and again (per 10,000) while adding them
             let mut fill = |from: f64, below: &dyn Fn(f64) -> bool| {
@@ -222,7 +352,10 @@ impl Histogram {
             if let Some(s) = &key_as_string {
                 out.insert("key_as_string".into(), s.as_str().into());
             }
-            out.insert("key".into(), key.into());
+            match self.date {
+                true => out.insert("key".into(), (key as i64).into()),
+                false => out.insert("key".into(), key.into()),
+            };
             out.insert("doc_count".into(), count.into());
             sub(&mut subs, &mut out)?;
             Ok((
@@ -241,6 +374,11 @@ impl Histogram {
         body.insert("buckets".into(), rendered);
         Ok(())
     }
+}
+
+/// Millis of an ES time value.
+fn time_millis(s: &str) -> Option<f64> {
+    es_index::parse_time(s).map(|d| d.as_millis() as f64)
 }
 
 /// A shard's empty buckets of a field with `format`; `empty` is a new bucket's
@@ -421,6 +559,163 @@ mod tests {
             json!({"field": "n", "interval": 1, "extended_bounds": {"min": 1e17, "max": 2e17}});
         let got = run(&[&index(&[])], json!({"h": {"histogram": stuck}}));
         assert_eq!(got.unwrap_err(), too_many);
+    }
+
+    /// The `h` date_histogram's buckets over `dates` as `[key_as_string, doc_count]` pairs.
+    fn date_histo(dates: &[&str], params: Value) -> Result<Value, String> {
+        let mut ix = index(&[]);
+        for (i, d) in dates.iter().enumerate() {
+            ix.put(&i.to_string(), json!({"at": d}));
+        }
+        let got = run(&[&ix], json!({"h": {"date_histogram": params}}))?;
+        let buckets = got["h"]["buckets"].as_array().unwrap().iter();
+        Ok(buckets
+            .map(|b| json!([b["key_as_string"], b["doc_count"]]))
+            .collect())
+    }
+
+    #[test]
+    fn date_histogram_rounds_to_calendar_units() {
+        let dates = ["2016-01-01", "2016-01-02", "2016-02-01", "2016-03-01"];
+        let mut ix = index(&[]);
+        for (i, d) in dates.iter().enumerate() {
+            ix.put(&i.to_string(), json!({"at": d}));
+        }
+        let got = run(
+            &[&ix],
+            json!({"h": {"date_histogram": {"field": "at", "calendar_interval": "month"}}}),
+        );
+        assert_eq!(
+            got.unwrap()["h"]["buckets"],
+            json!([
+                {"key_as_string": "2016-01-01T00:00:00.000Z", "key": 1_451_606_400_000_i64, "doc_count": 2},
+                {"key_as_string": "2016-02-01T00:00:00.000Z", "key": 1_454_284_800_000_i64, "doc_count": 1},
+                {"key_as_string": "2016-03-01T00:00:00.000Z", "key": 1_456_790_400_000_i64, "doc_count": 1},
+            ])
+        );
+        let first = |interval: &str, date: &str| {
+            let got = date_histo(
+                &[date],
+                json!({"field": "at", "calendar_interval": interval}),
+            );
+            got.unwrap()[0][0].as_str().unwrap().to_owned()
+        };
+        // 2016-01-01 is a Friday; weeks start on Monday
+        assert_eq!(
+            first("1w", "2016-01-01T05:00:00Z"),
+            "2015-12-28T00:00:00.000Z"
+        );
+        assert_eq!(first("quarter", "2016-05-15"), "2016-04-01T00:00:00.000Z");
+        assert_eq!(first("1y", "2016-05-15"), "2016-01-01T00:00:00.000Z");
+        assert_eq!(
+            first("day", "2016-05-15T13:14:15Z"),
+            "2016-05-15T00:00:00.000Z"
+        );
+        assert_eq!(
+            first("1h", "2016-05-15T13:14:15Z"),
+            "2016-05-15T13:00:00.000Z"
+        );
+        assert_eq!(
+            first("minute", "2016-05-15T13:14:15Z"),
+            "2016-05-15T13:14:00.000Z"
+        );
+        assert_eq!(
+            first("1s", "2016-05-15T13:14:15.5Z"),
+            "2016-05-15T13:14:15.000Z"
+        );
+        assert_eq!(first("month", "1969-12-15"), "1969-12-01T00:00:00.000Z");
+        // empty buckets step a calendar unit at a time
+        assert_eq!(
+            date_histo(
+                &["2016-01-31", "2016-04-01"],
+                json!({"field": "at", "calendar_interval": "month"})
+            )
+            .unwrap(),
+            json!([
+                ["2016-01-01T00:00:00.000Z", 1],
+                ["2016-02-01T00:00:00.000Z", 0],
+                ["2016-03-01T00:00:00.000Z", 0],
+                ["2016-04-01T00:00:00.000Z", 1]
+            ])
+        );
+    }
+
+    #[test]
+    fn date_histogram_offsets_and_bounds() {
+        let dates = ["2016-01-01", "2016-01-02", "2016-02-01", "2016-03-01"];
+        let month = json!({"field": "at", "calendar_interval": "month", "offset": "+1d"});
+        assert_eq!(
+            date_histo(&dates, month).unwrap(),
+            json!([
+                ["2015-12-02T00:00:00.000Z", 1],
+                ["2016-01-02T00:00:00.000Z", 2],
+                ["2016-02-02T00:00:00.000Z", 1]
+            ])
+        );
+        // extended bounds round without the offset, then shift by it
+        let day = json!({"field": "at", "calendar_interval": "day", "offset": "1h",
+            "extended_bounds": {"min": "2016-01-01", "max": "2016-01-04"}});
+        assert_eq!(
+            date_histo(&["2016-01-02", "2016-01-03"], day).unwrap(),
+            json!([
+                ["2016-01-01T01:00:00.000Z", 1],
+                ["2016-01-02T01:00:00.000Z", 1],
+                ["2016-01-03T01:00:00.000Z", 0],
+                ["2016-01-04T01:00:00.000Z", 0]
+            ])
+        );
+        let fixed = json!({"field": "at", "fixed_interval": "12h", "offset": -3_600_000,
+            "min_doc_count": 1});
+        assert_eq!(
+            date_histo(&["2016-01-01T10:00:00Z", "2016-01-02T12:00:00Z"], fixed).unwrap(),
+            json!([
+                ["2015-12-31T23:00:00.000Z", 1],
+                ["2016-01-02T11:00:00.000Z", 1]
+            ])
+        );
+        // hard bounds keep rounded keys in [min, max)
+        let hard = json!({"field": "at", "calendar_interval": "month",
+            "hard_bounds": {"min": "2016-02-01", "max": "2016-03-01"}});
+        assert_eq!(
+            date_histo(&dates, hard).unwrap(),
+            json!([["2016-02-01T00:00:00.000Z", 1]])
+        );
+    }
+
+    #[test]
+    fn date_histogram_keyed_typed_and_bad_requests() {
+        let mut ix = index(&[]);
+        ix.put("1", json!({"at": "2016-01-01"}));
+        let req = json!({"size": 0, "aggs": {"h": {"date_histogram": {"field": "at",
+            "calendar_interval": "year", "keyed": true}}}});
+        let req = SearchRequest::parse(&req).unwrap();
+        let res = search_many(&[("i", &ix, None)], &req).unwrap();
+        assert_eq!(
+            res.aggregations.unwrap()["h"]["buckets"],
+            json!({"2016-01-01T00:00:00.000Z": {"key_as_string": "2016-01-01T00:00:00.000Z",
+                "key": 1_451_606_400_000_i64, "doc_count": 1}})
+        );
+        let err = |params: Value| date_histo(&[], params).unwrap_err();
+        assert_eq!(
+            err(json!({"field": "at", "calendar_interval": "2d"})),
+            "The supplied interval [2d] could not be parsed as a calendar interval."
+        );
+        assert_eq!(
+            err(json!({"field": "at", "calendar_interval": "1d", "fixed_interval": "1d"})),
+            "Cannot use [fixed_interval] with [calendar_interval] configuration option."
+        );
+        assert_eq!(
+            err(json!({"field": "at"})),
+            "Invalid interval specified, must be non-null and non-empty"
+        );
+        assert_eq!(
+            err(json!({"field": "at", "fixed_interval": "1M"})),
+            "failed to parse setting [date_histogram.fixedInterval] with value [1M] as a time value: unit is missing or unrecognized"
+        );
+        assert_eq!(
+            err(json!({"field": "at", "interval": "1d"})),
+            "[date_histogram] unknown field [interval]"
+        );
     }
 
     #[test]
