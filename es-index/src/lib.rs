@@ -5,6 +5,7 @@ pub mod analysis;
 pub mod disk;
 pub mod mapping;
 pub mod postings;
+pub mod tz;
 
 pub use mapping::{FieldMapping, Mappings};
 

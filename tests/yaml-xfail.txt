@@ -35,7 +35,6 @@ aggregations/global.yml/simple
 aggregations/histogram.yml/date_histogram on range
 aggregations/histogram.yml/date_histogram on range with offset
 aggregations/histogram.yml/date_histogram with extended_bounds and offset and unmapped
-aggregations/histogram.yml/date_histogram with pre-epoch daylight savings time transition
 aggregations/histogram.yml/histogram with hard bounds
 aggregations/missing.yml/match all
 aggregations/missing.yml/match none

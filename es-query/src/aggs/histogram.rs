@@ -5,6 +5,7 @@
 use super::Stats;
 use super::terms::{Buckets, Format};
 use crate::{QueryError, int, num};
+use es_index::tz::TimeZone;
 use es_index::{civil_from_days, days_from_civil, iso_date, parse_date_millis};
 use serde_json::{Map, Value};
 use std::cell::Cell;
@@ -27,6 +28,8 @@ pub(super) struct Histogram {
     hard_bounds: Option<Bounds>,
     /// A DecimalFormat pattern for numeric keys.
     format: Option<String>,
+    /// A date_histogram's `time_zone` other than UTC.
+    time_zone: Option<TimeZone>,
 }
 
 /// A `calendar_interval`'s Rounding.DateTimeUnit.
@@ -80,6 +83,90 @@ impl Unit {
             Unit::Year => month(y + n, 1),
         }
     }
+
+    /// [`Unit::round`] in local time: ES's JavaTimeToMidnightRounding and
+    /// JavaTimeNotToMidnightRounding.
+    fn round_in(self, tz: &TimeZone, t: i64, next: bool) -> i64 {
+        let ms = match self {
+            Unit::Second => 1000,
+            Unit::Minute => 60_000,
+            Unit::Hour => 3_600_000,
+            _ => {
+                // the first instant of the local day the unit starts on
+                let local = self.round(t + tz.offset(t), next);
+                let first = tz.instants(local).first().copied();
+                return first.unwrap_or_else(|| tz.gap_start(local));
+            }
+        };
+        let round = |mut t: i64| loop {
+            let local = (t + tz.offset(t)).div_euclid(ms) * ms;
+            let truncated = tz.instants(local).into_iter().rev().find(|&i| i <= t);
+            match (tz.previous_transition(t), truncated) {
+                (Some(prev), Some(r)) if prev <= r => return r,
+                (None, r) => return r.unwrap_or(local - tz.offset(t)),
+                // a transition lies between: round down from just before it
+                (Some(prev), _) => t = prev - 1,
+            }
+        };
+        match next {
+            false => round(t),
+            true => match round(t + ms) {
+                r if t < r => r,
+                _ => round(t + 2 * ms),
+            },
+        }
+    }
+}
+
+/// ES's TimeIntervalRounding.JavaTimeRounding.round: the latest local multiple of `interval` at
+/// or before instant `t`.
+fn round_interval(tz: &TimeZone, t: i64, interval: i64) -> i64 {
+    let mut u = t;
+    // ponytail: ES fails after 5,000 attempts; this gives up on the last one
+    'attempt: for _ in 0..5000 {
+        let local = (u + tz.offset(u)).div_euclid(interval) * interval;
+        let instants = tz.instants(local);
+        let Some(&earliest) = instants.first() else {
+            return tz.gap_start(local);
+        };
+        let prev = tz.previous_transition(u + 1);
+        for &i in instants.iter().rev() {
+            if let Some(p) = prev.filter(|&p| i < p) {
+                // rounding down across a transition: round from just before it instead
+                u = p - 1;
+                continue 'attempt;
+            }
+            if i <= u {
+                return i;
+            }
+        }
+        return earliest;
+    }
+    u
+}
+
+/// ES's TimeIntervalRounding.JavaTimeRounding.nextRoundingValue: a search for the smallest
+/// rounded value above `t`'s.
+fn next_interval(tz: &TimeZone, t: i64, interval: i64) -> i64 {
+    let round = |t| round_interval(tz, t, interval);
+    let prev = round(t);
+    let (mut increment, mut from) = (interval, prev);
+    for _ in 0..100 {
+        from += increment;
+        let rounded = round(from);
+        if rounded <= prev {
+            if increment < 0 {
+                increment = -increment / 2;
+            }
+        } else if round(rounded - 1) > prev {
+            if increment > 0 {
+                increment = -increment / 2;
+            }
+        } else {
+            return rounded;
+        }
+    }
+    round(from)
 }
 
 /// ES's DoubleBounds (or LongBounds of dates): either end may be open.
@@ -150,6 +237,7 @@ impl Histogram {
             extended_bounds: Bounds::default(),
             hard_bounds: None,
             format: None,
+            time_zone: None,
         };
         for (k, v) in params {
             let bad = || QueryError::x_content(format!("[{ty}] failed to parse field [{k}]"));
@@ -194,6 +282,10 @@ impl Histogram {
                         }
                         None => int(v).ok_or_else(bad)? as f64,
                     }
+                }
+                "time_zone" if date => {
+                    let tz = TimeZone::parse(v.as_str().ok_or_else(bad)?).ok_or_else(bad)?;
+                    h.time_zone = Some(tz).filter(|tz| *tz != TimeZone::UTC);
                 }
                 "interval" if !date => {
                     h.interval = num(v).ok_or_else(bad)?;
@@ -273,17 +365,24 @@ impl Histogram {
 
     /// The bucket key after `key`.
     fn next(&self, key: f64) -> f64 {
-        match self.calendar {
-            Some(_) => self.round_from(key - self.offset, true) + self.offset,
-            None => self.round(key + self.interval + self.interval / 2.0),
+        match (self.calendar, &self.time_zone) {
+            (None, None) => self.round(key + self.interval + self.interval / 2.0),
+            _ => self.round_from(key - self.offset, true) + self.offset,
         }
     }
 
     /// The start of the interval holding `x` without the offset, or of the `next` one.
     fn round_from(&self, x: f64, next: bool) -> f64 {
-        match self.calendar {
-            Some(unit) => unit.round(x as i64, next) as f64,
-            None => ((x / self.interval).floor() + f64::from(u8::from(next))) * self.interval,
+        match (self.calendar, &self.time_zone) {
+            (Some(unit), None) => unit.round(x as i64, next) as f64,
+            (Some(unit), Some(tz)) => unit.round_in(tz, x as i64, next) as f64,
+            (None, Some(tz)) => {
+                let f = if next { next_interval } else { round_interval };
+                f(tz, x as i64, self.interval as i64) as f64
+            }
+            (None, None) => {
+                ((x / self.interval).floor() + f64::from(u8::from(next))) * self.interval
+            }
         }
     }
 
@@ -345,7 +444,10 @@ impl Histogram {
         let rendered = v.into_iter().map(|(key, count, mut subs)| {
             let mut out = Map::new();
             let key_as_string = match (b.format, &self.format) {
-                (Format::Date, _) => Some(iso_date(key as i64)),
+                (Format::Date, _) => Some(match &self.time_zone {
+                    Some(tz) => tz.format(key as i64),
+                    None => iso_date(key as i64),
+                }),
                 (_, Some(p)) => Some(super::decimal_format(p, key)),
                 _ => None,
             };
@@ -679,6 +781,62 @@ mod tests {
         assert_eq!(
             date_histo(&dates, hard).unwrap(),
             json!([["2016-02-01T00:00:00.000Z", 1]])
+        );
+    }
+
+    #[test]
+    fn date_histogram_rounds_in_time_zones() {
+        // expectations from tests/yaml/aggregations/{date_,}histogram.yml
+        let phoenix =
+            json!({"field": "at", "fixed_interval": "1ms", "time_zone": "America/Phoenix"});
+        assert_eq!(
+            date_histo(&["2016-01-01"], phoenix).unwrap(),
+            json!([["2015-12-31T17:00:00.000-07:00", 1]])
+        );
+        let berlin = json!({"field": "at", "fixed_interval": "30s", "time_zone": "Europe/Berlin"});
+        assert_eq!(
+            date_histo(&["2015-01-01T12:10:30Z"], berlin).unwrap(),
+            json!([["2015-01-01T13:10:30.000+01:00", 1]])
+        );
+        let spring: Vec<_> = (3..9).map(|h| format!("2020-03-09T0{h}:00:00Z")).collect();
+        let spring: Vec<_> = spring.iter().map(String::as_str).collect();
+        let daily =
+            json!({"field": "at", "calendar_interval": "1d", "time_zone": "America/New_York"});
+        assert_eq!(
+            date_histo(&spring, daily).unwrap(),
+            json!([
+                ["2020-03-08T00:00:00.000-05:00", 1],
+                ["2020-03-09T00:00:00.000-04:00", 5]
+            ])
+        );
+        let offset = json!({"field": "at", "calendar_interval": "1d",
+            "time_zone": "America/New_York", "offset": "+1h"});
+        assert_eq!(
+            date_histo(&spring, offset).unwrap(),
+            json!([
+                ["2020-03-08T01:00:00.000-05:00", 2],
+                ["2020-03-09T01:00:00.000-04:00", 4]
+            ])
+        );
+        // the repeated hour of a fall-back transition is two buckets
+        let hourly = json!({"field": "at", "calendar_interval": "hour",
+            "time_zone": "America/New_York", "min_doc_count": 1});
+        assert_eq!(
+            date_histo(&["2020-11-01T05:30:00Z", "2020-11-01T06:30:00Z"], hourly).unwrap(),
+            json!([
+                ["2020-11-01T01:00:00.000-04:00", 1],
+                ["2020-11-01T01:00:00.000-05:00", 1]
+            ])
+        );
+        let fixed = json!({"field": "at", "fixed_interval": "1h", "time_zone": "+05:30"});
+        assert_eq!(
+            date_histo(&["2020-01-01T00:00:00Z"], fixed).unwrap(),
+            json!([["2020-01-01T05:00:00.000+05:30", 1]])
+        );
+        let bad = json!({"field": "at", "fixed_interval": "1h", "time_zone": "../../etc/passwd"});
+        assert_eq!(
+            date_histo(&[], bad).unwrap_err(),
+            "[date_histogram] failed to parse field [time_zone]"
         );
     }
 
