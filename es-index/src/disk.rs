@@ -671,15 +671,20 @@ pub fn save(data_dir: &Path, indices: &Indices) -> es_codec::Result<()> {
 /// Serializes saves and persists process-wide.
 static SAVING: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Translog operations after which [`persist`] commits segments (Elasticsearch's flush), bounding
-/// how much a restart replays.
-// ponytail: an operation count; Elasticsearch flushes by translog size (512mb) and on idle
-pub const FLUSH_OPS: usize = 5000;
+/// Elasticsearch's `index.translog.flush_threshold_size`: [`persist`] commits segments (a flush)
+/// once a shard's translog outgrows it, bounding how much a restart replays.
+fn flush_threshold(ix: &Index) -> u64 {
+    ix.settings
+        .get("index.translog.flush_threshold_size")
+        .and_then(crate::parse_bytes)
+        .unwrap_or(512 << 20)
+}
 
 /// Makes the writes since the last call durable, like Elasticsearch: document writes are
 /// appended to each shard's translog (one fsynced append and an in-place checkpoint, per
 /// index written to), and segments are committed only when cluster metadata changed or a
-/// translog reaches [`FLUSH_OPS`]. [`open`] replays the translog.
+/// translog outgrows `index.translog.flush_threshold_size` (default 512mb). [`open`] replays
+/// the translog.
 pub fn persist(data_dir: &Path, indices: &mut Indices) -> es_codec::Result<()> {
     let _one_at_a_time = SAVING
         .lock()
@@ -688,7 +693,7 @@ pub fn persist(data_dir: &Path, indices: &mut Indices) -> es_codec::Result<()> {
     let unchanged = read_indices(data_dir).is_ok_and(|saved| saved == metas);
     let mut logs = vec![];
     if unchanged {
-        for (meta, ix) in metas.iter().zip(indices.values()) {
+        for meta in &metas {
             let dir = shard_dir(data_dir, &meta.uuid).join("../translog");
             let Ok(cp) = std::fs::read(dir.join("translog.ckp"))
                 .map_err(io)
@@ -697,35 +702,36 @@ pub fn persist(data_dir: &Path, indices: &mut Indices) -> es_codec::Result<()> {
                 logs.clear();
                 break;
             };
-            logs.push((dir, cp, ix.unlogged_len()));
+            logs.push((dir, cp));
         }
     }
-    let flush = !unchanged
-        || logs.len() != indices.len()
-        || logs
-            .iter()
-            .any(|(_, cp, n)| cp.num_ops as usize + n >= FLUSH_OPS);
+    let mut flush = !unchanged || logs.len() != indices.len();
+    if !flush {
+        for ((dir, cp), ix) in logs.into_iter().zip(indices.values_mut()) {
+            let ops = ix.take_unlogged();
+            let size = if ops.is_empty() {
+                cp.offset
+            } else {
+                append(&dir, cp, &ops)?
+            };
+            flush |= size as u64 > flush_threshold(ix);
+        }
+    }
     if flush {
         commit(data_dir, indices)?;
         indices.values_mut().for_each(|ix| drop(ix.take_unlogged()));
-        return Ok(());
-    }
-    for ((dir, cp, _), ix) in logs.into_iter().zip(indices.values_mut()) {
-        let ops = ix.take_unlogged();
-        if !ops.is_empty() {
-            append(&dir, cp, &ops)?;
-        }
     }
     Ok(())
 }
 
 /// Appends `ops` to the current translog generation in `dir` (overwriting any torn bytes past the
 /// checkpoint), fsyncs it, then rewrites the checkpoint in place, as Elasticsearch does.
+/// Returns the generation's new size.
 fn append(
     dir: &Path,
     mut cp: es_codec::translog::TranslogCheckpoint,
     ops: &[es_codec::translog::Op],
-) -> es_codec::Result<()> {
+) -> es_codec::Result<i64> {
     use std::io::{Seek, SeekFrom, Write};
     let bytes: Vec<u8> = ops.iter().flat_map(es_codec::translog::encode).collect();
     let path = dir.join(format!("translog-{}.tlog", cp.generation));
@@ -757,7 +763,8 @@ fn append(
         f.write_all(&es_codec::translog::checkpoint(&cp))?;
         f.sync_all()
     };
-    write().map_err(|e| es_codec::Error(format!("{}: {e}", ckp.display())))
+    write().map_err(|e| es_codec::Error(format!("{}: {e}", ckp.display())))?;
+    Ok(cp.offset)
 }
 
 /// Commits every index's documents into segments (see [`save`]); the caller holds `SAVING`.

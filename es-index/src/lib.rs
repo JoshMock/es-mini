@@ -335,11 +335,6 @@ impl Index {
         }
     }
 
-    /// Number of writes not yet in the translog.
-    pub fn unlogged_len(&self) -> usize {
-        self.unlogged.len()
-    }
-
     /// Writes not yet in the translog, oldest first; taking them marks them logged.
     pub fn take_unlogged(&mut self) -> Vec<es_codec::translog::Op> {
         std::mem::take(&mut self.unlogged)
@@ -963,6 +958,16 @@ pub fn parse_time(v: &str) -> Option<Duration> {
     })
 }
 
+/// Parses an ES byte size (`512mb`, `1kb`, `100b`; `b` to `pb`, any case); `None` for junk.
+pub(crate) fn parse_bytes(v: &str) -> Option<u64> {
+    let v = v.trim().to_ascii_lowercase();
+    let units = ["pb", "tb", "gb", "mb", "kb", "b"];
+    units.iter().zip((0..6).rev()).find_map(|(unit, pow)| {
+        let n: f64 = v.strip_suffix(unit)?.trim().parse().ok()?;
+        Some((n * 1024f64.powi(pow)) as u64)
+    })
+}
+
 /// All indices, keyed by name.
 pub type Indices = BTreeMap<String, Index>;
 
@@ -1237,6 +1242,15 @@ mod tests {
         assert_eq!(parse_time("1d"), Some(Duration::from_secs(86400)));
         assert_eq!(parse_time("-1"), None);
         assert_eq!(parse_time("soon"), None);
+    }
+
+    #[test]
+    fn parses_es_byte_sizes() {
+        assert_eq!(parse_bytes("100b"), Some(100));
+        assert_eq!(parse_bytes("1kb"), Some(1024));
+        assert_eq!(parse_bytes("512MB"), Some(512 << 20));
+        assert_eq!(parse_bytes("1.5gb"), Some(3 << 29));
+        assert_eq!(parse_bytes("big"), None);
     }
 
     #[test]

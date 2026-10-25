@@ -89,30 +89,34 @@ fn a_torn_last_operation_is_ignored() {
 }
 
 #[test]
-fn many_operations_flush_into_segments_and_a_new_generation() {
+fn flushes_by_translog_size() {
     let dir = scratch("flush");
     let mut indices = created();
+    let ix = indices.get_mut("idx").unwrap();
+    ix.settings
+        .merge(&json!({"index.translog.flush_threshold_size": "1kb"}));
     disk::persist(&dir, &mut indices).unwrap();
     let first = ckp(&dir).generation;
-    for i in 0..disk::FLUSH_OPS {
-        indices
-            .get_mut("idx")
-            .unwrap()
-            .put(&format!("d{i}"), json!({"i": i}));
-        disk::persist(&dir, &mut indices).unwrap();
-    }
+    // Small writes stay in the translog...
+    indices.get_mut("idx").unwrap().put("small", json!({}));
+    disk::persist(&dir, &mut indices).unwrap();
+    assert_eq!((ckp(&dir).generation, ckp(&dir).num_ops), (first, 1));
+    // ...until it outgrows index.translog.flush_threshold_size.
+    let big = "x".repeat(1024);
+    indices
+        .get_mut("idx")
+        .unwrap()
+        .put("big", json!({ "s": big }));
+    disk::persist(&dir, &mut indices).unwrap();
     let cp = ckp(&dir);
     assert!(cp.generation > first, "no flush");
-    assert!(cp.num_ops < 2, "{cp:?}");
+    assert_eq!(cp.num_ops, 0, "{cp:?}");
     assert!(
         !shard(&dir)
             .join(format!("translog/translog-{first}.tlog"))
             .exists()
     );
-    assert_eq!(
-        disk::open(&dir).unwrap()["idx"].docs().count(),
-        disk::FLUSH_OPS + 1
-    );
+    assert_eq!(disk::open(&dir).unwrap()["idx"].docs().count(), 3);
 }
 
 #[test]
