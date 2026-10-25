@@ -453,3 +453,12 @@ async fn hits_report_the_named_queries_they_match() {
     assert_eq!(hits[1]["matched_queries"], json!(["red", "apple"]));
     assert_eq!(hits.as_array().unwrap().len(), 2);
 }
+
+#[tokio::test]
+async fn hits_fetch_the_requested_fields() {
+    let app = seeded().await;
+    let body = json!({"fields": ["t", "n"], "sort": ["n"]});
+    let (_, r) = call(&app, Method::POST, "/idx/_search", Some(body)).await;
+    let hit = &r["hits"]["hits"][0];
+    assert_eq!(hit["fields"], json!({"t": ["green apple"], "n": [1]}));
+}

@@ -259,6 +259,9 @@ pub async fn search(
                 if !h.matched_queries.is_empty() {
                     hit["matched_queries"] = h.matched_queries.clone().into();
                 }
+                if !h.fields.is_empty() {
+                    hit["fields"] = h.fields.clone().into();
+                }
                 hit
             })
             .collect();

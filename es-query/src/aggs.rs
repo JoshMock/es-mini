@@ -73,6 +73,8 @@ struct TopHits {
     version: bool,
     seq_no: bool,
     docvalue_fields: Vec<String>,
+    /// The `fields` to fetch; `None` inherits the search's.
+    fields: Option<Vec<String>>,
 }
 
 /// A document `top_hits` collected.
@@ -83,7 +85,7 @@ struct TopHit {
     score: f64,
     sort: Vec<Value>,
     doc: Document,
-    /// The requested `docvalue_fields` that have values.
+    /// The requested `docvalue_fields` and `fields` that have values.
     fields: Map<String, Value>,
     matched_queries: Vec<String>,
 }
@@ -100,6 +102,7 @@ impl TopHits {
             version: false,
             seq_no: false,
             docvalue_fields: vec![],
+            fields: None,
         };
         // patterns of a string or an array of strings
         let patterns = |k: &str, v: &Value| match v {
@@ -123,19 +126,8 @@ impl TopHits {
                 "version" => t.version = v.as_bool().ok_or_else(|| bad(k))?,
                 "seq_no_primary_term" => t.seq_no = v.as_bool().ok_or_else(|| bad(k))?,
                 // ponytail: no per-field `format`
-                "docvalue_fields" => {
-                    t.docvalue_fields = (v.as_array().ok_or_else(|| bad(k))?.iter())
-                        .map(|f| match f {
-                            Value::Object(o) if o.len() == 1 => o.get("field"),
-                            f => Some(f),
-                        })
-                        .map(|f| {
-                            f.and_then(Value::as_str)
-                                .map(String::from)
-                                .ok_or_else(|| bad(k))
-                        })
-                        .collect::<Result<_, _>>()?;
-                }
+                "docvalue_fields" => t.docvalue_fields = field_names(v).ok_or_else(|| bad(k))?,
+                "fields" => t.fields = Some(field_names(v).ok_or_else(|| bad(k))?),
                 "_source" => {
                     t.source = match v {
                         Value::Bool(b) => b.then(String::new),
@@ -960,6 +952,61 @@ fn doc_values(s: &Searcher, field: &str, mapping: &FieldMapping, doc: &Document)
     v
 }
 
+/// A `fields`/`docvalue_fields` list: names, or `{"field": name}` objects.
+// ponytail: no per-field `format` or wildcard patterns
+pub(crate) fn field_names(v: &Value) -> Option<Vec<String>> {
+    (v.as_array()?.iter())
+        .map(|f| match f {
+            Value::Object(o) if o.len() == 1 => o.get("field"),
+            f => Some(f),
+        })
+        .map(|f| f.and_then(Value::as_str).map(String::from))
+        .collect()
+}
+
+/// Gives every `top_hits` without its own `fields` the search's, like ES's SubSearchContext.
+pub(crate) fn inherit_fields(aggs: &mut [Agg], fields: &[String]) {
+    for a in aggs {
+        if let Metric::TopHits(t) = &mut a.metric {
+            t.fields.get_or_insert_with(|| fields.to_vec());
+        }
+        inherit_fields(&mut a.subs, fields);
+    }
+}
+
+/// A hit's `fields`: each mapped field's values, dates formatted. `fetch` reads them like ES's
+/// FieldFetcher (source order, text included), otherwise as doc values.
+pub(crate) fn hit_fields(
+    s: &Searcher,
+    fields: &[String],
+    doc: &Document,
+    fetch: bool,
+) -> Map<String, Value> {
+    (fields.iter())
+        .filter_map(|f| {
+            let m = s.index.mappings.field(f)?;
+            let v = match fetch {
+                false => doc_values(s, f, m, doc),
+                true => (values(&doc.source, source_path(s.index, f)).into_iter())
+                    .filter_map(|v| match m {
+                        FieldMapping::Text | FieldMapping::TextKeyword { .. } => {
+                            Some(es_index::postings::text(v).into())
+                        }
+                        _ => doc_value(s, f, m, v),
+                    })
+                    .collect(),
+            };
+            let v: Vec<Value> = match m {
+                FieldMapping::Date { format, .. } => (v.iter())
+                    .filter_map(|t| Some(date_string(format.as_deref(), int(t)?).into()))
+                    .collect(),
+                _ => v,
+            };
+            (!v.is_empty()).then(|| (f.clone(), v.into()))
+        })
+        .collect()
+}
+
 fn doc_value(s: &Searcher, field: &str, mapping: &FieldMapping, v: &Value) -> Option<Value> {
     use FieldMapping as M;
     match mapping {
@@ -1222,20 +1269,12 @@ impl<'s, 'a> Collector<'s, 'a> {
                     sort: self.searcher.sort_values(&t.sort, score, doc),
                     matched_queries: self.searcher.matched_queries(id, doc),
                     doc: doc.clone(),
-                    fields: (t.docvalue_fields.iter())
-                        .filter_map(|f| {
-                            let m = self.searcher.index.mappings.field(f)?;
-                            let v = doc_values(self.searcher, f, m, doc);
-                            let v = match m {
-                                FieldMapping::Date { format, .. } => (v.iter())
-                                    .filter_map(|t| Some(date_string(format.as_deref(), int(t)?)))
-                                    .map(Value::from)
-                                    .collect(),
-                                _ => v,
-                            };
-                            (!v.is_empty()).then(|| (f.clone(), v.into()))
-                        })
-                        .collect(),
+                    fields: {
+                        let mut fields = hit_fields(self.searcher, &t.docvalue_fields, doc, false);
+                        let fetch = t.fields.as_deref().unwrap_or_default();
+                        fields.extend(hit_fields(self.searcher, fetch, doc, true));
+                        fields
+                    },
                 });
                 // ponytail: re-sorts at twice the kept hits; a heap if top_hits get large
                 if st.top.len() > 2 * t.from.saturating_add(t.size).max(8) {
@@ -2076,6 +2115,28 @@ mod tests {
         let fields =
             json!({"i": [151], "k": ["c"], "at": ["2021-05-04T00:00:00.000Z"], "f": [2.0]});
         assert_eq!(hit["fields"], fields);
+    }
+
+    #[test]
+    fn top_hits_fetch_the_search_fields_unless_they_set_their_own() {
+        let body = json!({"fields": ["t", {"field": "k"}, "at", "nope"], "sort": ["i"],
+        "aggs": {
+            "top": {"top_hits": {"size": 1, "sort": [{"i": "desc"}]}},
+            "own": {"top_hits": {"size": 1, "sort": [{"i": "desc"}], "fields": ["i"]}},
+        }});
+        let req = SearchRequest::parse(&body).unwrap();
+        let ix = index();
+        let r = search(&ix, &req);
+        // source order, duplicates kept, dates formatted, like ES's FieldFetcher
+        let fields = json!({"t": ["x"], "k": ["c", "c"], "at": ["2021-05-04T00:00:00.000Z"]});
+        let aggs = r.aggregations.unwrap();
+        assert_eq!(aggs["top"]["hits"]["hits"][0]["fields"], fields);
+        assert_eq!(
+            aggs["own"]["hits"]["hits"][0]["fields"],
+            json!({"i": [151]})
+        );
+        assert_eq!(Value::from(r.hits[3].fields.clone()), fields);
+        assert!(r.hits[4].fields.contains_key("t"));
     }
 
     #[test]

@@ -19,7 +19,7 @@ use es_index::postings::{text, values};
 use es_index::{
     Document, FieldMapping, Index, analysis::Analyzer, disk::DiskPos, parse_date_millis,
 };
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::{
     borrow::Cow,
     cell::RefCell,
@@ -671,6 +671,8 @@ pub struct SearchRequest {
     pub typed_keys: bool,
     /// Body `profile`: report where each shard's aggregation time went.
     pub profile: bool,
+    /// Body `fields`: the mapped fields each hit fetches.
+    pub fields: Vec<String>,
 }
 
 /// Which Elasticsearch error type a query failure maps to.
@@ -747,6 +749,7 @@ impl SearchRequest {
                     "aggs",
                     "aggregations",
                     "profile",
+                    "fields",
                 ]
                 .contains(&k.as_str())
             })
@@ -770,14 +773,20 @@ impl SearchRequest {
             Some(v) if v.is_boolean() || v.is_i64() => Some(v.to_string()),
             Some(_) => return Err("[track_total_hits] must be a boolean or a number".into()),
         };
-        let aggs = match (body.get("aggs"), body.get("aggregations")) {
+        let mut aggs = match (body.get("aggs"), body.get("aggregations")) {
             (Some(_), Some(_)) => {
                 return Err("Found two aggregation definitions: [aggs] and [aggregations]".into());
             }
             (Some(a), _) | (_, Some(a)) => aggs::parse(a)?,
             (None, None) => vec![],
         };
+        let fields = match body.get("fields") {
+            None => vec![],
+            Some(v) => aggs::field_names(v).ok_or("[fields] must be field names")?,
+        };
+        aggs::inherit_fields(&mut aggs, &fields);
         Ok(Self {
+            fields,
             aggs,
             typed_keys: false,
             profile: body.get("profile").and_then(Value::as_bool) == Some(true),
@@ -843,6 +852,8 @@ pub struct Hit<'a> {
     pub sort: Vec<Value>,
     /// The `_name`s of the named queries the hit matches.
     pub matched_queries: Vec<String>,
+    /// The requested `fields` that have values.
+    pub fields: Map<String, Value>,
 }
 
 #[derive(Debug)]
@@ -995,6 +1006,7 @@ pub fn search_many<'a>(
             collector.collect(id, &doc, score);
             let sort = s.sort_values(&req.sort, score, &doc);
             let matched_queries = s.matched_queries(id, &doc);
+            let fields = aggs::hit_fields(&s, &req.fields, &doc, true);
             hits.push((
                 pos,
                 Hit {
@@ -1004,6 +1016,7 @@ pub fn search_many<'a>(
                     score: Some(score as f32),
                     sort,
                     matched_queries,
+                    fields,
                 },
                 score,
             ));

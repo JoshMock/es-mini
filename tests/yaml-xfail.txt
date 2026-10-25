@@ -6,7 +6,6 @@ aggregations/histogram.yml/date_histogram with extended_bounds and offset and un
 aggregations/terms.yml/order by sub agg containing filter
 aggregations/terms.yml/order by sub agg containing nested
 aggregations/top_hits.yml/explain
-aggregations/top_hits.yml/fetch fields
 aggregations/top_hits.yml/having
 aggregations/top_hits.yml/highlight
 aggregations/top_hits.yml/highlight_query
