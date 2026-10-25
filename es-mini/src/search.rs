@@ -190,7 +190,9 @@ pub async fn search(
     if let Some(q) = params.get("q") {
         req.query = query_from_params(q, &params);
     }
-    req.typed_keys = params.get("typed_keys").is_some_and(|v| v == "true");
+    req.typed_keys = params
+        .get("typed_keys")
+        .is_some_and(|v| v.is_empty() || v == "true");
     let scroll = params
         .get("scroll")
         .map(|v| crate::scroll::keep_alive(v))

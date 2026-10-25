@@ -471,3 +471,11 @@ async fn size_zero_has_no_max_score() {
     assert_eq!(r["hits"]["total"]["value"], 2);
     assert_eq!(r["hits"]["max_score"], json!(null));
 }
+
+#[tokio::test]
+async fn bare_typed_keys_flag_is_true() {
+    let app = seeded().await;
+    let body = json!({"size": 0, "aggs": {"m": {"max": {"field": "n"}}}});
+    let (_, r) = call(&app, Method::POST, "/idx/_search?typed_keys", Some(body)).await;
+    assert_eq!(r["aggregations"]["max#m"]["value"], 3.0);
+}
