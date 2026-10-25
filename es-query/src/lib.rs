@@ -428,7 +428,9 @@ impl<'a> Searcher<'a> {
         match self.index.mappings.field(field)? {
             FieldMapping::Date { format, locale, .. }
             | FieldMapping::DateNanos { format, locale } => Some(move |v: &Value| match format {
-                Some(_) => parse_dated(v, locale.as_deref().unwrap_or("en")),
+                Some(f) => (v.as_str())
+                    .and_then(|s| f.split("||").find_map(|f| es_index::parse_pattern(f, s)))
+                    .or_else(|| parse_dated(v, locale.as_deref().unwrap_or("en"))),
                 None => parse_date_millis(v),
             }),
             _ => None,

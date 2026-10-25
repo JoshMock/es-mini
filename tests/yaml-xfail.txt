@@ -1,5 +1,4 @@
 # Known-failing YAML tests. Fix one, then delete its line.
-aggregations/date_histogram.yml/date_histogram and date_histogram_composite timezone
 aggregations/date_range.yml/Date range
 aggregations/date_range.yml/Date Range Missing
 aggregations/date_range.yml/Date range unmapped with children

@@ -649,6 +649,90 @@ pub fn iso_date(millis: i64) -> String {
     format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{sec:02}.{milli:03}Z")
 }
 
+/// A Java DateTimeFormatter pattern as runs of a field letter (`y`, `M`, `d`, `H`, `m`, `s`,
+/// `S`) and its width, or of literal text (width 0); `None` for other letters.
+// ponytail: numeric fields only; no month or day names, zones, or optional sections
+fn pattern_runs(pattern: &str) -> Option<Vec<(char, usize, String)>> {
+    let mut runs: Vec<(char, usize, String)> = vec![];
+    let mut chars = pattern.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            'y' | 'M' | 'd' | 'H' | 'm' | 's' | 'S' => match runs.last_mut() {
+                Some((l, n, _)) if *l == c => *n += 1,
+                _ => runs.push((c, 1, String::new())),
+            },
+            '\'' => {
+                let quoted: String = chars.by_ref().take_while(|&c| c != '\'').collect();
+                runs.push(('\'', 0, quoted));
+            }
+            c if c.is_ascii_alphabetic() => return None,
+            c => runs.push(('\'', 0, c.into())),
+        }
+    }
+    Some(runs)
+}
+
+/// Epoch milliseconds (UTC) of `s` in a Java date pattern of numeric fields (see `pattern_runs`).
+pub fn parse_pattern(pattern: &str, mut s: &str) -> Option<i64> {
+    let [mut y, mut mo, mut d, mut h, mut mi, mut sec, mut ms] = [1970, 1, 1, 0, 0, 0, 0];
+    for (c, n, text) in pattern_runs(pattern)? {
+        if n == 0 {
+            s = s.strip_prefix(text.as_str())?;
+            continue;
+        }
+        let (digits, rest) = s.split_at_checked(n)?;
+        if !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        s = rest;
+        let v: i64 = digits.parse().ok()?;
+        match c {
+            'y' => y = v,
+            'M' => mo = v,
+            'd' => d = v,
+            'H' => h = v,
+            'm' => mi = v,
+            's' => sec = v,
+            _ => ms = format!("{digits:0<3}")[..3].parse().ok()?,
+        }
+    }
+    let valid = (1..=12).contains(&mo) && (1..=31).contains(&d) && h < 24 && mi < 60 && sec < 60;
+    (s.is_empty() && valid)
+        .then(|| days_from_civil(y, mo, d) * 86_400_000 + ((h * 60 + mi) * 60 + sec) * 1000 + ms)
+}
+
+/// Epoch milliseconds `t` (already shifted to local time) in a Java date pattern of numeric fields (see `pattern_runs`).
+pub fn format_pattern(pattern: &str, t: i64) -> Option<String> {
+    let (days, ms) = (t.div_euclid(86_400_000), t.rem_euclid(86_400_000));
+    let (y, mo, d) = civil_from_days(days);
+    let mut out = String::new();
+    for (c, n, text) in pattern_runs(pattern)? {
+        let v = match c {
+            'y' if n == 2 => y.rem_euclid(100),
+            'y' => y,
+            'M' => mo,
+            'd' => d,
+            'H' => ms / 3_600_000,
+            'm' => ms / 60_000 % 60,
+            's' => ms / 1000 % 60,
+            'S' => {
+                out += &format!("{:03}", ms % 1000)
+                    .chars()
+                    .chain(std::iter::repeat('0'))
+                    .take(n)
+                    .collect::<String>();
+                continue;
+            }
+            _ => {
+                out += &text;
+                continue;
+            }
+        };
+        out += &format!("{v:0n$}");
+    }
+    Some(out)
+}
+
 /// The `(year, month, day)` of days since 1970-01-01 (Howard Hinnant's civil_from_days).
 pub fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let z = days + 719_468;
@@ -791,6 +875,25 @@ mod tests {
         ix.put("new1", json!({}));
         let got: Vec<String> = ix.docs().map(|(id, _)| id.to_owned()).collect();
         assert_eq!(got[40..], ["new2", "new1"]);
+    }
+
+    #[test]
+    fn date_patterns_parse_and_format() {
+        let p = "yyyy-MM-dd HH:mm:ss";
+        let t = 1_619_899_200_000;
+        assert_eq!(parse_pattern(p, "2021-05-01 20:00:00"), Some(t));
+        assert_eq!(format_pattern(p, t).as_deref(), Some("2021-05-01 20:00:00"));
+        let q = "yyyy-MM-dd'T'HH:mm:ss.SSS";
+        assert_eq!(parse_pattern(q, "1969-12-31T23:59:59.999"), Some(-1));
+        assert_eq!(
+            format_pattern(q, -1).as_deref(),
+            Some("1969-12-31T23:59:59.999")
+        );
+        assert_eq!(parse_pattern(p, "2021-05-01T20:00:00"), None);
+        assert_eq!(parse_pattern(p, "2021-05-01 20:00:00 extra"), None);
+        // patterns with other fields (names, zones) are not supported
+        assert_eq!(parse_pattern("dd MMM yyyy", "01 May 2021"), None);
+        assert_eq!(format_pattern("yyyy Z", t), None);
     }
 
     #[test]

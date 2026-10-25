@@ -479,10 +479,17 @@ impl Histogram {
         let rendered = v.into_iter().map(|(key, count, mut subs)| {
             let mut out = Map::new();
             let key_as_string = match (b.format, &self.format) {
-                (Format::Date, _) => Some(match &self.time_zone {
-                    Some(tz) => tz.format(key as i64),
-                    None => iso_date(key as i64),
-                }),
+                (Format::Date, _) => {
+                    let (t, tz) = (key as i64, self.time_zone.as_ref());
+                    let local = t + tz.map_or(0, |tz| tz.offset(t));
+                    let pattern = self.format.as_deref();
+                    Some(
+                        match pattern.and_then(|p| es_index::format_pattern(p, local)) {
+                            Some(s) => s,
+                            None => tz.map_or_else(|| iso_date(t), |tz| tz.format(t)),
+                        },
+                    )
+                }
                 (_, Some(p)) => Some(super::decimal_format(p, key)),
                 _ => None,
             };
@@ -930,6 +937,24 @@ mod tests {
         assert_eq!(
             date_histo(&["2020-01-01T00:00:00Z"], fixed).unwrap(),
             json!([["2020-01-01T05:00:00.000+05:30", 1]])
+        );
+        // a date pattern parses mapped values and formats keys in the time zone
+        let mut ix = Index::default();
+        let p = "yyyy-MM-dd HH:mm:ss";
+        let at = FieldMapping::Date {
+            format: Some(p.into()),
+            locale: None,
+            fields: Default::default(),
+        };
+        ix.mappings.properties.insert("at".into(), at);
+        ix.put("1", json!({"at": "2021-05-01 20:30:00"}));
+        let jakarta = json!({"field": "at", "calendar_interval": "hour",
+            "time_zone": "Asia/Jakarta", "format": p});
+        let got = run(&[&ix], json!({"h": {"date_histogram": jakarta}})).unwrap();
+        assert_eq!(
+            got["h"]["buckets"],
+            json!([{"key_as_string": "2021-05-02 03:00:00", "key": 1_619_899_200_000_i64,
+                "doc_count": 1}])
         );
         // no documents: no buckets (and no rounding of an open end)
         let none = json!({"field": "at", "calendar_interval": "hour", "time_zone": "Asia/Jakarta"});
