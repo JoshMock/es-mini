@@ -5,7 +5,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{StatusCode, Uri},
 };
-use es_index::{DocResult, Index, WriteResult, aliases};
+use es_index::{DocResult, FieldMapping, Index, WriteResult, aliases};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -147,6 +147,27 @@ pub fn put_or_create(
             )));
         }
         i.map_dynamic(&source);
+        for (name, m) in &i.mappings.properties {
+            let (FieldMapping::Date { format, locale, .. }
+            | FieldMapping::DateNanos { format, locale }) = m
+            else {
+                continue;
+            };
+            let (format, locale) = (format.as_deref(), locale.as_deref());
+            let values = es_index::postings::values(&source, name);
+            if let Some(v) = values
+                .iter()
+                .find(|v| es_query::bad_date(format, locale, v))
+            {
+                // ponytail: no `[line:column]` prefix or `caused_by`, unlike ES
+                return Err(AppError::DocumentParsing(format!(
+                    "failed to parse field [{name}] of type [{}] in document with id '{id}'. \
+                     Preview of field's value: '{}'",
+                    m.type_name(),
+                    es_index::postings::text(v)
+                )));
+            }
+        }
         Ok(match create {
             true => i.create(id, source),
             false => Ok(i.put(id, source)),

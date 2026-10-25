@@ -166,6 +166,27 @@ async fn non_object_source_is_400() {
 }
 
 #[tokio::test]
+async fn date_not_in_the_field_format_is_rejected() {
+    let app = app();
+    let mappings =
+        json!({"mappings": {"properties": {"d": {"type": "date", "format": "epoch_second"}}}});
+    call(&app, Method::PUT, "/idx", Some(mappings)).await;
+    let doc = json!({"d": "2020-03-08T06:15:00Z"});
+    let (s, r) = call(&app, Method::PUT, "/idx/_doc/1", Some(doc)).await;
+    assert_eq!(
+        (s, &r["error"]["type"]),
+        (
+            StatusCode::BAD_REQUEST,
+            &json!("document_parsing_exception")
+        )
+    );
+    for d in [json!(1000), json!("2000")] {
+        let (s, _) = call(&app, Method::PUT, "/idx/_doc/2", Some(json!({"d": d}))).await;
+        assert!(s.is_success());
+    }
+}
+
+#[tokio::test]
 async fn id_over_512_bytes_is_rejected() {
     let uri = format!("/idx/_doc/{}", "a".repeat(513));
     let (s, _) = call(&app(), Method::POST, &uri, Some(json!({"a": 1}))).await;

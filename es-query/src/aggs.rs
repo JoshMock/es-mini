@@ -1759,6 +1759,27 @@ mod tests {
     }
 
     #[test]
+    fn epoch_formats_read_numbers() {
+        let mut ix = Index::default();
+        for (f, format) in [("s", "epoch_second"), ("ms", "epoch_millis")] {
+            let m = FieldMapping::Date {
+                format: Some(format.into()),
+                locale: None,
+                fields: Default::default(),
+            };
+            ix.mappings.properties.insert(f.into(), m);
+        }
+        ix.put("1", json!({"s": 1000, "ms": 1000}));
+        ix.put("2", json!({"s": "2000", "ms": "2000"}));
+        let body = json!({"aggs": {"s": {"max": {"field": "s"}}, "ms": {"max": {"field": "ms"}}}});
+        let aggs = aggs_of(&ix, body);
+        assert_eq!(
+            (&aggs["s"]["value"], &aggs["ms"]["value"]),
+            (&json!(2e6), &json!(2e3))
+        );
+    }
+
+    #[test]
     fn named_date_formats_parse_iso_dates() {
         let mut ix = Index::default();
         let at = FieldMapping::Date {

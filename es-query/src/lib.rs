@@ -135,6 +135,32 @@ fn parse_dated(v: &Value, locale: &str) -> Option<i64> {
     Some((era * 146097 + doe - 719468) * 86400 + secs - off)
 }
 
+/// Epoch millis of a value of a date field with `format` and `locale`.
+pub fn date_millis(format: Option<&str>, locale: Option<&str>, v: &Value) -> Option<i64> {
+    let Some(format) = format else {
+        return parse_date_millis(v);
+    };
+    (format.split("||"))
+        .find_map(|f| match f {
+            "epoch_millis" => num(v).map(|x| x as i64),
+            "epoch_second" => num(v).map(|x| (x * 1000.0) as i64),
+            // ponytail: other named formats (`strict_date_time`, ...) parse as the default format
+            _ if es_index::format_pattern(f, 0).is_none() => {
+                v.as_str().and_then(|_| parse_date_millis(v))
+            }
+            _ => es_index::parse_pattern(f, v.as_str()?),
+        })
+        .or_else(|| parse_dated(v, locale.unwrap_or("en")))
+}
+
+/// Whether a value of a date field with `format` surely cannot be read: every format is an
+/// epoch or a pattern and none reads it.
+// ponytail: named formats only parse as the default format, so they never reject values
+pub fn bad_date(format: Option<&str>, locale: Option<&str>, v: &Value) -> bool {
+    let known = |f: &str| f.starts_with("epoch_") || es_index::format_pattern(f, 0).is_some();
+    format.is_some_and(|f| f.split("||").all(known)) && date_millis(format, locale, v).is_none()
+}
+
 /// Exact integer value, so longs above 2^53 keep their precision.
 fn int(v: &Value) -> Option<i64> {
     v.as_i64().or_else(|| v.as_str()?.parse().ok())
@@ -427,19 +453,9 @@ impl<'a> Searcher<'a> {
     fn instant(&self, field: &str) -> Option<impl Fn(&Value) -> Option<i64> + 'a> {
         match self.index.mappings.field(field)? {
             FieldMapping::Date { format, locale, .. }
-            | FieldMapping::DateNanos { format, locale } => Some(move |v: &Value| match format {
-                // ponytail: named formats (`strict_date_time`, ...) parse as the default format
-                Some(f) => (v.as_str())
-                    .and_then(|s| {
-                        f.split("||")
-                            .find_map(|f| match es_index::format_pattern(f, 0) {
-                                Some(_) => es_index::parse_pattern(f, s),
-                                None => parse_date_millis(v),
-                            })
-                    })
-                    .or_else(|| parse_dated(v, locale.as_deref().unwrap_or("en"))),
-                None => parse_date_millis(v),
-            }),
+            | FieldMapping::DateNanos { format, locale } => {
+                Some(move |v: &Value| date_millis(format.as_deref(), locale.as_deref(), v))
+            }
             _ => None,
         }
     }
