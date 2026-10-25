@@ -72,6 +72,7 @@ struct TopHits {
     source: Option<String>,
     version: bool,
     seq_no: bool,
+    docvalue_fields: Vec<String>,
 }
 
 /// A document `top_hits` collected.
@@ -82,6 +83,8 @@ struct TopHit {
     score: f64,
     sort: Vec<Value>,
     doc: Document,
+    /// The requested `docvalue_fields` that have values.
+    fields: Map<String, Value>,
 }
 
 impl TopHits {
@@ -95,6 +98,7 @@ impl TopHits {
             source: Some(String::new()),
             version: false,
             seq_no: false,
+            docvalue_fields: vec![],
         };
         // patterns of a string or an array of strings
         let patterns = |k: &str, v: &Value| match v {
@@ -117,6 +121,20 @@ impl TopHits {
                 "sort" => t.sort = crate::parse_sorts(v)?,
                 "version" => t.version = v.as_bool().ok_or_else(|| bad(k))?,
                 "seq_no_primary_term" => t.seq_no = v.as_bool().ok_or_else(|| bad(k))?,
+                // ponytail: no per-field `format`
+                "docvalue_fields" => {
+                    t.docvalue_fields = (v.as_array().ok_or_else(|| bad(k))?.iter())
+                        .map(|f| match f {
+                            Value::Object(o) if o.len() == 1 => o.get("field"),
+                            f => Some(f),
+                        })
+                        .map(|f| {
+                            f.and_then(Value::as_str)
+                                .map(String::from)
+                                .ok_or_else(|| bad(k))
+                        })
+                        .collect::<Result<_, _>>()?;
+                }
                 "_source" => {
                     t.source = match v {
                         Value::Bool(b) => b.then(String::new),
@@ -176,6 +194,9 @@ impl TopHits {
                     false => es_index::filter_path::apply(&h.doc.source, filter),
                 };
                 hit.insert("_source".into(), source);
+            }
+            if !h.fields.is_empty() {
+                hit.insert("fields".into(), h.fields.clone().into());
             }
             if !self.sort.is_empty() {
                 hit.insert("sort".into(), h.sort.clone().into());
@@ -921,6 +942,20 @@ impl Stats {
 }
 
 /// A source value as the field's doc values hold it; `None` if they cannot.
+/// A document's doc values of `field`, read from its source.
+fn doc_values(s: &Searcher, field: &str, mapping: &FieldMapping, doc: &Document) -> Vec<Value> {
+    let mut v: Vec<Value> = values(&doc.source, source_path(s.index, field))
+        .into_iter()
+        .filter_map(|v| doc_value(s, field, mapping, v))
+        .collect();
+    // keyword and ip doc values are a sorted set, other doc values sorted numbers
+    v.sort_by(crate::scalar_cmp);
+    if matches!(mapping, FieldMapping::Keyword { .. } | FieldMapping::Ip) {
+        v.dedup();
+    }
+    v
+}
+
 fn doc_value(s: &Searcher, field: &str, mapping: &FieldMapping, v: &Value) -> Option<Value> {
     use FieldMapping as M;
     match mapping {
@@ -1182,6 +1217,20 @@ impl<'s, 'a> Collector<'s, 'a> {
                     score,
                     sort: self.searcher.sort_values(&t.sort, score, doc),
                     doc: doc.clone(),
+                    fields: (t.docvalue_fields.iter())
+                        .filter_map(|f| {
+                            let m = self.searcher.index.mappings.field(f)?;
+                            let v = doc_values(self.searcher, f, m, doc);
+                            let v = match m {
+                                FieldMapping::Date { format, .. } => (v.iter())
+                                    .filter_map(|t| Some(date_string(format.as_deref(), int(t)?)))
+                                    .map(Value::from)
+                                    .collect(),
+                                _ => v,
+                            };
+                            (!v.is_empty()).then(|| (f.clone(), v.into()))
+                        })
+                        .collect(),
                 });
                 // ponytail: re-sorts at twice the kept hits; a heap if top_hits get large
                 if st.top.len() > 2 * t.from.saturating_add(t.size).max(8) {
@@ -1267,22 +1316,12 @@ impl<'s, 'a> Collector<'s, 'a> {
 
     /// A document's doc values of aggregation `i`'s field.
     fn values(&mut self, i: usize, id: &str, doc: &Document) -> Vec<Value> {
-        let (index, agg) = (self.searcher.index, &self.aggs[i]);
+        let agg = &self.aggs[i];
         match self.mappings[i] {
             None => vec![],
-            Some(m) => self.disk[i](id).unwrap_or_else(|| {
-                let path = source_path(index, &agg.field);
-                let mut v: Vec<Value> = values(&doc.source, path)
-                    .into_iter()
-                    .filter_map(|v| doc_value(self.searcher, &agg.field, m, v))
-                    .collect();
-                // keyword and ip doc values are a sorted set, other doc values sorted numbers
-                v.sort_by(crate::scalar_cmp);
-                if matches!(m, FieldMapping::Keyword { .. } | FieldMapping::Ip) {
-                    v.dedup();
-                }
-                v
-            }),
+            Some(m) => {
+                self.disk[i](id).unwrap_or_else(|| doc_values(self.searcher, &agg.field, m, doc))
+            }
         }
     }
 
@@ -2022,6 +2061,16 @@ mod tests {
         let body = json!({"aggs": {"t": {"top_hits": {"highlight": {}}}}});
         let err = SearchRequest::parse(&body).unwrap_err();
         assert_eq!(err.msg, "[top_hits] unknown field [highlight]");
+    }
+
+    #[test]
+    fn top_hits_docvalue_fields_render_doc_values_as_fields() {
+        let body = json!({"aggs": {"top": {"top_hits": {"size": 1, "sort": [{"i": "desc"}],
+            "_source": false, "docvalue_fields": ["i", {"field": "k"}, "at", "f", "nope"]}}}});
+        let hit = &aggs_of(&index(), body)["top"]["hits"]["hits"][0];
+        let fields =
+            json!({"i": [151], "k": ["c"], "at": ["2021-05-04T00:00:00.000Z"], "f": [2.0]});
+        assert_eq!(hit["fields"], fields);
     }
 
     #[test]
