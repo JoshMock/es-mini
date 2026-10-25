@@ -54,6 +54,95 @@ enum Metric {
     Global,
     /// A bucket per query, and maybe one of the documents matching none.
     Filters(Box<Filters>),
+    /// A bucket per range of values.
+    Range(Box<Ranges>),
+}
+
+/// The `range` aggregation's ranges, like ES's RangeAggregationBuilder.
+#[derive(Debug, Clone, PartialEq)]
+struct Ranges {
+    /// Each range's key, `from` and `to` as requested: numbers, or strings the field parses.
+    ranges: Vec<(Option<String>, Value, Value)>,
+    keyed: bool,
+    /// A DecimalFormat pattern for numeric bounds.
+    format: Option<String>,
+}
+
+impl Ranges {
+    fn parse(name: &str, params: &Map<String, Value>) -> Result<Self, QueryError> {
+        let bad = |k: &str| QueryError::x_content(format!("[range] failed to parse field [{k}]"));
+        let mut r = Ranges {
+            ranges: vec![],
+            keyed: false,
+            format: None,
+        };
+        for (k, v) in params {
+            match k.as_str() {
+                "field" | "missing" => {}
+                "keyed" => r.keyed = v.as_bool().ok_or_else(|| bad(k))?,
+                "format" => r.format = Some(v.as_str().ok_or_else(|| bad(k))?.into()),
+                "ranges" => {
+                    for range in v.as_array().ok_or_else(|| bad(k))? {
+                        let o = range.as_object().ok_or_else(|| bad(k))?;
+                        if let Some(k) = o
+                            .keys()
+                            .find(|k| !["key", "from", "to"].contains(&k.as_str()))
+                        {
+                            return Err(format!("[range] unknown field [{k}]").into());
+                        }
+                        let bound = |k| o.get(k).cloned().unwrap_or(Value::Null);
+                        let key = o.get("key").map(es_index::postings::text);
+                        r.ranges.push((key, bound("from"), bound("to")));
+                    }
+                }
+                _ => return Err(format!("[range] unknown field [{k}]").into()),
+            }
+        }
+        if r.ranges.is_empty() {
+            return Err(QueryError::illegal(format!(
+                "No [ranges] specified for the [{name}] aggregation"
+            )));
+        }
+        Ok(r)
+    }
+
+    /// Empty buckets of the ranges sorted by `from` then `to`, with their bounds parsed like
+    /// values of `field` (`m` its mapping).
+    fn buckets(
+        &self,
+        s: &Searcher,
+        field: &str,
+        m: Option<&FieldMapping>,
+        empty: &[Stats],
+    ) -> Result<Vec<Stats>, QueryError> {
+        let date = matches!(
+            m,
+            Some(FieldMapping::Date { .. } | FieldMapping::DateNanos { .. })
+        );
+        let parse = |v: &Value, open: f64| {
+            match v {
+                Value::Null => Some(open),
+                Value::String(_) if date => s.instant(field).and_then(|f| f(v)).map(|t| t as f64),
+                v => num(v),
+            }
+            .ok_or_else(|| {
+                QueryError::illegal(format!("failed to parse [{}]", es_index::postings::text(v)))
+            })
+        };
+        let mut ranges = (self.ranges.iter())
+            .map(|(key, from, to)| {
+                let bounds = (parse(from, f64::NEG_INFINITY)?, parse(to, f64::INFINITY)?);
+                Ok((key.clone(), bounds.0, bounds.1))
+            })
+            .collect::<Result<Vec<_>, QueryError>>()?;
+        ranges.sort_by(|x, y| x.1.total_cmp(&y.1).then(x.2.total_cmp(&y.2)));
+        let bucket = |range| Stats {
+            range: Some(range),
+            subs: empty.to_vec(),
+            ..Stats::default()
+        };
+        Ok(ranges.into_iter().map(bucket).collect())
+    }
 }
 
 /// The `filters` aggregation's buckets, like ES's FiltersAggregationBuilder.
@@ -130,6 +219,7 @@ impl Metric {
             Metric::Missing => "missing",
             Metric::Global => "global",
             Metric::Filters(_) => "filters",
+            Metric::Range(_) => "range",
         }
     }
 
@@ -137,7 +227,7 @@ impl Metric {
     fn buckets(&self) -> bool {
         matches!(
             self,
-            Metric::Terms(_) | Metric::Histogram(_) | Metric::Filters(_)
+            Metric::Terms(_) | Metric::Histogram(_) | Metric::Filters(_) | Metric::Range(_)
         ) || self.single()
     }
 
@@ -278,6 +368,7 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
         "missing" => Metric::Missing,
         "global" => Metric::Global,
         "filters" => Metric::Filters(Box::new(Filters::parse(object()?)?)),
+        "range" => Metric::Range(Box::new(Ranges::parse(name, object()?)?)),
         _ => return Err(format!("Unknown aggregation type [{t}]").into()),
     };
     if !subs.is_empty() && !metric.buckets() {
@@ -298,7 +389,8 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
     let params = object()?;
     for (k, v) in params {
         match (k.as_str(), &mut metric) {
-            ("field" | "missing", _) | (_, Metric::Terms(_) | Metric::Histogram(_)) => {}
+            ("field" | "missing", _)
+            | (_, Metric::Terms(_) | Metric::Histogram(_) | Metric::Range(_)) => {}
             ("sigma", Metric::ExtendedStats { sigma }) => {
                 *sigma = num(v).ok_or_else(|| {
                     QueryError::x_content(format!("[{t}] failed to parse field [sigma]"))
@@ -472,7 +564,7 @@ fn sort_value(agg: &Agg, rest: &str, st: Option<&Stats>) -> Result<f64, String> 
         Metric::Max => st.max,
         Metric::ValueCount => st.count as f64,
         Metric::Cardinality { .. } => st.hll.as_ref().map_or(0, Hll::cardinality) as f64,
-        Metric::Terms(_) | Metric::Histogram(_) | Metric::Filters(_) => {
+        Metric::Terms(_) | Metric::Histogram(_) | Metric::Filters(_) | Metric::Range(_) => {
             return Err(NOT_SORTABLE.into());
         }
         Metric::Stats | Metric::ExtendedStats { .. } | Metric::Percentiles { .. } => {
@@ -518,8 +610,10 @@ pub(crate) struct Stats {
     terms: Option<Buckets>,
     /// The sub-aggregations' results (only for single-bucket aggregations).
     subs: Vec<Stats>,
-    /// Each bucket's count and sub-aggregations (only for `filters`).
+    /// Each bucket's count and sub-aggregations (only for `filters` and `range`).
     buckets: Vec<Stats>,
+    /// A `range` bucket's key and requested bounds (open ends infinite).
+    range: Option<(Option<String>, f64, f64)>,
 }
 
 impl Default for Stats {
@@ -538,6 +632,7 @@ impl Default for Stats {
             terms: None,
             subs: vec![],
             buckets: vec![],
+            range: None,
         }
     }
 }
@@ -569,6 +664,7 @@ impl Stats {
         self.min = self.min.min(o.min);
         self.max = self.max.max(o.max);
         self.date |= o.date;
+        self.range = self.range.take().or(o.range);
         match (&mut self.hll, o.hll) {
             (Some(h), Some(o)) => h.merge(&o),
             (h, o) => *h = h.take().or(o),
@@ -804,6 +900,7 @@ impl<'s, 'a> Collector<'s, 'a> {
                         };
                         vec![bucket; n]
                     }
+                    Metric::Range(r) => r.buckets(searcher, &agg.field, m, &empty)?,
                     _ => vec![],
                 },
                 hll: match agg.metric {
@@ -853,6 +950,35 @@ impl<'s, 'a> Collector<'s, 'a> {
                 if f.other.is_some() {
                     hits.push(!hits.contains(&true));
                 }
+                let st = &mut self.stats[i];
+                for (b, _) in st.buckets.iter_mut().zip(hits).filter(|(_, hit)| *hit) {
+                    b.count += 1;
+                    if let Some(sub) = &mut self.subs[i] {
+                        sub.collect_into(&mut b.subs, id, doc);
+                    }
+                }
+                return;
+            }
+            Metric::Range(_) => {
+                let mut vals = self.values(i, id, doc);
+                if vals.is_empty() {
+                    vals.extend(self.missing[i].clone());
+                }
+                // the bounds take the field's precision, like ES's reduceToStoredPrecision
+                let fix = |x: f64| match self.mappings[i] {
+                    Some(FieldMapping::Float) => f64::from(x as f32),
+                    Some(FieldMapping::HalfFloat) => {
+                        f64::from(es_index::half_float(es_index::half_float_bits(x as f32)))
+                    }
+                    _ => x,
+                };
+                let hits: Vec<bool> = (self.stats[i].buckets.iter())
+                    .map(|b| {
+                        let (_, from, to) = b.range.clone().unwrap_or_default();
+                        let (from, to) = (fix(from), fix(to));
+                        vals.iter().filter_map(num).any(|x| from <= x && x < to)
+                    })
+                    .collect();
                 let st = &mut self.stats[i];
                 for (b, _) in st.buckets.iter_mut().zip(hits).filter(|(_, hit)| *hit) {
                     b.count += 1;
@@ -1056,6 +1182,8 @@ impl Collector<'_, '_> {
             Metric::Global => "GlobalAggregator",
             // ponytail: ES may run filters as FilterByFilterAggregator; not profiled yet
             Metric::Filters(_) => "FiltersAggregator",
+            // ponytail: ES runs ranges as NoOverlap, Overlap or from filters; not profiled yet
+            Metric::Range(_) => "NoOverlap",
             _ if m.is_none() && agg.missing.is_none() => match agg.metric {
                 Metric::Stats | Metric::ExtendedStats { .. } | Metric::Percentiles { .. } => {
                     "NonCollectingMultiMetricAggregator"
@@ -1286,7 +1414,7 @@ fn render_counted(
             Metric::Filters(f) => {
                 consume_buckets(buckets, st.buckets.len())?;
                 let keys = f.filters.iter().map(|(k, _)| k).chain(&f.other);
-                let (mut keyed, mut list) = (Map::new(), vec![]);
+                let mut list = vec![];
                 for (key, b) in keys.zip(&mut st.buckets) {
                     let mut bucket = Map::new();
                     if f.named && !f.keyed {
@@ -1294,16 +1422,43 @@ fn render_counted(
                     }
                     bucket.insert("doc_count".into(), b.count.into());
                     sub(&mut b.subs, &mut bucket)?;
-                    match f.keyed {
-                        true => drop(keyed.insert(key.clone(), bucket.into())),
-                        false => list.push(Value::from(bucket)),
-                    }
+                    list.push((key.clone(), bucket));
                 }
-                let buckets = match f.keyed {
-                    true => keyed.into(),
-                    false => list.into(),
+                body.insert("buckets".into(), keyed_buckets(f.keyed, list));
+            }
+            Metric::Range(r) => {
+                consume_buckets(buckets, st.buckets.len())?;
+                // ponytail: dates render in the default format, not the field's or `format`
+                let as_string = |x: f64| match (date, &r.format) {
+                    (true, _) => Some(iso_date(x as i64)),
+                    (_, Some(p)) => Some(decimal_format(p, x)),
+                    _ => None,
                 };
-                body.insert("buckets".into(), buckets);
+                let mut list = vec![];
+                for b in &mut st.buckets {
+                    let (key, from, to) = b.range.clone().unwrap_or_default();
+                    let mut bucket = Map::new();
+                    let end = |x: f64| match x.is_finite() {
+                        true => as_string(x).unwrap_or_else(|| java_double(x)),
+                        false => "*".into(),
+                    };
+                    let key = key.unwrap_or_else(|| format!("{}-{}", end(from), end(to)));
+                    if !r.keyed {
+                        bucket.insert("key".into(), key.as_str().into());
+                    }
+                    for (name, x) in [("from", from), ("to", to)] {
+                        if x.is_finite() {
+                            bucket.insert(name.into(), x.into());
+                            if let Some(s) = as_string(x) {
+                                bucket.insert(format!("{name}_as_string"), s.into());
+                            }
+                        }
+                    }
+                    bucket.insert("doc_count".into(), b.count.into());
+                    sub(&mut b.subs, &mut bucket)?;
+                    list.push((key, bucket));
+                }
+                body.insert("buckets".into(), keyed_buckets(r.keyed, list));
             }
             Metric::Avg => put(&mut body, "value", avg),
             Metric::Sum => put(&mut body, "value", Some(st.sum)),
@@ -1359,6 +1514,18 @@ fn render_counted(
         out.insert(key, body.into());
     }
     Ok(out.into())
+}
+
+/// Buckets as an object by key, or else an array.
+fn keyed_buckets(keyed: bool, buckets: Vec<(String, Map<String, Value>)>) -> Value {
+    let buckets = buckets.into_iter();
+    match keyed {
+        true => buckets
+            .map(|(k, b)| (k, b.into()))
+            .collect::<Map<_, _>>()
+            .into(),
+        false => buckets.map(|(_, b)| Value::from(b)).collect(),
+    }
 }
 
 /// The fields `extended_stats` adds to `stats`, computed like ES's InternalExtendedStats.
@@ -1563,6 +1730,35 @@ mod tests {
     }
 
     #[test]
+    fn range_buckets_values_in_sorted_ranges() {
+        let body = json!({"aggs": {
+            "i": {"range": {"field": "i", "missing": 1000, "ranges": [
+                {"from": 100}, {"to": 50, "key": "low"}, {"from": 50, "to": null}]},
+                "aggs": {"m": {"max": {"field": "i"}}}},
+            "f": {"range": {"field": "f", "format": "0.0#", "ranges": [{"from": 1, "to": 2.5}]}},
+            "at": {"range": {"field": "at", "keyed": true,
+                "ranges": [{"to": "2021-05-02T00:00:00Z"}]}},
+            "none": {"range": {"field": "nope", "ranges": [{"from": -1}]}},
+        }});
+        let want = json!({
+            "i": {"buckets": [
+                {"key": "low", "to": 50.0, "doc_count": 1, "m": {"value": 1.0}},
+                {"key": "50.0-*", "from": 50.0, "doc_count": 4, "m": {"value": 151.0}},
+                {"key": "100.0-*", "from": 100.0, "doc_count": 3, "m": {"value": 151.0}},
+            ]},
+            "f": {"buckets": [{"key": "1.0-2.5", "from": 1.0, "from_as_string": "1.0",
+                "to": 2.5, "to_as_string": "2.5", "doc_count": 2}]},
+            "at": {"buckets": {"*-2021-05-02T00:00:00.000Z": {"to": 1_619_913_600_000.0,
+                "to_as_string": "2021-05-02T00:00:00.000Z", "doc_count": 1}}},
+            "none": {"buckets": [{"key": "-1.0-*", "from": -1.0, "doc_count": 0}]},
+        });
+        assert_eq!(aggs_of(&index(), body), want);
+        let body = json!({"aggs": {"r": {"range": {"field": "i", "ranges": []}}}});
+        let err = SearchRequest::parse(&body).unwrap_err();
+        assert_eq!(err.msg, "No [ranges] specified for the [r] aggregation");
+    }
+
+    #[test]
     fn named_date_formats_parse_iso_dates() {
         let mut ix = Index::default();
         let at = FieldMapping::Date {
@@ -1574,6 +1770,37 @@ mod tests {
         ix.put("1", json!({"at": "2021-05-01T07:10:00Z"}));
         let aggs = aggs_of(&ix, json!({"aggs": {"max": {"max": {"field": "at"}}}}));
         assert_eq!(aggs["max"]["value"], 1_619_853_000_000.0);
+    }
+
+    #[test]
+    fn range_bounds_take_the_field_precision() {
+        // like ES's "Float Endpoint Exclusive": 0.04 as a float is below 0.04 as a double
+        let mut ix = Index::default();
+        let props = &mut ix.mappings.properties;
+        props.insert("f".into(), FieldMapping::Float);
+        props.insert("h".into(), FieldMapping::HalfFloat);
+        for (id, x) in [("1", 0.01), ("2", 0.0152), ("3", 0.04)] {
+            ix.put(id, json!({"f": x, "h": x}));
+        }
+        let ranges = json!([{"from": 0, "to": 0.04}, {"from": 0.04, "to": 1}]);
+        let body = json!({"aggs": {
+            "f": {"range": {"field": "f", "ranges": ranges}},
+            "h": {"range": {"field": "h", "ranges": [{"to": 0.0152}, {"from": 0.0152}]}},
+        }});
+        let aggs = aggs_of(&ix, body);
+        let counts = |a: &str| {
+            aggs[a]["buckets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|b| b["doc_count"].as_u64().unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(counts("f"), [2, 1]);
+        assert_eq!(counts("h"), [1, 2]);
+        // the bounds render as requested
+        assert_eq!(aggs["f"]["buckets"][0]["key"], "0.0-0.04");
+        assert_eq!(aggs["h"]["buckets"][1]["from"], 0.0152);
     }
 
     #[test]

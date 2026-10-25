@@ -9,18 +9,6 @@ aggregations/filters_bucket.yml/nested
 aggregations/filter.yml/Standard queries get cached
 aggregations/filter.yml/Terms lookup gets cached
 aggregations/histogram.yml/date_histogram with extended_bounds and offset and unmapped
-aggregations/range.yml/Double range
-aggregations/range.yml/Double range default keyed response
-aggregations/range.yml/Double range no decimal
-aggregations/range.yml/Double range on long field
-aggregations/range.yml/Double range with missing value
-aggregations/range.yml/Float Endpoint Exclusive
-aggregations/range.yml/Float range
-aggregations/range.yml/Half Float Endpoint Exclusive
-aggregations/range.yml/Min and max long range bounds
-aggregations/range.yml/Null to and from
-aggregations/range.yml/Range agg on long field
-aggregations/range.yml/Range aggregation on date field
 aggregations/terms.yml/order by sub agg containing filter
 aggregations/terms.yml/order by sub agg containing nested
 aggregations/top_hits.yml/docvalue fields
