@@ -6,7 +6,6 @@ mod by_query;
 mod docs;
 mod error;
 mod field_caps;
-mod filter_path;
 mod indices;
 mod nodes;
 mod params;
@@ -229,7 +228,7 @@ async fn filter_response(
     let Ok(v) = serde_json::from_slice::<Value>(&bytes) else {
         return (parts, bytes).into_response();
     };
-    let out = serde_json::to_vec(&filter_path::apply(&v, &f)).unwrap_or_default();
+    let out = serde_json::to_vec(&es_index::filter_path::apply(&v, &f)).unwrap_or_default();
     parts.headers.remove("content-length");
     (parts, out).into_response()
 }

@@ -3,6 +3,7 @@
 pub mod aliases;
 pub mod analysis;
 pub mod disk;
+pub mod filter_path;
 pub mod mapping;
 pub mod postings;
 pub mod tz;

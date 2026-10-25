@@ -310,7 +310,7 @@ fn filter_source(source: &Value, params: &HashMap<String, String>) -> Option<Val
     Some(if filter.is_empty() {
         source.clone()
     } else {
-        crate::filter_path::apply(source, &filter)
+        es_index::filter_path::apply(source, &filter)
     })
 }
 
