@@ -957,7 +957,6 @@ impl Stats {
     }
 }
 
-/// A source value as the field's doc values hold it; `None` if they cannot.
 /// A document's doc values of `field`, read from its source.
 fn doc_values(s: &Searcher, field: &str, mapping: &FieldMapping, doc: &Document) -> Vec<Value> {
     let mut v: Vec<Value> = values(&doc.source, source_path(s.index, field))
@@ -1043,6 +1042,7 @@ pub(crate) fn hit_fields(
         .collect()
 }
 
+/// A source value as the field's doc values hold it; `None` if they cannot.
 fn doc_value(s: &Searcher, field: &str, mapping: &FieldMapping, v: &Value) -> Option<Value> {
     use FieldMapping as M;
     match mapping {
