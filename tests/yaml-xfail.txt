@@ -2,19 +2,11 @@
 aggregations/date_range.yml/Date range
 aggregations/date_range.yml/Date Range Missing
 aggregations/date_range.yml/Date range unmapped with children
-aggregations/filters_bucket.yml/Anonymous filters test
-aggregations/filters_bucket.yml/Bad params
-aggregations/filters_bucket.yml/Basic test
 aggregations/filters_bucket.yml/cache busting
 aggregations/filters_bucket.yml/cache hits
-aggregations/filters_bucket.yml/empty meta
-aggregations/filters_bucket.yml/Filtered test
-aggregations/filters_bucket.yml/Metadata test
 aggregations/filters_bucket.yml/named filters with bucket sort test
 aggregations/filters_bucket.yml/nested
-aggregations/filters_bucket.yml/no meta
 aggregations/filters_bucket.yml/null meta
-aggregations/filters_bucket.yml/Only aggs test
 aggregations/filter.yml/Standard queries get cached
 aggregations/filter.yml/Terms lookup gets cached
 aggregations/histogram.yml/date_histogram with extended_bounds and offset and unmapped

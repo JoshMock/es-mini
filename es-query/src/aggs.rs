@@ -52,6 +52,63 @@ enum Metric {
     Missing,
     /// The single bucket of every document of the searched indices, whatever the query.
     Global,
+    /// A bucket per query, and maybe one of the documents matching none.
+    Filters(Box<Filters>),
+}
+
+/// The `filters` aggregation's buckets, like ES's FiltersAggregationBuilder.
+#[derive(Debug, Clone, PartialEq)]
+struct Filters {
+    /// Named filters sorted by name, or anonymous filters named by position.
+    filters: Vec<(String, Query)>,
+    /// Whether the filters were named, so array buckets have a `key`.
+    named: bool,
+    keyed: bool,
+    /// The key of the bucket of the documents matching no filter, if any.
+    other: Option<String>,
+}
+
+impl Filters {
+    fn parse(params: &Map<String, Value>) -> Result<Self, QueryError> {
+        let bad = |k: &str| QueryError::x_content(format!("[filters] failed to parse field [{k}]"));
+        let (mut filters, mut named, mut keyed) = (vec![], true, None);
+        let (mut other, mut other_key) = (false, None);
+        for (k, v) in params {
+            match k.as_str() {
+                "filters" => match v {
+                    Value::Object(o) => {
+                        // a BTreeMap: already sorted by name, as ES sorts named filters
+                        for (name, q) in o {
+                            filters.push((name.clone(), parse_query(q)?));
+                        }
+                    }
+                    Value::Array(a) => {
+                        named = false;
+                        for (i, q) in a.iter().enumerate() {
+                            filters.push((i.to_string(), parse_query(q)?));
+                        }
+                    }
+                    _ => return Err(bad(k)),
+                },
+                "keyed" => keyed = Some(v.as_bool().ok_or_else(|| bad(k))?),
+                "other_bucket" => other = v.as_bool().ok_or_else(|| bad(k))?,
+                "other_bucket_key" => other_key = Some(v.as_str().ok_or_else(|| bad(k))?.into()),
+                _ => return Err(format!("[filters] unknown field [{k}]").into()),
+            }
+        }
+        if filters.is_empty() {
+            return Err(QueryError::illegal("[filters] cannot be empty."));
+        }
+        // a key implies the other bucket; anonymous filters are never keyed
+        let other = (other || other_key.is_some()).then(|| other_key.unwrap_or("_other_".into()));
+        let keyed = named && keyed.unwrap_or(true);
+        Ok(Filters {
+            filters,
+            named,
+            keyed,
+            other,
+        })
+    }
 }
 
 impl Metric {
@@ -72,12 +129,16 @@ impl Metric {
             Metric::Filter(_) => "filter",
             Metric::Missing => "missing",
             Metric::Global => "global",
+            Metric::Filters(_) => "filters",
         }
     }
 
     /// Whether this aggregation buckets documents (and so may have sub-aggregations).
     fn buckets(&self) -> bool {
-        matches!(self, Metric::Terms(_) | Metric::Histogram(_)) || self.single()
+        matches!(
+            self,
+            Metric::Terms(_) | Metric::Histogram(_) | Metric::Filters(_)
+        ) || self.single()
     }
 
     /// Whether this aggregation has a single bucket (a `doc_count` and sub-aggregations).
@@ -203,6 +264,7 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
         "filter" => Metric::Filter(Box::new(parse_query(params)?)),
         "missing" => Metric::Missing,
         "global" => Metric::Global,
+        "filters" => Metric::Filters(Box::new(Filters::parse(object()?)?)),
         _ => return Err(format!("Unknown aggregation type [{t}]").into()),
     };
     if !subs.is_empty() && !metric.buckets() {
@@ -210,7 +272,7 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
             "Aggregator [{name}] of type [{t}] cannot accept sub-aggregations"
         )));
     }
-    if let Metric::Filter(_) | Metric::Global = metric {
+    if let Metric::Filter(_) | Metric::Global | Metric::Filters(_) = metric {
         return Ok(Agg {
             name: name.to_owned(),
             meta,
@@ -397,7 +459,9 @@ fn sort_value(agg: &Agg, rest: &str, st: Option<&Stats>) -> Result<f64, String> 
         Metric::Max => st.max,
         Metric::ValueCount => st.count as f64,
         Metric::Cardinality { .. } => st.hll.as_ref().map_or(0, Hll::cardinality) as f64,
-        Metric::Terms(_) | Metric::Histogram(_) => return Err(NOT_SORTABLE.into()),
+        Metric::Terms(_) | Metric::Histogram(_) | Metric::Filters(_) => {
+            return Err(NOT_SORTABLE.into());
+        }
         Metric::Stats | Metric::ExtendedStats { .. } | Metric::Percentiles { .. } => {
             let stats = !matches!(agg.metric, Metric::Percentiles { .. });
             return match key {
@@ -439,8 +503,10 @@ pub(crate) struct Stats {
     digest: Option<TDigest>,
     /// The buckets (only for `terms` and `histogram`).
     terms: Option<Buckets>,
-    /// The sub-aggregations' results (only for `filter`).
+    /// The sub-aggregations' results (only for single-bucket aggregations).
     subs: Vec<Stats>,
+    /// Each bucket's count and sub-aggregations (only for `filters`).
+    buckets: Vec<Stats>,
 }
 
 impl Default for Stats {
@@ -458,6 +524,7 @@ impl Default for Stats {
             digest: None,
             terms: None,
             subs: vec![],
+            buckets: vec![],
         }
     }
 }
@@ -500,6 +567,10 @@ impl Stats {
         match self.subs.is_empty() {
             true => self.subs = o.subs,
             false => reduce(&mut self.subs, o.subs),
+        }
+        match self.buckets.is_empty() {
+            true => self.buckets = o.buckets,
+            false => reduce(&mut self.buckets, o.buckets),
         }
         // like a data node, reduce shard results into a new digest (see TDigest::coordinated)
         if let Some(mut o) = o.digest {
@@ -706,6 +777,17 @@ impl<'s, 'a> Collector<'s, 'a> {
                     true => empty.clone(),
                     false => vec![],
                 },
+                buckets: match &agg.metric {
+                    Metric::Filters(f) => {
+                        let n = f.filters.len() + usize::from(f.other.is_some());
+                        let bucket = Stats {
+                            subs: empty.clone(),
+                            ..Stats::default()
+                        };
+                        vec![bucket; n]
+                    }
+                    _ => vec![],
+                },
                 hll: match agg.metric {
                     Metric::Cardinality { precision, .. } => Some(Hll::new(precision)),
                     _ => None,
@@ -746,6 +828,22 @@ impl<'s, 'a> Collector<'s, 'a> {
             Metric::Missing => self.values(i, id, doc).is_empty() && self.missing[i].is_none(),
             // collected over every document by `finish_terms`
             Metric::Global => false,
+            Metric::Filters(f) => {
+                let mut hits: Vec<_> = (f.filters.iter())
+                    .map(|(_, q)| self.searcher.score(q, id, doc).is_some())
+                    .collect();
+                if f.other.is_some() {
+                    hits.push(!hits.contains(&true));
+                }
+                let st = &mut self.stats[i];
+                for (b, _) in st.buckets.iter_mut().zip(hits).filter(|(_, hit)| *hit) {
+                    b.count += 1;
+                    if let Some(sub) = &mut self.subs[i] {
+                        sub.collect_into(&mut b.subs, id, doc);
+                    }
+                }
+                return;
+            }
             _ => {
                 let vals = self.values(i, id, doc);
                 if let Some(t) = &mut self.timings {
@@ -877,6 +975,11 @@ impl Collector<'_, '_> {
             if let (true, Some(sub)) = (self.aggs[i].metric.single(), &mut self.subs[i]) {
                 sub.finish_terms(&mut st.subs);
             }
+            if let Some(sub) = &mut self.subs[i] {
+                for b in &mut st.buckets {
+                    sub.finish_terms(&mut b.subs);
+                }
+            }
             let Some(b) = &mut st.terms else {
                 continue;
             };
@@ -933,6 +1036,8 @@ impl Collector<'_, '_> {
             Metric::Filter(_) => "FilterAggregator",
             Metric::Missing => "MissingAggregator",
             Metric::Global => "GlobalAggregator",
+            // ponytail: ES may run filters as FilterByFilterAggregator; not profiled yet
+            Metric::Filters(_) => "FiltersAggregator",
             _ if m.is_none() && agg.missing.is_none() => match agg.metric {
                 Metric::Stats | Metric::ExtendedStats { .. } | Metric::Percentiles { .. } => {
                     "NonCollectingMultiMetricAggregator"
@@ -1153,6 +1258,28 @@ fn render_counted(
             Metric::Filter(_) | Metric::Missing | Metric::Global => {
                 body.insert("doc_count".into(), st.count.into());
                 sub(&mut st.subs, &mut body)?;
+            }
+            Metric::Filters(f) => {
+                consume_buckets(buckets, st.buckets.len())?;
+                let keys = f.filters.iter().map(|(k, _)| k).chain(&f.other);
+                let (mut keyed, mut list) = (Map::new(), vec![]);
+                for (key, b) in keys.zip(&mut st.buckets) {
+                    let mut bucket = Map::new();
+                    if f.named && !f.keyed {
+                        bucket.insert("key".into(), key.clone().into());
+                    }
+                    bucket.insert("doc_count".into(), b.count.into());
+                    sub(&mut b.subs, &mut bucket)?;
+                    match f.keyed {
+                        true => drop(keyed.insert(key.clone(), bucket.into())),
+                        false => list.push(Value::from(bucket)),
+                    }
+                }
+                let buckets = match f.keyed {
+                    true => keyed.into(),
+                    false => list.into(),
+                };
+                body.insert("buckets".into(), buckets);
             }
             Metric::Avg => put(&mut body, "value", avg),
             Metric::Sum => put(&mut body, "value", Some(st.sum)),
@@ -1378,6 +1505,37 @@ mod tests {
             "none": {"doc_count": 0},
         });
         assert_eq!(aggs_of(&index(), body), want);
+    }
+
+    #[test]
+    fn filters_bucket_each_query_and_the_others() {
+        let body = json!({"query": {"range": {"i": {"gte": 50}}}, "aggs": {
+            "named": {"filters": {"other_bucket": true, "filters": {
+                "z": {"term": {"k": "b"}},
+                "a": {"term": {"k": "zzz"}},
+            }}, "aggs": {"m": {"max": {"field": "i"}}}},
+            "list": {"filters": {"keyed": false, "other_bucket_key": "rest",
+                "filters": {"b": {"term": {"k": "b"}}}}},
+            "anon": {"filters": {"filters": [{"term": {"k": "c"}}, {"match_all": {}}]}},
+        }});
+        let want = json!({
+            "named": {"buckets": {
+                "a": {"doc_count": 0, "m": {"value": null}},
+                "z": {"doc_count": 2, "m": {"value": 101.0}},
+                "_other_": {"doc_count": 1, "m": {"value": 151.0}},
+            }},
+            "list": {"buckets": [
+                {"key": "b", "doc_count": 2},
+                {"key": "rest", "doc_count": 1},
+            ]},
+            "anon": {"buckets": [{"doc_count": 1}, {"doc_count": 3}]},
+        });
+        assert_eq!(aggs_of(&index(), body), want);
+        for filters in [json!({}), json!({"filters": []})] {
+            let body = json!({"aggs": {"f": {"filters": filters}}});
+            let err = SearchRequest::parse(&body).unwrap_err();
+            assert_eq!(err.msg, "[filters] cannot be empty.");
+        }
     }
 
     #[test]
