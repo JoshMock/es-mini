@@ -56,7 +56,7 @@ pub enum FieldMapping {
 
 impl FieldMapping {
     /// The ES|QL-facing type name (`text`, `keyword`, `long`, `integer`, `double`, `boolean`, `date`,
-    /// `ip`, or `unsupported` for ranges).
+    /// `date_nanos`, `ip`, or `unsupported` for ranges).
     pub fn type_name(&self) -> &'static str {
         match self {
             Self::Text | Self::TextKeyword { .. } => "text",

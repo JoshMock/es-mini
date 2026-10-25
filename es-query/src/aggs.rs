@@ -1392,8 +1392,8 @@ pub(crate) fn render(
 }
 
 /// Counts `n` more buckets toward the request's [`MAX_BUCKETS`], like ES's MultiBucketConsumer.
-// ponytail: counts histogram buckets as rendered, so sub-aggregations of empty buckets count once
-// per bucket (ES reduces them once) and terms buckets not at all
+// ponytail: counts histogram, filters and range buckets as rendered, so sub-aggregations of empty
+// buckets count once per bucket (ES reduces them once) and terms buckets not at all
 fn consume_buckets(buckets: &Cell<usize>, n: usize) -> Result<(), QueryError> {
     buckets.set(buckets.get() + n);
     match buckets.get() > MAX_BUCKETS {
