@@ -1,6 +1,5 @@
 # Known-failing YAML tests. Fix one, then delete its line.
 aggregations/date_histogram.yml/date_histogram and date_histogram_composite timezone
-aggregations/date_histogram.yml/date_histogram on range with hard bounds
 aggregations/date_range.yml/Date range
 aggregations/date_range.yml/Date Range Missing
 aggregations/date_range.yml/Date range unmapped with children
@@ -21,10 +20,7 @@ aggregations/filter.yml/Standard queries get cached
 aggregations/filter.yml/Terms lookup gets cached
 aggregations/global.yml/profile
 aggregations/global.yml/simple
-aggregations/histogram.yml/date_histogram on range
-aggregations/histogram.yml/date_histogram on range with offset
 aggregations/histogram.yml/date_histogram with extended_bounds and offset and unmapped
-aggregations/histogram.yml/histogram with hard bounds
 aggregations/missing.yml/match all
 aggregations/missing.yml/match none
 aggregations/missing.yml/match some

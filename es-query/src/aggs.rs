@@ -528,8 +528,29 @@ fn doc_value(s: &Searcher, field: &str, mapping: &FieldMapping, v: &Value) -> Op
                 .then(|| t.into())
         }
         M::Ip => es_index::ip_bytes(v).map(|ip| es_index::ip_string(ip).into()),
-        M::Text | M::TextKeyword { .. } | M::LongRange | M::DateRange { .. } => None,
+        // ponytail: date_range's `format` is ignored
+        M::LongRange => range(v, int),
+        M::DateRange { .. } => range(v, es_index::parse_date_millis),
+        M::Text | M::TextKeyword { .. } => None,
     }
+}
+
+/// A range field's value as its inclusive `[from, to]`, open ends at the type's limits, like
+/// RangeFieldMapper.
+fn range(v: &Value, parse: fn(&Value) -> Option<i64>) -> Option<Value> {
+    let o = v.as_object()?;
+    let end = |k: &str| o.get(k).filter(|v| !v.is_null()).map(parse);
+    let from = match (end("gte"), end("gt")) {
+        (Some(x), _) => x?,
+        (_, Some(x)) => x?.checked_add(1)?,
+        _ => i64::MIN,
+    };
+    let to = match (end("lte"), end("lt")) {
+        (Some(x), _) => x?,
+        (_, Some(x)) => x?.checked_sub(1)?,
+        _ => i64::MAX,
+    };
+    Some(Value::from(vec![from, to]))
 }
 
 /// ES's ValuesSourceType of a field: every number is `numeric`.

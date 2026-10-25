@@ -4,7 +4,7 @@
 
 use super::Stats;
 use super::terms::{Buckets, Format};
-use crate::{QueryError, int, num};
+use crate::{MAX_BUCKETS, QueryError, int, num};
 use es_index::tz::TimeZone;
 use es_index::{civil_from_days, days_from_civil, iso_date, parse_date_millis};
 use serde_json::{Map, Value};
@@ -354,8 +354,39 @@ impl Histogram {
             .map(|x| self.round(x))
             .filter(|&k| (self.hard_bounds).is_none_or(|b| b.contains(unshifted(k), self.date)))
             .collect();
+        for r in vals.iter().filter_map(Value::as_array) {
+            self.range_keys(num(&r[0]), num(&r[1]), &mut keys);
+        }
+        keys.sort_by(f64::total_cmp);
         keys.dedup();
         keys.into_iter().map(Value::from).collect()
+    }
+
+    /// The keys of every bucket a range field's `[from, to]` overlaps, clamped to the hard bounds
+    /// (whose max is inclusive here), like RangeHistogramAggregator and
+    /// DateRangeHistogramAggregator; at most one past [`MAX_BUCKETS`], so the render fails.
+    // ponytail: a range whose keys stop advancing (f64 precision) ends there; ES loops forever
+    fn range_keys(&self, from: Option<f64>, to: Option<f64>, keys: &mut Vec<f64>) {
+        let (Some(mut from), Some(mut to)) = (from, to) else {
+            return;
+        };
+        if let Some(b) = self.hard_bounds {
+            from = b.min.map_or(from, |m| from.max(m));
+            to = b.max.map_or(to, |m| to.min(m));
+        }
+        if self.date {
+            // ponytail: open date ends stop at ±2^53 millis so rounding cannot overflow
+            const LIMIT: f64 = (1u64 << 53) as f64;
+            (from, to) = (from.max(-LIMIT), to.min(LIMIT));
+        }
+        let (mut k, end, start) = (self.round(from), self.round(to), keys.len());
+        while k <= end && keys.len() - start <= MAX_BUCKETS {
+            keys.push(k);
+            match self.next(k) {
+                next if next > k => k = next,
+                _ => break,
+            }
+        }
     }
 
     /// The key of the bucket holding `key`.
@@ -665,6 +696,69 @@ mod tests {
             json!({"field": "n", "interval": 1, "extended_bounds": {"min": 1e17, "max": 2e17}});
         let got = run(&[&index(&[])], json!({"h": {"histogram": stuck}}));
         assert_eq!(got.unwrap_err(), too_many);
+    }
+
+    #[test]
+    fn histograms_count_ranges_in_every_bucket_they_overlap() {
+        let mut ix = Index::default();
+        let props = &mut ix.mappings.properties;
+        props.insert("l".into(), FieldMapping::LongRange);
+        props.insert("d".into(), FieldMapping::DateRange { format: None });
+        let docs = [
+            json!({"l": {"lte": 2}, "d": {"gte": "2016-01-01", "lt": "2016-01-02"}}),
+            json!({"l": {"gt": 3, "lt": 6}, "d": {"gte": "2016-01-02", "lt": "2016-01-03"}}),
+            json!({"l": [{"gte": 4, "lte": 4}, {"gte": 5, "lte": 9}],
+                "d": {"gte": "2016-02-01", "lt": "2016-03-01"}}),
+        ];
+        for (i, d) in docs.into_iter().enumerate() {
+            ix.put(&i.to_string(), d);
+        }
+        let buckets = |ix: &Index, agg: Value| -> Result<Value, String> {
+            let got = run(&[ix], json!({"h": agg}))?;
+            let buckets = got["h"]["buckets"].as_array().unwrap().iter();
+            Ok(buckets
+                .map(|b| {
+                    json!([
+                        b["key_as_string"]
+                            .as_str()
+                            .map_or(b["key"].clone(), Value::from),
+                        b["doc_count"]
+                    ])
+                })
+                .collect())
+        };
+        // hard bounds clamp open ends, and their max is inclusive; a document counts once
+        let hard = json!({"histogram": {"field": "l", "interval": 2,
+            "hard_bounds": {"min": 0, "max": 8}}});
+        assert_eq!(
+            buckets(&ix, hard).unwrap(),
+            json!([[0.0, 1], [2.0, 1], [4.0, 2], [6.0, 1], [8.0, 1]])
+        );
+        // `lt` is exclusive: the first range ends before 2016-01-02
+        let month = json!({"date_histogram": {"field": "d", "calendar_interval": "month",
+            "offset": "+1d"}});
+        assert_eq!(
+            buckets(&ix, month).unwrap(),
+            json!([
+                ["2015-12-02T00:00:00.000Z", 1],
+                ["2016-01-02T00:00:00.000Z", 2],
+                ["2016-02-02T00:00:00.000Z", 1]
+            ])
+        );
+        // an open range without hard bounds is too many buckets
+        let open = json!({"histogram": {"field": "l", "interval": 1}});
+        assert!(
+            buckets(&ix, open)
+                .unwrap_err()
+                .starts_with("Trying to create too many buckets")
+        );
+        let open = json!({"date_histogram": {"field": "d", "calendar_interval": "day"}});
+        ix.put("3", json!({"d": {"lt": "2016-01-01"}}));
+        assert!(
+            buckets(&ix, open)
+                .unwrap_err()
+                .starts_with("Trying to create too many buckets")
+        );
     }
 
     /// The `h` date_histogram's buckets over `dates` as `[key_as_string, doc_count]` pairs.
