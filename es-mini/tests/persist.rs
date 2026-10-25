@@ -175,3 +175,28 @@ async fn posted_template_and_msearch_reads_do_not_save() {
     let _ = std::fs::remove_dir_all(&root);
     assert!(statuses.iter().all(|s| s.is_success()), "{statuses:?}");
 }
+
+#[tokio::test]
+async fn graceful_shutdown_flushes() {
+    let dir = std::env::temp_dir().join(format!("esm-persist-shutdown-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let app = es_mini::app_persisted(&dir).unwrap();
+    let mappings = json!({"properties": {"title": {"type": "keyword"}}});
+    call(&app, "PUT", "/books", json!({ "mappings": mappings })).await;
+    call(&app, "PUT", "/books/_doc/1", json!({"title": "Dune"})).await;
+    drop(app);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    es_mini::serve_persisted(listener, &dir, async {})
+        .await
+        .unwrap();
+
+    // Without the translog, only committed segments hold the document.
+    for ix in std::fs::read_dir(dir.join("indices")).unwrap() {
+        std::fs::remove_dir_all(ix.unwrap().path().join("0/translog")).unwrap();
+    }
+    let app = es_mini::app_persisted(&dir).unwrap();
+    let doc = call(&app, "GET", "/books/_doc/1", json!({})).await;
+    assert_eq!(doc["_source"], json!({"title": "Dune"}));
+    let _ = std::fs::remove_dir_all(&dir);
+}

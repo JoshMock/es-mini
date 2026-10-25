@@ -160,6 +160,26 @@ pub fn app_with(indices: Indices) -> Router {
 /// now (replaying their translogs), and every successful write request is made durable before
 /// it is answered (see [`es_index::disk::persist`]).
 pub fn app_persisted(dir: &std::path::Path) -> Result<Router, String> {
+    persisted(dir).map(|(app, _)| app)
+}
+
+/// Serves [`app_persisted`] over `dir` on `listener` until `shutdown` completes, lets in-flight
+/// requests finish, then flushes: commits every index's segments and empties its translog, so
+/// Elasticsearch opens the directory without replaying anything.
+pub async fn serve_persisted(
+    listener: tokio::net::TcpListener,
+    dir: &std::path::Path,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<(), String> {
+    let (app, state) = persisted(dir)?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await
+        .map_err(|e| e.to_string())?;
+    es_index::disk::save(dir, &state.read().expect("lock poisoned")).map_err(|e| e.0)
+}
+
+fn persisted(dir: &std::path::Path) -> Result<(Router, AppState), String> {
     es_index::disk::recover(dir).map_err(|e| e.0)?;
     let indices = if dir.join("_state").is_dir() {
         es_index::disk::open(dir).map_err(|e| e.0)?
@@ -168,7 +188,7 @@ pub fn app_persisted(dir: &std::path::Path) -> Result<Router, String> {
     };
     let state = Arc::new(RwLock::new(indices));
     let (dir, saved) = (dir.to_owned(), state.clone());
-    Ok(with_es_405(router(state).layer(axum::middleware::from_fn(
+    let app = with_es_405(router(state.clone()).layer(axum::middleware::from_fn(
         move |req: axum::extract::Request, next: axum::middleware::Next| {
             let (dir, state) = (dir.clone(), saved.clone());
             async move {
@@ -202,7 +222,8 @@ pub fn app_persisted(dir: &std::path::Path) -> Result<Router, String> {
                 }
             }
         },
-    ))))
+    )));
+    Ok((app, state))
 }
 
 /// Applies `filter_path` to every JSON response, errors included, as Java's `RestController` does.
