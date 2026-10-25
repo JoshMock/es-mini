@@ -989,8 +989,9 @@ fn meta_fields() -> Vec<es_codec::field_infos::FieldInfo> {
 }
 
 /// Commits `ix` into the shard directory `dir`, reusing the commit in `prev` (the same
-/// directory for an in-place commit). An in-place commit of an unchanged index writes nothing,
-/// and afterwards deletes the files no longer referenced. Returns whether it committed.
+/// directory for an in-place commit). An in-place commit of an unchanged index writes nothing.
+/// A commit afterwards deletes the files in `dir` no longer referenced. Returns whether it
+/// committed.
 fn write_shard(prev: &Path, dir: &Path, ix: &Index) -> es_codec::Result<bool> {
     use es_codec::segment_infos::{radix36, shard_user_data};
     let in_place = prev == dir;
@@ -1075,26 +1076,24 @@ fn write_shard(prev: &Path, dir: &Path, ix: &Index) -> es_codec::Result<bool> {
             let _ = std::fs::remove_file(translog.join(&name));
         }
     }
-    if in_place {
-        // Like Lucene's IndexFileDeleter: drop the previous commit's files (and leftovers of an
-        // interrupted commit) once the new commit is durable.
-        let mut keep: HashSet<String> =
-            HashSet::from([format!("segments_{}", radix36(infos.generation))]);
-        for seg in &infos.segments {
-            keep.extend(seg.info.files.iter().cloned());
-            if seg.del_gen != -1 {
-                keep.insert(format!("{}_{}.liv", seg.name, radix36(seg.del_gen as u64)));
-            }
+    // Like Lucene's IndexFileDeleter: drop the previous commit's files (and leftovers of an
+    // interrupted commit, or the empty commit of a new shard) once the new commit is durable.
+    let mut keep: HashSet<String> =
+        HashSet::from([format!("segments_{}", radix36(infos.generation))]);
+    for seg in &infos.segments {
+        keep.extend(seg.info.files.iter().cloned());
+        if seg.del_gen != -1 {
+            keep.insert(format!("{}_{}.liv", seg.name, radix36(seg.del_gen as u64)));
         }
-        for entry in std::fs::read_dir(dir).map_err(io)? {
-            let name = entry
-                .map_err(io)?
-                .file_name()
-                .to_string_lossy()
-                .into_owned();
-            if (name.starts_with('_') || name.starts_with("segments_")) && !keep.contains(&name) {
-                let _ = std::fs::remove_file(dir.join(&name));
-            }
+    }
+    for entry in std::fs::read_dir(dir).map_err(io)? {
+        let name = entry
+            .map_err(io)?
+            .file_name()
+            .to_string_lossy()
+            .into_owned();
+        if (name.starts_with('_') || name.starts_with("segments_")) && !keep.contains(&name) {
+            let _ = std::fs::remove_file(dir.join(&name));
         }
     }
     Ok(true)

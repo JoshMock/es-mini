@@ -269,3 +269,31 @@ mod in_place {
         SegmentInfos::read_latest(shard).unwrap()
     }
 }
+
+/// Index creation commits through the swap path; like an in-place commit, it leaves only the
+/// latest `segments_N` and the files it references.
+#[test]
+fn a_created_index_has_one_commit_file() {
+    let dir = scratch("created");
+    let mut idx = Index::default();
+    idx.put("1", json!({"n": 1}));
+    disk::save(&dir, &Indices::from([("idx".to_owned(), idx)])).unwrap();
+    let infos = commit(&dir);
+    let mut referenced: Vec<String> = infos
+        .segments
+        .iter()
+        .flat_map(|s| s.info.files.iter().cloned())
+        .collect();
+    referenced.push(format!(
+        "segments_{}",
+        es_codec::segment_infos::radix36(infos.generation)
+    ));
+    referenced.sort();
+    let mut files: Vec<String> = std::fs::read_dir(shard(&dir))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with('_') || n.starts_with("segments"))
+        .collect();
+    files.sort();
+    assert_eq!(files, referenced);
+}
