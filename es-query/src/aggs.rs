@@ -72,6 +72,7 @@ struct TopHits {
     source: Option<String>,
     version: bool,
     seq_no: bool,
+    explain: bool,
     docvalue_fields: Vec<String>,
     /// The `fields` to fetch; `None` inherits the search's.
     fields: Option<Vec<String>>,
@@ -89,6 +90,8 @@ struct TopHit {
     /// The requested `docvalue_fields` and `fields` that have values.
     fields: Map<String, Value>,
     matched_queries: Vec<String>,
+    /// Its score's explanation, if asked for.
+    explanation: Option<Value>,
 }
 
 impl TopHits {
@@ -102,6 +105,7 @@ impl TopHits {
             source: Some(String::new()),
             version: false,
             seq_no: false,
+            explain: false,
             docvalue_fields: vec![],
             fields: None,
             stored_fields: vec![],
@@ -128,6 +132,7 @@ impl TopHits {
                 "sort" => t.sort = crate::parse_sorts(v)?,
                 "version" => t.version = v.as_bool().ok_or_else(|| bad(k))?,
                 "seq_no_primary_term" => t.seq_no = v.as_bool().ok_or_else(|| bad(k))?,
+                "explain" => t.explain = v.as_bool().ok_or_else(|| bad(k))?,
                 // ponytail: no per-field `format`
                 "docvalue_fields" => t.docvalue_fields = field_names(v).ok_or_else(|| bad(k))?,
                 "fields" => t.fields = Some(field_names(v).ok_or_else(|| bad(k))?),
@@ -208,6 +213,9 @@ impl TopHits {
             }
             if !h.matched_queries.is_empty() {
                 hit.insert("matched_queries".into(), h.matched_queries.clone().into());
+            }
+            if let Some(e) = &h.explanation {
+                hit.insert("_explanation".into(), e.clone());
             }
             Value::from(hit)
         });
@@ -1296,6 +1304,7 @@ impl<'s, 'a> Collector<'s, 'a> {
                     score,
                     sort: self.searcher.sort_values(&t.sort, score, doc),
                     matched_queries: self.searcher.matched_queries(id, doc),
+                    explanation: t.explain.then(|| self.searcher.explain(id, doc)),
                     doc: doc.clone(),
                     fields: {
                         let mut fields = hit_fields(self.searcher, &t.docvalue_fields, doc, false);
@@ -2191,6 +2200,42 @@ mod tests {
         );
         assert_eq!(Value::from(r.hits[3].fields.clone()), fields);
         assert!(r.hits[4].fields.contains_key("t"));
+    }
+
+    #[test]
+    fn top_hits_explain_their_scores_like_lucene() {
+        let body = json!({"query": {"bool": {"should": [
+            {"match": {"t": "x"}}, {"match": {"t": "no values"}}]}},
+            "aggs": {"top": {"top_hits": {"explain": true, "_source": false}}}});
+        let aggs = aggs_of(&index(), body);
+        let hits = aggs["top"]["hits"]["hits"].as_array().unwrap();
+        // doc 5 matches both terms, so it leads
+        let first = &hits[1]["_explanation"];
+        assert_eq!(first["value"], hits[1]["_score"]);
+        assert_eq!(first["description"], "sum of:");
+        // a single term is its weight, not a sum
+        let weight = &first["details"][0];
+        assert_eq!(weight["value"], hits[1]["_score"]);
+        assert_eq!(
+            weight["description"],
+            "weight(t:x in 0) [PerFieldSimilarity], result of:"
+        );
+        let score = &weight["details"][0];
+        let desc = "score(freq=1.0), computed as boost * idf * tf from:";
+        assert_eq!(score["description"], desc);
+        let parts = score["details"].as_array().unwrap();
+        let [boost, idf, tf] = [0, 1, 2].map(|i| parts[i]["value"].as_f64().unwrap());
+        assert_eq!(parts[0]["description"], "boost");
+        assert!((boost * idf * tf - score["value"].as_f64().unwrap()).abs() < 1e-6);
+        let n = json!([{"value": 4.0, "description": "n, number of documents containing term",
+            "details": []}, {"value": 5.0, "description": "N, total number of documents with field",
+            "details": []}]);
+        assert_eq!(parts[1]["details"], n);
+        assert_eq!(parts[2]["details"].as_array().unwrap().len(), 5);
+        // two matched terms sum
+        let both = &hits[0]["_explanation"]["details"][0];
+        assert_eq!(both["description"], "sum of:");
+        assert_eq!(both["details"].as_array().unwrap().len(), 2);
     }
 
     #[test]

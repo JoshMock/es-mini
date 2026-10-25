@@ -27,6 +27,11 @@ use std::{
     collections::{BTreeSet, HashMap, HashSet},
 };
 
+/// One node of Lucene's Explanation, with its value as the float Lucene computes.
+fn explanation(value: f64, description: String, details: Vec<Value>) -> Value {
+    serde_json::json!({"value": value as f32, "description": description, "details": details})
+}
+
 /// Lucene wildcard syntax: `*` any run, `?` one char, `\\` escapes.
 fn wildcard_match(p: &[char], t: &[char]) -> bool {
     match p.split_first() {
@@ -231,6 +236,8 @@ struct Searcher<'a> {
     in_memory: Option<HashSet<String>>,
     /// The query's named queries (see `named_queries`).
     named: Vec<(String, Query)>,
+    /// The query, for `explain`.
+    query: Query,
 }
 
 const K1: f64 = 1.2;
@@ -246,6 +253,7 @@ impl<'a> Searcher<'a> {
             on_disk: None,
             in_memory: None,
             named: named_queries(q),
+            query: q.clone(),
         };
         s.gather(q);
         s.on_disk = s.candidates(q);
@@ -501,7 +509,9 @@ impl<'a> Searcher<'a> {
             .docs_at(self.in_memory.as_ref(), self.on_disk.as_ref())
     }
 
-    fn bm25(&self, field: &str, term: &str, freq: f64, len: f64) -> f64 {
+    /// BM25's inputs and parts for a term of a field `len` terms long:
+    /// `[df, docs with the field, norm length, average length, idf, tf]`.
+    fn bm25_parts(&self, field: &str, term: &str, freq: f64, len: f64) -> [f64; 6] {
         let (n, avg) = self.field_stats.get(field).copied().unwrap_or((1.0, 1.0));
         let df = self
             .doc_freq
@@ -512,8 +522,103 @@ impl<'a> Searcher<'a> {
             len as u32,
         )));
         let idf = (1.0 + (n - df + 0.5) / (df + 0.5)).ln();
+        let tf = freq / (freq + K1 * (1.0 - B + B * len / avg));
+        [df, n, len, avg, idf, tf]
+    }
+
+    fn bm25(&self, field: &str, term: &str, freq: f64, len: f64) -> f64 {
+        let [.., idf, tf] = self.bm25_parts(field, term, freq, len);
         // ES's LegacyBM25Similarity scales Lucene's BM25 by (1 + k1).
-        idf * (1.0 + K1) * freq / (freq + K1 * (1.0 - B + B * len / avg))
+        idf * (1.0 + K1) * tf
+    }
+
+    /// A matching document's score as Lucene's Explanation, like ES's `explain`.
+    fn explain(&self, id: &str, d: &Document) -> Value {
+        self.explain_query(&self.query, id, d)
+    }
+
+    fn explain_query(&self, q: &Query, id: &str, d: &Document) -> Value {
+        let score = self.score(q, id, d).unwrap_or(0.0);
+        let mut details = match q {
+            Query::Match { field, query, .. } => self.explain_terms(field, query_terms, query, d),
+            Query::Term { field, value } if field != "_id" => {
+                self.explain_terms(field, |_, v| vec![v.to_owned()], &text(value), d)
+            }
+            Query::Bool { must, should, .. } => {
+                // ponytail: filter/must_not clauses are left out of the explanation
+                let details = (must.iter().chain(should))
+                    .filter(|c| self.score(c, id, d).is_some())
+                    .map(|c| self.explain_query(c, id, d));
+                return explanation(score, "sum of:".into(), details.collect());
+            }
+            Query::Named { query, .. } => return self.explain_query(query, id, d),
+            Query::MatchAll => return explanation(score, "*:*".into(), vec![]),
+            _ => vec![],
+        };
+        match details.len() {
+            1 => details.remove(0),
+            // ponytail: constant-score queries describe themselves generically, not as
+            // Lucene's query strings
+            0 => explanation(score, "ConstantScore".into(), vec![]),
+            _ => explanation(score, "sum of:".into(), details),
+        }
+    }
+
+    /// Each matched term's BM25 weight, like Lucene's TermWeight and BM25Similarity explain.
+    fn explain_terms(
+        &self,
+        field: &str,
+        analyze: fn(Kind, &str) -> Vec<String>,
+        query: &str,
+        d: &Document,
+    ) -> Vec<Value> {
+        let (kind, path) = self.kind(field);
+        if matches!(kind, Kind::Number | Kind::Bool) {
+            return vec![];
+        }
+        let doc_terms = terms(kind, &values(&d.source, path));
+        let mut out = vec![];
+        for w in analyze(kind, query) {
+            let freq = doc_terms.iter().filter(|t| **t == w).count() as f64;
+            if freq == 0.0 {
+                continue;
+            }
+            let [df, n, len, avg, idf, tf] =
+                self.bm25_parts(field, &w, freq, doc_terms.len() as f64);
+            let leaf = |v: f64, desc: &str| explanation(v, desc.into(), vec![]);
+            let idf = explanation(
+                idf,
+                "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:".into(),
+                vec![
+                    leaf(df, "n, number of documents containing term"),
+                    leaf(n, "N, total number of documents with field"),
+                ],
+            );
+            let tf = explanation(
+                tf,
+                "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:".into(),
+                vec![
+                    leaf(freq, "freq, occurrences of term within document"),
+                    leaf(K1, "k1, term saturation parameter"),
+                    leaf(B, "b, length normalization parameter"),
+                    leaf(len, "dl, length of field"),
+                    leaf(avg, "avgdl, average length of field"),
+                ],
+            );
+            let weight = self.bm25(field, &w, freq, doc_terms.len() as f64);
+            let score = explanation(
+                weight,
+                format!("score(freq={freq:?}), computed as boost * idf * tf from:"),
+                vec![leaf(1.0 + K1, "boost"), idf, tf],
+            );
+            // ponytail: Lucene's doc id is segment-local; the sequence number stands in
+            let desc = format!(
+                "weight({field}:{w} in {}) [PerFieldSimilarity], result of:",
+                d.seq_no
+            );
+            out.push(explanation(weight, desc, vec![score]));
+        }
+        out
     }
 
     /// `None` if the document does not match; otherwise its score.
