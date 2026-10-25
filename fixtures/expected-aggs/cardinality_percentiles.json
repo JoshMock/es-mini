@@ -1,0 +1,35 @@
+{
+  "_shards": {
+    "failed": 0,
+    "skipped": 0,
+    "successful": 1,
+    "total": 1
+  },
+  "aggregations": {
+    "pct": {
+      "values": {
+        "25.0": 3.0,
+        "50.0": 3.5,
+        "99.0": 4.98
+      }
+    },
+    "ranks": {
+      "values": {
+        "10.0": 43.15789473684211,
+        "30.0": 75.0
+      }
+    },
+    "tags": {
+      "value": 3
+    }
+  },
+  "hits": {
+    "hits": [],
+    "max_score": null,
+    "total": {
+      "relation": "eq",
+      "value": 5
+    }
+  },
+  "timed_out": false
+}

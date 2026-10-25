@@ -1,0 +1,37 @@
+{
+  "_shards": {
+    "failed": 0,
+    "skipped": 0,
+    "successful": 1,
+    "total": 1
+  },
+  "aggregations": {
+    "tags": {
+      "buckets": [
+        {
+          "doc_count": 1,
+          "key": "animal"
+        },
+        {
+          "doc_count": 1,
+          "key": "news"
+        },
+        {
+          "doc_count": 1,
+          "key": "pet"
+        }
+      ],
+      "doc_count_error_upper_bound": 0,
+      "sum_other_doc_count": 0
+    }
+  },
+  "hits": {
+    "hits": [],
+    "max_score": null,
+    "total": {
+      "relation": "eq",
+      "value": 3
+    }
+  },
+  "timed_out": false
+}

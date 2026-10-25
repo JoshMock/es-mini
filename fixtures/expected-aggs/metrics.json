@@ -1,0 +1,64 @@
+{
+  "_shards": {
+    "failed": 0,
+    "skipped": 0,
+    "successful": 1,
+    "total": 1
+  },
+  "aggregations": {
+    "avg_views": {
+      "value": 17.6
+    },
+    "count_tag": {
+      "value": 5
+    },
+    "ext_views": {
+      "avg": 17.6,
+      "count": 5,
+      "max": 42.0,
+      "min": 3.0,
+      "std_deviation": 14.485855169785456,
+      "std_deviation_bounds": {
+        "lower": -11.37171033957091,
+        "lower_population": -11.37171033957091,
+        "lower_sampling": -14.791356871857033,
+        "upper": 46.57171033957091,
+        "upper_population": 46.57171033957091,
+        "upper_sampling": 49.991356871857036
+      },
+      "std_deviation_population": 14.485855169785456,
+      "std_deviation_sampling": 16.195678435928517,
+      "sum": 88.0,
+      "sum_of_squares": 2598.0,
+      "variance": 209.84,
+      "variance_population": 209.84,
+      "variance_sampling": 262.3
+    },
+    "max_date": {
+      "value": 1714867200000.0,
+      "value_as_string": "2024-05-05T00:00:00.000Z"
+    },
+    "min_rating": {
+      "value": 2.5
+    },
+    "stats_rating": {
+      "avg": 3.7,
+      "count": 5,
+      "max": 5.0,
+      "min": 2.5,
+      "sum": 18.5
+    },
+    "sum_views": {
+      "value": 88.0
+    }
+  },
+  "hits": {
+    "hits": [],
+    "max_score": null,
+    "total": {
+      "relation": "eq",
+      "value": 5
+    }
+  },
+  "timed_out": false
+}

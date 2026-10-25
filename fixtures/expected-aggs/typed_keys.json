@@ -1,0 +1,53 @@
+{
+  "_shards": {
+    "failed": 0,
+    "skipped": 0,
+    "successful": 1,
+    "total": 1
+  },
+  "aggregations": {
+    "stats#st": {
+      "avg": 17.6,
+      "count": 5,
+      "max": 42.0,
+      "min": 3.0,
+      "sum": 88.0
+    },
+    "sterms#tags": {
+      "buckets": [
+        {
+          "doc_count": 2,
+          "key": "animal",
+          "max#mx": {
+            "value": 26.0
+          }
+        },
+        {
+          "doc_count": 2,
+          "key": "pet",
+          "max#mx": {
+            "value": 7.0
+          }
+        },
+        {
+          "doc_count": 1,
+          "key": "news",
+          "max#mx": {
+            "value": 42.0
+          }
+        }
+      ],
+      "doc_count_error_upper_bound": 0,
+      "sum_other_doc_count": 0
+    }
+  },
+  "hits": {
+    "hits": [],
+    "max_score": null,
+    "total": {
+      "relation": "eq",
+      "value": 5
+    }
+  },
+  "timed_out": false
+}

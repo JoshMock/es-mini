@@ -1,0 +1,77 @@
+{
+  "_shards": {
+    "failed": 0,
+    "skipped": 0,
+    "successful": 1,
+    "total": 1
+  },
+  "aggregations": {
+    "tags": {
+      "buckets": [
+        {
+          "doc_count": 2,
+          "key": "animal",
+          "top": {
+            "hits": {
+              "hits": [
+                {
+                  "_id": "2",
+                  "_index": "fixture",
+                  "_score": null,
+                  "_source": {
+                    "title": "Quick quick rabbits"
+                  },
+                  "sort": [
+                    26
+                  ]
+                }
+              ],
+              "max_score": null,
+              "total": {
+                "relation": "eq",
+                "value": 2
+              }
+            }
+          }
+        },
+        {
+          "doc_count": 2,
+          "key": "pet",
+          "top": {
+            "hits": {
+              "hits": [
+                {
+                  "_id": "4",
+                  "_index": "fixture",
+                  "_score": null,
+                  "_source": {
+                    "title": "A brown dog and a fox"
+                  },
+                  "sort": [
+                    7
+                  ]
+                }
+              ],
+              "max_score": null,
+              "total": {
+                "relation": "eq",
+                "value": 2
+              }
+            }
+          }
+        }
+      ],
+      "doc_count_error_upper_bound": 0,
+      "sum_other_doc_count": 1
+    }
+  },
+  "hits": {
+    "hits": [],
+    "max_score": null,
+    "total": {
+      "relation": "eq",
+      "value": 5
+    }
+  },
+  "timed_out": false
+}

@@ -1,0 +1,76 @@
+{
+  "_shards": {
+    "failed": 0,
+    "skipped": 0,
+    "successful": 1,
+    "total": 1
+  },
+  "aggregations": {
+    "by_key": {
+      "buckets": [
+        {
+          "doc_count": 1,
+          "key": 42
+        },
+        {
+          "doc_count": 1,
+          "key": 26
+        }
+      ],
+      "doc_count_error_upper_bound": 0,
+      "sum_other_doc_count": 3
+    },
+    "pub": {
+      "buckets": [
+        {
+          "doc_count": 4,
+          "key": 1,
+          "key_as_string": "true"
+        },
+        {
+          "doc_count": 1,
+          "key": 0,
+          "key_as_string": "false"
+        }
+      ],
+      "doc_count_error_upper_bound": 0,
+      "sum_other_doc_count": 0
+    },
+    "tags": {
+      "buckets": [
+        {
+          "doc_count": 2,
+          "key": "animal",
+          "v": {
+            "value": 18.0
+          }
+        },
+        {
+          "doc_count": 2,
+          "key": "pet",
+          "v": {
+            "value": 5.0
+          }
+        },
+        {
+          "doc_count": 1,
+          "key": "news",
+          "v": {
+            "value": 42.0
+          }
+        }
+      ],
+      "doc_count_error_upper_bound": 0,
+      "sum_other_doc_count": 0
+    }
+  },
+  "hits": {
+    "hits": [],
+    "max_score": null,
+    "total": {
+      "relation": "eq",
+      "value": 5
+    }
+  },
+  "timed_out": false
+}

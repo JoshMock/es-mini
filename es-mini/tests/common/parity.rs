@@ -1,5 +1,6 @@
 //! Shared harness for the parity tests: parses fixtures/generate.sh and compares es-mini's
-//! responses with the ones real Elasticsearch 9.5.5 recorded in fixtures/expected/.
+//! responses with the ones real Elasticsearch 9.5.5 recorded in fixtures/expected/ and, for
+//! fixtures/generate_aggs.sh's aggregation requests, fixtures/expected-aggs/.
 
 // The per-case report on stdout is this harness's output.
 #![allow(clippy::print_stdout)]
@@ -40,6 +41,8 @@ pub struct Req {
 pub struct Case {
     pub name: String,
     pub req: Req,
+    /// The recorded response.
+    pub expected: PathBuf,
 }
 
 pub fn between<'a>(s: &'a str, start: &str, end: &str) -> Vec<&'a str> {
@@ -66,7 +69,12 @@ pub fn parse_script() -> (Vec<Req>, Vec<Case>) {
             body: Some(ndjson.into()),
         });
     }
-    let cases = script
+    (setup, recorded(&script, "expected"))
+}
+
+/// The `record` lines of a generator script whose responses are in `fixtures/{dir}/`.
+fn recorded(script: &str, dir: &str) -> Vec<Case> {
+    script
         .lines()
         .filter_map(|l| {
             l.trim_start_matches("ALLOW_404=404 ")
@@ -78,12 +86,12 @@ pub fn parse_script() -> (Vec<Req>, Vec<Case>) {
             let (name, method, path) = (next().unwrap(), next().unwrap(), next().unwrap());
             let body = next().map(|b| b.trim_matches('\'').to_owned());
             Case {
+                expected: fixtures().join(format!("{dir}/{name}.json")),
                 name,
                 req: Req { method, path, body },
             }
         })
-        .collect();
-    (setup, cases)
+        .collect()
 }
 
 pub async fn send(app: &Router, r: &Req) -> Value {
@@ -147,19 +155,18 @@ pub fn diff(path: &str, expected: &Value, actual: &Value, out: &mut Vec<String>)
 /// Compares every recorded case. Fails on any difference not in `xfail` and on any listed
 /// case that now matches. `PARITY_VERBOSE=1` prints every difference.
 pub async fn compare(app: &Router, xfail: &BTreeSet<String>) {
-    let (_, cases) = parse_script();
+    let (_, mut cases) = parse_script();
     assert!(
         cases.len() >= 10,
         "parsed only {} cases from generate.sh",
         cases.len()
     );
+    let aggs = fs::read_to_string(fixtures().join("generate_aggs.sh")).unwrap();
+    cases.extend(recorded(&aggs, "expected-aggs"));
     let verbose = std::env::var("PARITY_VERBOSE").is_ok();
     let mut problems = vec![];
     for c in &cases {
-        let expected: Value = serde_json::from_slice(
-            &fs::read(fixtures().join(format!("expected/{}.json", c.name))).unwrap(),
-        )
-        .unwrap();
+        let expected: Value = serde_json::from_slice(&fs::read(&c.expected).unwrap()).unwrap();
         let mut actual = send(app, &c.req).await;
         if let Value::Object(o) = &mut actual {
             VOLATILE.iter().for_each(|k| drop(o.remove(*k)));

@@ -1,0 +1,82 @@
+{
+  "_shards": {
+    "failed": 0,
+    "skipped": 0,
+    "successful": 1,
+    "total": 1
+  },
+  "aggregations": {
+    "d": {
+      "buckets": {
+        "2023-12-19T00:00:00.000Z": {
+          "doc_count": 2,
+          "key": 1702944000000,
+          "key_as_string": "2023-12-19T00:00:00.000Z"
+        },
+        "2024-01-18T00:00:00.000Z": {
+          "doc_count": 1,
+          "key": 1705536000000,
+          "key_as_string": "2024-01-18T00:00:00.000Z"
+        },
+        "2024-02-17T00:00:00.000Z": {
+          "doc_count": 1,
+          "key": 1708128000000,
+          "key_as_string": "2024-02-17T00:00:00.000Z"
+        },
+        "2024-03-18T00:00:00.000Z": {
+          "doc_count": 0,
+          "key": 1710720000000,
+          "key_as_string": "2024-03-18T00:00:00.000Z"
+        },
+        "2024-04-17T00:00:00.000Z": {
+          "doc_count": 1,
+          "key": 1713312000000,
+          "key_as_string": "2024-04-17T00:00:00.000Z"
+        }
+      }
+    },
+    "m": {
+      "buckets": [
+        {
+          "doc_count": 1,
+          "key": 1701388800000,
+          "key_as_string": "2023-12"
+        },
+        {
+          "doc_count": 1,
+          "key": 1704067200000,
+          "key_as_string": "2024-01"
+        },
+        {
+          "doc_count": 1,
+          "key": 1706745600000,
+          "key_as_string": "2024-02"
+        },
+        {
+          "doc_count": 1,
+          "key": 1709251200000,
+          "key_as_string": "2024-03"
+        },
+        {
+          "doc_count": 0,
+          "key": 1711929600000,
+          "key_as_string": "2024-04"
+        },
+        {
+          "doc_count": 1,
+          "key": 1714521600000,
+          "key_as_string": "2024-05"
+        }
+      ]
+    }
+  },
+  "hits": {
+    "hits": [],
+    "max_score": null,
+    "total": {
+      "relation": "eq",
+      "value": 5
+    }
+  },
+  "timed_out": false
+}

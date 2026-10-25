@@ -1,0 +1,55 @@
+{
+  "_shards": {
+    "failed": 0,
+    "skipped": 0,
+    "successful": 1,
+    "total": 1
+  },
+  "aggregations": {
+    "dr": {
+      "buckets": [
+        {
+          "doc_count": 2,
+          "key": "*-2024-02-01",
+          "to": 1706745600000.0,
+          "to_as_string": "2024-02-01"
+        },
+        {
+          "doc_count": 3,
+          "from": 1706745600000.0,
+          "from_as_string": "2024-02-01",
+          "key": "2024-02-01-*"
+        }
+      ]
+    },
+    "r": {
+      "buckets": [
+        {
+          "doc_count": 1,
+          "key": "*-5.0",
+          "to": 5.0
+        },
+        {
+          "doc_count": 2,
+          "from": 5.0,
+          "key": "5.0-20.0",
+          "to": 20.0
+        },
+        {
+          "doc_count": 2,
+          "from": 20.0,
+          "key": "20.0-*"
+        }
+      ]
+    }
+  },
+  "hits": {
+    "hits": [],
+    "max_score": null,
+    "total": {
+      "relation": "eq",
+      "value": 5
+    }
+  },
+  "timed_out": false
+}

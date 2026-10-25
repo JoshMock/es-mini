@@ -13,3 +13,7 @@ Layout: `es-9.5.5/data/indices/<index-uuid>/0/index/` holds the Lucene files (`s
 compound `.cfs`/`.cfe`, doc values). The index-name-to-UUID mapping is in the cluster metadata
 under `es-9.5.5/data/_state/`. File bytes include UUIDs and timestamps and differ per run; the
 logical content and `expected/` are deterministic.
+
+`generate_aggs.sh` boots Elasticsearch on a copy of `es-9.5.5/data` (leaving it untouched) and
+records its responses to aggregation requests in `expected-aggs/`; the parity tests compare
+those too, in memory and from disk.
