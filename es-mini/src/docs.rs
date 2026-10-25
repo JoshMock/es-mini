@@ -146,7 +146,6 @@ pub fn put_or_create(
                 "failed to parse: The total number of objects across all arrays in a document has exceeded the allowed limit of [{limit}]."
             )));
         }
-        i.map_dynamic(&source);
         for (name, m) in &i.mappings.properties {
             let (FieldMapping::Date { format, locale, .. }
             | FieldMapping::DateNanos { format, locale }) = m
@@ -168,6 +167,8 @@ pub fn put_or_create(
                 )));
             }
         }
+        // only once the document is accepted; dynamic dates never fail the check above
+        i.map_dynamic(&source);
         Ok(match create {
             true => i.create(id, source),
             false => Ok(i.put(id, source)),

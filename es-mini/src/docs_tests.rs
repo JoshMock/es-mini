@@ -187,6 +187,19 @@ async fn date_not_in_the_field_format_is_rejected() {
 }
 
 #[tokio::test]
+async fn rejected_document_adds_no_dynamic_mappings() {
+    let app = app();
+    let mappings =
+        json!({"mappings": {"properties": {"d": {"type": "date", "format": "epoch_second"}}}});
+    call(&app, Method::PUT, "/idx", Some(mappings)).await;
+    let doc = json!({"d": "not a date", "new": 1});
+    let (s, _) = call(&app, Method::PUT, "/idx/_doc/1", Some(doc)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (_, r) = call(&app, Method::GET, "/idx/_mapping", None).await;
+    assert_eq!(r["idx"]["mappings"]["properties"]["new"], json!(null));
+}
+
+#[tokio::test]
 async fn id_over_512_bytes_is_rejected() {
     let uri = format!("/idx/_doc/{}", "a".repeat(513));
     let (s, _) = call(&app(), Method::POST, &uri, Some(json!({"a": 1}))).await;
