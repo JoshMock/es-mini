@@ -120,6 +120,29 @@ fn flushes_by_translog_size() {
 }
 
 #[test]
+fn async_durability_defers_fsync() {
+    let dir = scratch("async");
+    let mut indices = created();
+    let ix = indices.get_mut("idx").unwrap();
+    ix.settings
+        .merge(&json!({"index.translog": {"durability": "async", "sync_interval": "7s"}}));
+    disk::persist(&dir, &mut indices).unwrap();
+    assert_eq!(
+        disk::sync_interval(&indices),
+        std::time::Duration::from_secs(7)
+    );
+    indices.get_mut("idx").unwrap().put("2", json!({}));
+    disk::persist(&dir, &mut indices).unwrap();
+    // Not logged by the request: a crash now loses the write, as in Elasticsearch.
+    assert_eq!(ckp(&dir).num_ops, 0);
+    assert!(disk::open(&dir).unwrap()["idx"].get("2").is_none());
+    // The periodic sync logs it.
+    disk::sync(&dir, &mut indices).unwrap();
+    assert_eq!(ckp(&dir).num_ops, 1);
+    assert!(disk::open(&dir).unwrap()["idx"].get("2").is_some());
+}
+
+#[test]
 fn creating_an_index_commits() {
     let dir = scratch("create");
     let mut indices = created();

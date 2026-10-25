@@ -18,6 +18,7 @@ use std::{
     borrow::Cow,
     collections::{BTreeSet, HashMap, HashSet},
     path::Path,
+    time::Duration,
 };
 
 /// Opens every index of `data_dir` (single shard 0).
@@ -684,8 +685,34 @@ fn flush_threshold(ix: &Index) -> u64 {
 /// appended to each shard's translog (one fsynced append and an in-place checkpoint, per
 /// index written to), and segments are committed only when cluster metadata changed or a
 /// translog outgrows `index.translog.flush_threshold_size` (default 512mb). [`open`] replays
-/// the translog.
+/// the translog. Writes to indices with `index.translog.durability: async` are left for [`sync`].
 pub fn persist(data_dir: &Path, indices: &mut Indices) -> es_codec::Result<()> {
+    log(data_dir, indices, false)
+}
+
+/// Like [`persist`], also logging the writes of `async` durability indices; run it every
+/// [`sync_interval`], as Elasticsearch syncs their translogs.
+pub fn sync(data_dir: &Path, indices: &mut Indices) -> es_codec::Result<()> {
+    if indices.values().all(|ix| ix.unlogged.is_empty()) {
+        return Ok(());
+    }
+    log(data_dir, indices, true)
+}
+
+/// The shortest `index.translog.sync_interval` (default 5s) of all indices.
+// ponytail: one timer for all indices, so some sync more often than they ask (never less)
+pub fn sync_interval(indices: &Indices) -> Duration {
+    let default = Duration::from_secs(5);
+    let every = |ix: &Index| {
+        ix.settings
+            .get("index.translog.sync_interval")
+            .and_then(crate::parse_time)
+            .unwrap_or(default)
+    };
+    indices.values().map(every).min().unwrap_or(default)
+}
+
+fn log(data_dir: &Path, indices: &mut Indices, all: bool) -> es_codec::Result<()> {
     let _one_at_a_time = SAVING
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -708,7 +735,12 @@ pub fn persist(data_dir: &Path, indices: &mut Indices) -> es_codec::Result<()> {
     let mut flush = !unchanged || logs.len() != indices.len();
     if !flush {
         for ((dir, cp), ix) in logs.into_iter().zip(indices.values_mut()) {
-            let ops = ix.take_unlogged();
+            let deferred = ix.settings.get("index.translog.durability") == Some("async");
+            let ops = if all || !deferred {
+                ix.take_unlogged()
+            } else {
+                vec![]
+            };
             let size = if ops.is_empty() {
                 cp.offset
             } else {

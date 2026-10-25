@@ -187,6 +187,7 @@ fn persisted(dir: &std::path::Path) -> Result<(Router, AppState), String> {
         Indices::new()
     };
     let state = Arc::new(RwLock::new(indices));
+    spawn_syncer(dir.to_owned(), Arc::downgrade(&state));
     let (dir, saved) = (dir.to_owned(), state.clone());
     let app = with_es_405(router(state.clone()).layer(axum::middleware::from_fn(
         move |req: axum::extract::Request, next: axum::middleware::Next| {
@@ -224,6 +225,27 @@ fn persisted(dir: &std::path::Path) -> Result<(Router, AppState), String> {
         },
     )));
     Ok((app, state))
+}
+
+/// Runs [`es_index::disk::sync`] every [`es_index::disk::sync_interval`] until `state` is dropped.
+fn spawn_syncer(dir: std::path::PathBuf, state: std::sync::Weak<RwLock<Indices>>) {
+    use std::time::{Duration, Instant};
+    std::thread::spawn(move || {
+        let mut last = Instant::now();
+        loop {
+            // Elasticsearch's smallest index.translog.sync_interval.
+            std::thread::sleep(Duration::from_millis(100));
+            let Some(state) = state.upgrade() else { return };
+            let every = es_index::disk::sync_interval(&state.read().expect("lock poisoned"));
+            if last.elapsed() < every {
+                continue;
+            }
+            last = Instant::now();
+            if let Err(e) = es_index::disk::sync(&dir, &mut state.write().expect("lock poisoned")) {
+                tracing::error!("syncing {}: {e}", dir.display());
+            }
+        }
+    });
 }
 
 /// Applies `filter_path` to every JSON response, errors included, as Java's `RestController` does.

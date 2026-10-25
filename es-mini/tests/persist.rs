@@ -200,3 +200,29 @@ async fn graceful_shutdown_flushes() {
     assert_eq!(doc["_source"], json!({"title": "Dune"}));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn async_durability_syncs_on_a_timer() {
+    let dir = std::env::temp_dir().join(format!("esm-persist-async-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let app = es_mini::app_persisted(&dir).unwrap();
+    let settings = json!({"index.translog": {"durability": "async", "sync_interval": "100ms"}});
+    call(&app, "PUT", "/logs", json!({ "settings": settings })).await;
+    call(&app, "PUT", "/logs/_doc/1", json!({})).await;
+    // The write is answered before it is logged; the timer logs it within the interval.
+    let logged = || {
+        es_index::disk::open(&dir).unwrap()["logs"]
+            .get("1")
+            .is_some()
+    };
+    assert!(!logged());
+    for _ in 0..30 {
+        if logged() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(logged());
+    drop(app);
+    let _ = std::fs::remove_dir_all(&dir);
+}
