@@ -71,9 +71,11 @@ fn resolve(index: &Index, field: &str, sample: impl Fn(&str) -> Option<Value>) -
         Some(FieldMapping::Date { .. } | FieldMapping::DateNanos { .. }) => Kind::Keyword,
         // ponytail: ips match as their JSON strings; no CIDR or address normalization in queries
         Some(FieldMapping::Ip) => Kind::Keyword,
+        // ponytail: queries never match range fields; add intersects/within/contains relations
+        Some(FieldMapping::LongRange | FieldMapping::DateRange { .. }) => Kind::Keyword,
         Some(m) if m.is_numeric() => Kind::Number,
         Some(_) => {
-            unreachable!("every FieldMapping is text, keyword, boolean, date, ip or numeric")
+            unreachable!("every FieldMapping is text, keyword, boolean, date, ip, range or numeric")
         }
         None if field.ends_with(".keyword") => Kind::Keyword,
         // ponytail: unmapped fields are typed from their first value, mimicking ES dynamic mapping

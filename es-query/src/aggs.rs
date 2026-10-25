@@ -528,7 +528,7 @@ fn doc_value(s: &Searcher, field: &str, mapping: &FieldMapping, v: &Value) -> Op
                 .then(|| t.into())
         }
         M::Ip => es_index::ip_bytes(v).map(|ip| es_index::ip_string(ip).into()),
-        M::Text | M::TextKeyword { .. } => None,
+        M::Text | M::TextKeyword { .. } | M::LongRange | M::DateRange { .. } => None,
     }
 }
 

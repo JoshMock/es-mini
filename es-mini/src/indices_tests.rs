@@ -137,6 +137,26 @@ async fn date_nanos_fields_and_date_multi_fields() {
 }
 
 #[tokio::test]
+async fn range_fields() {
+    let app = app();
+    let props = json!({
+        "d": {"type": "date_range", "format": "yyyy-MM-dd"},
+        "l": {"type": "long_range"}
+    });
+    let body = json!({"mappings": {"properties": props}});
+    let (s, r) = call(&app, Method::PUT, "/idx", Some(body)).await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    let (_, r) = call(&app, Method::GET, "/idx/_mapping", None).await;
+    assert_eq!(r["idx"]["mappings"]["properties"], props);
+    let doc = json!({"d": {"gte": "2016-01-02"}, "l": {"gte": 1, "lt": 3}});
+    let (s, r) = call(&app, Method::PUT, "/idx/_doc/1?refresh=true", Some(doc)).await;
+    assert_eq!(s, StatusCode::CREATED, "{r}");
+    let body = json!({"query": {"term": {"l": 2}}});
+    let (s, r) = call(&app, Method::POST, "/idx/_search", Some(body)).await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+}
+
+#[tokio::test]
 async fn empty_field_name_is_illegal_argument() {
     let body = json!({"mappings": {"properties": {"": {"type": "keyword"}}}});
     let (s, r) = call(&app(), Method::PUT, "/idx", Some(body)).await;

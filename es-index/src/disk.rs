@@ -481,7 +481,8 @@ fn user_fields(
                 out.keyword.push((number, keys));
                 (IndexOptions::Docs, DocValuesType::SortedSet, true)
             }
-            M::DateNanos { .. } => continue,
+            // ponytail: ranges are not indexed on disk; their `_source` is kept
+            M::DateNanos { .. } | M::LongRange | M::DateRange { .. } => continue,
             M::Ip => {
                 // Like ES: points and sorted-set doc values of the 16-byte encoding, no postings.
                 let Some(ips) = typed(&values, &crate::ip_bytes) else {

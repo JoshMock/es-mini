@@ -429,10 +429,10 @@ impl Format {
         use FieldMapping as M;
         match m {
             None => Format::Unmapped,
-            Some(M::Long | M::Integer | M::Short | M::Byte) => Format::Long,
+            Some(M::Long | M::Integer | M::Short | M::Byte | M::LongRange) => Format::Long,
             Some(M::Double | M::Float) => Format::Double,
             Some(M::Boolean) => Format::Bool,
-            Some(M::Date { .. } | M::DateNanos { .. }) => Format::Date,
+            Some(M::Date { .. } | M::DateNanos { .. } | M::DateRange { .. }) => Format::Date,
             Some(M::Ip) => Format::Ip,
             Some(M::Keyword { .. } | M::Text | M::TextKeyword { .. }) => Format::Str,
         }

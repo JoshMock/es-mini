@@ -44,11 +44,18 @@ pub enum FieldMapping {
         locale: Option<String>,
     },
     Ip,
+    /// A `{gte, gt, lte, lt}` object of longs; aggregations count it in every bucket it overlaps.
+    // ponytail: only the range types the YAML tests map; add integer/float/double/ip_range alike
+    LongRange,
+    DateRange {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        format: Option<String>,
+    },
 }
 
 impl FieldMapping {
     /// The ES|QL-facing type name (`text`, `keyword`, `long`, `integer`, `double`, `boolean`, `date`,
-    /// `ip`).
+    /// `ip`, or `unsupported` for ranges).
     pub fn type_name(&self) -> &'static str {
         match self {
             Self::Text | Self::TextKeyword { .. } => "text",
@@ -60,6 +67,7 @@ impl FieldMapping {
             Self::Date { .. } => "date",
             Self::DateNanos { .. } => "date_nanos",
             Self::Ip => "ip",
+            Self::LongRange | Self::DateRange { .. } => "unsupported",
         }
     }
 

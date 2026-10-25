@@ -1,17 +1,6 @@
 # Known-failing YAML tests. Fix one, then delete its line.
 aggregations/date_histogram.yml/date_histogram and date_histogram_composite timezone
-aggregations/date_histogram.yml/date_histogram on date_nanos without timezone calendar interval
-aggregations/date_histogram.yml/date_histogram on date_nanos without timezone fixed interval
-aggregations/date_histogram.yml/date_histogram on date_nanos with timezone calendar interval
-aggregations/date_histogram.yml/date_histogram on date_nanos with timezone fixed interval
 aggregations/date_histogram.yml/date_histogram on range with hard bounds
-aggregations/date_histogram.yml/Date histogram on two indices with same field but different date type
-aggregations/date_histogram.yml/Date histogram with contradicting filters
-aggregations/date_histogram.yml/date_histogram with hard_bounds outside data under a parent agg
-aggregations/date_histogram.yml/Daylight with offset date_histogram test
-aggregations/date_histogram.yml/Daylight without offset date_histogram test
-aggregations/date_histogram.yml/Multi-value date histogram
-aggregations/date_histogram.yml/Multi-value date histogram docvalues only
 aggregations/date_range.yml/Date range
 aggregations/date_range.yml/Date Range Missing
 aggregations/date_range.yml/Date range unmapped with children
