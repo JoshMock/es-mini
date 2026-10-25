@@ -294,7 +294,7 @@ impl Terms {
                     out.insert("key_as_string".into(), (*x != 0).to_string().into());
                 }
                 (Key::Long(x), Format::Date) => {
-                    out.insert("key_as_string".into(), iso_date(*x as u64).into());
+                    out.insert("key_as_string".into(), iso_date(*x).into());
                 }
                 _ => {}
             }

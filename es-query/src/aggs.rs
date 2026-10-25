@@ -1073,7 +1073,7 @@ fn render_counted(
             body.insert(key.into(), v.map_or(Value::Null, Value::from));
             // ponytail: dates render in the default format, not a mapping's custom `format`
             if let Some(v) = v.filter(|_| date) {
-                body.insert(format!("{key}_as_string"), iso_date(v as u64).into());
+                body.insert(format!("{key}_as_string"), iso_date(v as i64).into());
             }
         };
         let mut ty = agg.metric.name();

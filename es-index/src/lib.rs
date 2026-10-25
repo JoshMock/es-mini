@@ -641,10 +641,16 @@ pub fn ip_string(bytes: [u8; 16]) -> String {
 }
 
 /// Formats epoch milliseconds as ES's `date_optional_time` (`2024-01-15T10:30:00.000Z`).
-pub fn iso_date(millis: u64) -> String {
-    let (days, ms) = (millis / 86_400_000, millis % 86_400_000);
-    // Howard Hinnant's civil_from_days, for days since 1970-01-01.
-    let z = days as i64 + 719_468;
+pub fn iso_date(millis: i64) -> String {
+    let (days, ms) = (millis.div_euclid(86_400_000), millis.rem_euclid(86_400_000));
+    let (year, month, day) = civil_from_days(days);
+    let (h, m, sec, milli) = (ms / 3_600_000, ms / 60_000 % 60, ms / 1000 % 60, ms % 1000);
+    format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{sec:02}.{milli:03}Z")
+}
+
+/// The `(year, month, day)` of days since 1970-01-01 (Howard Hinnant's civil_from_days).
+pub fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z - era * 146_097;
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
@@ -652,9 +658,16 @@ pub fn iso_date(millis: u64) -> String {
     let mp = (5 * doy + 2) / 153;
     let day = doy - (153 * mp + 2) / 5 + 1;
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    let (h, m, sec, milli) = (ms / 3_600_000, ms / 60_000 % 60, ms / 1000 % 60, ms % 1000);
-    format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{sec:02}.{milli:03}Z")
+    (yoe + era * 400 + i64::from(month <= 2), month, day)
+}
+
+/// Days since 1970-01-01 of a date (Howard Hinnant's days_from_civil).
+pub fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = y - i64::from(m <= 2);
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+    era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468
 }
 
 /// Epoch milliseconds of a date value: a number, or ES's default `strict_date_optional_time`
@@ -725,12 +738,7 @@ pub fn parse_date_millis(v: &serde_json::Value) -> Option<i64> {
     if !s.is_empty() {
         return None;
     }
-    // Howard Hinnant's days_from_civil.
-    let y = y - i64::from(m <= 2);
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
-    let days = era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468;
+    let days = days_from_civil(y, m, day);
     Some(((days * 24 + h) * 60 + min - offset) * 60_000 + sec * 1000 + milli)
 }
 
@@ -929,8 +937,8 @@ mod tests {
     #[test]
     fn parses_dates_back_to_epoch_millis() {
         use serde_json::json;
-        for ms in [0u64, 1_705_314_600_123, 1_709_251_200_000] {
-            assert_eq!(parse_date_millis(&json!(iso_date(ms))), Some(ms as i64));
+        for ms in [0, 1_705_314_600_123, 1_709_251_200_000, -86_400_001] {
+            assert_eq!(parse_date_millis(&json!(iso_date(ms))), Some(ms));
         }
         assert_eq!(
             parse_date_millis(&json!("2024-01-01")),
@@ -967,6 +975,7 @@ mod tests {
         assert_eq!(iso_date(0), "1970-01-01T00:00:00.000Z");
         assert_eq!(iso_date(1_792_182_985_033), "2026-10-16T20:36:25.033Z");
         assert_eq!(iso_date(951_782_400_000), "2000-02-29T00:00:00.000Z");
+        assert_eq!(iso_date(-1), "1969-12-31T23:59:59.999Z");
     }
 
     #[test]

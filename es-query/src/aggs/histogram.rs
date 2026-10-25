@@ -215,7 +215,7 @@ impl Histogram {
         let rendered = v.into_iter().map(|(key, count, mut subs)| {
             let mut out = Map::new();
             let key_as_string = match (b.format, &self.format) {
-                (Format::Date, _) => Some(iso_date(key as u64)),
+                (Format::Date, _) => Some(iso_date(key as i64)),
                 (_, Some(p)) => Some(super::decimal_format(p, key)),
                 _ => None,
             };
