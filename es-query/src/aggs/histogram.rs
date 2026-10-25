@@ -7,6 +7,10 @@ use super::terms::{Buckets, Format};
 use crate::{QueryError, int, num};
 use es_index::iso_date;
 use serde_json::{Map, Value};
+use std::cell::Cell;
+
+/// InternalMultiBucketAggregation.REPORT_EMPTY_EVERY.
+const REPORT_EMPTY_EVERY: usize = 10_000;
 
 /// A `histogram` request.
 #[derive(Debug, Clone, PartialEq)]
@@ -159,41 +163,52 @@ impl Histogram {
         &self,
         b: &mut Buckets,
         body: &mut Map<String, Value>,
-        mut sub: impl FnMut(&mut [Stats], &mut Map<String, Value>),
-    ) {
+        buckets: &Cell<usize>,
+        mut sub: impl FnMut(&mut [Stats], &mut Map<String, Value>) -> Result<(), QueryError>,
+    ) -> Result<(), QueryError> {
         let mut v: Vec<(f64, u64, Vec<Stats>)> = std::mem::take(&mut b.counts)
             .into_iter()
             .map(|(k, bucket)| (k.f64(), bucket.count, bucket.subs))
             .filter(|b| b.1 >= self.min_doc_count)
             .collect();
+        super::consume_buckets(buckets, v.len())?;
         if self.min_doc_count == 0 {
             // InternalHistogram.iterateEmptyBuckets
             let (min, max) = (self.extended_bounds.min, self.extended_bounds.max);
             let mut keys = vec![];
+            // ES counts empty buckets before and again (per 10,000) while adding them
             let mut fill = |from: f64, below: &dyn Fn(f64) -> bool| {
                 let mut k = from;
                 while below(k) {
                     keys.push(k);
+                    let n = keys.len();
+                    let again = if n % REPORT_EMPTY_EVERY == 0 {
+                        REPORT_EMPTY_EVERY
+                    } else {
+                        0
+                    };
+                    super::consume_buckets(buckets, 1 + again)?;
                     k = self.next(k);
                 }
+                Ok::<_, QueryError>(())
             };
             let max = max.unwrap_or(f64::NEG_INFINITY);
             match (v.first(), v.last()) {
                 (Some(first), Some(last)) => {
                     if let Some(min) = min {
-                        fill(self.round(min), &|k| k < first.0);
+                        fill(self.round(min), &|k| k < first.0)?;
                     }
                     for w in v.windows(2) {
-                        fill(self.next(w[0].0), &|k| k < w[1].0);
+                        fill(self.next(w[0].0), &|k| k < w[1].0)?;
                     }
-                    fill(self.next(last.0), &|k| k <= max);
+                    fill(self.next(last.0), &|k| k <= max)?;
                 }
-                _ => fill(self.round(min.unwrap_or(f64::INFINITY)), &|k| k <= max),
+                _ => fill(self.round(min.unwrap_or(f64::INFINITY)), &|k| k <= max)?,
             }
             v.extend(keys.into_iter().map(|k| (k, 0, b.empty.clone())));
             v.sort_by(|a, b| a.0.total_cmp(&b.0));
         }
-        let buckets = v.into_iter().map(|(key, count, mut subs)| {
+        let rendered = v.into_iter().map(|(key, count, mut subs)| {
             let mut out = Map::new();
             let key_as_string = match b.format {
                 Format::Date => Some(iso_date(key as u64)),
@@ -204,17 +219,22 @@ impl Histogram {
             }
             out.insert("key".into(), key.into());
             out.insert("doc_count".into(), count.into());
-            sub(&mut subs, &mut out);
-            (
+            sub(&mut subs, &mut out)?;
+            Ok((
                 key_as_string.unwrap_or_else(|| super::java_double(key)),
                 out,
-            )
+            ))
         });
-        let buckets = match self.keyed {
-            true => buckets.map(|(k, b)| (k, Value::Object(b))).collect(),
-            false => buckets.map(|(_, b)| Value::Object(b)).collect(),
+        let rendered = match self.keyed {
+            true => (rendered.map(|b| b.map(|(k, b)| (k, Value::Object(b)))))
+                .collect::<Result<Map<_, _>, QueryError>>()?
+                .into(),
+            false => (rendered.map(|b| b.map(|(_, b)| Value::Object(b))))
+                .collect::<Result<Vec<_>, QueryError>>()?
+                .into(),
         };
-        body.insert("buckets".into(), buckets);
+        body.insert("buckets".into(), rendered);
+        Ok(())
     }
 }
 
@@ -354,6 +374,32 @@ mod tests {
                 {"key": 10.0, "doc_count": 1, "m": {"value": 12.0}},
             ])
         );
+    }
+
+    #[test]
+    fn histogram_fails_past_max_buckets() {
+        let too_many = "Trying to create too many buckets. Must be less than or equal to: [65536] but this number of buckets was exceeded. This limit can be set by changing the [search.max_buckets] cluster level setting.";
+        let ext = |max: f64| {
+            let h = json!({"field": "n", "interval": 1, "extended_bounds": {"min": 0, "max": max}});
+            run(&[&index(&[json!(1)])], json!({"h": {"histogram": h}}))
+        };
+        // like ES, empty buckets count twice once there are 10,000 of them
+        assert_eq!(ext(1e15).unwrap_err(), too_many);
+        assert_eq!(ext(65_535.0).unwrap_err(), too_many);
+        let ok = ext(30_000.0).unwrap();
+        assert_eq!(ok["h"]["buckets"].as_array().unwrap().len(), 30_001);
+        // the limit holds across a request: nested histograms multiply (stricter than ES, which
+        // counts the sub-aggregations of empty buckets once)
+        let nested = json!({"h": {"histogram": {"field": "n", "interval": 1,
+            "extended_bounds": {"min": 0, "max": 1000}},
+            "aggs": {"g": {"histogram": {"field": "n", "interval": 1,
+                "extended_bounds": {"min": 0, "max": 1000}}}}}});
+        assert_eq!(run(&[&index(&[json!(1)])], nested).unwrap_err(), too_many);
+        // a key too large to step past still ends
+        let stuck =
+            json!({"field": "n", "interval": 1, "extended_bounds": {"min": 1e17, "max": 2e17}});
+        let got = run(&[&index(&[])], json!({"h": {"histogram": stuck}}));
+        assert_eq!(got.unwrap_err(), too_many);
     }
 
     #[test]

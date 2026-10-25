@@ -42,6 +42,8 @@ pub enum AppError {
     XContentParse(String),
     Verification(String),
     Io(String),
+    /// Past `search.max_buckets`, found while reducing aggregations.
+    TooManyBuckets(String),
     /// A scroll or point-in-time id whose context expired or was freed.
     SearchContextMissing(u64),
 }
@@ -50,6 +52,24 @@ impl AppError {
     /// Status and the `error` object (with `root_cause`) of the ES envelope.
     pub(crate) fn parts(self) -> (StatusCode, Value) {
         let (status, kind, reason, index) = match self {
+            Self::TooManyBuckets(reason) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    json!({
+                        "root_cause": [],
+                        "type": "search_phase_execution_exception",
+                        "reason": "",
+                        "phase": "fetch",
+                        "grouped": true,
+                        "failed_shards": [],
+                        "caused_by": {
+                            "type": "too_many_buckets_exception",
+                            "reason": reason,
+                            "max_buckets": es_query::MAX_BUCKETS,
+                        },
+                    }),
+                );
+            }
             Self::SearchContextMissing(id) => {
                 let cause = json!({
                     "type": "search_context_missing_exception",
@@ -215,6 +235,7 @@ impl From<es_query::QueryError> for AppError {
             es_query::ErrorKind::Parsing => Self::ParsingException(e.msg),
             es_query::ErrorKind::IllegalArgument => Self::IllegalArgument(e.msg),
             es_query::ErrorKind::XContentParse => Self::XContentParse(e.msg),
+            es_query::ErrorKind::TooManyBuckets => Self::TooManyBuckets(e.msg),
         }
     }
 }

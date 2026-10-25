@@ -602,7 +602,12 @@ pub enum ErrorKind {
     IllegalArgument,
     /// `x_content_parse_exception`
     XContentParse,
+    /// `too_many_buckets_exception`, past `search.max_buckets`
+    TooManyBuckets,
 }
+
+/// ES's `search.max_buckets`: a search fails rather than render more aggregation buckets.
+pub const MAX_BUCKETS: usize = 65_536;
 
 /// A query failure: its Elasticsearch error type and reason.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -932,7 +937,8 @@ pub fn search_many<'a>(
     Ok(SearchResult {
         failures,
         aggregations: (!req.aggs.is_empty())
-            .then(|| aggs::render(&req.aggs, &mut aggs, req.typed_keys)),
+            .then(|| aggs::render(&req.aggs, &mut aggs, req.typed_keys))
+            .transpose()?,
         profile,
         total: hits.len(),
         max_score,

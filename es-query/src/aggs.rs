@@ -10,10 +10,14 @@ mod terms;
 
 use crate::hll::{self, Hll};
 use crate::tdigest::TDigest;
-use crate::{Query, QueryError, Searcher, fielddata_disabled, int, num, parse_query, source_path};
+use crate::{
+    MAX_BUCKETS, Query, QueryError, Searcher, fielddata_disabled, int, num, parse_query,
+    source_path,
+};
 use es_index::{Document, FieldMapping, Index, iso_date, postings::values};
 use histogram::Histogram;
 use serde_json::{Map, Value};
+use std::cell::Cell;
 use std::time::Instant;
 use terms::{Buckets, Format, Terms};
 
@@ -1006,7 +1010,36 @@ pub(crate) fn reduce(total: &mut [Stats], shard: Vec<Stats>) {
 
 /// The `aggregations` object of a search response; with `typed_keys`, names are prefixed with
 /// their type (`avg#name`).
-pub(crate) fn render(aggs: &[Agg], stats: &mut [Stats], typed_keys: bool) -> Value {
+pub(crate) fn render(
+    aggs: &[Agg],
+    stats: &mut [Stats],
+    typed_keys: bool,
+) -> Result<Value, QueryError> {
+    render_counted(aggs, stats, typed_keys, &Cell::new(0))
+}
+
+/// Counts `n` more buckets toward the request's [`MAX_BUCKETS`], like ES's MultiBucketConsumer.
+// ponytail: counts histogram buckets as rendered, so sub-aggregations of empty buckets count once
+// per bucket (ES reduces them once) and terms buckets not at all
+fn consume_buckets(buckets: &Cell<usize>, n: usize) -> Result<(), QueryError> {
+    buckets.set(buckets.get() + n);
+    match buckets.get() > MAX_BUCKETS {
+        true => Err(QueryError {
+            kind: crate::ErrorKind::TooManyBuckets,
+            msg: format!(
+                "Trying to create too many buckets. Must be less than or equal to: [{MAX_BUCKETS}] but this number of buckets was exceeded. This limit can be set by changing the [search.max_buckets] cluster level setting."
+            ),
+        }),
+        false => Ok(()),
+    }
+}
+
+fn render_counted(
+    aggs: &[Agg],
+    stats: &mut [Stats],
+    typed_keys: bool,
+    buckets: &Cell<usize>,
+) -> Result<Value, QueryError> {
     let mut out = Map::new();
     for (agg, st) in aggs.iter().zip(stats) {
         let mut body = Map::new();
@@ -1026,24 +1059,25 @@ pub(crate) fn render(aggs: &[Agg], stats: &mut [Stats], typed_keys: bool) -> Val
         };
         let mut ty = agg.metric.name();
         let sub = |subs: &mut [Stats], out: &mut Map<String, Value>| {
-            if let Value::Object(m) = render(&agg.subs, subs, typed_keys) {
+            if let Value::Object(m) = render_counted(&agg.subs, subs, typed_keys, buckets)? {
                 out.extend(m);
             }
+            Ok(())
         };
         match &agg.metric {
             Metric::Terms(t) => {
                 if let Some(b) = &mut st.terms {
-                    ty = t.render(b, &mut body, sub);
+                    ty = t.render(b, &mut body, sub)?;
                 }
             }
             Metric::Histogram(h) => {
                 if let Some(b) = &mut st.terms {
-                    h.render(b, &mut body, sub);
+                    h.render(b, &mut body, buckets, sub)?;
                 }
             }
             Metric::Filter(_) => {
                 body.insert("doc_count".into(), st.count.into());
-                sub(&mut st.subs, &mut body);
+                sub(&mut st.subs, &mut body)?;
             }
             Metric::Avg => put(&mut body, "value", avg),
             Metric::Sum => put(&mut body, "value", Some(st.sum)),
@@ -1098,7 +1132,7 @@ pub(crate) fn render(aggs: &[Agg], stats: &mut [Stats], typed_keys: bool) -> Val
         };
         out.insert(key, body.into());
     }
-    out.into()
+    Ok(out.into())
 }
 
 /// The fields `extended_stats` adds to `stats`, computed like ES's InternalExtendedStats.

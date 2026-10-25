@@ -248,6 +248,20 @@ async fn profile_histogram_counts_collected_buckets() {
 }
 
 #[tokio::test]
+async fn too_many_buckets_fails_the_search_like_es() {
+    let app = seeded().await;
+    let h = json!({"field": "n", "interval": 1, "extended_bounds": {"min": 0, "max": 1e9}});
+    let body = json!({"size": 0, "aggs": {"h": {"histogram": h}}});
+    let (s, r) = call(&app, Method::POST, "/idx/_search", Some(body)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{r}");
+    assert_eq!(r["error"]["type"], "search_phase_execution_exception");
+    assert_eq!(r["error"]["root_cause"], json!([]));
+    let cause = &r["error"]["caused_by"];
+    assert_eq!(cause["type"], "too_many_buckets_exception");
+    assert_eq!(cause["max_buckets"], 65_536);
+}
+
+#[tokio::test]
 async fn profile_map_terms_defers_sub_aggregations_not_sorted_on() {
     let app = seeded().await;
     let aggs = json!({"k": {

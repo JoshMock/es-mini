@@ -266,8 +266,8 @@ impl Terms {
         &self,
         b: &mut Buckets,
         body: &mut Map<String, Value>,
-        mut sub: impl FnMut(&mut [Stats], &mut Map<String, Value>),
-    ) -> &'static str {
+        mut sub: impl FnMut(&mut [Stats], &mut Map<String, Value>) -> Result<(), QueryError>,
+    ) -> Result<&'static str, QueryError> {
         let mut v: Vec<(Key, Bucket)> = (std::mem::take(&mut b.counts).into_iter())
             .filter(|b| b.1.count >= self.min_doc_count)
             .collect();
@@ -298,15 +298,18 @@ impl Terms {
                 _ => {}
             }
             out.insert("doc_count".into(), bucket.count.into());
-            sub(&mut bucket.subs, &mut out);
-            Value::Object(out)
+            sub(&mut bucket.subs, &mut out)?;
+            Ok(Value::Object(out))
         });
-        body.insert("buckets".into(), buckets.collect());
-        match b.format {
+        body.insert(
+            "buckets".into(),
+            buckets.collect::<Result<Vec<_>, QueryError>>()?.into(),
+        );
+        Ok(match b.format {
             Format::Unmapped | Format::Str | Format::Ip => "sterms",
             Format::Double => "dterms",
             Format::Long | Format::Bool | Format::Date => "lterms",
-        }
+        })
     }
 }
 
