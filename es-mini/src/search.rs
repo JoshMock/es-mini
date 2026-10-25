@@ -256,6 +256,9 @@ pub async fn search(
                 if !h.sort.is_empty() {
                     hit["sort"] = h.sort.clone().into();
                 }
+                if !h.matched_queries.is_empty() {
+                    hit["matched_queries"] = h.matched_queries.clone().into();
+                }
                 hit
             })
             .collect();

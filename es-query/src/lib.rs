@@ -182,6 +182,41 @@ fn scalar_cmp(a: &Value, b: &Value) -> Ordering {
     }
 }
 
+/// The named queries in `q`, in the order of ES's MatchedQueriesPhase: a Java HashMap's (by
+/// `String.hashCode` bucket).
+fn named_queries(q: &Query) -> Vec<(String, Query)> {
+    fn walk(q: &Query, out: &mut Vec<(String, Query)>) {
+        match q {
+            Query::Named { name, query } => {
+                out.push((name.clone(), (**query).clone()));
+                walk(query, out);
+            }
+            Query::Bool {
+                must,
+                should,
+                must_not,
+                filter,
+                ..
+            } => {
+                (must.iter().chain(should).chain(must_not).chain(filter)).for_each(|c| walk(c, out))
+            }
+            _ => {}
+        }
+    }
+    let mut all = vec![];
+    walk(q, &mut all);
+    // ponytail: names sharing a bucket keep query order (Java's follows Map.copyOf's), and a
+    // repeated name keeps its first query (Java's its last)
+    let cap = (all.len() * 4).div_ceil(3).next_power_of_two().max(16);
+    let bucket = |name: &str| {
+        let h = (name.encode_utf16()).fold(0u32, |h, c| h.wrapping_mul(31).wrapping_add(c.into()));
+        (h ^ (h >> 16)) as usize & (cap - 1)
+    };
+    all.sort_by_key(|(name, _)| bucket(name));
+    all.dedup_by(|a, b| a.0 == b.0);
+    all
+}
+
 struct Searcher<'a> {
     index: &'a Index,
     /// Per field: (docs with the field, average length).
@@ -194,6 +229,8 @@ struct Searcher<'a> {
     on_disk: Option<BTreeSet<DiskPos>>,
     /// The in-memory documents the query can match (see `memory_candidates`).
     in_memory: Option<HashSet<String>>,
+    /// The query's named queries (see `named_queries`).
+    named: Vec<(String, Query)>,
 }
 
 const K1: f64 = 1.2;
@@ -208,6 +245,7 @@ impl<'a> Searcher<'a> {
             kinds: RefCell::default(),
             on_disk: None,
             in_memory: None,
+            named: named_queries(q),
         };
         s.gather(q);
         s.on_disk = s.candidates(q);
@@ -256,6 +294,7 @@ impl<'a> Searcher<'a> {
                 must.iter().chain(should).for_each(|c| self.gather(c));
                 return;
             }
+            Query::Named { query, .. } => return self.gather(query),
             _ => return,
         };
         let (kind, path) = self.kind(field);
@@ -337,6 +376,7 @@ impl<'a> Searcher<'a> {
                 let (kind, _) = self.kind(field);
                 Some(self.term_docs(field, &query_terms(kind, query), *and))
             }
+            Query::Named { query, .. } => self.candidates(query),
             Query::Bool {
                 must,
                 should,
@@ -383,6 +423,7 @@ impl<'a> Searcher<'a> {
             Query::Match { field, query, and } => {
                 lookup(field, &query_terms(self.kind(field).0, query), *and)
             }
+            Query::Named { query, .. } => self.memory_candidates(query),
             Query::Bool {
                 must,
                 should,
@@ -556,7 +597,16 @@ impl<'a> Searcher<'a> {
                 let hits: Vec<f64> = should.iter().filter_map(|c| self.score(c, id, d)).collect();
                 (hits.len() >= *min_should).then(|| total + hits.iter().sum::<f64>())
             }
+            Query::Named { query, .. } => self.score(query, id, d),
         }
+    }
+
+    /// The `_name`s of the query's named queries a matching document matches.
+    fn matched_queries(&self, id: &str, d: &Document) -> Vec<String> {
+        (self.named.iter())
+            .filter(|(_, q)| self.score(q, id, d).is_some())
+            .map(|(name, _)| name.clone())
+            .collect()
     }
 
     fn score_terms(
@@ -791,6 +841,8 @@ pub struct Hit<'a> {
     /// `None` when sorting by a field (ES reports `_score: null`).
     pub score: Option<f32>,
     pub sort: Vec<Value>,
+    /// The `_name`s of the named queries the hit matches.
+    pub matched_queries: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -942,6 +994,7 @@ pub fn search_many<'a>(
             };
             collector.collect(id, &doc, score);
             let sort = s.sort_values(&req.sort, score, &doc);
+            let matched_queries = s.matched_queries(id, &doc);
             hits.push((
                 pos,
                 Hit {
@@ -950,6 +1003,7 @@ pub fn search_many<'a>(
                     doc,
                     score: Some(score as f32),
                     sort,
+                    matched_queries,
                 },
                 score,
             ));

@@ -41,6 +41,11 @@ pub enum Query {
         filter: Vec<Query>,
         min_should: usize,
     },
+    /// A query given a `_name`, which hits report in `matched_queries`.
+    Named {
+        name: String,
+        query: Box<Query>,
+    },
 }
 
 /// The single `{field: params}` entry of a leaf query.
@@ -152,7 +157,23 @@ fn constant_score_any(field: &str, vals: &[Value]) -> Query {
 pub fn parse_query(v: &Value) -> Result<Query, QueryError> {
     let (kind, body) = single_field("query", v)
         .map_err(|_| "query malformed, expected a single query type".to_owned())?;
-    match kind.as_str() {
+    let query = parse_kind(kind, body)?;
+    // `_name` sits in the query's body, or in its single field's parameters
+    let name = body.get("_name").or_else(|| {
+        let (_, p) = single_field(kind, body).ok()?;
+        p.get("_name")
+    });
+    Ok(match name.and_then(Value::as_str) {
+        Some(name) => Query::Named {
+            name: name.to_owned(),
+            query: Box::new(query),
+        },
+        None => query,
+    })
+}
+
+fn parse_kind(kind: &str, body: &Value) -> Result<Query, QueryError> {
+    match kind {
         "match_all" => Ok(Query::MatchAll),
         "match" => {
             let (field, p) = single_field(kind, body)?;

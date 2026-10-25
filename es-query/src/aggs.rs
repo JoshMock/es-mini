@@ -85,6 +85,7 @@ struct TopHit {
     doc: Document,
     /// The requested `docvalue_fields` that have values.
     fields: Map<String, Value>,
+    matched_queries: Vec<String>,
 }
 
 impl TopHits {
@@ -200,6 +201,9 @@ impl TopHits {
             }
             if !self.sort.is_empty() {
                 hit.insert("sort".into(), h.sort.clone().into());
+            }
+            if !h.matched_queries.is_empty() {
+                hit.insert("matched_queries".into(), h.matched_queries.clone().into());
             }
             Value::from(hit)
         });
@@ -1216,6 +1220,7 @@ impl<'s, 'a> Collector<'s, 'a> {
                     id: id.to_owned(),
                     score,
                     sort: self.searcher.sort_values(&t.sort, score, doc),
+                    matched_queries: self.searcher.matched_queries(id, doc),
                     doc: doc.clone(),
                     fields: (t.docvalue_fields.iter())
                         .filter_map(|f| {
@@ -2071,6 +2076,22 @@ mod tests {
         let fields =
             json!({"i": [151], "k": ["c"], "at": ["2021-05-04T00:00:00.000Z"], "f": [2.0]});
         assert_eq!(hit["fields"], fields);
+    }
+
+    #[test]
+    fn top_hits_report_the_named_queries_each_hit_matches() {
+        // ordered like Java's HashMap of the names ("a" before "b"), not like the query
+        let body = json!({"query": {"bool": {"should": [
+            {"term": {"k": {"value": "b", "_name": "b"}}},
+            {"range": {"i": {"gte": 100, "_name": "a"}}},
+            {"term": {"k": {"value": "a", "_name": "z"}}},
+        ], "must_not": {"term": {"k": {"value": "zzz", "_name": "no"}}}}},
+            "aggs": {"top": {"top_hits": {"sort": ["i"], "_source": false}}}});
+        let aggs = aggs_of(&index(), body);
+        let names: Vec<_> = (aggs["top"]["hits"]["hits"].as_array().unwrap().iter())
+            .map(|h| h["matched_queries"].clone())
+            .collect();
+        assert_eq!(names, [json!(["z"]), json!(["b"]), json!(["a", "b"])]);
     }
 
     #[test]

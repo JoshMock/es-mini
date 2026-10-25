@@ -440,3 +440,16 @@ async fn terms_lookup_reads_terms_from_a_document() {
     .await;
     assert_eq!(s, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn hits_report_the_named_queries_they_match() {
+    let app = seeded().await;
+    let named = |q: &str| json!({"match": {"t": {"query": q, "_name": q}}});
+    let body = json!({"query": {"bool": {"should": [named("red"), named("apple")]}},
+        "sort": ["n"]});
+    let (_, r) = call(&app, Method::POST, "/idx/_search", Some(body)).await;
+    let hits = &r["hits"]["hits"];
+    assert_eq!(hits[0]["matched_queries"], json!(["apple"]));
+    assert_eq!(hits[1]["matched_queries"], json!(["red", "apple"]));
+    assert_eq!(hits.as_array().unwrap().len(), 2);
+}
