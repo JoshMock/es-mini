@@ -1,7 +1,4 @@
 # Known-failing YAML tests. Fix one, then delete its line.
-aggregations/date_range.yml/Date range
-aggregations/date_range.yml/Date Range Missing
-aggregations/date_range.yml/Date range unmapped with children
 aggregations/filters_bucket.yml/cache busting
 aggregations/filters_bucket.yml/cache hits
 aggregations/filters_bucket.yml/named filters with bucket sort test

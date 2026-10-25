@@ -58,23 +58,35 @@ enum Metric {
     Range(Box<Ranges>),
 }
 
-/// The `range` aggregation's ranges, like ES's RangeAggregationBuilder.
+/// The `range` or `date_range` aggregation's ranges, like ES's RangeAggregationBuilder and
+/// DateRangeAggregationBuilder.
 #[derive(Debug, Clone, PartialEq)]
 struct Ranges {
     /// Each range's key, `from` and `to` as requested: numbers, or strings the field parses.
     ranges: Vec<(Option<String>, Value, Value)>,
     keyed: bool,
-    /// A DecimalFormat pattern for numeric bounds.
+    /// A DecimalFormat pattern for numeric bounds, or a date format for dates.
     format: Option<String>,
+    /// A `date_range`: bounds read as dates, even of an unmapped field.
+    date: bool,
+}
+
+/// A `range` bucket's key, requested bounds (open ends infinite) and their strings.
+#[derive(Debug, Clone, Default)]
+struct RangeBucket {
+    key: String,
+    bounds: [f64; 2],
+    strings: [Option<String>; 2],
 }
 
 impl Ranges {
-    fn parse(name: &str, params: &Map<String, Value>) -> Result<Self, QueryError> {
-        let bad = |k: &str| QueryError::x_content(format!("[range] failed to parse field [{k}]"));
+    fn parse(name: &str, ty: &str, params: &Map<String, Value>) -> Result<Self, QueryError> {
+        let bad = |k: &str| QueryError::x_content(format!("[{ty}] failed to parse field [{k}]"));
         let mut r = Ranges {
             ranges: vec![],
             keyed: false,
             format: None,
+            date: ty == "date_range",
         };
         for (k, v) in params {
             match k.as_str() {
@@ -88,14 +100,14 @@ impl Ranges {
                             .keys()
                             .find(|k| !["key", "from", "to"].contains(&k.as_str()))
                         {
-                            return Err(format!("[range] unknown field [{k}]").into());
+                            return Err(format!("[{ty}] unknown field [{k}]").into());
                         }
                         let bound = |k| o.get(k).cloned().unwrap_or(Value::Null);
                         let key = o.get("key").map(es_index::postings::text);
                         r.ranges.push((key, bound("from"), bound("to")));
                     }
                 }
-                _ => return Err(format!("[range] unknown field [{k}]").into()),
+                _ => return Err(format!("[{ty}] unknown field [{k}]").into()),
             }
         }
         if r.ranges.is_empty() {
@@ -115,27 +127,56 @@ impl Ranges {
         m: Option<&FieldMapping>,
         empty: &[Stats],
     ) -> Result<Vec<Stats>, QueryError> {
-        let date = matches!(
-            m,
-            Some(FieldMapping::Date { .. } | FieldMapping::DateNanos { .. })
-        );
+        let field_format = match m {
+            Some(FieldMapping::Date { format, .. } | FieldMapping::DateNanos { format, .. }) => {
+                Some(format.as_deref())
+            }
+            None if self.date => Some(None),
+            _ => None,
+        };
+        let date = |v: &Value| match s.instant(field) {
+            Some(instant) => instant(v),
+            None => es_index::parse_date_millis(v),
+        };
         let parse = |v: &Value, open: f64| {
             match v {
                 Value::Null => Some(open),
-                Value::String(_) if date => s.instant(field).and_then(|f| f(v)).map(|t| t as f64),
+                // a `range` reads numbers as millis, a `date_range` in the field's format
+                Value::String(_) if field_format.is_some() => date(v).map(|t| t as f64),
+                v if self.date && field_format.is_some() => date(v).map(|t| t as f64),
                 v => num(v),
             }
             .ok_or_else(|| {
                 QueryError::illegal(format!("failed to parse [{}]", es_index::postings::text(v)))
             })
         };
+        let as_string = |x: f64| match field_format {
+            Some(f) => Some(date_string(self.format.as_deref().or(f), x as i64)),
+            None => self.format.as_deref().map(|p| decimal_format(p, x)),
+        };
         let mut ranges = (self.ranges.iter())
             .map(|(key, from, to)| {
-                let bounds = (parse(from, f64::NEG_INFINITY)?, parse(to, f64::INFINITY)?);
-                Ok((key.clone(), bounds.0, bounds.1))
+                let bounds = [parse(from, f64::NEG_INFINITY)?, parse(to, f64::INFINITY)?];
+                let strings = bounds.map(|x| x.is_finite().then(|| as_string(x)).flatten());
+                let end = |i: usize| match (&strings[i], bounds[i].is_finite()) {
+                    (Some(s), _) => s.clone(),
+                    (None, true) => java_double(bounds[i]),
+                    (None, false) => "*".into(),
+                };
+                let key = key
+                    .clone()
+                    .unwrap_or_else(|| format!("{}-{}", end(0), end(1)));
+                Ok(RangeBucket {
+                    key,
+                    bounds,
+                    strings,
+                })
             })
             .collect::<Result<Vec<_>, QueryError>>()?;
-        ranges.sort_by(|x, y| x.1.total_cmp(&y.1).then(x.2.total_cmp(&y.2)));
+        ranges.sort_by(|x, y| {
+            let ([a, b], [c, d]) = (x.bounds, y.bounds);
+            a.total_cmp(&c).then(b.total_cmp(&d))
+        });
         let bucket = |range| Stats {
             range: Some(range),
             subs: empty.to_vec(),
@@ -219,6 +260,7 @@ impl Metric {
             Metric::Missing => "missing",
             Metric::Global => "global",
             Metric::Filters(_) => "filters",
+            Metric::Range(r) if r.date => "date_range",
             Metric::Range(_) => "range",
         }
     }
@@ -368,7 +410,7 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
         "missing" => Metric::Missing,
         "global" => Metric::Global,
         "filters" => Metric::Filters(Box::new(Filters::parse(object()?)?)),
-        "range" => Metric::Range(Box::new(Ranges::parse(name, object()?)?)),
+        "range" | "date_range" => Metric::Range(Box::new(Ranges::parse(name, t, object()?)?)),
         _ => return Err(format!("Unknown aggregation type [{t}]").into()),
     };
     if !subs.is_empty() && !metric.buckets() {
@@ -612,8 +654,8 @@ pub(crate) struct Stats {
     subs: Vec<Stats>,
     /// Each bucket's count and sub-aggregations (only for `filters` and `range`).
     buckets: Vec<Stats>,
-    /// A `range` bucket's key and requested bounds (open ends infinite).
-    range: Option<(Option<String>, f64, f64)>,
+    /// A `range` bucket's key and bounds.
+    range: Option<RangeBucket>,
 }
 
 impl Default for Stats {
@@ -974,8 +1016,7 @@ impl<'s, 'a> Collector<'s, 'a> {
                 };
                 let hits: Vec<bool> = (self.stats[i].buckets.iter())
                     .map(|b| {
-                        let (_, from, to) = b.range.clone().unwrap_or_default();
-                        let (from, to) = (fix(from), fix(to));
+                        let [from, to] = b.range.as_ref().map_or([0.0; 2], |r| r.bounds.map(fix));
                         vals.iter().filter_map(num).any(|x| from <= x && x < to)
                     })
                     .collect();
@@ -1428,28 +1469,21 @@ fn render_counted(
             }
             Metric::Range(r) => {
                 consume_buckets(buckets, st.buckets.len())?;
-                // ponytail: dates render in the default format, not the field's or `format`
-                let as_string = |x: f64| match (date, &r.format) {
-                    (true, _) => Some(iso_date(x as i64)),
-                    (_, Some(p)) => Some(decimal_format(p, x)),
-                    _ => None,
-                };
                 let mut list = vec![];
                 for b in &mut st.buckets {
-                    let (key, from, to) = b.range.clone().unwrap_or_default();
+                    let RangeBucket {
+                        key,
+                        bounds,
+                        strings,
+                    } = b.range.clone().unwrap_or_default();
                     let mut bucket = Map::new();
-                    let end = |x: f64| match x.is_finite() {
-                        true => as_string(x).unwrap_or_else(|| java_double(x)),
-                        false => "*".into(),
-                    };
-                    let key = key.unwrap_or_else(|| format!("{}-{}", end(from), end(to)));
                     if !r.keyed {
                         bucket.insert("key".into(), key.as_str().into());
                     }
-                    for (name, x) in [("from", from), ("to", to)] {
+                    for ((name, x), s) in ["from", "to"].into_iter().zip(bounds).zip(strings) {
                         if x.is_finite() {
                             bucket.insert(name.into(), x.into());
-                            if let Some(s) = as_string(x) {
+                            if let Some(s) = s {
                                 bucket.insert(format!("{name}_as_string"), s.into());
                             }
                         }
@@ -1514,6 +1548,18 @@ fn render_counted(
         out.insert(key, body.into());
     }
     Ok(out.into())
+}
+
+/// Epoch millis `t` in a date field's `format` (the first of its `||` alternatives).
+// ponytail: no time zones; named formats other than epochs render as the default format
+fn date_string(format: Option<&str>, t: i64) -> String {
+    match format.and_then(|f| f.split("||").next()) {
+        Some("epoch_millis") => t.to_string(),
+        Some("epoch_second") if t % 1000 == 0 => (t / 1000).to_string(),
+        Some("epoch_second") => (t as f64 / 1000.0).to_string(),
+        Some(p) => es_index::format_pattern(p, t).unwrap_or_else(|| iso_date(t)),
+        None => iso_date(t),
+    }
 }
 
 /// Buckets as an object by key, or else an array.
@@ -1777,6 +1823,36 @@ mod tests {
             (&aggs["s"]["value"], &aggs["ms"]["value"]),
             (&json!(2e6), &json!(2e3))
         );
+    }
+
+    #[test]
+    fn date_range_reads_bounds_and_renders_keys_in_the_field_format() {
+        let mut ix = Index::default();
+        let m = FieldMapping::Date {
+            format: Some("epoch_second".into()),
+            locale: None,
+            fields: Default::default(),
+        };
+        ix.mappings.properties.insert("s".into(), m);
+        ix.put("1", json!({"s": 1000}));
+        ix.put("2", json!({"s": "3000"}));
+        ix.put("3", json!({}));
+        let body = json!({"aggs": {
+            "s": {"date_range": {"field": "s", "missing": "0",
+                "ranges": [{"from": "3000", "to": 4000}, {"key": "low", "to": 1000}]}},
+            "none": {"date_range": {"field": "nope",
+                "ranges": [{"from": "2020-01-01T00:00:00Z"}]}},
+        }});
+        let want = json!({
+            "s": {"buckets": [
+                {"key": "low", "to": 1e6, "to_as_string": "1000", "doc_count": 1},
+                {"key": "3000-4000", "from": 3e6, "from_as_string": "3000",
+                    "to": 4e6, "to_as_string": "4000", "doc_count": 1},
+            ]},
+            "none": {"buckets": [{"key": "2020-01-01T00:00:00.000Z-*", "from": 1_577_836_800_000.0,
+                "from_as_string": "2020-01-01T00:00:00.000Z", "doc_count": 0}]},
+        });
+        assert_eq!(aggs_of(&ix, body), want);
     }
 
     #[test]
