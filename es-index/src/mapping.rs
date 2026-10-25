@@ -9,7 +9,13 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum FieldMapping {
-    Text,
+    Text {
+        /// Kept as a stored field; es-mini answers `stored_fields` from `_source`.
+        // ponytail: disk saves do not write the Lucene stored field, so Elasticsearch reading
+        // a Rust-written index finds no stored values; write them if that matters
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        store: bool,
+    },
     /// Dynamically mapped string: `text` with a `keyword` subfield.
     #[serde(rename = "text", skip_deserializing)]
     TextKeyword {
@@ -59,7 +65,7 @@ impl FieldMapping {
     /// `date_nanos`, `ip`, or `unsupported` for ranges).
     pub fn type_name(&self) -> &'static str {
         match self {
-            Self::Text | Self::TextKeyword { .. } => "text",
+            Self::Text { .. } | Self::TextKeyword { .. } => "text",
             Self::Keyword { .. } => "keyword",
             Self::Long => "long",
             Self::Integer | Self::Short | Self::Byte => "integer",

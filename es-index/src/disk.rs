@@ -445,7 +445,7 @@ fn user_fields(
         };
         let mut point_width = 0;
         let (index_options, doc_values, omit_norms) = match mapping {
-            M::Text | M::TextKeyword { .. } => {
+            M::Text { .. } | M::TextKeyword { .. } => {
                 let Some(texts) = typed(&values, &|v| v.as_str().map(str::to_owned)) else {
                     continue;
                 };

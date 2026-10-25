@@ -64,7 +64,7 @@ fn source_path<'f>(index: &Index, field: &'f str) -> &'f str {
 
 fn resolve(index: &Index, field: &str, sample: impl Fn(&str) -> Option<Value>) -> Kind {
     match index.mappings.properties.get(field) {
-        Some(FieldMapping::Text | FieldMapping::TextKeyword { .. }) => Kind::Text,
+        Some(FieldMapping::Text { .. } | FieldMapping::TextKeyword { .. }) => Kind::Text,
         Some(FieldMapping::Keyword { .. }) => Kind::Keyword,
         Some(FieldMapping::Boolean) => Kind::Bool,
         // ponytail: dates match and sort as their JSON values (only range parses instants); no date math
@@ -911,7 +911,7 @@ pub fn check_sortable(targets: &[Target], req: &SearchRequest) -> Result<(), Que
                     f.field
                 )));
             }
-            if let Some(FieldMapping::Text | FieldMapping::TextKeyword { .. }) =
+            if let Some(FieldMapping::Text { .. } | FieldMapping::TextKeyword { .. }) =
                 index.mappings.properties.get(&f.field)
             {
                 return Err(fielddata_disabled(&f.field));
@@ -1098,7 +1098,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("esm-candidates-{}", std::process::id()));
         let mut ix = Index::default();
         let props = &mut ix.mappings.properties;
-        props.insert("title".into(), FieldMapping::Text);
+        props.insert("title".into(), FieldMapping::Text { store: false });
         props.insert("tag".into(), FieldMapping::Keyword { ignore_above: None });
         props.insert("ok".into(), FieldMapping::Boolean);
         for i in 0..50 {

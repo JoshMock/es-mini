@@ -144,7 +144,7 @@ fn saves_and_reloads_many_terms_and_docs() {
     let mut idx = Index::default();
     idx.mappings
         .properties
-        .insert("title".into(), FieldMapping::Text);
+        .insert("title".into(), FieldMapping::Text { store: false });
     idx.mappings
         .properties
         .insert("tag".into(), FieldMapping::Keyword { ignore_above: None });

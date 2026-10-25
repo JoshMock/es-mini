@@ -75,6 +75,7 @@ struct TopHits {
     docvalue_fields: Vec<String>,
     /// The `fields` to fetch; `None` inherits the search's.
     fields: Option<Vec<String>>,
+    stored_fields: Vec<String>,
 }
 
 /// A document `top_hits` collected.
@@ -103,7 +104,9 @@ impl TopHits {
             seq_no: false,
             docvalue_fields: vec![],
             fields: None,
+            stored_fields: vec![],
         };
+        let mut stored_fields = None;
         // patterns of a string or an array of strings
         let patterns = |k: &str, v: &Value| match v {
             Value::String(s) => Ok(vec![s.clone()]),
@@ -128,6 +131,7 @@ impl TopHits {
                 // ponytail: no per-field `format`
                 "docvalue_fields" => t.docvalue_fields = field_names(v).ok_or_else(|| bad(k))?,
                 "fields" => t.fields = Some(field_names(v).ok_or_else(|| bad(k))?),
+                "stored_fields" => stored_fields = Some(patterns(k, v)?),
                 "_source" => {
                     t.source = match v {
                         Value::Bool(b) => b.then(String::new),
@@ -149,6 +153,14 @@ impl TopHits {
                 }
                 _ => return Err(format!("[top_hits] unknown field [{k}]").into()),
             }
+        }
+        // Stored fields leave `_source` out unless it is asked for, like ES's FetchContext.
+        if let Some(f) = stored_fields {
+            let asked = params.contains_key("_source") || f.iter().any(|f| f == "_source");
+            if f == ["_none_"] || !asked {
+                t.source = None;
+            }
+            t.stored_fields = f;
         }
         Ok(t)
     }
@@ -964,6 +976,22 @@ pub(crate) fn field_names(v: &Value) -> Option<Vec<String>> {
         .collect()
 }
 
+/// A hit's `stored_fields`: the source values of each field mapped with `store`.
+// ponytail: only `text` can be stored; metadata fields (`_id`, `_routing`) are not rendered
+fn stored_fields(s: &Searcher, fields: &[String], doc: &Document) -> Map<String, Value> {
+    (fields.iter())
+        .filter(|f| {
+            matches!(
+                s.index.mappings.field(f),
+                Some(FieldMapping::Text { store: true })
+            )
+        })
+        .map(|f| (f.clone(), values(&doc.source, source_path(s.index, f))))
+        .filter(|(_, v)| !v.is_empty())
+        .map(|(f, v)| (f, Value::Array(v.into_iter().cloned().collect())))
+        .collect()
+}
+
 /// Gives every `top_hits` without its own `fields` the search's, like ES's SubSearchContext.
 pub(crate) fn inherit_fields(aggs: &mut [Agg], fields: &[String]) {
     for a in aggs {
@@ -989,7 +1017,7 @@ pub(crate) fn hit_fields(
                 false => doc_values(s, f, m, doc),
                 true => (values(&doc.source, source_path(s.index, f)).into_iter())
                     .filter_map(|v| match m {
-                        FieldMapping::Text | FieldMapping::TextKeyword { .. } => {
+                        FieldMapping::Text { .. } | FieldMapping::TextKeyword { .. } => {
                             Some(es_index::postings::text(v).into())
                         }
                         _ => doc_value(s, f, m, v),
@@ -1041,7 +1069,7 @@ fn doc_value(s: &Searcher, field: &str, mapping: &FieldMapping, v: &Value) -> Op
         // ponytail: date_range's `format` is ignored
         M::LongRange => range(v, int),
         M::DateRange { .. } => range(v, es_index::parse_date_millis),
-        M::Text | M::TextKeyword { .. } => None,
+        M::Text { .. } | M::TextKeyword { .. } => None,
     }
 }
 
@@ -1137,7 +1165,7 @@ impl<'s, 'a> Collector<'s, 'a> {
             let start = Instant::now();
             let m = index.mappings.field(&agg.field);
             match m {
-                Some(FieldMapping::Text | FieldMapping::TextKeyword { .. }) => {
+                Some(FieldMapping::Text { .. } | FieldMapping::TextKeyword { .. }) => {
                     return Err(fielddata_disabled(&agg.field));
                 }
                 Some(FieldMapping::Keyword { .. })
@@ -1271,6 +1299,7 @@ impl<'s, 'a> Collector<'s, 'a> {
                     doc: doc.clone(),
                     fields: {
                         let mut fields = hit_fields(self.searcher, &t.docvalue_fields, doc, false);
+                        fields.extend(stored_fields(self.searcher, &t.stored_fields, doc));
                         let fetch = t.fields.as_deref().unwrap_or_default();
                         fields.extend(hit_fields(self.searcher, fetch, doc, true));
                         fields
@@ -1960,7 +1989,7 @@ mod tests {
             fields: Default::default(),
         };
         props.insert("at".into(), date);
-        props.insert("t".into(), FieldMapping::Text);
+        props.insert("t".into(), FieldMapping::Text { store: false });
         for (id, i, f, k, at) in [
             ("1", 1, 0.5, "a", "2021-05-01T00:00:00Z"),
             ("2", 51, 1.1, "b", "2021-05-02T00:00:00Z"),
@@ -2115,6 +2144,31 @@ mod tests {
         let fields =
             json!({"i": [151], "k": ["c"], "at": ["2021-05-04T00:00:00.000Z"], "f": [2.0]});
         assert_eq!(hit["fields"], fields);
+    }
+
+    #[test]
+    fn top_hits_stored_fields_render_stored_values_as_fields() {
+        let mut ix = index();
+        let store = FieldMapping::Text { store: true };
+        ix.mappings.properties.insert("s".into(), store);
+        ix.put("6", json!({"i": 200, "s": ["The Fox", "x"], "t": "y"}));
+        let body = json!({"aggs": {
+            "top": {"top_hits": {"size": 1, "sort": [{"i": "desc"}],
+                "stored_fields": ["s", "t", "i", "nope"]}},
+            "one": {"top_hits": {"size": 1, "sort": [{"i": "desc"}], "stored_fields": "s",
+                "_source": ["i"]}},
+            "none": {"top_hits": {"size": 1, "stored_fields": "_none_", "_source": true}},
+        }});
+        let aggs = aggs_of(&ix, body);
+        let fields = json!({"s": ["The Fox", "x"]});
+        let top = &aggs["top"]["hits"]["hits"][0];
+        assert_eq!(top["fields"], fields);
+        // stored fields leave `_source` out unless it is asked for, like ES's FetchContext
+        assert!(top.get("_source").is_none());
+        let one = &aggs["one"]["hits"]["hits"][0];
+        assert_eq!(one["fields"], fields);
+        assert_eq!(one["_source"], json!({"i": 200}));
+        assert!(aggs["none"]["hits"]["hits"][0].get("_source").is_none());
     }
 
     #[test]

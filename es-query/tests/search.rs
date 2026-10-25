@@ -319,7 +319,9 @@ fn minimum_should_match_accepts_elasticsearch_specs() {
 #[test]
 fn sorting_on_a_text_field_is_refused() {
     let mut i = Index::default();
-    i.mappings.properties.insert("t".into(), FieldMapping::Text);
+    i.mappings
+        .properties
+        .insert("t".into(), FieldMapping::Text { store: false });
     i.put("1", json!({"t": "a"}));
     let targets = [("i", &i, None)];
     let req = SearchRequest::parse(&json!({"sort": ["t"]})).unwrap();

@@ -1046,13 +1046,14 @@ mod tests {
         assert_eq!(FieldMapping::Float.type_name(), "double");
         assert!(FieldMapping::Byte.is_numeric());
         assert!(!FieldMapping::Boolean.is_numeric());
-        assert!(!FieldMapping::Text.is_numeric());
+        assert!(!FieldMapping::Text { store: false }.is_numeric());
     }
 
     #[test]
     fn mappings_round_trip() {
         let raw = json!({"properties": {
             "title": {"type": "text"},
+            "body": {"type": "text", "store": true},
             "tag": {"type": "keyword"},
             "n": {"type": "long"},
             "ok": {"type": "boolean"},
@@ -1313,7 +1314,7 @@ mod tests {
             fields: Default::default(),
         };
         props.insert("at".into(), date);
-        props.insert("t".into(), FieldMapping::Text);
+        props.insert("t".into(), FieldMapping::Text { store: false });
         let doc = json!({"n": [3, -2], "d": -1.5, "f": 1.1, "k": ["b", "a", "b"], "ok": true,
             "at": "2021-05-01T00:00:00Z", "t": "x"});
         ix.put("1", doc);
