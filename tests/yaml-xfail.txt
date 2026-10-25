@@ -20,10 +20,6 @@ aggregations/filter.yml/Terms lookup gets cached
 aggregations/global.yml/profile
 aggregations/global.yml/simple
 aggregations/histogram.yml/date_histogram with extended_bounds and offset and unmapped
-aggregations/missing.yml/match all
-aggregations/missing.yml/match none
-aggregations/missing.yml/match some
-aggregations/missing.yml/missing param
 aggregations/range.yml/Double range
 aggregations/range.yml/Double range default keyed response
 aggregations/range.yml/Double range no decimal

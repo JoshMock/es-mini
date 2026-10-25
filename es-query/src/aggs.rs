@@ -48,6 +48,8 @@ enum Metric {
     Histogram(Box<Histogram>),
     /// The single bucket of the documents matching a query.
     Filter(Box<Query>),
+    /// The single bucket of the documents without a value for the field (nor `missing`).
+    Missing,
 }
 
 impl Metric {
@@ -66,6 +68,7 @@ impl Metric {
             Metric::Histogram(h) if h.date => "date_histogram",
             Metric::Histogram(_) => "histogram",
             Metric::Filter(_) => "filter",
+            Metric::Missing => "missing",
         }
     }
 
@@ -73,8 +76,13 @@ impl Metric {
     fn buckets(&self) -> bool {
         matches!(
             self,
-            Metric::Terms(_) | Metric::Histogram(_) | Metric::Filter(_)
+            Metric::Terms(_) | Metric::Histogram(_) | Metric::Filter(_) | Metric::Missing
         )
+    }
+
+    /// Whether this aggregation has a single bucket (a `doc_count` and sub-aggregations).
+    fn single(&self) -> bool {
+        matches!(self, Metric::Filter(_) | Metric::Missing)
     }
 }
 
@@ -193,6 +201,7 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
             Metric::Histogram(Box::new(h))
         }
         "filter" => Metric::Filter(Box::new(parse_query(params)?)),
+        "missing" => Metric::Missing,
         _ => return Err(format!("Unknown aggregation type [{t}]").into()),
     };
     if !subs.is_empty() && !metric.buckets() {
@@ -355,7 +364,7 @@ const NOT_SORTABLE: &str = "Buckets can only be sorted on a sub-aggregator path 
 fn sort_value(agg: &Agg, rest: &str, st: Option<&Stats>) -> Result<f64, String> {
     let name = &agg.name;
     if let Some(path) = rest.strip_prefix('>') {
-        if !matches!(agg.metric, Metric::Filter(_)) {
+        if !agg.metric.single() {
             return Err(NOT_SORTABLE.into());
         }
         let (sub, rest) = split_path(path);
@@ -373,7 +382,7 @@ fn sort_value(agg: &Agg, rest: &str, st: Option<&Stats>) -> Result<f64, String> 
     };
     let avg = st.sum / st.count as f64;
     let single = match agg.metric {
-        Metric::Filter(_) => {
+        Metric::Filter(_) | Metric::Missing => {
             return match key {
                 None | Some("doc_count") => Ok(st.count as f64),
                 Some(_) => Err(format!(
@@ -629,7 +638,10 @@ impl<'s, 'a> Collector<'s, 'a> {
                 Some(FieldMapping::Keyword { .. })
                     if !matches!(
                         agg.metric,
-                        Metric::ValueCount | Metric::Cardinality { .. } | Metric::Terms(_)
+                        Metric::ValueCount
+                            | Metric::Cardinality { .. }
+                            | Metric::Terms(_)
+                            | Metric::Missing
                     ) =>
                 {
                     return Err(QueryError::illegal(format!(
@@ -689,9 +701,9 @@ impl<'s, 'a> Collector<'s, 'a> {
                     m,
                     Some(FieldMapping::Date { .. } | FieldMapping::DateNanos { .. })
                 ),
-                subs: match agg.metric {
-                    Metric::Filter(_) => empty.clone(),
-                    _ => vec![],
+                subs: match agg.metric.single() {
+                    true => empty.clone(),
+                    false => vec![],
                 },
                 hll: match agg.metric {
                     Metric::Cardinality { precision, .. } => Some(Hll::new(precision)),
@@ -728,23 +740,27 @@ impl<'s, 'a> Collector<'s, 'a> {
     }
 
     fn collect_one(&mut self, i: usize, id: &str, doc: &Document) {
-        if let Metric::Filter(q) = &self.aggs[i].metric {
-            if self.searcher.score(q, id, doc).is_some() {
-                let st = &mut self.stats[i];
-                st.count += 1;
-                if let Some(sub) = &mut self.subs[i] {
-                    sub.collect_into(&mut st.subs, id, doc);
+        let matches = match &self.aggs[i].metric {
+            Metric::Filter(q) => self.searcher.score(q, id, doc).is_some(),
+            Metric::Missing => self.values(i, id, doc).is_empty() && self.missing[i].is_none(),
+            _ => {
+                let vals = self.values(i, id, doc);
+                if let Some(t) = &mut self.timings {
+                    t[i].multi_valued |= vals.len() > 1;
                 }
+                match vals.is_empty() {
+                    true => self.add(i, self.missing[i].iter().cloned().collect(), id, doc),
+                    false => self.add(i, vals, id, doc),
+                }
+                return;
             }
-            return;
-        }
-        let vals = self.values(i, id, doc);
-        if let Some(t) = &mut self.timings {
-            t[i].multi_valued |= vals.len() > 1;
-        }
-        match vals.is_empty() {
-            true => self.add(i, self.missing[i].iter().cloned().collect(), id, doc),
-            false => self.add(i, vals, id, doc),
+        };
+        if matches {
+            let st = &mut self.stats[i];
+            st.count += 1;
+            if let Some(sub) = &mut self.subs[i] {
+                sub.collect_into(&mut st.subs, id, doc);
+            }
         }
     }
 
@@ -846,7 +862,7 @@ impl Collector<'_, '_> {
     fn finish_terms(&mut self, stats: &mut [Stats]) {
         let index = self.searcher.index;
         for (i, st) in stats.iter_mut().enumerate() {
-            if let (Metric::Filter(_), Some(sub)) = (&self.aggs[i].metric, &mut self.subs[i]) {
+            if let (true, Some(sub)) = (self.aggs[i].metric.single(), &mut self.subs[i]) {
                 sub.finish_terms(&mut st.subs);
             }
             let Some(b) = &mut st.terms else {
@@ -903,6 +919,7 @@ impl Collector<'_, '_> {
             Metric::Histogram(_) => "NumericHistogramAggregator",
             // ponytail: ES may run a filter as FilterByFilterAggregator; not profiled yet
             Metric::Filter(_) => "FilterAggregator",
+            Metric::Missing => "MissingAggregator",
             _ if m.is_none() && agg.missing.is_none() => match agg.metric {
                 Metric::Stats | Metric::ExtendedStats { .. } | Metric::Percentiles { .. } => {
                     "NonCollectingMultiMetricAggregator"
@@ -1120,7 +1137,7 @@ fn render_counted(
                     h.render(b, &mut body, buckets, sub)?;
                 }
             }
-            Metric::Filter(_) => {
+            Metric::Filter(_) | Metric::Missing => {
                 body.insert("doc_count".into(), st.count.into());
                 sub(&mut st.subs, &mut body)?;
             }
@@ -1346,6 +1363,21 @@ mod tests {
         let want = json!({
             "f": {"doc_count": 2, "m": {"value": 101.0}},
             "none": {"doc_count": 0},
+        });
+        assert_eq!(aggs_of(&index(), body), want);
+    }
+
+    #[test]
+    fn missing_counts_documents_without_values() {
+        let body = json!({"aggs": {
+            "i": {"missing": {"field": "i"}, "aggs": {"c": {"value_count": {"field": "k"}}}},
+            "none": {"missing": {"field": "nope"}},
+            "filled": {"missing": {"field": "i", "missing": 1}},
+        }});
+        let want = json!({
+            "i": {"doc_count": 1, "c": {"value": 0}},
+            "none": {"doc_count": 5},
+            "filled": {"doc_count": 0},
         });
         assert_eq!(aggs_of(&index(), body), want);
     }
