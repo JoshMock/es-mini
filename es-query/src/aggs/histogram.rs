@@ -260,6 +260,7 @@ mod tests {
         let date = FieldMapping::Date {
             format: None,
             locale: None,
+            fields: Default::default(),
         };
         props.insert("at".into(), date);
         for (i, n) in numbers.iter().enumerate() {

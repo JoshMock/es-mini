@@ -376,8 +376,8 @@ pub fn norm_len(norm: i8) -> u32 {
 /// arrays of scalars. Field numbers start at 6, after the metadata fields.
 // ponytail: fields the writer cannot encode yet are left out of the segment, which only
 // Elasticsearch notices (es-mini rebuilds every field from `_source` on open): values of the
-// wrong type or nested objects, custom date formats, positions, and any field with a term in
-// 256+ docs.
+// wrong type or nested objects, custom date formats, `date_nanos`, multi-fields, positions, and
+// any field with a term in 256+ docs.
 #[derive(Default)]
 struct UserFields {
     fields: Vec<es_codec::field_infos::FieldInfo>,
@@ -481,6 +481,7 @@ fn user_fields(
                 out.keyword.push((number, keys));
                 (IndexOptions::Docs, DocValuesType::SortedSet, true)
             }
+            M::DateNanos { .. } => continue,
             M::Ip => {
                 // Like ES: points and sorted-set doc values of the 16-byte encoding, no postings.
                 let Some(ips) = typed(&values, &crate::ip_bytes) else {

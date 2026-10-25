@@ -14,7 +14,7 @@ use crate::{
     MAX_BUCKETS, Query, QueryError, Searcher, fielddata_disabled, int, num, parse_query,
     source_path,
 };
-use es_index::{Document, FieldMapping, Index, iso_date, postings::values};
+use es_index::{Document, FieldMapping, iso_date, postings::values};
 use histogram::Histogram;
 use serde_json::{Map, Value};
 use std::cell::Cell;
@@ -478,7 +478,7 @@ fn doc_value(s: &Searcher, field: &str, mapping: &FieldMapping, v: &Value) -> Op
         }
         M::Double => num(v).map(Value::from),
         M::Float => num(v).map(|f| Value::from(f64::from(f as f32))),
-        M::Date { .. } => match s.instant(field) {
+        M::Date { .. } | M::DateNanos { .. } => match s.instant(field) {
             Some(instant) => instant(v),
             // an unmapped field's `value_type`
             None => es_index::parse_date_millis(v),
@@ -507,18 +507,6 @@ fn values_source(m: &FieldMapping) -> &'static str {
     } else {
         m.type_name()
     }
-}
-
-/// The mapping of `field`, including a `keyword` multi-field of a text field.
-fn mapping<'a>(index: &'a Index, field: &str) -> Option<&'a FieldMapping> {
-    let props = &index.mappings.properties;
-    props.get(field).or_else(|| {
-        let (base, sub) = field.rsplit_once('.')?;
-        match props.get(base)? {
-            FieldMapping::TextKeyword { fields } => fields.get(sub),
-            _ => None,
-        }
-    })
 }
 
 /// Reads a field's doc values for on-disk documents (see `Index::disk_values`).
@@ -580,7 +568,7 @@ impl<'s, 'a> Collector<'s, 'a> {
         };
         for agg in aggs {
             let start = Instant::now();
-            let m = mapping(index, &agg.field);
+            let m = index.mappings.field(&agg.field);
             match m {
                 Some(FieldMapping::Text | FieldMapping::TextKeyword { .. }) => {
                     return Err(fielddata_disabled(&agg.field));
@@ -644,7 +632,10 @@ impl<'s, 'a> Collector<'s, 'a> {
             let empty = sub.as_ref().map(|s| s.stats.clone()).unwrap_or_default();
             c.subs.push(sub);
             c.stats.push(Stats {
-                date: matches!(m, Some(FieldMapping::Date { .. })),
+                date: matches!(
+                    m,
+                    Some(FieldMapping::Date { .. } | FieldMapping::DateNanos { .. })
+                ),
                 subs: match agg.metric {
                     Metric::Filter(_) => empty.clone(),
                     _ => vec![],
@@ -1190,6 +1181,7 @@ mod tests {
         let date = FieldMapping::Date {
             format: None,
             locale: None,
+            fields: Default::default(),
         };
         props.insert("at".into(), date);
         props.insert("t".into(), FieldMapping::Text);
@@ -1362,6 +1354,7 @@ mod tests {
         let date = FieldMapping::Date {
             format: None,
             locale: None,
+            fields: Default::default(),
         };
         props.insert("dt".into(), date);
         // ES indexed these values as one document; spread them so the disk save fits a chunk

@@ -46,11 +46,19 @@ enum Kind {
     Bool,
 }
 
-/// The source path a field reads: unmapped `x.keyword` reads `x`.
+/// The source path a field reads: a multi-field `x.y`, or unmapped `x.keyword`, reads `x`.
 fn source_path<'f>(index: &Index, field: &'f str) -> &'f str {
-    match index.mappings.properties.contains_key(field) {
+    let props = &index.mappings.properties;
+    let multi = |(base, sub): (&'f str, &str)| {
+        (props.get(base)?.fields()?)
+            .contains_key(sub)
+            .then_some(base)
+    };
+    match props.contains_key(field) {
         true => field,
-        false => field.strip_suffix(".keyword").unwrap_or(field),
+        false => (field.rsplit_once('.').and_then(multi))
+            .or(field.strip_suffix(".keyword"))
+            .unwrap_or(field),
     }
 }
 
@@ -60,7 +68,7 @@ fn resolve(index: &Index, field: &str, sample: impl Fn(&str) -> Option<Value>) -
         Some(FieldMapping::Keyword { .. }) => Kind::Keyword,
         Some(FieldMapping::Boolean) => Kind::Bool,
         // ponytail: dates match and sort as their JSON values (only range parses instants); no date math
-        Some(FieldMapping::Date { .. }) => Kind::Keyword,
+        Some(FieldMapping::Date { .. } | FieldMapping::DateNanos { .. }) => Kind::Keyword,
         // ponytail: ips match as their JSON strings; no CIDR or address normalization in queries
         Some(FieldMapping::Ip) => Kind::Keyword,
         Some(m) if m.is_numeric() => Kind::Number,
@@ -415,8 +423,9 @@ impl<'a> Searcher<'a> {
 
     /// For a date field, how it reads a value as epoch millis.
     fn instant(&self, field: &str) -> Option<impl Fn(&Value) -> Option<i64> + 'a> {
-        match self.index.mappings.properties.get(field)? {
-            FieldMapping::Date { format, locale } => Some(move |v: &Value| match format {
+        match self.index.mappings.field(field)? {
+            FieldMapping::Date { format, locale, .. }
+            | FieldMapping::DateNanos { format, locale } => Some(move |v: &Value| match format {
                 Some(_) => parse_dated(v, locale.as_deref().unwrap_or("en")),
                 None => parse_date_millis(v),
             }),
@@ -1036,6 +1045,7 @@ mod tests {
         let date = FieldMapping::Date {
             format: None,
             locale: None,
+            fields: Default::default(),
         };
         props.insert("when".into(), date);
         for i in 0..50 {

@@ -383,6 +383,7 @@ fn date_range_compares_instants_not_strings() {
         FieldMapping::Date {
             format: None,
             locale: None,
+            fields: Default::default(),
         },
     );
     idx.put("a", json!({"d": "2024-01-01T00:00:00Z"}));

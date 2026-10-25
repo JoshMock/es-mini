@@ -31,6 +31,17 @@ pub enum FieldMapping {
         format: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         locale: Option<String>,
+        /// Multi-fields, indexed from the same source value.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        fields: BTreeMap<String, FieldMapping>,
+    },
+    /// Read and aggregated as epoch millis like `date`.
+    // ponytail: sub-millisecond precision only lives in `_source`
+    DateNanos {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        format: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        locale: Option<String>,
     },
     Ip,
 }
@@ -47,7 +58,16 @@ impl FieldMapping {
             Self::Double | Self::Float => "double",
             Self::Boolean => "boolean",
             Self::Date { .. } => "date",
+            Self::DateNanos { .. } => "date_nanos",
             Self::Ip => "ip",
+        }
+    }
+
+    /// The multi-fields indexed from this field's value.
+    pub fn fields(&self) -> Option<&BTreeMap<String, FieldMapping>> {
+        match self {
+            Self::TextKeyword { fields } | Self::Date { fields, .. } => Some(fields),
+            _ => None,
         }
     }
 
@@ -66,6 +86,14 @@ pub struct Mappings {
 }
 
 impl Mappings {
+    /// The mapping of `field`, including a multi-field such as `title.keyword`.
+    pub fn field(&self, field: &str) -> Option<&FieldMapping> {
+        self.properties.get(field).or_else(|| {
+            let (base, sub) = field.rsplit_once('.')?;
+            self.properties.get(base)?.fields()?.get(sub)
+        })
+    }
+
     /// False when the mapping sets `_source.enabled` to `false`.
     pub fn source_enabled(&self) -> bool {
         self.source.as_ref().is_none_or(|s| s["enabled"] != false)
@@ -92,6 +120,7 @@ impl Index {
                     FieldMapping::Date {
                         format: None,
                         locale: None,
+                        fields: BTreeMap::new(),
                     }
                 }
                 Some(Value::String(_)) if auto_text => FieldMapping::TextKeyword {

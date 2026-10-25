@@ -117,6 +117,7 @@ impl Terms {
                         "date" => FieldMapping::Date {
                             format: None,
                             locale: None,
+                            fields: Default::default(),
                         },
                         "ip" => FieldMapping::Ip,
                         _ => return Err(format!("Unknown value type [{}]", text(v)).into()),
@@ -431,7 +432,7 @@ impl Format {
             Some(M::Long | M::Integer | M::Short | M::Byte) => Format::Long,
             Some(M::Double | M::Float) => Format::Double,
             Some(M::Boolean) => Format::Bool,
-            Some(M::Date { .. }) => Format::Date,
+            Some(M::Date { .. } | M::DateNanos { .. }) => Format::Date,
             Some(M::Ip) => Format::Ip,
             Some(M::Keyword { .. } | M::Text | M::TextKeyword { .. }) => Format::Str,
         }
@@ -656,6 +657,7 @@ mod tests {
         let date = FieldMapping::Date {
             format: None,
             locale: None,
+            fields: Default::default(),
         };
         props.insert("at".into(), date);
         props.insert("ip".into(), FieldMapping::Ip);

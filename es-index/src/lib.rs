@@ -1053,6 +1053,7 @@ mod tests {
         let date = FieldMapping::Date {
             format: None,
             locale: None,
+            fields: Default::default(),
         };
         props.insert("at".into(), date);
         props.insert("t".into(), FieldMapping::Text);
