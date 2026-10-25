@@ -50,6 +50,8 @@ enum Metric {
     Filter(Box<Query>),
     /// The single bucket of the documents without a value for the field (nor `missing`).
     Missing,
+    /// The single bucket of every document of the searched indices, whatever the query.
+    Global,
 }
 
 impl Metric {
@@ -69,20 +71,18 @@ impl Metric {
             Metric::Histogram(_) => "histogram",
             Metric::Filter(_) => "filter",
             Metric::Missing => "missing",
+            Metric::Global => "global",
         }
     }
 
     /// Whether this aggregation buckets documents (and so may have sub-aggregations).
     fn buckets(&self) -> bool {
-        matches!(
-            self,
-            Metric::Terms(_) | Metric::Histogram(_) | Metric::Filter(_) | Metric::Missing
-        )
+        matches!(self, Metric::Terms(_) | Metric::Histogram(_)) || self.single()
     }
 
     /// Whether this aggregation has a single bucket (a `doc_count` and sub-aggregations).
     fn single(&self) -> bool {
-        matches!(self, Metric::Filter(_) | Metric::Missing)
+        matches!(self, Metric::Filter(_) | Metric::Missing | Metric::Global)
     }
 }
 
@@ -202,6 +202,7 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
         }
         "filter" => Metric::Filter(Box::new(parse_query(params)?)),
         "missing" => Metric::Missing,
+        "global" => Metric::Global,
         _ => return Err(format!("Unknown aggregation type [{t}]").into()),
     };
     if !subs.is_empty() && !metric.buckets() {
@@ -209,7 +210,7 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
             "Aggregator [{name}] of type [{t}] cannot accept sub-aggregations"
         )));
     }
-    if let Metric::Filter(_) = metric {
+    if let Metric::Filter(_) | Metric::Global = metric {
         return Ok(Agg {
             name: name.to_owned(),
             meta,
@@ -382,7 +383,7 @@ fn sort_value(agg: &Agg, rest: &str, st: Option<&Stats>) -> Result<f64, String> 
     };
     let avg = st.sum / st.count as f64;
     let single = match agg.metric {
-        Metric::Filter(_) | Metric::Missing => {
+        Metric::Filter(_) | Metric::Missing | Metric::Global => {
             return match key {
                 None | Some("doc_count") => Ok(st.count as f64),
                 Some(_) => Err(format!(
@@ -743,6 +744,8 @@ impl<'s, 'a> Collector<'s, 'a> {
         let matches = match &self.aggs[i].metric {
             Metric::Filter(q) => self.searcher.score(q, id, doc).is_some(),
             Metric::Missing => self.values(i, id, doc).is_empty() && self.missing[i].is_none(),
+            // collected over every document by `finish_terms`
+            Metric::Global => false,
             _ => {
                 let vals = self.values(i, id, doc);
                 if let Some(t) = &mut self.timings {
@@ -859,9 +862,18 @@ impl Collector<'_, '_> {
     /// Keeps each `terms` aggregation's top buckets of this shard in `stats` (and so on in
     /// their sub-aggregations), first adding empty buckets for the values of unmatched
     /// documents if `min_doc_count` is 0.
+    /// Also collects every document into each `global` aggregation.
     fn finish_terms(&mut self, stats: &mut [Stats]) {
         let index = self.searcher.index;
         for (i, st) in stats.iter_mut().enumerate() {
+            if self.aggs[i].metric == Metric::Global {
+                for (id, doc) in index.docs().filter(|(_, d)| index.searchable(d)) {
+                    st.count += 1;
+                    if let Some(sub) = &mut self.subs[i] {
+                        sub.collect_into(&mut st.subs, id, &doc);
+                    }
+                }
+            }
             if let (true, Some(sub)) = (self.aggs[i].metric.single(), &mut self.subs[i]) {
                 sub.finish_terms(&mut st.subs);
             }
@@ -920,6 +932,7 @@ impl Collector<'_, '_> {
             // ponytail: ES may run a filter as FilterByFilterAggregator; not profiled yet
             Metric::Filter(_) => "FilterAggregator",
             Metric::Missing => "MissingAggregator",
+            Metric::Global => "GlobalAggregator",
             _ if m.is_none() && agg.missing.is_none() => match agg.metric {
                 Metric::Stats | Metric::ExtendedStats { .. } | Metric::Percentiles { .. } => {
                     "NonCollectingMultiMetricAggregator"
@@ -1137,7 +1150,7 @@ fn render_counted(
                     h.render(b, &mut body, buckets, sub)?;
                 }
             }
-            Metric::Filter(_) | Metric::Missing => {
+            Metric::Filter(_) | Metric::Missing | Metric::Global => {
                 body.insert("doc_count".into(), st.count.into());
                 sub(&mut st.subs, &mut body)?;
             }
@@ -1379,6 +1392,15 @@ mod tests {
             "none": {"doc_count": 5},
             "filled": {"doc_count": 0},
         });
+        assert_eq!(aggs_of(&index(), body), want);
+    }
+
+    #[test]
+    fn global_aggregates_every_document_not_the_matches() {
+        let body = json!({"query": {"term": {"k": "b"}}, "aggs": {
+            "g": {"global": {}, "aggs": {"m": {"max": {"field": "i"}}}},
+        }});
+        let want = json!({"g": {"doc_count": 5, "m": {"value": 151.0}}});
         assert_eq!(aggs_of(&index(), body), want);
     }
 

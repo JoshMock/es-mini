@@ -17,8 +17,6 @@ aggregations/filters_bucket.yml/null meta
 aggregations/filters_bucket.yml/Only aggs test
 aggregations/filter.yml/Standard queries get cached
 aggregations/filter.yml/Terms lookup gets cached
-aggregations/global.yml/profile
-aggregations/global.yml/simple
 aggregations/histogram.yml/date_histogram with extended_bounds and offset and unmapped
 aggregations/range.yml/Double range
 aggregations/range.yml/Double range default keyed response
