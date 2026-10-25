@@ -231,83 +231,111 @@ pub async fn search(
     if scroll.is_some() {
         req.size = usize::MAX;
     }
-    let r = es_query::search_many(&targets, &req)?;
-    let hits: Vec<Value> = r
-        .hits
-        .iter()
-        .map(|h| {
-            let mut hit =
-                json!({"_index": h.index, "_id": h.id, "_score": h.score, "_source": h.doc.source});
-            if !h.sort.is_empty() {
-                hit["sort"] = h.sort.clone().into();
-            }
-            hit
-        })
-        .collect();
-    let as_int = params
-        .get("rest_total_hits_as_int")
-        .is_some_and(|v| v == "true");
-    let track = params
-        .get("track_total_hits")
-        .or(req.track_total_hits.as_ref())
-        .map(String::as_str);
-    let limit = match track {
-        Some("true" | "-1") => None,
-        None if as_int => None,
-        None => Some(Some(10_000)),
-        Some("false") => Some(None),
-        Some(n) => match n.parse::<u64>() {
-            Ok(n) if as_int => {
-                return Err(AppError::IllegalArgument(format!(
-                    "[rest_total_hits_as_int] cannot be used if the tracking of total hits is not accurate, got {n}"
-                )));
-            }
-            Ok(n) => Some(Some(n)),
-            Err(_) => {
-                return Err(AppError::IllegalArgument(format!(
-                    "[track_total_hits] parameter must be positive or equals to -1, got {n}"
-                )));
-            }
-        },
+    // Like Elasticsearch's IndicesService.canCache; the key is the request after terms lookups.
+    // ponytail: only single-index searches are cached; ES caches each shard's result
+    let cache = match (
+        &targets[..],
+        params.get("request_cache").map(String::as_str),
+    ) {
+        (_, Some("false")) => None,
+        _ if scroll.is_some() || snapshot.is_some() || req.profile => None,
+        ([(_, index, _)], Some("true")) => Some(index),
+        ([(_, index, _)], _) => (page == 0
+            && index.settings.get("index.requests.cache.enable") != Some("false"))
+        .then_some(index),
+        _ => None,
     };
-    let total = match limit {
-        Some(None) if as_int => json!(-1),
-        Some(None) => Value::Null,
-        Some(Some(n)) if r.total as u64 > n => json!({"value": n, "relation": "gte"}),
-        _ if as_int => json!(r.total),
-        _ => json!({"value": r.total, "relation": "eq"}),
-    };
-    let mut hits = json!({"total": total, "max_score": r.max_score, "hits": hits});
-    if total.is_null() {
-        hits.as_object_mut().unwrap().remove("total");
-    }
-    let mut resp = json!({
-        "took": start.elapsed().as_millis() as u64,
-        "timed_out": false,
-        "_shards": shards(targets.len()),
-        "hits": hits
-    });
-    if !r.failures.is_empty() {
-        let s = &mut resp["_shards"];
-        s["successful"] = (targets.len() - r.failures.len()).into();
-        s["failed"] = r.failures.len().into();
-        let failures = r.failures.iter().map(|(index, e)| {
-            let (_, mut reason) = AppError::from(e.clone()).parts();
-            reason.as_object_mut().unwrap().remove("root_cause");
-            json!({"shard": 0, "index": index, "node": crate::nodes::NODE_ID, "reason": reason})
-        });
-        s["failures"] = failures.collect();
-    }
-    if let Some(a) = r.aggregations {
-        resp["aggregations"] = a;
-    }
-    if let Some(p) = r.profile {
-        let searched: Vec<_> = (targets.iter())
-            .filter(|(n, ..)| !r.failures.iter().any(|(f, _)| f == n))
-            .cloned()
+    let respond = || -> Result<Value, AppError> {
+        let r = es_query::search_many(&targets, &req)?;
+        let hits: Vec<Value> = r
+            .hits
+            .iter()
+            .map(|h| {
+                let mut hit =
+                    json!({"_index": h.index, "_id": h.id, "_score": h.score, "_source": h.doc.source});
+                if !h.sort.is_empty() {
+                    hit["sort"] = h.sort.clone().into();
+                }
+                hit
+            })
             .collect();
-        resp["profile"] = profile(&searched, p);
-    }
+        let as_int = params
+            .get("rest_total_hits_as_int")
+            .is_some_and(|v| v == "true");
+        let track = params
+            .get("track_total_hits")
+            .or(req.track_total_hits.as_ref())
+            .map(String::as_str);
+        let limit = match track {
+            Some("true" | "-1") => None,
+            None if as_int => None,
+            None => Some(Some(10_000)),
+            Some("false") => Some(None),
+            Some(n) => match n.parse::<u64>() {
+                Ok(n) if as_int => {
+                    return Err(AppError::IllegalArgument(format!(
+                        "[rest_total_hits_as_int] cannot be used if the tracking of total hits is not accurate, got {n}"
+                    )));
+                }
+                Ok(n) => Some(Some(n)),
+                Err(_) => {
+                    return Err(AppError::IllegalArgument(format!(
+                        "[track_total_hits] parameter must be positive or equals to -1, got {n}"
+                    )));
+                }
+            },
+        };
+        let total = match limit {
+            Some(None) if as_int => json!(-1),
+            Some(None) => Value::Null,
+            Some(Some(n)) if r.total as u64 > n => json!({"value": n, "relation": "gte"}),
+            _ if as_int => json!(r.total),
+            _ => json!({"value": r.total, "relation": "eq"}),
+        };
+        let mut hits = json!({"total": total, "max_score": r.max_score, "hits": hits});
+        if total.is_null() {
+            hits.as_object_mut().unwrap().remove("total");
+        }
+        let mut resp = json!({
+            "took": start.elapsed().as_millis() as u64,
+            "timed_out": false,
+            "_shards": shards(targets.len()),
+            "hits": hits
+        });
+        if !r.failures.is_empty() {
+            let s = &mut resp["_shards"];
+            s["successful"] = (targets.len() - r.failures.len()).into();
+            s["failed"] = r.failures.len().into();
+            let failures = r.failures.iter().map(|(index, e)| {
+                let (_, mut reason) = AppError::from(e.clone()).parts();
+                reason.as_object_mut().unwrap().remove("root_cause");
+                json!({"shard": 0, "index": index, "node": crate::nodes::NODE_ID, "reason": reason})
+            });
+            s["failures"] = failures.collect();
+        }
+        if let Some(a) = r.aggregations {
+            resp["aggregations"] = a;
+        }
+        if let Some(p) = r.profile {
+            let searched: Vec<_> = (targets.iter())
+                .filter(|(n, ..)| !r.failures.iter().any(|(f, _)| f == n))
+                .cloned()
+                .collect();
+            resp["profile"] = profile(&searched, p);
+        }
+        Ok(resp)
+    };
+    let mut resp = match cache {
+        Some(index) => {
+            let mut key: Vec<_> = (params.iter())
+                .filter(|(k, _)| !matches!(k.as_str(), "request_cache" | "preference"))
+                .collect();
+            key.sort();
+            index.cached(format!("{body}{key:?}{:?}", targets[0].2), respond)?
+        }
+        None => respond()?,
+    };
+    resp["took"] = (start.elapsed().as_millis() as u64).into();
     if let Some(p) = &pit_id {
         resp["pit_id"] = p.clone();
     }

@@ -538,7 +538,7 @@ pub async fn get_all_mappings(
     get_mapping(state, Path("_all".to_string()), uri, Query(params)).await
 }
 
-/// `GET [/{index}]/_stats[/{metric}]`: the `docs` and `fielddata` metrics.
+/// `GET [/{index}]/_stats[/{metric}]`: the `docs`, `fielddata` and `request_cache` metrics.
 // ponytail: other metrics (store, indexing, search, ...) are left out of the response.
 pub async fn stats(
     State(state): State<AppState>,
@@ -566,7 +566,7 @@ pub async fn stats(
         path.get("index").map_or("_all", String::as_str),
         &params,
     )?;
-    let section = |docs: usize| {
+    let section = |docs: usize, (hits, misses, bytes): (u64, u64, usize)| {
         let mut s = Map::new();
         if wanted("docs") {
             s.insert("docs".into(), json!({"count": docs, "deleted": 0}));
@@ -578,17 +578,29 @@ pub async fn stats(
                 json!({"memory_size_in_bytes": 0, "evictions": 0}),
             );
         }
+        if wanted("request_cache") {
+            s.insert(
+                "request_cache".into(),
+                json!({"memory_size_in_bytes": bytes, "evictions": 0, "hit_count": hits, "miss_count": misses}),
+            );
+        }
         Value::Object(s)
     };
-    let mut total = 0;
+    let (mut total, mut cache_total) = (0, (0, 0, 0));
     let mut per_index = Map::new();
     for n in &names {
         let docs = indices[n].docs().count();
         total += docs;
-        let s = section(docs);
+        let cache = indices[n].request_cache_stats();
+        cache_total = (
+            cache_total.0 + cache.0,
+            cache_total.1 + cache.1,
+            cache_total.2 + cache.2,
+        );
+        let s = section(docs, cache);
         per_index.insert(n.clone(), json!({"primaries": s, "total": s}));
     }
-    let all = section(total);
+    let all = section(total, cache_total);
     Ok(Json(json!({
         "_shards": {"total": names.len(), "successful": names.len(), "failed": 0},
         "_all": {"primaries": all, "total": all},

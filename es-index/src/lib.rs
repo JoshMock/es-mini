@@ -208,6 +208,19 @@ pub struct Index {
     refreshed_seq_no: u64,
     /// Writes not yet in the translog (see [`disk::persist`]).
     unlogged: Vec<es_codec::translog::Op>,
+    request_cache: std::sync::Mutex<RequestCache>,
+}
+
+/// Elasticsearch's shard request cache (see [`Index::cached`]).
+#[derive(Debug, Default)]
+struct RequestCache {
+    hits: u64,
+    misses: u64,
+    /// Serialized size of the keys and entries.
+    bytes: usize,
+    /// The visible sequence number and mappings the entries were computed against.
+    reader: Option<(u64, Mappings)>,
+    entries: HashMap<String, Value>,
 }
 
 impl Index {
@@ -377,6 +390,63 @@ impl Index {
             refreshed_seq_no: self.refreshed_seq_no,
             ..Index::default()
         }
+    }
+
+    /// The result of `compute` for `key`, reused until the visible documents or the mappings
+    /// change, like Elasticsearch's shard request cache.
+    // ponytail: unbounded until the next change; ES caps the cache at 1% of the heap
+    pub fn cached<E>(
+        &self,
+        key: String,
+        compute: impl FnOnce() -> Result<Value, E>,
+    ) -> Result<Value, E> {
+        let visible = if self.settings.get("index.refresh_interval") == Some("-1") {
+            self.refreshed_seq_no
+        } else {
+            self.next_seq_no
+        };
+        let lock = || {
+            self.request_cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        };
+        {
+            let mut c = lock();
+            if !c
+                .reader
+                .as_ref()
+                .is_some_and(|r| r.0 == visible && r.1 == self.mappings)
+            {
+                c.reader = Some((visible, self.mappings.clone()));
+                c.entries.clear();
+                c.bytes = 0;
+            }
+            if let Some(v) = c.entries.get(&key).cloned() {
+                c.hits += 1;
+                return Ok(v);
+            }
+            c.misses += 1;
+        }
+        // Computed unlocked so that other searches of this index are not held up.
+        let v = compute()?;
+        let mut c = lock();
+        if c.reader
+            .as_ref()
+            .is_some_and(|r| r.0 == visible && r.1 == self.mappings)
+        {
+            c.bytes += key.len() + v.to_string().len();
+            c.entries.insert(key, v.clone());
+        }
+        Ok(v)
+    }
+
+    /// The request cache's (hit count, miss count, size of its entries in bytes).
+    pub fn request_cache_stats(&self) -> (u64, u64, usize) {
+        let c = self
+            .request_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (c.hits, c.misses, c.bytes)
     }
 
     /// Makes all writes so far visible to search.
@@ -925,6 +995,29 @@ mod tests {
         ix.put("new1", json!({}));
         let got: Vec<String> = ix.docs().map(|(id, _)| id.to_owned()).collect();
         assert_eq!(got[40..], ["new2", "new1"]);
+    }
+
+    #[test]
+    fn request_cache_reuses_results_until_the_index_changes() {
+        let mut ix = Index::default();
+        let mut runs = 0;
+        let mut search = |ix: &Index, key: &str| {
+            ix.cached(key.into(), || {
+                runs += 1;
+                Ok::<_, ()>(json!(runs))
+            })
+            .unwrap()
+        };
+        assert_eq!(search(&ix, "a"), json!(1));
+        assert_eq!(search(&ix, "a"), json!(1));
+        assert_eq!(search(&ix, "b"), json!(2));
+        ix.put("1", json!({}));
+        assert_eq!(search(&ix, "a"), json!(3));
+        ix.mappings.source = Some(json!({"enabled": false}));
+        assert_eq!(search(&ix, "a"), json!(4));
+        let (hits, misses, bytes) = ix.request_cache_stats();
+        assert_eq!((hits, misses), (1, 4));
+        assert!(bytes > 0);
     }
 
     #[test]

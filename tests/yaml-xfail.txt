@@ -1,10 +1,7 @@
 # Known-failing YAML tests. Fix one, then delete its line.
 aggregations/filters_bucket.yml/cache busting
-aggregations/filters_bucket.yml/cache hits
 aggregations/filters_bucket.yml/named filters with bucket sort test
 aggregations/filters_bucket.yml/nested
-aggregations/filter.yml/Standard queries get cached
-aggregations/filter.yml/Terms lookup gets cached
 aggregations/histogram.yml/date_histogram with extended_bounds and offset and unmapped
 aggregations/terms.yml/order by sub agg containing filter
 aggregations/terms.yml/order by sub agg containing nested
