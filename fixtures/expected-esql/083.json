@@ -1,0 +1,55 @@
+{
+  "query": "FROM emp | STATS c = COUNT(*) BY b = BUCKET(age, 10, 20, 60) | SORT b",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "c",
+        "type": "long"
+      },
+      {
+        "name": "b",
+        "type": "double"
+      }
+    ],
+    "completion_time_in_millis": 1793005684291,
+    "cpu_nanos": 1332660,
+    "documents_found": 8,
+    "expiration_time_in_millis": 1793437684221,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 66,
+    "start_time_in_millis": 1793005684279,
+    "values": [
+      [
+        1,
+        20.0
+      ],
+      [
+        2,
+        25.0
+      ],
+      [
+        1,
+        30.0
+      ],
+      [
+        1,
+        35.0
+      ],
+      [
+        1,
+        45.0
+      ],
+      [
+        1,
+        50.0
+      ],
+      [
+        1,
+        null
+      ]
+    ],
+    "values_loaded": 7
+  }
+}

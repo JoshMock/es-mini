@@ -1,0 +1,59 @@
+{
+  "query": "FROM emp | EVAL level = CASE(age >= 45, \"senior\", age >= 30, \"mid\", \"junior\") | KEEP name, level | SORT name",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "name",
+        "type": "keyword"
+      },
+      {
+        "name": "level",
+        "type": "keyword"
+      }
+    ],
+    "completion_time_in_millis": 1793005679778,
+    "cpu_nanos": 2471967,
+    "documents_found": 8,
+    "expiration_time_in_millis": 1793437679619,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 88,
+    "start_time_in_millis": 1793005679757,
+    "values": [
+      [
+        "Alice",
+        "mid"
+      ],
+      [
+        "Bob",
+        "junior"
+      ],
+      [
+        "Carol",
+        "senior"
+      ],
+      [
+        "Dave",
+        "junior"
+      ],
+      [
+        "Eve",
+        "junior"
+      ],
+      [
+        "Frank",
+        "junior"
+      ],
+      [
+        "Grace",
+        "senior"
+      ],
+      [
+        "Héloïse",
+        "mid"
+      ]
+    ],
+    "values_loaded": 15
+  }
+}

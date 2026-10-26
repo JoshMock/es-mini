@@ -1,0 +1,16 @@
+{
+  "query": "FROM emp | KEEP nope",
+  "response": {
+    "error": {
+      "reason": "Found 1 problem\nline 1:17: Unknown column [nope]",
+      "root_cause": [
+        {
+          "reason": "Found 1 problem\nline 1:17: Unknown column [nope]",
+          "type": "verification_exception"
+        }
+      ],
+      "type": "verification_exception"
+    },
+    "status": 400
+  }
+}

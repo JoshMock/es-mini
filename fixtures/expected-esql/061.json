@@ -1,0 +1,71 @@
+{
+  "query": "FROM emp | EVAL y = DATE_TRUNC(1 year, hired), m = DATE_TRUNC(1 month, hired) | KEEP name, y, m | SORT name",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "name",
+        "type": "keyword"
+      },
+      {
+        "name": "y",
+        "type": "date"
+      },
+      {
+        "name": "m",
+        "type": "date"
+      }
+    ],
+    "completion_time_in_millis": 1793005681659,
+    "cpu_nanos": 1688968,
+    "documents_found": 8,
+    "expiration_time_in_millis": 1793437681620,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 96,
+    "start_time_in_millis": 1793005681627,
+    "values": [
+      [
+        "Alice",
+        "2019-01-01T00:00:00.000Z",
+        "2019-03-01T00:00:00.000Z"
+      ],
+      [
+        "Bob",
+        "2021-01-01T00:00:00.000Z",
+        "2021-07-01T00:00:00.000Z"
+      ],
+      [
+        "Carol",
+        "2015-01-01T00:00:00.000Z",
+        "2015-11-01T00:00:00.000Z"
+      ],
+      [
+        "Dave",
+        "2022-01-01T00:00:00.000Z",
+        "2022-01-01T00:00:00.000Z"
+      ],
+      [
+        "Eve",
+        "2018-01-01T00:00:00.000Z",
+        "2018-05-01T00:00:00.000Z"
+      ],
+      [
+        "Frank",
+        "2024-01-01T00:00:00.000Z",
+        "2024-02-01T00:00:00.000Z"
+      ],
+      [
+        "Grace",
+        "2010-01-01T00:00:00.000Z",
+        "2010-09-01T00:00:00.000Z"
+      ],
+      [
+        "Héloïse",
+        "2020-01-01T00:00:00.000Z",
+        "2020-12-01T00:00:00.000Z"
+      ]
+    ],
+    "values_loaded": 16
+  }
+}

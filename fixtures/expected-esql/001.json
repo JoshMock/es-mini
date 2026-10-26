@@ -1,0 +1,46 @@
+{
+  "query": "ROW a = 1, b = \"two\", c = true, d = 1.5, e = null",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "a",
+        "type": "integer"
+      },
+      {
+        "name": "b",
+        "type": "keyword"
+      },
+      {
+        "name": "c",
+        "type": "boolean"
+      },
+      {
+        "name": "d",
+        "type": "double"
+      },
+      {
+        "name": "e",
+        "type": "null"
+      }
+    ],
+    "completion_time_in_millis": 1793005672432,
+    "cpu_nanos": 417132,
+    "documents_found": 0,
+    "expiration_time_in_millis": 1793437672414,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 1,
+    "start_time_in_millis": 1793005671543,
+    "values": [
+      [
+        1,
+        "two",
+        true,
+        1.5,
+        null
+      ]
+    ],
+    "values_loaded": 0
+  }
+}

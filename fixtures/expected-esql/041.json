@@ -1,0 +1,61 @@
+{
+  "query": "ROW a = 7, b = 2 | EVAL s = a + b, d = a - b, p = a * b, q = a / b, r = a % b, f = a / 2.0",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "a",
+        "type": "integer"
+      },
+      {
+        "name": "b",
+        "type": "integer"
+      },
+      {
+        "name": "s",
+        "type": "integer"
+      },
+      {
+        "name": "d",
+        "type": "integer"
+      },
+      {
+        "name": "p",
+        "type": "integer"
+      },
+      {
+        "name": "q",
+        "type": "integer"
+      },
+      {
+        "name": "r",
+        "type": "integer"
+      },
+      {
+        "name": "f",
+        "type": "double"
+      }
+    ],
+    "completion_time_in_millis": 1793005679246,
+    "cpu_nanos": 139245,
+    "documents_found": 0,
+    "expiration_time_in_millis": 1793437679219,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 7,
+    "start_time_in_millis": 1793005679222,
+    "values": [
+      [
+        7,
+        2,
+        9,
+        5,
+        14,
+        3,
+        1,
+        3.5
+      ]
+    ],
+    "values_loaded": 0
+  }
+}

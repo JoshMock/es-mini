@@ -1,0 +1,72 @@
+{
+  "query": "FROM emp | DROP h* | SORT name | LIMIT 2",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "active",
+        "type": "boolean"
+      },
+      {
+        "name": "age",
+        "type": "integer"
+      },
+      {
+        "name": "bio",
+        "type": "text"
+      },
+      {
+        "name": "name",
+        "type": "keyword"
+      },
+      {
+        "name": "salary",
+        "type": "long"
+      },
+      {
+        "name": "scores",
+        "type": "integer"
+      },
+      {
+        "name": "tags",
+        "type": "keyword"
+      }
+    ],
+    "completion_time_in_millis": 1793005678457,
+    "cpu_nanos": 3109271,
+    "documents_found": 2,
+    "expiration_time_in_millis": 1793437678419,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 20,
+    "start_time_in_millis": 1793005678446,
+    "values": [
+      [
+        true,
+        34,
+        "Loves Rust and coffee",
+        "Alice",
+        85000,
+        [
+          75,
+          82,
+          90
+        ],
+        [
+          "dev",
+          "lead"
+        ]
+      ],
+      [
+        false,
+        28,
+        "  Plays chess  ",
+        "Bob",
+        62000,
+        60,
+        "dev"
+      ]
+    ],
+    "values_loaded": 17
+  }
+}

@@ -1,0 +1,81 @@
+{
+  "query": "FROM emp* | KEEP name, age, dept | SORT name",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "name",
+        "type": "keyword"
+      },
+      {
+        "name": "age",
+        "type": "integer"
+      },
+      {
+        "name": "dept",
+        "type": "keyword"
+      }
+    ],
+    "completion_time_in_millis": 1793005673833,
+    "cpu_nanos": 10925852,
+    "documents_found": 10,
+    "expiration_time_in_millis": 1793437673815,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 100,
+    "start_time_in_millis": 1793005673752,
+    "values": [
+      [
+        "Alice",
+        34,
+        null
+      ],
+      [
+        "Bob",
+        28,
+        null
+      ],
+      [
+        "Carol",
+        45,
+        null
+      ],
+      [
+        "Dave",
+        28,
+        null
+      ],
+      [
+        "Eve",
+        null,
+        null
+      ],
+      [
+        "Frank",
+        23,
+        null
+      ],
+      [
+        "Grace",
+        51,
+        null
+      ],
+      [
+        "Héloïse",
+        39,
+        null
+      ],
+      [
+        "Ivan",
+        30,
+        "eng"
+      ],
+      [
+        "Judy",
+        41,
+        "ops"
+      ]
+    ],
+    "values_loaded": 21
+  }
+}

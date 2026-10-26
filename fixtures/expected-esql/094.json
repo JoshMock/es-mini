@@ -1,0 +1,16 @@
+{
+  "query": "FROM emp | EVAL x = name + 1",
+  "response": {
+    "error": {
+      "reason": "Found 1 problem\nline 1:21: first argument of [name + 1] must be [date_nanos, datetime, numeric or dense_vector], found value [name] type [keyword]",
+      "root_cause": [
+        {
+          "reason": "Found 1 problem\nline 1:21: first argument of [name + 1] must be [date_nanos, datetime, numeric or dense_vector], found value [name] type [keyword]",
+          "type": "verification_exception"
+        }
+      ],
+      "type": "verification_exception"
+    },
+    "status": 400
+  }
+}

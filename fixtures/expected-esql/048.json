@@ -1,0 +1,47 @@
+{
+  "query": "FROM emp | EVAL full = CONCAT(name, \"-\", TO_STRING(age)) | KEEP full | SORT full",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "full",
+        "type": "keyword"
+      }
+    ],
+    "completion_time_in_millis": 1793005680131,
+    "cpu_nanos": 5496072,
+    "documents_found": 8,
+    "expiration_time_in_millis": 1793437680019,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 88,
+    "start_time_in_millis": 1793005680056,
+    "values": [
+      [
+        "Alice-34"
+      ],
+      [
+        "Bob-28"
+      ],
+      [
+        "Carol-45"
+      ],
+      [
+        "Dave-28"
+      ],
+      [
+        "Frank-23"
+      ],
+      [
+        "Grace-51"
+      ],
+      [
+        "Héloïse-39"
+      ],
+      [
+        null
+      ]
+    ],
+    "values_loaded": 15
+  }
+}

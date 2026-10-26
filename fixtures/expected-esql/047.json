@@ -1,0 +1,71 @@
+{
+  "query": "FROM emp | EVAL a = COALESCE(age, 0), s = COALESCE(salary, -1) | KEEP name, a, s | SORT name",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "name",
+        "type": "keyword"
+      },
+      {
+        "name": "a",
+        "type": "integer"
+      },
+      {
+        "name": "s",
+        "type": "long"
+      }
+    ],
+    "completion_time_in_millis": 1793005679950,
+    "cpu_nanos": 3682075,
+    "documents_found": 8,
+    "expiration_time_in_millis": 1793437679819,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 96,
+    "start_time_in_millis": 1793005679869,
+    "values": [
+      [
+        "Alice",
+        34,
+        85000
+      ],
+      [
+        "Bob",
+        28,
+        62000
+      ],
+      [
+        "Carol",
+        45,
+        120000
+      ],
+      [
+        "Dave",
+        28,
+        58000
+      ],
+      [
+        "Eve",
+        0,
+        99000
+      ],
+      [
+        "Frank",
+        23,
+        -1
+      ],
+      [
+        "Grace",
+        51,
+        150000
+      ],
+      [
+        "Héloïse",
+        39,
+        77000
+      ]
+    ],
+    "values_loaded": 22
+  }
+}

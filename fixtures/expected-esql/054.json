@@ -1,0 +1,26 @@
+{
+  "query": "ROW t = TRIM(\"  padded  \")",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "t",
+        "type": "keyword"
+      }
+    ],
+    "completion_time_in_millis": 1793005680861,
+    "cpu_nanos": 55731,
+    "documents_found": 0,
+    "expiration_time_in_millis": 1793437680820,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 1,
+    "start_time_in_millis": 1793005680858,
+    "values": [
+      [
+        "padded"
+      ]
+    ],
+    "values_loaded": 0
+  }
+}

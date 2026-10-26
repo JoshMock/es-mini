@@ -1,0 +1,31 @@
+{
+  "query": "ROW a = 1 + 1.5, b = 1 + 3000000000",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "a",
+        "type": "double"
+      },
+      {
+        "name": "b",
+        "type": "long"
+      }
+    ],
+    "completion_time_in_millis": 1793005679446,
+    "cpu_nanos": 51581,
+    "documents_found": 0,
+    "expiration_time_in_millis": 1793437679419,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 1,
+    "start_time_in_millis": 1793005679439,
+    "values": [
+      [
+        2.5,
+        3000000001
+      ]
+    ],
+    "values_loaded": 0
+  }
+}

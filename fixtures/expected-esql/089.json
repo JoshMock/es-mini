@@ -1,0 +1,26 @@
+{
+  "query": "ROW a = 1 | STATS c = COUNT(*)",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "c",
+        "type": "long"
+      }
+    ],
+    "completion_time_in_millis": 1793005684986,
+    "cpu_nanos": 105523,
+    "documents_found": 0,
+    "expiration_time_in_millis": 1793437684822,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 3,
+    "start_time_in_millis": 1793005684983,
+    "values": [
+      [
+        1
+      ]
+    ],
+    "values_loaded": 0
+  }
+}

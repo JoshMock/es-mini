@@ -1,0 +1,59 @@
+{
+  "query": "FROM emp | SORT age ASC NULLS FIRST, name | KEEP name, age",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "name",
+        "type": "keyword"
+      },
+      {
+        "name": "age",
+        "type": "integer"
+      }
+    ],
+    "completion_time_in_millis": 1793005678778,
+    "cpu_nanos": 2476930,
+    "documents_found": 8,
+    "expiration_time_in_millis": 1793437678619,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 72,
+    "start_time_in_millis": 1793005678770,
+    "values": [
+      [
+        "Eve",
+        null
+      ],
+      [
+        "Frank",
+        23
+      ],
+      [
+        "Bob",
+        28
+      ],
+      [
+        "Dave",
+        28
+      ],
+      [
+        "Alice",
+        34
+      ],
+      [
+        "Héloïse",
+        39
+      ],
+      [
+        "Carol",
+        45
+      ],
+      [
+        "Grace",
+        51
+      ]
+    ],
+    "values_loaded": 15
+  }
+}

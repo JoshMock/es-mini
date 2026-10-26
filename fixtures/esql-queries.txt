@@ -1,0 +1,122 @@
+# ES|QL parity queries: one per line, recorded by generate_esql.sh against its `emp` and
+# `emp_extra` indices. Blank lines and `#` comments are skipped. Responses are numbered by
+# position, so regenerate expected-esql/ after editing. Multi-row queries SORT for a stable order.
+
+# Source commands
+ROW a = 1, b = "two", c = true, d = 1.5, e = null
+ROW a = [1, 2, 3], b = ["x", "y"]
+SHOW INFO
+FROM emp | SORT name | LIMIT 3
+FROM emp | KEEP name, bio, age, salary, height, active, hired, tags, scores | SORT name
+FROM emp, emp_extra | KEEP name, age | SORT name
+FROM emp* | KEEP name, age, dept | SORT name
+FROM emp_* | KEEP name, dept | SORT name
+FROM emp METADATA _id, _index, _version | KEEP _id, _index, _version, name | SORT _id
+FROM emp* METADATA _index | STATS c = COUNT(*) BY _index | SORT _index
+
+# WHERE
+FROM emp | WHERE age > 30 | KEEP name, age | SORT age
+FROM emp | WHERE age >= 28 AND active | KEEP name | SORT name
+FROM emp | WHERE age < 30 OR salary > 100000 | KEEP name | SORT name
+FROM emp | WHERE NOT active | KEEP name | SORT name
+FROM emp | WHERE age == 28 | KEEP name | SORT name
+FROM emp | WHERE age != 28 | KEEP name | SORT name
+FROM emp | WHERE age IS NULL | KEEP name
+FROM emp | WHERE salary IS NOT NULL | KEEP name | SORT name
+FROM emp | WHERE name LIKE "*a*" | KEEP name | SORT name
+FROM emp | WHERE name LIKE "?ob" | KEEP name
+FROM emp | WHERE bio LIKE "*chess*" | KEEP name
+FROM emp | WHERE name RLIKE "[A-C].*" | KEEP name | SORT name
+FROM emp | WHERE name IN ("Alice", "Dave", "Zed") | KEEP name | SORT name
+FROM emp | WHERE age IN (28, 51) | KEEP name, age | SORT name
+FROM emp | WHERE hired > "2020-01-01" | KEEP name, hired | SORT hired
+FROM emp | WHERE tags == "dev" | KEEP name | SORT name
+
+# EVAL, RENAME, KEEP, DROP, SORT, LIMIT
+FROM emp | EVAL monthly = salary / 12, bonus = salary * 0.1 | KEEP name, monthly, bonus | SORT name
+FROM emp | EVAL x = age + 1, y = age - 1, z = age * 2, w = age / 3, m = age % 5 | KEEP name, x, y, z, w, m | SORT name
+FROM emp | EVAL neg = -age | KEEP neg | SORT neg
+FROM emp | EVAL x = salary / age | KEEP name, x | SORT name
+FROM emp | RENAME name AS who | KEEP who, age | SORT who
+FROM emp | RENAME name AS who, age AS years | KEEP who, years | SORT who
+FROM emp | DROP bio, tags, scores | SORT name | LIMIT 2
+FROM emp | DROP h* | SORT name | LIMIT 2
+FROM emp | KEEP n*, a* | SORT name
+FROM emp | SORT age DESC NULLS LAST, name | KEEP name, age
+FROM emp | SORT age ASC NULLS FIRST, name | KEEP name, age
+FROM emp | SORT height DESC | KEEP name, height | LIMIT 3
+FROM emp | SORT name | LIMIT 0
+FROM emp | LIMIT 2 | STATS c = COUNT(*)
+
+# Operators and type rules
+ROW a = 7, b = 2 | EVAL s = a + b, d = a - b, p = a * b, q = a / b, r = a % b, f = a / 2.0
+ROW a = 1 < 2, b = 2 <= 2, c = 3 > 4, d = "a" == "a", e = 1 != 1, f = null == 1
+ROW a = 1 + 1.5, b = 1 + 3000000000
+ROW a = 5 / 0
+ROW a = 2147483647 + 1
+
+# Conditional and string functions
+FROM emp | EVAL level = CASE(age >= 45, "senior", age >= 30, "mid", "junior") | KEEP name, level | SORT name
+FROM emp | EVAL a = COALESCE(age, 0), s = COALESCE(salary, -1) | KEEP name, a, s | SORT name
+FROM emp | EVAL full = CONCAT(name, "-", TO_STRING(age)) | KEEP full | SORT full
+FROM emp | EVAL n = LENGTH(name) | KEEP name, n | SORT name
+FROM emp | EVAL s = SUBSTRING(name, 2, 3) | KEEP s | SORT s
+ROW s = SUBSTRING("hello", 2)
+FROM emp | EVAL l = TO_LOWER(name), u = TO_UPPER(name) | KEEP l, u | SORT l
+FROM emp | EVAL t = TRIM(bio) | KEEP name, t | SORT name
+ROW t = TRIM("  padded  ")
+FROM emp | WHERE STARTS_WITH(name, "A") OR ENDS_WITH(name, "e") | KEEP name | SORT name
+
+# Math functions
+ROW a = ABS(-3), b = ABS(-2.5), c = ROUND(3.14159, 2), d = ROUND(2.5), e = FLOOR(2.7), f = CEIL(2.1), g = POW(2, 10), h = POW(2.0, 0.5)
+FROM emp | EVAL r = ROUND(height, 1), f = FLOOR(height), c = CEIL(height) | KEEP name, r, f, c | SORT name
+
+# Date functions
+FROM emp | EVAL y = DATE_EXTRACT("year", hired), m = DATE_EXTRACT("month_of_year", hired) | KEEP name, y, m | SORT name
+FROM emp | EVAL d = DATE_FORMAT("yyyy-MM-dd", hired) | KEEP name, d | SORT name
+FROM emp | EVAL d = DATE_FORMAT(hired) | KEEP d | SORT d | LIMIT 2
+FROM emp | EVAL y = DATE_TRUNC(1 year, hired), m = DATE_TRUNC(1 month, hired) | KEEP name, y, m | SORT name
+ROW recent = NOW() > TO_DATETIME("2025-01-01T00:00:00Z")
+
+# Conversion functions
+ROW a = TO_STRING(42), b = TO_STRING(true), c = TO_STRING(1.5)
+ROW a = TO_INTEGER("42"), b = TO_INTEGER(3.9), c = TO_INTEGER(true), d = TO_INTEGER("x")
+ROW a = TO_LONG("9000000000"), b = TO_LONG(2.5)
+ROW a = TO_DOUBLE("1.25"), b = TO_DOUBLE(3), c = TO_DOUBLE(true)
+ROW a = TO_BOOLEAN("true"), b = TO_BOOLEAN("no"), c = TO_BOOLEAN(0), d = TO_BOOLEAN(2)
+ROW a = TO_DATETIME("2024-02-29T12:00:00.000Z"), b = TO_DATETIME(0)
+
+# Multi-value functions
+FROM emp | EVAL c = MV_COUNT(scores), lo = MV_MIN(scores), hi = MV_MAX(scores), t = MV_COUNT(tags) | KEEP name, c, lo, hi, t | SORT name
+ROW a = MV_MIN([3, 1, 2]), b = MV_MAX(["b", "c", "a"]), c = MV_COUNT([1, 2, 3])
+
+# STATS
+FROM emp | STATS c = COUNT(*), ca = COUNT(age), cs = COUNT(scores)
+FROM emp | STATS COUNT(*)
+FROM emp | STATS d = COUNT_DISTINCT(tags), da = COUNT_DISTINCT(age)
+FROM emp | STATS a = AVG(salary), s = SUM(salary), mn = MIN(age), mx = MAX(age)
+FROM emp | STATS mh = MIN(hired), xh = MAX(hired), mxh = MAX(height), sa = SUM(age), ah = AVG(height)
+FROM emp | STATS m = MEDIAN(salary), p = PERCENTILE(salary, 90), p0 = PERCENTILE(age, 0)
+FROM emp | WHERE active | STATS v = VALUES(name)
+FROM emp | STATS c = COUNT(*), a = AVG(age) BY active | SORT active
+FROM emp | STATS c = COUNT(*) BY tags | SORT tags
+FROM emp | STATS c = COUNT(*) BY active, age | SORT active, age
+FROM emp | STATS c = COUNT(*) BY decade = age / 10 * 10 | SORT decade
+FROM emp | STATS c = COUNT(*) BY b = BUCKET(salary, 50000) | SORT b
+FROM emp | STATS c = COUNT(*) BY b = BUCKET(age, 10, 20, 60) | SORT b
+FROM emp | STATS c = COUNT(*) BY y = BUCKET(hired, 1 year) | SORT y
+FROM emp | STATS c = COUNT(*) BY m = BUCKET(hired, 5, "2010-01-01T00:00:00Z", "2025-01-01T00:00:00Z") | SORT m
+FROM emp | STATS max_age = MAX(age) BY active | EVAL older = max_age > 40 | SORT active
+FROM emp | WHERE active | STATS total = SUM(salary)
+FROM emp* | STATS c = COUNT(*) BY dept | SORT dept
+ROW a = 1 | STATS c = COUNT(*)
+
+# Invalid queries: only the error type is compared
+FROM emp | WHERE
+FROM emp | SORT
+FROM emp | KEEP nope
+FROM nope
+FROM emp | EVAL x = name + 1
+FROM emp | STATS AVG(name)
+FROM emp | EVAL x = UNKNOWN_FN(age)
+FROM emp | LIMIT -1

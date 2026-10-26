@@ -1,0 +1,51 @@
+{
+  "query": "FROM emp | STATS c = COUNT(*) BY tags | SORT tags",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "c",
+        "type": "long"
+      },
+      {
+        "name": "tags",
+        "type": "keyword"
+      }
+    ],
+    "completion_time_in_millis": 1793005683745,
+    "cpu_nanos": 4661266,
+    "documents_found": 8,
+    "expiration_time_in_millis": 1793437683621,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 52,
+    "start_time_in_millis": 1793005683735,
+    "values": [
+      [
+        4,
+        "dev"
+      ],
+      [
+        1,
+        "lead"
+      ],
+      [
+        2,
+        "mgr"
+      ],
+      [
+        2,
+        "ops"
+      ],
+      [
+        1,
+        "sec"
+      ],
+      [
+        1,
+        null
+      ]
+    ],
+    "values_loaded": 10
+  }
+}

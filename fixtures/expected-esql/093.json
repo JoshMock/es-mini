@@ -1,0 +1,16 @@
+{
+  "query": "FROM nope",
+  "response": {
+    "error": {
+      "reason": "Unknown index [nope]",
+      "root_cause": [
+        {
+          "reason": "Unknown index [nope]",
+          "type": "verification_exception"
+        }
+      ],
+      "type": "verification_exception"
+    },
+    "status": 400
+  }
+}

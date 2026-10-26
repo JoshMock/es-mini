@@ -1,0 +1,59 @@
+{
+  "query": "FROM emp | EVAL n = LENGTH(name) | KEEP name, n | SORT name",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "name",
+        "type": "keyword"
+      },
+      {
+        "name": "n",
+        "type": "integer"
+      }
+    ],
+    "completion_time_in_millis": 1793005680270,
+    "cpu_nanos": 4741305,
+    "documents_found": 8,
+    "expiration_time_in_millis": 1793437680219,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 88,
+    "start_time_in_millis": 1793005680245,
+    "values": [
+      [
+        "Alice",
+        5
+      ],
+      [
+        "Bob",
+        3
+      ],
+      [
+        "Carol",
+        5
+      ],
+      [
+        "Dave",
+        4
+      ],
+      [
+        "Eve",
+        3
+      ],
+      [
+        "Frank",
+        5
+      ],
+      [
+        "Grace",
+        5
+      ],
+      [
+        "Héloïse",
+        7
+      ]
+    ],
+    "values_loaded": 16
+  }
+}

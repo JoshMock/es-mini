@@ -1,0 +1,36 @@
+{
+  "query": "SHOW INFO",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "version",
+        "type": "keyword"
+      },
+      {
+        "name": "date",
+        "type": "keyword"
+      },
+      {
+        "name": "hash",
+        "type": "keyword"
+      }
+    ],
+    "completion_time_in_millis": 1793005672836,
+    "cpu_nanos": 192955,
+    "documents_found": 0,
+    "expiration_time_in_millis": 1793437672815,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 1,
+    "start_time_in_millis": 1793005672832,
+    "values": [
+      [
+        "9.5.5",
+        "2026-09-30T22:12:03.984586187Z",
+        "48acba663b09e70b115dd879329141506c377890"
+      ]
+    ],
+    "values_loaded": 0
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "query": "FROM emp | STATS c = COUNT(*) BY decade = age / 10 * 10 | SORT decade",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "c",
+        "type": "long"
+      },
+      {
+        "name": "decade",
+        "type": "integer"
+      }
+    ],
+    "completion_time_in_millis": 1793005683962,
+    "cpu_nanos": 2428155,
+    "documents_found": 8,
+    "expiration_time_in_millis": 1793437683821,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 54,
+    "start_time_in_millis": 1793005683950,
+    "values": [
+      [
+        3,
+        20
+      ],
+      [
+        2,
+        30
+      ],
+      [
+        1,
+        40
+      ],
+      [
+        1,
+        50
+      ],
+      [
+        1,
+        null
+      ]
+    ],
+    "values_loaded": 7
+  }
+}

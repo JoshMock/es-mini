@@ -1,0 +1,20 @@
+{
+  "query": "FROM emp | WHERE",
+  "response": {
+    "error": {
+      "caused_by": {
+        "reason": null,
+        "type": "input_mismatch_exception"
+      },
+      "reason": "line 1:17: mismatched input '<EOF>' expecting {QUOTED_STRING, INTEGER_LITERAL, DECIMAL_LITERAL, 'false', 'first', 'last', 'not', 'null', '?', 'true', '+', '-', '??', NAMED_OR_POSITIONAL_PARAM, NAMED_OR_POSITIONAL_DOUBLE_PARAMS, '[', '(', UNQUOTED_IDENTIFIER, QUOTED_IDENTIFIER}",
+      "root_cause": [
+        {
+          "reason": "line 1:17: mismatched input '<EOF>' expecting {QUOTED_STRING, INTEGER_LITERAL, DECIMAL_LITERAL, 'false', 'first', 'last', 'not', 'null', '?', 'true', '+', '-', '??', NAMED_OR_POSITIONAL_PARAM, NAMED_OR_POSITIONAL_DOUBLE_PARAMS, '[', '(', UNQUOTED_IDENTIFIER, QUOTED_IDENTIFIER}",
+          "type": "parsing_exception"
+        }
+      ],
+      "type": "parsing_exception"
+    },
+    "status": 400
+  }
+}

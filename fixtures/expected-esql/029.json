@@ -1,0 +1,47 @@
+{
+  "query": "FROM emp | EVAL neg = -age | KEEP neg | SORT neg",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "neg",
+        "type": "integer"
+      }
+    ],
+    "completion_time_in_millis": 1793005677944,
+    "cpu_nanos": 2127561,
+    "documents_found": 8,
+    "expiration_time_in_millis": 1793437677818,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 88,
+    "start_time_in_millis": 1793005677932,
+    "values": [
+      [
+        -51
+      ],
+      [
+        -45
+      ],
+      [
+        -39
+      ],
+      [
+        -34
+      ],
+      [
+        -28
+      ],
+      [
+        -28
+      ],
+      [
+        -23
+      ],
+      [
+        null
+      ]
+    ],
+    "values_loaded": 7
+  }
+}

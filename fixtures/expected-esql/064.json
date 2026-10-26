@@ -1,0 +1,41 @@
+{
+  "query": "ROW a = TO_INTEGER(\"42\"), b = TO_INTEGER(3.9), c = TO_INTEGER(true), d = TO_INTEGER(\"x\")",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "a",
+        "type": "integer"
+      },
+      {
+        "name": "b",
+        "type": "integer"
+      },
+      {
+        "name": "c",
+        "type": "integer"
+      },
+      {
+        "name": "d",
+        "type": "integer"
+      }
+    ],
+    "completion_time_in_millis": 1793005681962,
+    "cpu_nanos": 35499,
+    "documents_found": 0,
+    "expiration_time_in_millis": 1793437681820,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 1,
+    "start_time_in_millis": 1793005681958,
+    "values": [
+      [
+        42,
+        4,
+        1,
+        null
+      ]
+    ],
+    "values_loaded": 0
+  }
+}

@@ -1,0 +1,54 @@
+{
+  "query": "FROM emp | SORT name | LIMIT 0",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "active",
+        "type": "boolean"
+      },
+      {
+        "name": "age",
+        "type": "integer"
+      },
+      {
+        "name": "bio",
+        "type": "text"
+      },
+      {
+        "name": "height",
+        "type": "double"
+      },
+      {
+        "name": "hired",
+        "type": "date"
+      },
+      {
+        "name": "name",
+        "type": "keyword"
+      },
+      {
+        "name": "salary",
+        "type": "long"
+      },
+      {
+        "name": "scores",
+        "type": "integer"
+      },
+      {
+        "name": "tags",
+        "type": "keyword"
+      }
+    ],
+    "completion_time_in_millis": 1793005679009,
+    "cpu_nanos": 37000,
+    "documents_found": 0,
+    "expiration_time_in_millis": 1793437678819,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 0,
+    "start_time_in_millis": 1793005679006,
+    "values": [],
+    "values_loaded": 0
+  }
+}

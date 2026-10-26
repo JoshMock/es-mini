@@ -1,0 +1,39 @@
+{
+  "query": "FROM emp | SORT height DESC | KEEP name, height | LIMIT 3",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "name",
+        "type": "keyword"
+      },
+      {
+        "name": "height",
+        "type": "double"
+      }
+    ],
+    "completion_time_in_millis": 1793005678905,
+    "cpu_nanos": 5487167,
+    "documents_found": 3,
+    "expiration_time_in_millis": 1793437678819,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 30,
+    "start_time_in_millis": 1793005678891,
+    "values": [
+      [
+        "Eve",
+        null
+      ],
+      [
+        "Dave",
+        1.9
+      ],
+      [
+        "Bob",
+        1.82
+      ]
+    ],
+    "values_loaded": 5
+  }
+}

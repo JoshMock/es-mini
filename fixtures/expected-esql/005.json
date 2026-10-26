@@ -1,0 +1,165 @@
+{
+  "query": "FROM emp | KEEP name, bio, age, salary, height, active, hired, tags, scores | SORT name",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "name",
+        "type": "keyword"
+      },
+      {
+        "name": "bio",
+        "type": "text"
+      },
+      {
+        "name": "age",
+        "type": "integer"
+      },
+      {
+        "name": "salary",
+        "type": "long"
+      },
+      {
+        "name": "height",
+        "type": "double"
+      },
+      {
+        "name": "active",
+        "type": "boolean"
+      },
+      {
+        "name": "hired",
+        "type": "date"
+      },
+      {
+        "name": "tags",
+        "type": "keyword"
+      },
+      {
+        "name": "scores",
+        "type": "integer"
+      }
+    ],
+    "completion_time_in_millis": 1793005673470,
+    "cpu_nanos": 8356611,
+    "documents_found": 8,
+    "expiration_time_in_millis": 1793437673415,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 80,
+    "start_time_in_millis": 1793005673447,
+    "values": [
+      [
+        "Alice",
+        "Loves Rust and coffee",
+        34,
+        85000,
+        1.68,
+        true,
+        "2019-03-15T09:30:00.000Z",
+        [
+          "dev",
+          "lead"
+        ],
+        [
+          75,
+          82,
+          90
+        ]
+      ],
+      [
+        "Bob",
+        "  Plays chess  ",
+        28,
+        62000,
+        1.82,
+        false,
+        "2021-07-01T00:00:00.000Z",
+        "dev",
+        60
+      ],
+      [
+        "Carol",
+        "Writes poetry",
+        45,
+        120000,
+        1.75,
+        true,
+        "2015-11-20T14:00:00.000Z",
+        [
+          "mgr",
+          "ops"
+        ],
+        [
+          88,
+          95
+        ]
+      ],
+      [
+        "Dave",
+        null,
+        28,
+        58000,
+        1.9,
+        true,
+        "2022-01-10T00:00:00.000Z",
+        "ops",
+        null
+      ],
+      [
+        "Eve",
+        "Security researcher",
+        null,
+        99000,
+        null,
+        false,
+        "2018-05-05T00:00:00.000Z",
+        [
+          "dev",
+          "sec"
+        ],
+        70
+      ],
+      [
+        "Frank",
+        "New hire",
+        23,
+        null,
+        1.7,
+        true,
+        "2024-02-29T08:15:00.000Z",
+        null,
+        [
+          55,
+          65
+        ]
+      ],
+      [
+        "Grace",
+        "Database Ninja",
+        51,
+        150000,
+        1.6,
+        true,
+        "2010-09-01T00:00:00.000Z",
+        "mgr",
+        99
+      ],
+      [
+        "Héloïse",
+        "Ünïcödé café 東京",
+        39,
+        77000,
+        1.65,
+        false,
+        "2020-12-31T23:59:59.000Z",
+        "dev",
+        [
+          80,
+          80
+        ]
+      ]
+    ],
+    "values_loaded": 74
+  }
+}

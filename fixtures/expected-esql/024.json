@@ -1,0 +1,39 @@
+{
+  "query": "FROM emp | WHERE age IN (28, 51) | KEEP name, age | SORT name",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "name",
+        "type": "keyword"
+      },
+      {
+        "name": "age",
+        "type": "integer"
+      }
+    ],
+    "completion_time_in_millis": 1793005676987,
+    "cpu_nanos": 3975104,
+    "documents_found": 3,
+    "expiration_time_in_millis": 1793437676818,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 27,
+    "start_time_in_millis": 1793005676973,
+    "values": [
+      [
+        "Bob",
+        28
+      ],
+      [
+        "Dave",
+        28
+      ],
+      [
+        "Grace",
+        51
+      ]
+    ],
+    "values_loaded": 6
+  }
+}

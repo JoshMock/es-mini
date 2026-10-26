@@ -1,0 +1,41 @@
+{
+  "query": "FROM emp | STATS c = COUNT(*), a = AVG(age) BY active | SORT active",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "c",
+        "type": "long"
+      },
+      {
+        "name": "a",
+        "type": "double"
+      },
+      {
+        "name": "active",
+        "type": "boolean"
+      }
+    ],
+    "completion_time_in_millis": 1793005683635,
+    "cpu_nanos": 11888052,
+    "documents_found": 8,
+    "expiration_time_in_millis": 1793437683621,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 32,
+    "start_time_in_millis": 1793005683555,
+    "values": [
+      [
+        3,
+        33.5,
+        false
+      ],
+      [
+        5,
+        36.2,
+        true
+      ]
+    ],
+    "values_loaded": 15
+  }
+}

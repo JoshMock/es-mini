@@ -1,0 +1,41 @@
+{
+  "query": "FROM emp | STATS a = AVG(salary), s = SUM(salary), mn = MIN(age), mx = MAX(age)",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "a",
+        "type": "double"
+      },
+      {
+        "name": "s",
+        "type": "long"
+      },
+      {
+        "name": "mn",
+        "type": "integer"
+      },
+      {
+        "name": "mx",
+        "type": "integer"
+      }
+    ],
+    "completion_time_in_millis": 1793005683074,
+    "cpu_nanos": 2058848,
+    "documents_found": 8,
+    "expiration_time_in_millis": 1793437683021,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 40,
+    "start_time_in_millis": 1793005683055,
+    "values": [
+      [
+        93000.0,
+        651000,
+        23,
+        51
+      ]
+    ],
+    "values_loaded": 14
+  }
+}

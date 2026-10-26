@@ -1,0 +1,46 @@
+{
+  "query": "FROM emp | STATS mh = MIN(hired), xh = MAX(hired), mxh = MAX(height), sa = SUM(age), ah = AVG(height)",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "mh",
+        "type": "date"
+      },
+      {
+        "name": "xh",
+        "type": "date"
+      },
+      {
+        "name": "mxh",
+        "type": "double"
+      },
+      {
+        "name": "sa",
+        "type": "long"
+      },
+      {
+        "name": "ah",
+        "type": "double"
+      }
+    ],
+    "completion_time_in_millis": 1793005683191,
+    "cpu_nanos": 2191396,
+    "documents_found": 8,
+    "expiration_time_in_millis": 1793437683021,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 24,
+    "start_time_in_millis": 1793005683174,
+    "values": [
+      [
+        "2010-09-01T00:00:00.000Z",
+        "2024-02-29T08:15:00.000Z",
+        1.9,
+        248,
+        1.7285714285714284
+      ]
+    ],
+    "values_loaded": 22
+  }
+}

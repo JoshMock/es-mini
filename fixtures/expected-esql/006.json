@@ -1,0 +1,67 @@
+{
+  "query": "FROM emp, emp_extra | KEEP name, age | SORT name",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "name",
+        "type": "keyword"
+      },
+      {
+        "name": "age",
+        "type": "integer"
+      }
+    ],
+    "completion_time_in_millis": 1793005673651,
+    "cpu_nanos": 4447652,
+    "documents_found": 10,
+    "expiration_time_in_millis": 1793437673615,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 100,
+    "start_time_in_millis": 1793005673639,
+    "values": [
+      [
+        "Alice",
+        34
+      ],
+      [
+        "Bob",
+        28
+      ],
+      [
+        "Carol",
+        45
+      ],
+      [
+        "Dave",
+        28
+      ],
+      [
+        "Eve",
+        null
+      ],
+      [
+        "Frank",
+        23
+      ],
+      [
+        "Grace",
+        51
+      ],
+      [
+        "Héloïse",
+        39
+      ],
+      [
+        "Ivan",
+        30
+      ],
+      [
+        "Judy",
+        41
+      ]
+    ],
+    "values_loaded": 19
+  }
+}

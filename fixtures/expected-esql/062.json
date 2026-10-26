@@ -1,0 +1,26 @@
+{
+  "query": "ROW recent = NOW() > TO_DATETIME(\"2025-01-01T00:00:00Z\")",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "recent",
+        "type": "boolean"
+      }
+    ],
+    "completion_time_in_millis": 1793005681761,
+    "cpu_nanos": 48311,
+    "documents_found": 0,
+    "expiration_time_in_millis": 1793437681620,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 1,
+    "start_time_in_millis": 1793005681755,
+    "values": [
+      [
+        true
+      ]
+    ],
+    "values_loaded": 0
+  }
+}

@@ -1,0 +1,107 @@
+{
+  "query": "FROM emp | EVAL x = age + 1, y = age - 1, z = age * 2, w = age / 3, m = age % 5 | KEEP name, x, y, z, w, m | SORT name",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "name",
+        "type": "keyword"
+      },
+      {
+        "name": "x",
+        "type": "integer"
+      },
+      {
+        "name": "y",
+        "type": "integer"
+      },
+      {
+        "name": "z",
+        "type": "integer"
+      },
+      {
+        "name": "w",
+        "type": "integer"
+      },
+      {
+        "name": "m",
+        "type": "integer"
+      }
+    ],
+    "completion_time_in_millis": 1793005677827,
+    "cpu_nanos": 4855629,
+    "documents_found": 8,
+    "expiration_time_in_millis": 1793437677818,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 120,
+    "start_time_in_millis": 1793005677732,
+    "values": [
+      [
+        "Alice",
+        35,
+        33,
+        68,
+        11,
+        4
+      ],
+      [
+        "Bob",
+        29,
+        27,
+        56,
+        9,
+        3
+      ],
+      [
+        "Carol",
+        46,
+        44,
+        90,
+        15,
+        0
+      ],
+      [
+        "Dave",
+        29,
+        27,
+        56,
+        9,
+        3
+      ],
+      [
+        "Eve",
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      [
+        "Frank",
+        24,
+        22,
+        46,
+        7,
+        3
+      ],
+      [
+        "Grace",
+        52,
+        50,
+        102,
+        17,
+        1
+      ],
+      [
+        "Héloïse",
+        40,
+        38,
+        78,
+        13,
+        4
+      ]
+    ],
+    "values_loaded": 15
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "query": "FROM emp | WHERE name RLIKE \"[A-C].*\" | KEEP name | SORT name",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "name",
+        "type": "keyword"
+      }
+    ],
+    "completion_time_in_millis": 1793005676738,
+    "cpu_nanos": 1855534,
+    "documents_found": 3,
+    "expiration_time_in_millis": 1793437676617,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 27,
+    "start_time_in_millis": 1793005676722,
+    "values": [
+      [
+        "Alice"
+      ],
+      [
+        "Bob"
+      ],
+      [
+        "Carol"
+      ]
+    ],
+    "values_loaded": 3
+  }
+}

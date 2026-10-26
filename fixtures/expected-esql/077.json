@@ -1,0 +1,32 @@
+{
+  "query": "FROM emp | WHERE active | STATS v = VALUES(name)",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "v",
+        "type": "keyword"
+      }
+    ],
+    "completion_time_in_millis": 1793005683445,
+    "cpu_nanos": 1792231,
+    "documents_found": 8,
+    "expiration_time_in_millis": 1793437683421,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 32,
+    "start_time_in_millis": 1793005683425,
+    "values": [
+      [
+        [
+          "Alice",
+          "Carol",
+          "Dave",
+          "Frank",
+          "Grace"
+        ]
+      ]
+    ],
+    "values_loaded": 13
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "query": "ROW a = [1, 2, 3], b = [\"x\", \"y\"]",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "a",
+        "type": "integer"
+      },
+      {
+        "name": "b",
+        "type": "keyword"
+      }
+    ],
+    "completion_time_in_millis": 1793005672716,
+    "cpu_nanos": 369649,
+    "documents_found": 0,
+    "expiration_time_in_millis": 1793437672615,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 1,
+    "start_time_in_millis": 1793005672627,
+    "values": [
+      [
+        [
+          1,
+          2,
+          3
+        ],
+        [
+          "x",
+          "y"
+        ]
+      ]
+    ],
+    "values_loaded": 0
+  }
+}

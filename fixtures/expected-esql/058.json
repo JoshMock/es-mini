@@ -1,0 +1,71 @@
+{
+  "query": "FROM emp | EVAL y = DATE_EXTRACT(\"year\", hired), m = DATE_EXTRACT(\"month_of_year\", hired) | KEEP name, y, m | SORT name",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "name",
+        "type": "keyword"
+      },
+      {
+        "name": "y",
+        "type": "long"
+      },
+      {
+        "name": "m",
+        "type": "long"
+      }
+    ],
+    "completion_time_in_millis": 1793005681330,
+    "cpu_nanos": 2236153,
+    "documents_found": 8,
+    "expiration_time_in_millis": 1793437681220,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 96,
+    "start_time_in_millis": 1793005681318,
+    "values": [
+      [
+        "Alice",
+        2019,
+        3
+      ],
+      [
+        "Bob",
+        2021,
+        7
+      ],
+      [
+        "Carol",
+        2015,
+        11
+      ],
+      [
+        "Dave",
+        2022,
+        1
+      ],
+      [
+        "Eve",
+        2018,
+        5
+      ],
+      [
+        "Frank",
+        2024,
+        2
+      ],
+      [
+        "Grace",
+        2010,
+        9
+      ],
+      [
+        "Héloïse",
+        2020,
+        12
+      ]
+    ],
+    "values_loaded": 16
+  }
+}

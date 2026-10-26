@@ -1,0 +1,35 @@
+{
+  "query": "FROM emp* METADATA _index | STATS c = COUNT(*) BY _index | SORT _index",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "c",
+        "type": "long"
+      },
+      {
+        "name": "_index",
+        "type": "keyword"
+      }
+    ],
+    "completion_time_in_millis": 1793005674533,
+    "cpu_nanos": 30287805,
+    "documents_found": 10,
+    "expiration_time_in_millis": 1793437674416,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 32,
+    "start_time_in_millis": 1793005674353,
+    "values": [
+      [
+        8,
+        "emp"
+      ],
+      [
+        2,
+        "emp_extra"
+      ]
+    ],
+    "values_loaded": 10
+  }
+}

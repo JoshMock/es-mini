@@ -1,0 +1,83 @@
+{
+  "query": "FROM emp | EVAL r = ROUND(height, 1), f = FLOOR(height), c = CEIL(height) | KEEP name, r, f, c | SORT name",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "name",
+        "type": "keyword"
+      },
+      {
+        "name": "r",
+        "type": "double"
+      },
+      {
+        "name": "f",
+        "type": "double"
+      },
+      {
+        "name": "c",
+        "type": "double"
+      }
+    ],
+    "completion_time_in_millis": 1793005681200,
+    "cpu_nanos": 2517648,
+    "documents_found": 8,
+    "expiration_time_in_millis": 1793437681020,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 104,
+    "start_time_in_millis": 1793005681192,
+    "values": [
+      [
+        "Alice",
+        1.7,
+        1.0,
+        2.0
+      ],
+      [
+        "Bob",
+        1.8,
+        1.0,
+        2.0
+      ],
+      [
+        "Carol",
+        1.8,
+        1.0,
+        2.0
+      ],
+      [
+        "Dave",
+        1.9,
+        1.0,
+        2.0
+      ],
+      [
+        "Eve",
+        null,
+        null,
+        null
+      ],
+      [
+        "Frank",
+        1.7,
+        1.0,
+        2.0
+      ],
+      [
+        "Grace",
+        1.6,
+        1.0,
+        2.0
+      ],
+      [
+        "Héloïse",
+        1.7,
+        1.0,
+        2.0
+      ]
+    ],
+    "values_loaded": 15
+  }
+}

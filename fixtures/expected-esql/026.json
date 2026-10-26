@@ -1,0 +1,29 @@
+{
+  "query": "FROM emp | WHERE tags == \"dev\" | KEEP name | SORT name",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "name",
+        "type": "keyword"
+      }
+    ],
+    "completion_time_in_millis": 1793005677337,
+    "cpu_nanos": 10683760,
+    "documents_found": 2,
+    "expiration_time_in_millis": 1793437677218,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 18,
+    "start_time_in_millis": 1793005677252,
+    "values": [
+      [
+        "Bob"
+      ],
+      [
+        "Héloïse"
+      ]
+    ],
+    "values_loaded": 2
+  }
+}

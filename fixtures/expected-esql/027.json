@@ -1,0 +1,71 @@
+{
+  "query": "FROM emp | EVAL monthly = salary / 12, bonus = salary * 0.1 | KEEP name, monthly, bonus | SORT name",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "name",
+        "type": "keyword"
+      },
+      {
+        "name": "monthly",
+        "type": "long"
+      },
+      {
+        "name": "bonus",
+        "type": "double"
+      }
+    ],
+    "completion_time_in_millis": 1793005677615,
+    "cpu_nanos": 67886009,
+    "documents_found": 8,
+    "expiration_time_in_millis": 1793437677418,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 96,
+    "start_time_in_millis": 1793005677461,
+    "values": [
+      [
+        "Alice",
+        7083,
+        8500.0
+      ],
+      [
+        "Bob",
+        5166,
+        6200.0
+      ],
+      [
+        "Carol",
+        10000,
+        12000.0
+      ],
+      [
+        "Dave",
+        4833,
+        5800.0
+      ],
+      [
+        "Eve",
+        8250,
+        9900.0
+      ],
+      [
+        "Frank",
+        null,
+        null
+      ],
+      [
+        "Grace",
+        12500,
+        15000.0
+      ],
+      [
+        "Héloïse",
+        6416,
+        7700.0
+      ]
+    ],
+    "values_loaded": 15
+  }
+}

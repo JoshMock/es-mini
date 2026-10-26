@@ -1,0 +1,43 @@
+{
+  "query": "FROM emp | WHERE age > 30 | KEEP name, age | SORT age",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "name",
+        "type": "keyword"
+      },
+      {
+        "name": "age",
+        "type": "integer"
+      }
+    ],
+    "completion_time_in_millis": 1793005674854,
+    "cpu_nanos": 16081942,
+    "documents_found": 4,
+    "expiration_time_in_millis": 1793437674816,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 40,
+    "start_time_in_millis": 1793005674720,
+    "values": [
+      [
+        "Alice",
+        34
+      ],
+      [
+        "Héloïse",
+        39
+      ],
+      [
+        "Carol",
+        45
+      ],
+      [
+        "Grace",
+        51
+      ]
+    ],
+    "values_loaded": 8
+  }
+}

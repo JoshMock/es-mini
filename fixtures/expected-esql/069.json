@@ -1,0 +1,95 @@
+{
+  "query": "FROM emp | EVAL c = MV_COUNT(scores), lo = MV_MIN(scores), hi = MV_MAX(scores), t = MV_COUNT(tags) | KEEP name, c, lo, hi, t | SORT name",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "name",
+        "type": "keyword"
+      },
+      {
+        "name": "c",
+        "type": "integer"
+      },
+      {
+        "name": "lo",
+        "type": "integer"
+      },
+      {
+        "name": "hi",
+        "type": "integer"
+      },
+      {
+        "name": "t",
+        "type": "integer"
+      }
+    ],
+    "completion_time_in_millis": 1793005682518,
+    "cpu_nanos": 3098134,
+    "documents_found": 8,
+    "expiration_time_in_millis": 1793437682420,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 112,
+    "start_time_in_millis": 1793005682503,
+    "values": [
+      [
+        "Alice",
+        3,
+        75,
+        90,
+        2
+      ],
+      [
+        "Bob",
+        1,
+        60,
+        60,
+        1
+      ],
+      [
+        "Carol",
+        2,
+        88,
+        95,
+        2
+      ],
+      [
+        "Dave",
+        null,
+        null,
+        null,
+        1
+      ],
+      [
+        "Eve",
+        1,
+        70,
+        70,
+        2
+      ],
+      [
+        "Frank",
+        2,
+        55,
+        65,
+        null
+      ],
+      [
+        "Grace",
+        1,
+        99,
+        99,
+        1
+      ],
+      [
+        "Héloïse",
+        2,
+        80,
+        80,
+        1
+      ]
+    ],
+    "values_loaded": 44
+  }
+}

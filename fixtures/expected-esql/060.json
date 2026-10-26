@@ -1,0 +1,29 @@
+{
+  "query": "FROM emp | EVAL d = DATE_FORMAT(hired) | KEEP d | SORT d | LIMIT 2",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "d",
+        "type": "keyword"
+      }
+    ],
+    "completion_time_in_millis": 1793005681542,
+    "cpu_nanos": 1265220,
+    "documents_found": 8,
+    "expiration_time_in_millis": 1793437681420,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 40,
+    "start_time_in_millis": 1793005681534,
+    "values": [
+      [
+        "2010-09-01T00:00:00.000Z"
+      ],
+      [
+        "2015-11-20T14:00:00.000Z"
+      ]
+    ],
+    "values_loaded": 8
+  }
+}

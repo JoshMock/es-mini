@@ -1,0 +1,32 @@
+{
+  "query": "FROM emp | WHERE NOT active | KEEP name | SORT name",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "name",
+        "type": "keyword"
+      }
+    ],
+    "completion_time_in_millis": 1793005675440,
+    "cpu_nanos": 4681583,
+    "documents_found": 8,
+    "expiration_time_in_millis": 1793437675417,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 46,
+    "start_time_in_millis": 1793005675356,
+    "values": [
+      [
+        "Bob"
+      ],
+      [
+        "Eve"
+      ],
+      [
+        "Héloïse"
+      ]
+    ],
+    "values_loaded": 11
+  }
+}

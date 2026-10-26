@@ -1,0 +1,35 @@
+{
+  "query": "FROM emp | WHERE age >= 28 AND active | KEEP name | SORT name",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "name",
+        "type": "keyword"
+      }
+    ],
+    "completion_time_in_millis": 1793005675042,
+    "cpu_nanos": 3675125,
+    "documents_found": 6,
+    "expiration_time_in_millis": 1793437675016,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 52,
+    "start_time_in_millis": 1793005674955,
+    "values": [
+      [
+        "Alice"
+      ],
+      [
+        "Carol"
+      ],
+      [
+        "Dave"
+      ],
+      [
+        "Grace"
+      ]
+    ],
+    "values_loaded": 10
+  }
+}

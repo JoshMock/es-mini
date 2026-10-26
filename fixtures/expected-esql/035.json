@@ -1,0 +1,71 @@
+{
+  "query": "FROM emp | KEEP n*, a* | SORT name",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "name",
+        "type": "keyword"
+      },
+      {
+        "name": "active",
+        "type": "boolean"
+      },
+      {
+        "name": "age",
+        "type": "integer"
+      }
+    ],
+    "completion_time_in_millis": 1793005678565,
+    "cpu_nanos": 2167403,
+    "documents_found": 8,
+    "expiration_time_in_millis": 1793437678419,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 80,
+    "start_time_in_millis": 1793005678556,
+    "values": [
+      [
+        "Alice",
+        true,
+        34
+      ],
+      [
+        "Bob",
+        false,
+        28
+      ],
+      [
+        "Carol",
+        true,
+        45
+      ],
+      [
+        "Dave",
+        true,
+        28
+      ],
+      [
+        "Eve",
+        false,
+        null
+      ],
+      [
+        "Frank",
+        true,
+        23
+      ],
+      [
+        "Grace",
+        true,
+        51
+      ],
+      [
+        "Héloïse",
+        false,
+        39
+      ]
+    ],
+    "values_loaded": 23
+  }
+}

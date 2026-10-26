@@ -1,0 +1,83 @@
+{
+  "query": "FROM emp METADATA _id, _index, _version | KEEP _id, _index, _version, name | SORT _id",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "_id",
+        "type": "keyword"
+      },
+      {
+        "name": "_index",
+        "type": "keyword"
+      },
+      {
+        "name": "_version",
+        "type": "long"
+      },
+      {
+        "name": "name",
+        "type": "keyword"
+      }
+    ],
+    "completion_time_in_millis": 1793005674248,
+    "cpu_nanos": 10428459,
+    "documents_found": 8,
+    "expiration_time_in_millis": 1793437674216,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 88,
+    "start_time_in_millis": 1793005674159,
+    "values": [
+      [
+        "1",
+        "emp",
+        1,
+        "Alice"
+      ],
+      [
+        "2",
+        "emp",
+        1,
+        "Bob"
+      ],
+      [
+        "3",
+        "emp",
+        1,
+        "Carol"
+      ],
+      [
+        "4",
+        "emp",
+        1,
+        "Dave"
+      ],
+      [
+        "5",
+        "emp",
+        1,
+        "Eve"
+      ],
+      [
+        "6",
+        "emp",
+        1,
+        "Frank"
+      ],
+      [
+        "7",
+        "emp",
+        1,
+        "Grace"
+      ],
+      [
+        "8",
+        "emp",
+        1,
+        "Héloïse"
+      ]
+    ],
+    "values_loaded": 32
+  }
+}

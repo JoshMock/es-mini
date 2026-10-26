@@ -1,0 +1,61 @@
+{
+  "query": "ROW a = ABS(-3), b = ABS(-2.5), c = ROUND(3.14159, 2), d = ROUND(2.5), e = FLOOR(2.7), f = CEIL(2.1), g = POW(2, 10), h = POW(2.0, 0.5)",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "a",
+        "type": "integer"
+      },
+      {
+        "name": "b",
+        "type": "double"
+      },
+      {
+        "name": "c",
+        "type": "double"
+      },
+      {
+        "name": "d",
+        "type": "double"
+      },
+      {
+        "name": "e",
+        "type": "double"
+      },
+      {
+        "name": "f",
+        "type": "double"
+      },
+      {
+        "name": "g",
+        "type": "double"
+      },
+      {
+        "name": "h",
+        "type": "double"
+      }
+    ],
+    "completion_time_in_millis": 1793005681094,
+    "cpu_nanos": 66068,
+    "documents_found": 0,
+    "expiration_time_in_millis": 1793437681020,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 1,
+    "start_time_in_millis": 1793005681074,
+    "values": [
+      [
+        3,
+        2.5,
+        3.14,
+        3.0,
+        2.0,
+        3.0,
+        1024.0,
+        1.4142135623730951
+      ]
+    ],
+    "values_loaded": 0
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "query": "FROM emp | WHERE age IS NULL | KEEP name",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "name",
+        "type": "keyword"
+      }
+    ],
+    "completion_time_in_millis": 1793005675931,
+    "cpu_nanos": 2553026,
+    "documents_found": 1,
+    "expiration_time_in_millis": 1793437675817,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 7,
+    "start_time_in_millis": 1793005675859,
+    "values": [
+      [
+        "Eve"
+      ]
+    ],
+    "values_loaded": 1
+  }
+}

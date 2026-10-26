@@ -1,0 +1,59 @@
+{
+  "query": "FROM emp | EVAL d = DATE_FORMAT(\"yyyy-MM-dd\", hired) | KEEP name, d | SORT name",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "name",
+        "type": "keyword"
+      },
+      {
+        "name": "d",
+        "type": "keyword"
+      }
+    ],
+    "completion_time_in_millis": 1793005681429,
+    "cpu_nanos": 2518159,
+    "documents_found": 8,
+    "expiration_time_in_millis": 1793437681420,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 88,
+    "start_time_in_millis": 1793005681418,
+    "values": [
+      [
+        "Alice",
+        "2019-03-15"
+      ],
+      [
+        "Bob",
+        "2021-07-01"
+      ],
+      [
+        "Carol",
+        "2015-11-20"
+      ],
+      [
+        "Dave",
+        "2022-01-10"
+      ],
+      [
+        "Eve",
+        "2018-05-05"
+      ],
+      [
+        "Frank",
+        "2024-02-29"
+      ],
+      [
+        "Grace",
+        "2010-09-01"
+      ],
+      [
+        "Héloïse",
+        "2020-12-31"
+      ]
+    ],
+    "values_loaded": 16
+  }
+}

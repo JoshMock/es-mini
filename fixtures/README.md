@@ -17,3 +17,9 @@ logical content and `expected/` are deterministic.
 `generate_aggs.sh` boots Elasticsearch on a copy of `es-9.5.5/data` (leaving it untouched) and
 records its responses to aggregation requests in `expected-aggs/`; the parity tests compare
 those too, in memory and from disk.
+
+`generate_esql.sh` boots a fresh Elasticsearch (no data volume), ingests its `emp` and
+`emp_extra` indices, and records the response to each query in `esql-queries.txt` (one per line)
+as `expected-esql/NNN.json`. `es-mini/tests/esql_parity.rs` replays the ingest in memory and
+compares columns and values, or the error type for invalid queries; known differences are in
+`esql-parity-xfail.txt`, which may only shrink.

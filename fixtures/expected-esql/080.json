@@ -1,0 +1,71 @@
+{
+  "query": "FROM emp | STATS c = COUNT(*) BY active, age | SORT active, age",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "c",
+        "type": "long"
+      },
+      {
+        "name": "active",
+        "type": "boolean"
+      },
+      {
+        "name": "age",
+        "type": "integer"
+      }
+    ],
+    "completion_time_in_millis": 1793005683856,
+    "cpu_nanos": 6253204,
+    "documents_found": 8,
+    "expiration_time_in_millis": 1793437683821,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 64,
+    "start_time_in_millis": 1793005683840,
+    "values": [
+      [
+        1,
+        false,
+        28
+      ],
+      [
+        1,
+        false,
+        39
+      ],
+      [
+        1,
+        false,
+        null
+      ],
+      [
+        1,
+        true,
+        23
+      ],
+      [
+        1,
+        true,
+        28
+      ],
+      [
+        1,
+        true,
+        34
+      ],
+      [
+        1,
+        true,
+        45
+      ],
+      [
+        1,
+        true,
+        51
+      ]
+    ],
+    "values_loaded": 15
+  }
+}

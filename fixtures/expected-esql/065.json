@@ -1,0 +1,31 @@
+{
+  "query": "ROW a = TO_LONG(\"9000000000\"), b = TO_LONG(2.5)",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "a",
+        "type": "long"
+      },
+      {
+        "name": "b",
+        "type": "long"
+      }
+    ],
+    "completion_time_in_millis": 1793005682060,
+    "cpu_nanos": 60903,
+    "documents_found": 0,
+    "expiration_time_in_millis": 1793437682020,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 1,
+    "start_time_in_millis": 1793005682057,
+    "values": [
+      [
+        9000000000,
+        3
+      ]
+    ],
+    "values_loaded": 0
+  }
+}

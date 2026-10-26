@@ -1,0 +1,26 @@
+{
+  "query": "FROM emp | STATS COUNT(*)",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "COUNT(*)",
+        "type": "long"
+      }
+    ],
+    "completion_time_in_millis": 1793005682846,
+    "cpu_nanos": 1077051,
+    "documents_found": 1,
+    "expiration_time_in_millis": 1793437682821,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 6,
+    "start_time_in_millis": 1793005682836,
+    "values": [
+      [
+        8
+      ]
+    ],
+    "values_loaded": 0
+  }
+}

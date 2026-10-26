@@ -1,0 +1,59 @@
+{
+  "query": "FROM emp | STATS c = COUNT(*) BY y = BUCKET(hired, 1 year) | SORT y",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "c",
+        "type": "long"
+      },
+      {
+        "name": "y",
+        "type": "date"
+      }
+    ],
+    "completion_time_in_millis": 1793005684400,
+    "cpu_nanos": 5395326,
+    "documents_found": 15,
+    "expiration_time_in_millis": 1793437684221,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 63,
+    "start_time_in_millis": 1793005684386,
+    "values": [
+      [
+        1,
+        "2010-01-01T00:00:00.000Z"
+      ],
+      [
+        1,
+        "2015-01-01T00:00:00.000Z"
+      ],
+      [
+        1,
+        "2018-01-01T00:00:00.000Z"
+      ],
+      [
+        1,
+        "2019-01-01T00:00:00.000Z"
+      ],
+      [
+        1,
+        "2020-01-01T00:00:00.000Z"
+      ],
+      [
+        1,
+        "2021-01-01T00:00:00.000Z"
+      ],
+      [
+        1,
+        "2022-01-01T00:00:00.000Z"
+      ],
+      [
+        1,
+        "2024-01-01T00:00:00.000Z"
+      ]
+    ],
+    "values_loaded": 0
+  }
+}

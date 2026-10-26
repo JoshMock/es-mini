@@ -1,0 +1,43 @@
+{
+  "query": "FROM emp | STATS c = COUNT(*) BY b = BUCKET(salary, 50000) | SORT b",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "c",
+        "type": "long"
+      },
+      {
+        "name": "b",
+        "type": "double"
+      }
+    ],
+    "completion_time_in_millis": 1793005684106,
+    "cpu_nanos": 3868893,
+    "documents_found": 8,
+    "expiration_time_in_millis": 1793437684021,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 48,
+    "start_time_in_millis": 1793005684094,
+    "values": [
+      [
+        5,
+        50000.0
+      ],
+      [
+        1,
+        100000.0
+      ],
+      [
+        1,
+        150000.0
+      ],
+      [
+        1,
+        null
+      ]
+    ],
+    "values_loaded": 7
+  }
+}

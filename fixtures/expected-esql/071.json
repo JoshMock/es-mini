@@ -1,0 +1,36 @@
+{
+  "query": "FROM emp | STATS c = COUNT(*), ca = COUNT(age), cs = COUNT(scores)",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "c",
+        "type": "long"
+      },
+      {
+        "name": "ca",
+        "type": "long"
+      },
+      {
+        "name": "cs",
+        "type": "long"
+      }
+    ],
+    "completion_time_in_millis": 1793005682733,
+    "cpu_nanos": 1413925,
+    "documents_found": 8,
+    "expiration_time_in_millis": 1793437682620,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 22,
+    "start_time_in_millis": 1793005682721,
+    "values": [
+      [
+        8,
+        7,
+        12
+      ]
+    ],
+    "values_loaded": 19
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "query": "FROM emp | STATS m = MEDIAN(salary), p = PERCENTILE(salary, 90), p0 = PERCENTILE(age, 0)",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "m",
+        "type": "double"
+      },
+      {
+        "name": "p",
+        "type": "double"
+      },
+      {
+        "name": "p0",
+        "type": "double"
+      }
+    ],
+    "completion_time_in_millis": 1793005683307,
+    "cpu_nanos": 3391013,
+    "documents_found": 8,
+    "expiration_time_in_millis": 1793437683221,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 22,
+    "start_time_in_millis": 1793005683289,
+    "values": [
+      [
+        85000.0,
+        132000.0,
+        23.0
+      ]
+    ],
+    "values_loaded": 14
+  }
+}

@@ -1,0 +1,59 @@
+{
+  "query": "FROM emp | EVAL l = TO_LOWER(name), u = TO_UPPER(name) | KEEP l, u | SORT l",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "l",
+        "type": "keyword"
+      },
+      {
+        "name": "u",
+        "type": "keyword"
+      }
+    ],
+    "completion_time_in_millis": 1793005680630,
+    "cpu_nanos": 2426172,
+    "documents_found": 8,
+    "expiration_time_in_millis": 1793437680620,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 96,
+    "start_time_in_millis": 1793005680618,
+    "values": [
+      [
+        "alice",
+        "ALICE"
+      ],
+      [
+        "bob",
+        "BOB"
+      ],
+      [
+        "carol",
+        "CAROL"
+      ],
+      [
+        "dave",
+        "DAVE"
+      ],
+      [
+        "eve",
+        "EVE"
+      ],
+      [
+        "frank",
+        "FRANK"
+      ],
+      [
+        "grace",
+        "GRACE"
+      ],
+      [
+        "héloïse",
+        "HÉLOÏSE"
+      ]
+    ],
+    "values_loaded": 8
+  }
+}

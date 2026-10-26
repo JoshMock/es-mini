@@ -1,0 +1,36 @@
+{
+  "query": "ROW a = MV_MIN([3, 1, 2]), b = MV_MAX([\"b\", \"c\", \"a\"]), c = MV_COUNT([1, 2, 3])",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "a",
+        "type": "integer"
+      },
+      {
+        "name": "b",
+        "type": "keyword"
+      },
+      {
+        "name": "c",
+        "type": "integer"
+      }
+    ],
+    "completion_time_in_millis": 1793005682615,
+    "cpu_nanos": 41785,
+    "documents_found": 0,
+    "expiration_time_in_millis": 1793437682420,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 1,
+    "start_time_in_millis": 1793005682607,
+    "values": [
+      [
+        1,
+        "c",
+        3
+      ]
+    ],
+    "values_loaded": 0
+  }
+}

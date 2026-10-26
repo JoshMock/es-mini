@@ -1,0 +1,59 @@
+{
+  "query": "FROM emp | RENAME name AS who | KEEP who, age | SORT who",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "who",
+        "type": "keyword"
+      },
+      {
+        "name": "age",
+        "type": "integer"
+      }
+    ],
+    "completion_time_in_millis": 1793005678148,
+    "cpu_nanos": 2825402,
+    "documents_found": 8,
+    "expiration_time_in_millis": 1793437678018,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 80,
+    "start_time_in_millis": 1793005678137,
+    "values": [
+      [
+        "Alice",
+        34
+      ],
+      [
+        "Bob",
+        28
+      ],
+      [
+        "Carol",
+        45
+      ],
+      [
+        "Dave",
+        28
+      ],
+      [
+        "Eve",
+        null
+      ],
+      [
+        "Frank",
+        23
+      ],
+      [
+        "Grace",
+        51
+      ],
+      [
+        "Héloïse",
+        39
+      ]
+    ],
+    "values_loaded": 15
+  }
+}

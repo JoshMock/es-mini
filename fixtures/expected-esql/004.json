@@ -1,0 +1,101 @@
+{
+  "query": "FROM emp | SORT name | LIMIT 3",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "active",
+        "type": "boolean"
+      },
+      {
+        "name": "age",
+        "type": "integer"
+      },
+      {
+        "name": "bio",
+        "type": "text"
+      },
+      {
+        "name": "height",
+        "type": "double"
+      },
+      {
+        "name": "hired",
+        "type": "date"
+      },
+      {
+        "name": "name",
+        "type": "keyword"
+      },
+      {
+        "name": "salary",
+        "type": "long"
+      },
+      {
+        "name": "scores",
+        "type": "integer"
+      },
+      {
+        "name": "tags",
+        "type": "keyword"
+      }
+    ],
+    "completion_time_in_millis": 1793005673326,
+    "cpu_nanos": 171888455,
+    "documents_found": 3,
+    "expiration_time_in_millis": 1793437673215,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 27,
+    "start_time_in_millis": 1793005672935,
+    "values": [
+      [
+        true,
+        34,
+        "Loves Rust and coffee",
+        1.68,
+        "2019-03-15T09:30:00.000Z",
+        "Alice",
+        85000,
+        [
+          75,
+          82,
+          90
+        ],
+        [
+          "dev",
+          "lead"
+        ]
+      ],
+      [
+        false,
+        28,
+        "  Plays chess  ",
+        1.82,
+        "2021-07-01T00:00:00.000Z",
+        "Bob",
+        62000,
+        60,
+        "dev"
+      ],
+      [
+        true,
+        45,
+        "Writes poetry",
+        1.75,
+        "2015-11-20T14:00:00.000Z",
+        "Carol",
+        120000,
+        [
+          88,
+          95
+        ],
+        [
+          "mgr",
+          "ops"
+        ]
+      ]
+    ],
+    "values_loaded": 32
+  }
+}

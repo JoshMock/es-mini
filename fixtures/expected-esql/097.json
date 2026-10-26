@@ -1,0 +1,16 @@
+{
+  "query": "FROM emp | LIMIT -1",
+  "response": {
+    "error": {
+      "reason": "line 1:12: value of [LIMIT -1] must be a non negative integer, found value [-1] type [integer]",
+      "root_cause": [
+        {
+          "reason": "line 1:12: value of [LIMIT -1] must be a non negative integer, found value [-1] type [integer]",
+          "type": "parsing_exception"
+        }
+      ],
+      "type": "parsing_exception"
+    },
+    "status": 400
+  }
+}

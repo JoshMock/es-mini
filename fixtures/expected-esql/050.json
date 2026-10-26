@@ -1,0 +1,47 @@
+{
+  "query": "FROM emp | EVAL s = SUBSTRING(name, 2, 3) | KEEP s | SORT s",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "s",
+        "type": "keyword"
+      }
+    ],
+    "completion_time_in_millis": 1793005680420,
+    "cpu_nanos": 4776890,
+    "documents_found": 8,
+    "expiration_time_in_millis": 1793437680419,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 88,
+    "start_time_in_millis": 1793005680381,
+    "values": [
+      [
+        "aro"
+      ],
+      [
+        "ave"
+      ],
+      [
+        "lic"
+      ],
+      [
+        "ob"
+      ],
+      [
+        "rac"
+      ],
+      [
+        "ran"
+      ],
+      [
+        "ve"
+      ],
+      [
+        "élo"
+      ]
+    ],
+    "values_loaded": 8
+  }
+}

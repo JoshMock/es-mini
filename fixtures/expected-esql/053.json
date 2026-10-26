@@ -1,0 +1,59 @@
+{
+  "query": "FROM emp | EVAL t = TRIM(bio) | KEEP name, t | SORT name",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "name",
+        "type": "keyword"
+      },
+      {
+        "name": "t",
+        "type": "keyword"
+      }
+    ],
+    "completion_time_in_millis": 1793005680739,
+    "cpu_nanos": 2984552,
+    "documents_found": 8,
+    "expiration_time_in_millis": 1793437680620,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 88,
+    "start_time_in_millis": 1793005680728,
+    "values": [
+      [
+        "Alice",
+        "Loves Rust and coffee"
+      ],
+      [
+        "Bob",
+        "Plays chess"
+      ],
+      [
+        "Carol",
+        "Writes poetry"
+      ],
+      [
+        "Dave",
+        null
+      ],
+      [
+        "Eve",
+        "Security researcher"
+      ],
+      [
+        "Frank",
+        "New hire"
+      ],
+      [
+        "Grace",
+        "Database Ninja"
+      ],
+      [
+        "Héloïse",
+        "Ünïcödé café 東京"
+      ]
+    ],
+    "values_loaded": 15
+  }
+}

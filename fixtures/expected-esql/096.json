@@ -1,0 +1,16 @@
+{
+  "query": "FROM emp | EVAL x = UNKNOWN_FN(age)",
+  "response": {
+    "error": {
+      "reason": "Found 1 problem\nline 1:21: Unknown function [UNKNOWN_FN]",
+      "root_cause": [
+        {
+          "reason": "Found 1 problem\nline 1:21: Unknown function [UNKNOWN_FN]",
+          "type": "verification_exception"
+        }
+      ],
+      "type": "verification_exception"
+    },
+    "status": 400
+  }
+}

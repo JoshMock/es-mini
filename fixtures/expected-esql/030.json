@@ -1,0 +1,59 @@
+{
+  "query": "FROM emp | EVAL x = salary / age | KEEP name, x | SORT name",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "name",
+        "type": "keyword"
+      },
+      {
+        "name": "x",
+        "type": "long"
+      }
+    ],
+    "completion_time_in_millis": 1793005678049,
+    "cpu_nanos": 2989557,
+    "documents_found": 8,
+    "expiration_time_in_millis": 1793437678018,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 88,
+    "start_time_in_millis": 1793005678035,
+    "values": [
+      [
+        "Alice",
+        2500
+      ],
+      [
+        "Bob",
+        2214
+      ],
+      [
+        "Carol",
+        2666
+      ],
+      [
+        "Dave",
+        2071
+      ],
+      [
+        "Eve",
+        null
+      ],
+      [
+        "Frank",
+        null
+      ],
+      [
+        "Grace",
+        2941
+      ],
+      [
+        "Héloïse",
+        1974
+      ]
+    ],
+    "values_loaded": 22
+  }
+}

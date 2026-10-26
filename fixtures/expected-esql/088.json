@@ -1,0 +1,39 @@
+{
+  "query": "FROM emp* | STATS c = COUNT(*) BY dept | SORT dept",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "c",
+        "type": "long"
+      },
+      {
+        "name": "dept",
+        "type": "keyword"
+      }
+    ],
+    "completion_time_in_millis": 1793005684870,
+    "cpu_nanos": 3223511,
+    "documents_found": 10,
+    "expiration_time_in_millis": 1793437684822,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 38,
+    "start_time_in_millis": 1793005684860,
+    "values": [
+      [
+        1,
+        "eng"
+      ],
+      [
+        1,
+        "ops"
+      ],
+      [
+        8,
+        null
+      ]
+    ],
+    "values_loaded": 2
+  }
+}

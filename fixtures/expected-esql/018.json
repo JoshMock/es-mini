@@ -1,0 +1,44 @@
+{
+  "query": "FROM emp | WHERE salary IS NOT NULL | KEEP name | SORT name",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "name",
+        "type": "keyword"
+      }
+    ],
+    "completion_time_in_millis": 1793005676052,
+    "cpu_nanos": 3530681,
+    "documents_found": 7,
+    "expiration_time_in_millis": 1793437676017,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 63,
+    "start_time_in_millis": 1793005676040,
+    "values": [
+      [
+        "Alice"
+      ],
+      [
+        "Bob"
+      ],
+      [
+        "Carol"
+      ],
+      [
+        "Dave"
+      ],
+      [
+        "Eve"
+      ],
+      [
+        "Grace"
+      ],
+      [
+        "Héloïse"
+      ]
+    ],
+    "values_loaded": 7
+  }
+}

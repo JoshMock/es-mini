@@ -1,0 +1,35 @@
+{
+  "query": "FROM emp | WHERE name LIKE \"*a*\" | KEEP name | SORT name",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "name",
+        "type": "keyword"
+      }
+    ],
+    "completion_time_in_millis": 1793005676228,
+    "cpu_nanos": 43748857,
+    "documents_found": 4,
+    "expiration_time_in_millis": 1793437676217,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 36,
+    "start_time_in_millis": 1793005676163,
+    "values": [
+      [
+        "Carol"
+      ],
+      [
+        "Dave"
+      ],
+      [
+        "Frank"
+      ],
+      [
+        "Grace"
+      ]
+    ],
+    "values_loaded": 4
+  }
+}

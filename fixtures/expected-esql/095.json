@@ -1,0 +1,16 @@
+{
+  "query": "FROM emp | STATS AVG(name)",
+  "response": {
+    "error": {
+      "reason": "Found 1 problem\nline 1:18: argument of [AVG(name)] must be [aggregate_metric_double, exponential_histogram, tdigest or numeric except unsigned_long or counter types], found value [name] type [keyword]",
+      "root_cause": [
+        {
+          "reason": "Found 1 problem\nline 1:18: argument of [AVG(name)] must be [aggregate_metric_double, exponential_histogram, tdigest or numeric except unsigned_long or counter types], found value [name] type [keyword]",
+          "type": "verification_exception"
+        }
+      ],
+      "type": "verification_exception"
+    },
+    "status": 400
+  }
+}

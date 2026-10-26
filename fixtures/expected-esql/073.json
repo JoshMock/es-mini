@@ -1,0 +1,31 @@
+{
+  "query": "FROM emp | STATS d = COUNT_DISTINCT(tags), da = COUNT_DISTINCT(age)",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "d",
+        "type": "long"
+      },
+      {
+        "name": "da",
+        "type": "long"
+      }
+    ],
+    "completion_time_in_millis": 1793005682962,
+    "cpu_nanos": 3756037,
+    "documents_found": 8,
+    "expiration_time_in_millis": 1793437682821,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 22,
+    "start_time_in_millis": 1793005682944,
+    "values": [
+      [
+        5,
+        6
+      ]
+    ],
+    "values_loaded": 17
+  }
+}

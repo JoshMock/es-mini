@@ -1,0 +1,41 @@
+{
+  "query": "FROM emp | STATS max_age = MAX(age) BY active | EVAL older = max_age > 40 | SORT active",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "max_age",
+        "type": "integer"
+      },
+      {
+        "name": "active",
+        "type": "boolean"
+      },
+      {
+        "name": "older",
+        "type": "boolean"
+      }
+    ],
+    "completion_time_in_millis": 1793005684655,
+    "cpu_nanos": 5195790,
+    "documents_found": 8,
+    "expiration_time_in_millis": 1793437684622,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 30,
+    "start_time_in_millis": 1793005684635,
+    "values": [
+      [
+        39,
+        false,
+        false
+      ],
+      [
+        51,
+        true,
+        true
+      ]
+    ],
+    "values_loaded": 15
+  }
+}

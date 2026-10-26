@@ -1,0 +1,26 @@
+{
+  "query": "ROW a = 2147483647 + 1",
+  "response": {
+    "bytes_read": 0,
+    "columns": [
+      {
+        "name": "a",
+        "type": "integer"
+      }
+    ],
+    "completion_time_in_millis": 1793005679654,
+    "cpu_nanos": 37231,
+    "documents_found": 0,
+    "expiration_time_in_millis": 1793437679619,
+    "is_partial": false,
+    "read_nanos": 0,
+    "rows_emitted": 1,
+    "start_time_in_millis": 1793005679652,
+    "values": [
+      [
+        null
+      ]
+    ],
+    "values_loaded": 0
+  }
+}
