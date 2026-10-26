@@ -22,7 +22,7 @@ for _ in $(seq 90); do
   sleep 2
 done
 # Batches need every field mapped up front (ShardBatchMapper falls back on dynamic mapping).
-req PUT /t '{"settings":{"number_of_shards":1,"number_of_replicas":0},"mappings":{"properties":{"w":{"type":"text","analyzer":"keyword"},"a":{"type":"long"},"n":{"type":"long"},"s":{"type":"keyword"},"o":{"properties":{"x":{"type":"long"}}},"f":{"type":"float"},"t":{"type":"boolean"},"z":{"type":"keyword"}}}}'
+req PUT /t '{"settings":{"number_of_shards":1,"number_of_replicas":0},"mappings":{"properties":{"w":{"type":"text","analyzer":"keyword"},"a":{"type":"long"},"n":{"type":"long"},"s":{"type":"keyword"},"o":{"properties":{"x":{"type":"long"}}},"f":{"type":"float"},"t":{"type":"boolean"},"z":{"type":"keyword"},"k":{"type":"keyword"},"g":{"type":"double"},"l":{"type":"text"},"u":{"type":"object","dynamic":false}}}}'
 immense=$(printf 'x%.0s' $(seq 33000))
 # Mixed bulk: single records. Index with routing (seq 0), delete (1), and a document Lucene
 # rejects after it took a sequence number, which Elasticsearch logs as a NoOp (2): an immense
@@ -42,6 +42,17 @@ req POST /t/_bulk "$bulk
 " x-ndjson | cut -c1-300
 req POST /t/_bulk "$(printf '%s\n' '{"index":{"_id":"c1"}}' '{"a":2}' '{"index":{"_id":"c2"}}' "{\"w\":\"$immense\"}")
 " x-ndjson | cut -c1-600
+# Arrays in mapped fields make Elasticsearch fall back to a single record (45); a double and
+# escapes batch (46), with a row whose strings outgrow a small row's 16-bit offsets (47).
+req POST /t/_bulk "$(printf '%s\n' '{"index":{"_id":"d1"}}' '{"k":["x","y"]}')
+" x-ndjson | cut -c1-300
+req POST /t/_bulk "$(printf '%s\n' '{"index":{"_id":"d2"}}' '{"g":2.5e300,"s":"q\"\u00e9\ud83d\ude00\n"}' \
+  '{"index":{"_id":"d3"}}' "{\"l\":\"$(printf 'ab %.0s' $(seq 22000))\"}")
+" x-ndjson | cut -c1-300
+# Unmapped values under a dynamic:false object batch whatever their shape (48).
+req POST /t/_bulk "$(printf '%s\n' '{"index":{"_id":"e1"}}' \
+  '{"u":{"arr":[1,"a",[2.5,null],false],"fix":[1,2],"objs":[{"p":1,"q":[true]}],"e":{}}}')
+" x-ndjson | cut -c1-300
 req GET '/t/_stats/translog?filter_path=**.translog' | cut -c1-400
 uuid=$(req GET '/_cat/indices/t?h=uuid' | tr -d '[:space:]')
 docker kill "$name" >/dev/null

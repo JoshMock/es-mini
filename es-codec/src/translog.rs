@@ -1,13 +1,14 @@
 //! Elasticsearch translog generations (`translog-N.tlog`) and their checkpoint
 //! (`translog.ckp`), in the format Elasticsearch 9.5.5 writes: a header, then length-prefixed,
 //! CRC32-checked operations (`Translog.Index`/`Delete`/`NoOp`; index and delete in serialization
-//! formats 12 and 8).
+//! formats 12 and 8). Reading also takes `IndexBatch` records apart into their operations.
 
 use crate::{Error, Result, codec_util::crc32, err, input::DataInput, output::Output};
 
 const INDEX: u8 = 2;
 const DELETE: u8 = 3;
 const NO_OP: u8 = 4;
+const BATCH: u8 = 5;
 /// `Translog.Index.FORMAT_REORDERED` and `Translog.Delete.FORMAT_REORDERED`.
 const INDEX_FORMAT: i32 = 12;
 const DELETE_FORMAT: i32 = 8;
@@ -209,20 +210,32 @@ pub fn read(file: &[u8]) -> Result<(Header, Vec<Op>)> {
                 input.pos - record.len()
             ));
         }
-        ops.push(decode(body)?);
+        decode(body, &mut ops)?;
     }
     Ok((Header { uuid, primary_term }, ops))
 }
 
-fn decode(body: &[u8]) -> Result<Op> {
+fn optional_string(input: &mut DataInput) -> Result<Option<String>> {
+    match input.read_byte()? {
+        0 => Ok(None),
+        _ => Ok(Some(input.read_es_string()?)),
+    }
+}
+
+/// Appends the operations of one record to `ops`.
+fn decode(body: &[u8], ops: &mut Vec<Op>) -> Result<()> {
     let input = &mut DataInput::new(body);
     let kind = input.read_byte()?;
     if kind == NO_OP {
-        return Ok(Op::NoOp {
+        ops.push(Op::NoOp {
             seq_no: input.read_be_long()?,
             primary_term: input.read_be_long()?,
             reason: input.read_es_string()?,
         });
+        return Ok(());
+    }
+    if kind == BATCH {
+        return decode_batch(input, ops);
     }
     let format = input.read_vint()?;
     let (version, seq_no, primary_term) = (
@@ -230,39 +243,87 @@ fn decode(body: &[u8]) -> Result<Op> {
         input.read_be_long()?,
         input.read_be_long()?,
     );
-    match (kind, format) {
+    ops.push(match (kind, format) {
         (INDEX, INDEX_FORMAT) => {
             input.read_be_long()?; // auto-generated id timestamp
             let n = input.read_len()?;
             let id = crate::uid::decode_id(input.read_bytes(n)?);
-            let routing = match input.read_byte()? {
-                0 => None,
-                _ => Some(input.read_es_string()?),
-            };
+            let routing = optional_string(input)?;
             let n = input.read_len()?;
-            Ok(Op::Index {
+            Op::Index {
                 id,
                 source: input.read_bytes(n)?.to_vec(),
                 seq_no,
                 version,
                 primary_term,
                 routing,
-            })
+            }
         }
         (DELETE, DELETE_FORMAT) => {
             let n = input.read_len()?;
-            Ok(Op::Delete {
+            Op::Delete {
                 id: crate::uid::decode_id(input.read_bytes(n)?),
                 seq_no,
                 version,
                 primary_term,
-            })
+            }
         }
-        // ponytail: older formats and batches; Elasticsearch 9.5.5 writes these two
-        _ => err(format!(
-            "unsupported translog operation type {kind} format {format}"
-        )),
+        // ponytail: older formats; Elasticsearch 9.5.5 writes these two
+        _ => {
+            return err(format!(
+                "unsupported translog operation type {kind} format {format}"
+            ));
+        }
+    });
+    Ok(())
+}
+
+/// `Translog.IndexBatch` (format 0): per-document metadata, then the documents as an EIRF batch.
+/// Sources come back as JSON whatever their original content type.
+fn decode_batch(input: &mut DataInput, ops: &mut Vec<Op>) -> Result<()> {
+    let format = input.read_vint()?;
+    if format != 0 {
+        return err(format!("unsupported translog IndexBatch format {format}"));
     }
+    let primary_term = input.read_be_long()?;
+    let count = input.read_be_int()?;
+    let mut rows = vec![];
+    for _ in 0..count {
+        match input.read_byte()? {
+            0 => {
+                let (version, seq_no) = (input.read_be_long()?, input.read_be_long()?);
+                input.read_be_long()?; // auto-generated id timestamp
+                let row = input.read_be_int()?;
+                input.read_byte()?; // content type
+                let n = input.read_len()?;
+                let id = crate::uid::decode_id(input.read_bytes(n)?);
+                ops.push(Op::Index {
+                    id,
+                    source: vec![],
+                    seq_no,
+                    version,
+                    primary_term,
+                    routing: optional_string(input)?,
+                });
+                rows.push((ops.len() - 1, row));
+            }
+            1 => ops.push(Op::NoOp {
+                seq_no: input.read_be_long()?,
+                primary_term,
+                reason: input.read_es_string()?,
+            }),
+            tag => return err(format!("unknown translog IndexBatch op tag {tag}")),
+        }
+    }
+    let n = input.read_len()?;
+    let batch = crate::eirf::Batch::new(input.read_bytes(n)?)?;
+    for (op, row) in rows {
+        let Op::Index { source, .. } = &mut ops[op] else {
+            unreachable!("rows index Op::Index entries")
+        };
+        *source = batch.source(usize::try_from(row).or_else(|_| err("negative EIRF row"))?)?;
+    }
+    Ok(())
 }
 
 /// Fields of `translog.ckp` that vary for an empty translog.

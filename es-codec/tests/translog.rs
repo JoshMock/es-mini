@@ -128,3 +128,42 @@ fn reads_and_writes_routing_and_no_ops() {
     let encoded: Vec<u8> = ops.iter().flat_map(translog::encode).collect();
     assert_eq!(encoded, file[start..end]);
 }
+
+#[test]
+fn reads_index_batches_as_their_operations() {
+    let (_, ops) = translog::read(&records()).unwrap();
+    assert_eq!(ops.len(), 49);
+    assert_eq!(
+        ops.iter().map(Op::seq_no).collect::<Vec<_>>(),
+        (0..49).collect::<Vec<_>>()
+    );
+    for i in 1..=40 {
+        let source =
+            format!(r#"{{"o":{{"x":-{i}}},"n":{i},"s":"v{i}","f":1.5,"t":true,"z":null}}"#);
+        let mut op = index(&format!("b{i}"), &source, i + 2, 1);
+        if let Op::Index { routing, .. } = &mut op {
+            *routing = (i == 7).then(|| "user2".to_owned());
+        }
+        assert_eq!(ops[i as usize + 2], op);
+    }
+    assert_eq!(ops[43], index("c1", r#"{"a":2}"#, 43, 1));
+    let Op::NoOp {
+        seq_no: 44,
+        primary_term: 1,
+        reason,
+    } = &ops[44]
+    else {
+        panic!("{:?}", ops[44]);
+    };
+    assert!(reason.contains("immense term in field=\"w\""), "{reason}");
+    assert_eq!(ops[45], index("d1", r#"{"k":["x","y"]}"#, 45, 1));
+    assert_eq!(
+        ops[46],
+        index("d2", "{\"g\":2.5e300,\"s\":\"q\\\"é😀\\n\"}", 46, 1)
+    );
+    let long = format!(r#"{{"l":"{}"}}"#, "ab ".repeat(22000));
+    assert_eq!(ops[47], index("d3", &long, 47, 1));
+    let shapes =
+        r#"{"u":{"arr":[1,"a",[2.5,null],false],"fix":[1,2],"objs":[{"p":1,"q":[true]}],"e":{}}}"#;
+    assert_eq!(ops[48], index("e1", shapes, 48, 1));
+}

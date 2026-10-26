@@ -10,6 +10,7 @@ pub mod compound;
 pub mod data_dir;
 mod direct_monotonic;
 pub mod doc_values;
+mod eirf;
 pub mod field_infos;
 pub mod inflate;
 pub mod input;
