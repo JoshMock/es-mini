@@ -1388,7 +1388,7 @@ pub fn search_many<'a>(
     Ok(SearchResult {
         failures,
         aggregations: (!req.aggs.is_empty())
-            .then(|| aggs::render(&req.aggs, &mut aggs, req.typed_keys))
+            .then(|| aggs::render(&req.aggs, &req.pipelines, &mut aggs, req.typed_keys))
             .transpose()?,
         profile,
         total: hits.len(),

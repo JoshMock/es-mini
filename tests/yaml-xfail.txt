@@ -1,2 +1,1 @@
 # Known-failing YAML tests. Fix one, then delete its line.
-aggregations/typed_keys.yml/Test typed keys parameter for date_histogram aggregation and max_bucket pipeline aggregation

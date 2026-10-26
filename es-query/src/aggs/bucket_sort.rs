@@ -2,7 +2,7 @@
 //! multi-bucket aggregation, like ES's BucketSortPipelineAggregator.
 
 use crate::{ErrorKind, QueryError, int};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::cmp::Ordering;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -119,6 +119,17 @@ fn sort_entry(v: &Value) -> Option<Vec<(String, bool)>> {
     }
 }
 
+/// The sub-aggregation `name` of a rendered aggregation, whether or not `typed_keys` prefixed it.
+pub(super) fn agg_at<'a>(aggs: &'a Map<String, Value>, name: &str) -> Option<&'a Value> {
+    let typed = |k: &String| k.split_once('#').is_some_and(|(_, n)| n == name);
+    aggs.get(name)
+        .or_else(|| aggs.iter().find(|(k, _)| typed(k)).map(|(_, v)| v))
+}
+
+fn sub_agg<'a>(bucket: &'a Value, name: &str) -> Option<&'a Value> {
+    agg_at(bucket.as_object()?, name)
+}
+
 /// The value at a bucket path (`_count`, `_key`, or `agg>agg.metric`) of a rendered bucket:
 /// `None` when missing, a number, or a `_key` string.
 pub(super) fn bucket_value(bucket: &Value, path: &str) -> Result<Option<Value>, QueryError> {
@@ -141,9 +152,9 @@ pub(super) fn bucket_value(bucket: &Value, path: &str) -> Result<Option<Value>, 
             let (name, prop) = m[..m.len() - 1].split_once('[').unwrap_or_default();
             let mut at = bucket;
             for name in names.into_iter().flat_map(|n| n.split('>')) {
-                at = at.get(name).ok_or_else(no_agg)?;
+                at = sub_agg(at, name).ok_or_else(no_agg)?;
             }
-            let hits = at.get(name).ok_or_else(no_agg)?["hits"]["hits"].as_array();
+            let hits = sub_agg(at, name).ok_or_else(no_agg)?["hits"]["hits"].as_array();
             return match top_hit_property(name, prop, hits.ok_or_else(no_agg)?)? {
                 Value::Null => Ok(None),
                 v => v.as_f64().map(|_| Some(v.clone())).ok_or_else(not_number),
@@ -156,13 +167,13 @@ pub(super) fn bucket_value(bucket: &Value, path: &str) -> Result<Option<Value>, 
     };
     let mut at = bucket;
     for name in names.into_iter().flat_map(|n| n.split('>')) {
-        at = at.get(name).ok_or_else(no_agg)?;
+        at = sub_agg(at, name).ok_or_else(no_agg)?;
     }
     let v = match last {
         "_count" => at.get("doc_count"),
         "_key" => at.get("key"),
         name => {
-            let agg = at.get(name).ok_or_else(no_agg)?;
+            let agg = sub_agg(at, name).ok_or_else(no_agg)?;
             Some(agg.get(metric.unwrap_or("value")).ok_or_else(no_agg)?)
         }
     };

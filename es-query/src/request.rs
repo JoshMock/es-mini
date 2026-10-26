@@ -22,6 +22,8 @@ pub struct SearchRequest {
     /// Body `track_total_hits` (`true`, `false` or a number) as the URL-parameter spelling.
     pub track_total_hits: Option<String>,
     pub aggs: Vec<crate::aggs::Agg>,
+    /// Top-level `max_bucket` aggregations, computed from the rendered `aggs`.
+    pub pipelines: Vec<crate::aggs::MaxBucket>,
     /// The `typed_keys` URL parameter: aggregation names are prefixed with their type.
     pub typed_keys: bool,
     /// Body `profile`: report where each shard's aggregation time went.
@@ -135,12 +137,12 @@ impl SearchRequest {
             Some(v) if v.is_boolean() || v.is_i64() => Some(v.to_string()),
             Some(_) => return Err("[track_total_hits] must be a boolean or a number".into()),
         };
-        let mut aggs = match (body.get("aggs"), body.get("aggregations")) {
+        let (mut aggs, pipelines) = match (body.get("aggs"), body.get("aggregations")) {
             (Some(_), Some(_)) => {
                 return Err("Found two aggregation definitions: [aggs] and [aggregations]".into());
             }
-            (Some(a), _) | (_, Some(a)) => crate::aggs::parse(a)?,
-            (None, None) => vec![],
+            (Some(a), _) | (_, Some(a)) => crate::aggs::parse_top(a)?,
+            (None, None) => Default::default(),
         };
         let fields = match body.get("fields") {
             None => vec![],
@@ -154,6 +156,7 @@ impl SearchRequest {
             runtime_source,
             fields,
             aggs,
+            pipelines,
             typed_keys: false,
             profile: body.get("profile").and_then(Value::as_bool) == Some(true),
             query,

@@ -7,7 +7,9 @@
 
 mod bucket_selector;
 mod bucket_sort;
+mod derivative;
 pub(crate) mod histogram;
+mod max_bucket;
 mod terms;
 
 use crate::hll::{self, Hll};
@@ -18,8 +20,10 @@ use crate::{
 };
 use bucket_selector::BucketSelector;
 use bucket_sort::BucketSort;
+use derivative::Derivative;
 use es_index::{Document, FieldMapping, iso_date, postings::values};
 use histogram::Histogram;
+pub use max_bucket::MaxBucket;
 use serde_json::{Map, Value};
 use std::cell::Cell;
 use std::time::Instant;
@@ -541,6 +545,8 @@ pub struct Agg {
     bucket_sort: Option<BucketSort>,
     /// `bucket_selector` sub-aggregations, which drop buckets of this aggregation.
     bucket_selectors: Vec<BucketSelector>,
+    /// `derivative` sub-aggregations, which add a value to each bucket of this aggregation.
+    derivatives: Vec<Derivative>,
 }
 
 /// `aggs` with the queries of their filter aggregations resolved for `index` (see
@@ -568,25 +574,52 @@ pub(crate) fn resolve_dates(
         .collect()
 }
 
-/// Parses the sub-aggregations of an aggregation: `bucket_sort` and `bucket_selector` are kept
-/// apart from the rest, as they compute nothing per bucket.
+/// Parses the sub-aggregations of an aggregation: `bucket_sort`, `bucket_selector` and
+/// `derivative` are kept apart from the rest, as they compute nothing per bucket.
 fn parse_subs(v: &Value) -> Result<Pipelines, QueryError> {
-    let (mut sort, mut selectors, mut rest) = (None, vec![], Map::new());
+    let (mut sort, mut selectors, mut derivatives, mut rest) = (None, vec![], vec![], Map::new());
     for (name, body) in v
         .as_object()
         .ok_or("Expected [START_OBJECT] under [aggregations]")?
     {
-        match (body.get("bucket_sort"), body.get("bucket_selector")) {
-            (Some(params), _) => sort = Some(BucketSort::parse(params)?),
-            (_, Some(params)) => selectors.push(BucketSelector::parse(params)?),
+        let get = |t| body.get(t);
+        match (
+            get("bucket_sort"),
+            get("bucket_selector"),
+            get("derivative"),
+        ) {
+            (Some(params), ..) => sort = Some(BucketSort::parse(params)?),
+            (_, Some(params), _) => selectors.push(BucketSelector::parse(params)?),
+            (.., Some(params)) => derivatives.push(Derivative::parse(name, params)?),
             _ => drop(rest.insert(name.clone(), body.clone())),
         }
     }
-    Ok((parse(&rest.into())?, sort, selectors))
+    Ok((parse(&rest.into())?, sort, selectors, derivatives))
 }
 
-/// The sub-aggregations, `bucket_sort` and `bucket_selector`s of an aggregation.
-type Pipelines = (Vec<Agg>, Option<BucketSort>, Vec<BucketSelector>);
+/// The sub-aggregations, `bucket_sort`, `bucket_selector`s and `derivative`s of an aggregation.
+type Pipelines = (
+    Vec<Agg>,
+    Option<BucketSort>,
+    Vec<BucketSelector>,
+    Vec<Derivative>,
+);
+
+/// Parses the object under a request's top-level `aggs`: `max_bucket` is kept apart from the
+/// rest, as it computes from the other aggregations' results.
+pub(crate) fn parse_top(v: &Value) -> Result<(Vec<Agg>, Vec<MaxBucket>), QueryError> {
+    let (mut pipelines, mut rest) = (vec![], Map::new());
+    for (name, body) in v
+        .as_object()
+        .ok_or("Expected [START_OBJECT] under [aggregations]")?
+    {
+        match body.get("max_bucket") {
+            Some(params) => pipelines.push(MaxBucket::parse(name, params)?),
+            None => drop(rest.insert(name.clone(), body.clone())),
+        }
+    }
+    Ok((parse(&rest.into())?, pipelines))
+}
 
 /// Parses the object under `aggs`/`aggregations`.
 pub(crate) fn parse(v: &Value) -> Result<Vec<Agg>, QueryError> {
@@ -606,7 +639,7 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
         .as_object()
         .ok_or_else(|| format!("Expected [START_OBJECT] under [{name}]"))?;
     let (mut meta, mut kind, mut subs) = (None, None, vec![]);
-    let (mut bucket_sort, mut bucket_selectors) = (None, vec![]);
+    let (mut bucket_sort, mut bucket_selectors, mut derivatives) = (None, vec![], vec![]);
     for (k, v) in body {
         match k.as_str() {
             "meta" if !v.is_object() => {
@@ -623,7 +656,9 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
                 .into());
             }
             "meta" => meta = Some(v.clone()),
-            "aggs" | "aggregations" => (subs, bucket_sort, bucket_selectors) = parse_subs(v)?,
+            "aggs" | "aggregations" => {
+                (subs, bucket_sort, bucket_selectors, derivatives) = parse_subs(v)?
+            }
             t => match kind {
                 Some((prev, _)) => {
                     return Err(format!(
@@ -686,9 +721,8 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
         "top_hits" => Metric::TopHits(Box::new(TopHits::parse(object()?)?)),
         _ => return Err(format!("Unknown aggregation type [{t}]").into()),
     };
-    if (!subs.is_empty() || bucket_sort.is_some() || !bucket_selectors.is_empty())
-        && !metric.buckets()
-    {
+    let has_pipelines = bucket_sort.is_some() || !bucket_selectors.is_empty();
+    if (!subs.is_empty() || has_pipelines || !derivatives.is_empty()) && !metric.buckets() {
         return Err(QueryError::illegal(format!(
             "Aggregator [{name}] of type [{t}] cannot accept sub-aggregations"
         )));
@@ -708,6 +742,7 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
             subs,
             bucket_sort,
             bucket_selectors,
+            derivatives,
         });
     }
     let params = object()?;
@@ -872,6 +907,7 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
         subs,
         bucket_sort,
         bucket_selectors,
+        derivatives,
     })
 }
 
@@ -1872,10 +1908,17 @@ pub(crate) fn reduce(total: &mut [Stats], shard: Vec<Stats>) {
 /// their type (`avg#name`).
 pub(crate) fn render(
     aggs: &[Agg],
+    pipelines: &[MaxBucket],
     stats: &mut [Stats],
     typed_keys: bool,
 ) -> Result<Value, QueryError> {
-    render_counted(aggs, stats, typed_keys, &Cell::new(0))
+    let mut out = render_counted(aggs, stats, typed_keys, &Cell::new(0))?;
+    if let Value::Object(out) = &mut out {
+        for p in pipelines {
+            p.apply(out, typed_keys)?;
+        }
+    }
+    Ok(out)
 }
 
 /// Counts `n` more buckets toward the request's [`MAX_BUCKETS`], like ES's MultiBucketConsumer.
@@ -2042,6 +2085,9 @@ fn render_counted(
             }
         }
         if let Some(Value::Array(buckets)) = body.get_mut("buckets") {
+            for derivative in &agg.derivatives {
+                derivative.apply(buckets, typed_keys)?;
+            }
             for selector in &agg.bucket_selectors {
                 selector.apply(buckets)?;
             }
@@ -2571,6 +2617,34 @@ mod tests {
         // a null score is NaN, which no comparison holds for
         assert!(keys("top[_score]", "params.ts < 8000").is_empty());
         assert_eq!(keys("_count", "params.ts == 1"), ["a", "c"]);
+    }
+
+    #[test]
+    fn derivative_and_max_bucket_pipelines() {
+        let body = json!({"size": 0, "aggs": {
+            "h": {"histogram": {"field": "i", "interval": 50},
+                "aggs": {"s": {"sum": {"field": "i"}}, "d": {"derivative": {"buckets_path": "s"}}}},
+            "best": {"max_bucket": {"buckets_path": "h>s"}},
+        }});
+        let aggs = aggs_of(&index(), body.clone());
+        let buckets = aggs["h"]["buckets"].as_array().unwrap();
+        let derivs: Vec<_> = buckets.iter().map(|b| b.get("d").cloned()).collect();
+        let want = [
+            None,
+            Some(json!({"value": 50.0})),
+            Some(json!({"value": 50.0})),
+        ];
+        assert_eq!(derivs[..3], want);
+        assert_eq!(aggs["best"], json!({"value": 151.0, "keys": ["150.0"]}));
+        // typed keys prefix names, but paths use the plain ones
+        let mut req = SearchRequest::parse(&body).unwrap();
+        req.typed_keys = true;
+        let aggs = search(&index(), &req).aggregations.unwrap();
+        assert_eq!(aggs["bucket_metric_value#best"]["value"], 151.0);
+        assert_eq!(
+            aggs["histogram#h"]["buckets"][1]["derivative#d"]["value"],
+            50.0
+        );
     }
 
     #[test]
