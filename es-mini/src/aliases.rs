@@ -23,30 +23,57 @@ type Params = Query<HashMap<String, String>>;
 
 const WRITE_PARAMS: [&str; 2] = ["timeout", "master_timeout"];
 
-/// Resolves `<static{anchor||/d{yyyy-MM-dd}}>` date math; other names pass through.
-// ponytail: only `anchor||/d{fmt}` with yyyy/MM/dd; `now` and other rounding units unsupported.
-pub fn resolve_date_math(name: &str) -> String {
+/// Resolves `<static{math{format|zone}}>` date math names like ES's DateMathExpressionResolver;
+/// other names pass through.
+pub fn resolve_date_math(name: &str) -> Result<String, AppError> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64);
+    resolve_date_math_at(name, now)
+}
+
+pub(crate) fn resolve_date_math_at(name: &str, now: i64) -> Result<String, AppError> {
+    let bad = |why: &str| {
+        AppError::IllegalArgument(format!("invalid dynamic name expression [{name}]. {why}"))
+    };
     let Some(inner) = name.strip_prefix('<').and_then(|n| n.strip_suffix('>')) else {
-        return name.to_string();
+        return Ok(name.to_string());
     };
     let mut out = String::new();
-    let mut rest = inner;
-    while let Some(open) = rest.find('{') {
-        out.push_str(&rest[..open]);
-        let Some(close) = rest.find("}}") else { break };
-        let expr = &rest[open + 1..close + 1];
-        rest = &rest[close + 2..];
-        let (anchor, fmt) = expr.split_once("||/d{").unwrap_or((expr, "yyyy-MM-dd}"));
-        let mut d = anchor.splitn(3, '-');
-        let (y, m, day) = (d.next(), d.next(), d.next());
-        out.push_str(
-            &fmt.trim_end_matches('}')
-                .replace("yyyy", y.unwrap_or(""))
-                .replace("MM", m.unwrap_or(""))
-                .replace("dd", day.unwrap_or("")),
-        );
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => out.push(chars.next().ok_or_else(|| bad("trailing escape"))?),
+            '{' => {
+                let (mut expr, mut depth) = (String::new(), 1);
+                for c in chars.by_ref() {
+                    depth += i32::from(c == '{') - i32::from(c == '}');
+                    if depth == 0 {
+                        break;
+                    }
+                    expr.push(c);
+                }
+                if depth != 0 {
+                    return Err(bad("date math placeholder is open ended"));
+                }
+                out.push_str(&resolve_expr(&expr, now).map_err(|e| bad(&e))?);
+            }
+            c => out.push(c),
+        }
     }
-    out + rest
+    Ok(out)
+}
+
+/// One placeholder `math`, `math{format}` or `math{format|zone}`; format defaults to `yyyy.MM.dd`.
+fn resolve_expr(expr: &str, now: i64) -> Result<String, String> {
+    let (math, spec) = match expr.split_once('{') {
+        Some((m, f)) => (m, f.strip_suffix('}').ok_or("missing closing brace")?),
+        None => (expr, "yyyy.MM.dd"),
+    };
+    let (fmt, zone) = spec.split_once('|').unwrap_or((spec, "UTC"));
+    let tz = es_index::tz::TimeZone::parse(zone).ok_or(format!("unknown time zone [{zone}]"))?;
+    let t = es_index::date_math::parse(math, None, None, &tz, false, now)?;
+    es_index::format_pattern(fmt, t + tz.offset(t)).ok_or(format!("invalid date format [{fmt}]"))
 }
 
 /// Rejects values of the wrong scalar type for alias fields, as ES does at index creation.

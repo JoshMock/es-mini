@@ -307,3 +307,25 @@ async fn shards_total_counts_one_per_target_index() {
         assert_eq!(r["_shards"]["successful"], 2, "{uri}");
     }
 }
+
+#[test]
+fn date_math_names_resolve_now_units_formats_and_zones() {
+    let now = 1_700_000_000_000; // 2023-11-14T22:13:20Z
+    let r = |n: &str| crate::aliases::resolve_date_math_at(n, now).ok();
+    assert_eq!(r("plain"), Some("plain".into()));
+    assert_eq!(r("<logs-{now/d}>"), Some("logs-2023.11.14".into()));
+    assert_eq!(r("<logs-{now/M{yyyy.MM}}>"), Some("logs-2023.11".into()));
+    assert_eq!(r("<l-{now-1d/d{yyyy-MM-dd}}>"), Some("l-2023-11-13".into()));
+    assert_eq!(
+        r("<l-{now/h{yyyy.MM.dd.HH}}>"),
+        Some("l-2023.11.14.22".into())
+    );
+    assert_eq!(r("<l-{now/y{yyyy}}>"), Some("l-2023".into()));
+    assert_eq!(
+        r("<l-{now/d{yyyy.MM.dd|+03:00}}>"),
+        Some("l-2023.11.15".into())
+    );
+    assert_eq!(r(r"<a\{b-{now/d{yyyy}}>"), Some("a{b-2023".into()));
+    assert!(r("<l-{now/q}>").is_none());
+    assert!(r("<l-{now/d>").is_none());
+}

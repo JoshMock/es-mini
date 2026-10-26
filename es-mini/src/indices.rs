@@ -95,7 +95,8 @@ pub async fn create(
         &params,
         &["timeout", "master_timeout", "wait_for_active_shards"],
     )?;
-    validate_index_name(&resolve_date_math(&name))?;
+    let name = resolve_date_math(&name)?;
+    validate_index_name(&name)?;
     let body = parse_body(&body)?;
     let mut index = Index::default();
     index.settings.record_creation(&name);
@@ -158,7 +159,7 @@ pub async fn create(
         reject_bad_scalars(alias, meta)?;
         index
             .aliases
-            .insert(resolve_date_math(alias), parse_alias(meta)?);
+            .insert(resolve_date_math(alias)?, parse_alias(meta)?);
     }
     let mut indices = state.write().expect("lock poisoned");
     if indices.contains_key(&name) {
