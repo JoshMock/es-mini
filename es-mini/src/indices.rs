@@ -478,15 +478,11 @@ fn put_settings_on(
     for (key, value) in es_index::flatten_settings(settings) {
         let short = key.strip_prefix("index.").unwrap_or(&key);
         let key = format!("index.{short}");
-        let value = match value {
-            Value::Null => None,
-            Value::String(v) => Some(v.clone()),
-            v => Some(v.to_string()),
-        };
+        let value = (!value.is_null()).then(|| es_index::setting_value(value));
         let update = match index_settings::get(&key) {
             Some(s) => {
                 if let Some(v) = &value {
-                    values.push((s, v.clone()));
+                    values.push((s, es_index::setting_string(v)));
                 }
                 s.update
             }
@@ -519,7 +515,7 @@ fn put_settings_on(
         let index = &indices[n];
         let changes = skipped
             .iter()
-            .any(|(k, v, _)| v.as_deref() != index.settings.get(k));
+            .any(|(k, v, _)| v.as_ref() != index.settings.flat().get(k));
         if index.closed || (reopen && changes) {
             as_closed.push(n);
         } else {

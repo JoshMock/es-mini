@@ -295,3 +295,22 @@ fn saving_segments_of_a_sorted_index_fails() {
     let e = disk::save(&dir, &indices).unwrap_err();
     assert!(e.to_string().contains("index.sort"), "{e}");
 }
+
+/// List settings are written as arrays, as Elasticsearch's cluster state stores them.
+#[test]
+fn list_settings_survive_a_save() {
+    let dir = scratch("lists").join("data");
+    let mut indices = Indices::new();
+    let list = json!({"index.routing.allocation.include._name": ["a", "b"]});
+    indices
+        .entry("idx".into())
+        .or_default()
+        .settings
+        .merge(&list);
+    disk::save(&dir, &indices).unwrap();
+    let settings = disk::open(&dir).unwrap()["idx"].settings.to_json();
+    assert_eq!(
+        settings["index"]["routing"]["allocation"]["include"]["_name"],
+        json!(["a", "b"])
+    );
+}

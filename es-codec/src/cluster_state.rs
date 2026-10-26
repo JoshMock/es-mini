@@ -5,7 +5,7 @@
 //! blobs hold a SMILE `{"content": <binary>}` wrapping deflated JSON.
 
 use crate::{
-    Result, SegmentInfos, SegmentReader, err,
+    Error, Result, SegmentInfos, SegmentReader, err,
     field_infos::{FieldInfo, IndexOptions},
     inflate,
     segment_writer::{NewSegment, write_segment},
@@ -22,6 +22,8 @@ pub struct IndexMetadata {
     pub uuid: String,
     /// Flat setting keys, e.g. `index.number_of_shards`.
     pub settings: BTreeMap<String, String>,
+    /// List-valued settings (`index.sort.field: ["a"]`), stored as arrays.
+    pub list_settings: BTreeMap<String, Vec<String>>,
     /// Mapping JSON as stored, e.g. `{"_doc":{"properties":{...}}}`; `None` if the index has none.
     pub mappings: Option<String>,
 }
@@ -102,18 +104,28 @@ pub fn read_indices(data_dir: &Path) -> Result<Vec<IndexMetadata>> {
         let Some((name, meta)) = top.first() else {
             return err(format!("index {uuid} metadata is empty"));
         };
-        let settings = match meta.get("settings") {
-            Some(Value::Object(s)) => s
-                .iter()
-                // list settings (arrays) are not modelled and stay dropped
-                .filter(|(_, v)| !matches!(v, Value::Array(_)))
-                .map(|(k, v)| match v.as_str() {
-                    Some(v) => Ok((k.clone(), v.to_owned())),
-                    None => err(format!("index {uuid} setting {k} is not a string")),
-                })
-                .collect::<Result<_>>()?,
-            _ => BTreeMap::new(),
-        };
+        let mut settings = BTreeMap::new();
+        let mut list_settings = BTreeMap::new();
+        let not_string = |k: &str| Error(format!("index {uuid} setting {k} is not a string"));
+        if let Some(Value::Object(s)) = meta.get("settings") {
+            for (k, v) in s {
+                match v {
+                    Value::Array(items) => {
+                        let items = items
+                            .iter()
+                            .map(|i| i.as_str().map(str::to_owned).ok_or_else(|| not_string(k)))
+                            .collect::<Result<_>>()?;
+                        list_settings.insert(k.clone(), items);
+                    }
+                    v => match v.as_str() {
+                        Some(v) => {
+                            settings.insert(k.clone(), v.to_owned());
+                        }
+                        None => return Err(not_string(k)),
+                    },
+                }
+            }
+        }
         let mappings = meta
             .get("mappings_hash")
             .and_then(Value::as_str)
@@ -122,6 +134,7 @@ pub fn read_indices(data_dir: &Path) -> Result<Vec<IndexMetadata>> {
             name: name.clone(),
             uuid,
             settings,
+            list_settings,
             mappings,
         });
     }
@@ -221,6 +234,10 @@ pub fn write_state(
                 ix.settings
                     .iter()
                     .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                    .chain(ix.list_settings.iter().map(|(k, v)| {
+                        let items = v.iter().map(|i| Value::String(i.clone())).collect();
+                        (k.clone(), Value::Array(items))
+                    }))
                     .collect(),
             ),
         )];
@@ -338,12 +355,14 @@ mod tests {
                 name: "a".into(),
                 uuid: "uuid-a".into(),
                 settings: [("index.number_of_shards".to_string(), "1".to_string())].into(),
+                list_settings: [("index.sort.field".to_string(), vec!["t".to_string()])].into(),
                 mappings: Some(r#"{"_doc":{"properties":{"t":{"type":"text"}}}}"#.into()),
             },
             IndexMetadata {
                 name: "b".into(),
                 uuid: "uuid-b".into(),
                 settings: BTreeMap::new(),
+                list_settings: BTreeMap::new(),
                 mappings: None,
             },
         ];

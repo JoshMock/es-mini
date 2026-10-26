@@ -17,7 +17,7 @@ use serde_json::Value;
 use std::{
     borrow::Cow,
     cmp::Ordering,
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     path::Path,
     time::Duration,
 };
@@ -33,6 +33,7 @@ pub fn open(data_dir: &Path) -> es_codec::Result<Indices> {
                 .into_iter()
                 .map(|(k, v)| (k, Value::String(v))),
         );
+        settings.extend(meta.list_settings.into_iter().map(|(k, v)| (k, v.into())));
         index.settings.merge(&Value::Object(settings));
         if let Some(m) = meta.mappings {
             let m: Value = serde_json::from_str(&m).map_err(|e| es_codec::Error(e.to_string()))?;
@@ -1309,7 +1310,19 @@ fn metas(indices: &Indices) -> Vec<es_codec::cluster_state::IndexMetadata> {
         .map(|(name, ix)| {
             // Indices read from an Elasticsearch directory keep its identity (index.uuid,
             // index.version.created); only indices es-mini created get generated values.
-            let mut settings = ix.settings.flat().clone();
+            let (lists, strings): (Vec<_>, Vec<_>) =
+                ix.settings.flat().iter().partition(|(_, v)| v.is_array());
+            let mut settings: BTreeMap<String, String> = strings
+                .into_iter()
+                .map(|(k, v)| (k.clone(), crate::setting_string(v)))
+                .collect();
+            let list_settings = lists
+                .into_iter()
+                .map(|(k, v)| {
+                    let items = v.as_array().into_iter().flatten();
+                    (k.clone(), items.map(crate::setting_string).collect())
+                })
+                .collect();
             let uuid = settings
                 .entry("index.uuid".into())
                 .or_insert_with(|| uuid(name))
@@ -1322,6 +1335,7 @@ fn metas(indices: &Indices) -> Vec<es_codec::cluster_state::IndexMetadata> {
                 name: name.clone(),
                 uuid,
                 settings,
+                list_settings,
                 mappings: serde_json::to_string(&serde_json::json!({"_doc": ix.mappings})).ok(),
             }
         })

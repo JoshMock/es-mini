@@ -21,9 +21,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Index settings stored the way ES normalizes them: flat `index.*` keys with string values.
+/// Index settings stored the way ES normalizes them: flat `index.*` keys whose values are
+/// strings or lists of strings ([`setting_value`]).
 #[derive(Debug, Clone, PartialEq)]
-pub struct Settings(BTreeMap<String, String>);
+pub struct Settings(BTreeMap<String, Value>);
 
 const DEFAULT_SETTINGS: [(&str, &str); 2] = [
     ("index.number_of_shards", "1"),
@@ -35,7 +36,7 @@ impl Default for Settings {
         Self(
             DEFAULT_SETTINGS
                 .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .map(|(k, v)| (k.to_string(), Value::from(*v)))
                 .collect(),
         )
     }
@@ -61,11 +62,10 @@ impl Settings {
             }
             match value {
                 Value::Null => match DEFAULT_SETTINGS.iter().find(|(k, _)| *k == key) {
-                    Some((_, v)) => self.0.insert(key, v.to_string()),
+                    Some((_, v)) => self.0.insert(key, Value::from(*v)),
                     None => self.0.remove(&key),
                 },
-                Value::String(v) => self.0.insert(key, v.clone()),
-                v => self.0.insert(key, v.to_string()),
+                v => self.0.insert(key, setting_value(v)),
             };
         }
     }
@@ -83,12 +83,12 @@ impl Settings {
             ("index.version.created", VERSION_CREATED.to_string()),
             ("index.provided_name", name.to_owned()),
         ] {
-            self.0.entry(key.to_owned()).or_insert(value);
+            self.0.entry(key.to_owned()).or_insert(value.into());
         }
     }
 
     pub fn get(&self, key: &str) -> Option<&str> {
-        self.0.get(key).map(String::as_str)
+        self.0.get(key).and_then(Value::as_str)
     }
 
     /// The defaults of the registered settings ([`index_settings`]) this does not set.
@@ -97,13 +97,13 @@ impl Settings {
             index_settings::SETTINGS
                 .iter()
                 .filter(|s| !self.0.contains_key(s.key))
-                .filter_map(|s| Some((s.key.to_owned(), s.default?.to_owned())))
+                .filter_map(|s| Some((s.key.to_owned(), s.default?.into())))
                 .collect(),
         )
     }
 
-    /// The flat `index.*` keys and string values.
-    pub fn flat(&self) -> &BTreeMap<String, String> {
+    /// The flat `index.*` keys and their values.
+    pub fn flat(&self) -> &BTreeMap<String, Value> {
         &self.0
     }
 
@@ -116,7 +116,7 @@ impl Settings {
     pub fn to_json_where(&self, keep: impl Fn(&str) -> bool) -> Value {
         let mut out = serde_json::Map::new();
         for (key, value) in self.0.iter().filter(|(k, _)| keep(k)) {
-            insert_setting(&mut out, "", key, Value::String(value.clone()));
+            insert_setting(&mut out, "", key, value.clone());
         }
         Value::Object(out)
     }
@@ -142,6 +142,29 @@ fn insert_setting(map: &mut serde_json::Map<String, Value>, prefix: &str, key: &
     }
 }
 
+/// A settings value as Settings.fromXContent stores it: arrays stay lists of strings, other
+/// values become strings.
+// ponytail: ES fails on objects and nulls inside lists; they are stringified here
+pub fn setting_value(v: &Value) -> Value {
+    match v {
+        Value::Array(items) => Value::Array(items.iter().map(setting_value).collect()),
+        Value::String(_) => v.clone(),
+        v => Value::String(v.to_string()),
+    }
+}
+
+/// A settings value as `Settings.get` reads it: a list renders like Java's `List.toString`.
+pub fn setting_string(v: &Value) -> String {
+    match v {
+        Value::Array(items) => {
+            let items: Vec<String> = items.iter().map(setting_string).collect();
+            format!("[{}]", items.join(", "))
+        }
+        Value::String(s) => s.clone(),
+        v => v.to_string(),
+    }
+}
+
 /// Leaf values of nested settings JSON under dotted keys (`{"a": {"b": 1}}` → `a.b`).
 pub fn flatten_settings(json: &Value) -> Vec<(String, &Value)> {
     let mut out = Vec::new();
@@ -161,7 +184,6 @@ fn flatten<'a>(prefix: &str, json: &'a Value, out: &mut Vec<(String, &'a Value)>
                 flatten(&key, v, out);
             }
         }
-        // ponytail: arrays are stringified, not expanded like ES's list settings
         v => out.push((prefix.to_owned(), v)),
     }
 }

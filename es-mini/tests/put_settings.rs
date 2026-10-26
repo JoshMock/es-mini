@@ -291,6 +291,41 @@ async fn include_defaults_lists_every_modelled_default_not_set() {
     );
 }
 
+#[tokio::test]
+async fn list_settings_stay_lists_and_scalar_settings_reject_them() {
+    let app = es_mini::app();
+    let include = json!({"_name": ["a", "b"]});
+    call(
+        &app,
+        "PUT",
+        "/t",
+        json!({"settings": {"index.routing.allocation.include": include}}),
+    )
+    .await;
+    let (_, b) = call(&app, "GET", "/t/_settings", json!({})).await;
+    assert_eq!(
+        b["t"]["settings"]["index"]["routing"]["allocation"]["include"],
+        include
+    );
+    let (_, b) = call(&app, "GET", "/t/_settings?flat_settings=true", json!({})).await;
+    assert_eq!(
+        b["t"]["settings"]["index.routing.allocation.include._name"],
+        json!(["a", "b"])
+    );
+    let (s, b) = call(
+        &app,
+        "PUT",
+        "/t/_settings",
+        json!({"index.refresh_interval": ["1s"]}),
+    )
+    .await;
+    assert_eq!(s, 400);
+    assert_eq!(
+        reason(&b),
+        "failed to parse setting [index.refresh_interval] with value [[1s]] as a time value: unit is missing or unrecognized"
+    );
+}
+
 /// Elasticsearch accepts a setting that is both a leaf and a branch, and renders the branch's
 /// keys in dot notation beside the leaf (Settings.getAsStructuredMap).
 #[tokio::test]
