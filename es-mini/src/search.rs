@@ -125,12 +125,9 @@ fn profile(targets: &[es_query::Target], aggs: Vec<Value>) -> Value {
 /// Replaces each terms lookup (`"terms": {field: {"index", "id", "path"}}`) in a request body
 /// with the values at `path` in that document (none if it is missing), as Elasticsearch fetches
 /// them before searching.
-fn terms_lookups(
-    indices: &aliases::Map<impl Borrow<es_index::Index>>,
-    v: &mut Value,
-) -> Result<(), AppError> {
+fn terms_lookups(shared: &crate::store::Shared, v: &mut Value) -> Result<(), AppError> {
     match v {
-        Value::Array(a) => a.iter_mut().try_for_each(|x| terms_lookups(indices, x)),
+        Value::Array(a) => a.iter_mut().try_for_each(|x| terms_lookups(shared, x)),
         Value::Object(o) => {
             if let Some(Value::Object(terms)) = o.get_mut("terms") {
                 for spec in terms.values_mut() {
@@ -140,8 +137,8 @@ fn terms_lookups(
                     }) else {
                         continue;
                     };
-                    let index: &es_index::Index =
-                        indices[&crate::docs::single_index(indices, index)?].borrow();
+                    let index = crate::docs::single_index(&**shared, index)?;
+                    let index = shared.read(&index).expect("resolved");
                     *spec = match index.get(id) {
                         Some(d) => es_index::postings::values(&d.source, path)
                             .into_iter()
@@ -151,7 +148,7 @@ fn terms_lookups(
                     };
                 }
             }
-            o.values_mut().try_for_each(|x| terms_lookups(indices, x))
+            o.values_mut().try_for_each(|x| terms_lookups(shared, x))
         }
         _ => Ok(()),
     }
@@ -199,7 +196,7 @@ pub async fn search(
             "[indices] cannot be used with point in time. Do not specify any index with point in time.".into(),
         ));
     }
-    terms_lookups(&state.read().all(), &mut body)?;
+    terms_lookups(&state.read(), &mut body)?;
     let mut req = SearchRequest::parse(&body).map_err(AppError::from)?;
     if let Some(q) = params.get("q") {
         req.query = query_from_params(q, &params)?;
@@ -225,8 +222,8 @@ pub async fn search(
             .collect(),
         None => {
             shared = state.read();
-            indices = shared.all();
-            resolved = crate::indices::data_targets(&indices, &name, &params)?;
+            resolved = crate::indices::data_targets(&*shared, &name, &params)?;
+            indices = shared.lock(resolved.iter().map(|t| &t.index));
             targets(&indices, &resolved)
         }
     };
@@ -522,15 +519,15 @@ pub async fn count(
         )));
     }
     let shared = state.read();
-    let indices = shared.all();
-    terms_lookups(&indices, &mut body)?;
+    terms_lookups(&shared, &mut body)?;
     let query = match params.get("q") {
         Some(q) => query_from_params(q, &params)?,
         None => body
             .get("query")
             .map_or(Ok(es_query::Query::MatchAll), parse_query)?,
     };
-    let resolved = crate::indices::data_targets(&indices, &name, &params)?;
+    let resolved = crate::indices::data_targets(&*shared, &name, &params)?;
+    let indices = shared.lock(resolved.iter().map(|t| &t.index));
     let n = es_query::count_many(&targets(&indices, &resolved), &query)?;
     let resp = json!({"count": n, "_shards": shards(resolved.len())});
     Ok(Json(resp))

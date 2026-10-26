@@ -98,11 +98,11 @@ fn parse(
 }
 
 fn resolve_alias(state: &AppState, name: &str) -> Result<String, AppError> {
-    crate::docs::write_target(&state.read(), name)
+    aliases::resolve_write(&*state.read(), name).map_err(AppError::from)
 }
 
 fn is_alias(state: &AppState, name: &str) -> bool {
-    aliases::is_alias(&state.read().all(), name)
+    aliases::is_alias(&*state.read(), name)
 }
 
 fn execute(state: &AppState, params: &HashMap<String, String>, a: Action) -> Value {

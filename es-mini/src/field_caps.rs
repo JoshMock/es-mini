@@ -88,11 +88,11 @@ pub async fn field_caps(
         |k: &str| -> Vec<&str> { params.get(k).map_or(Vec::new(), |v| v.split(',').collect()) };
     let (filters, types) = (list("filters"), list("types"));
     let shared = state.read();
-    let indices = shared.all();
-    let names: BTreeSet<String> = crate::indices::data_targets(&indices, &name, &params)?
+    let names: BTreeSet<String> = crate::indices::data_targets(&*shared, &name, &params)?
         .into_iter()
         .map(|t| t.index)
         .collect();
+    let indices = shared.lock(&names);
 
     // field -> type -> (capabilities, indices having the field with that type)
     let mut found: BTreeMap<String, BTreeMap<String, (Value, Vec<&str>)>> = BTreeMap::new();

@@ -73,11 +73,10 @@ async fn health(
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<(StatusCode, Json<Value>), AppError> {
     params::check(&uri, &params, &HEALTH_PARAMS)?;
-    let shared = state.read();
-    let store = shared.all();
+    let store = state.read();
     let names: Vec<String> = match &index {
         None => store.keys().cloned().collect(),
-        Some(Path(expr)) => match es_index::aliases::resolve_read(&store, expr) {
+        Some(Path(expr)) => match es_index::aliases::resolve_read(&*store, expr) {
             Ok(targets) => targets.into_iter().map(|t| t.index).collect(),
             Err(_) => {
                 let mut body = health_body(0);

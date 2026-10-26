@@ -110,7 +110,7 @@ pub fn parse_alias(v: &Value) -> Result<Alias, AppError> {
 
 /// Concrete index names an expression refers to (aliases expand to their indices).
 fn resolved_names(
-    indices: &aliases::Map<impl std::borrow::Borrow<es_index::Index>>,
+    indices: &aliases::Map<impl aliases::IndexMeta>,
     expr: &str,
 ) -> Result<Vec<String>, AppError> {
     Ok(aliases::resolve_read(indices, expr)?
@@ -188,7 +188,7 @@ pub async fn delete(
 /// `{index: {aliases: {...}}}` for the selected indices and alias names, plus the literal
 /// names that matched nothing.
 fn lookup(
-    indices: &aliases::Map<impl std::borrow::Borrow<es_index::Index>>,
+    indices: &aliases::Map<impl aliases::IndexMeta>,
     index: Option<&str>,
     names: Option<&str>,
 ) -> Result<(Value, Vec<String>), AppError> {
@@ -200,7 +200,8 @@ fn lookup(
     let mut out = Map::new();
     let mut seen = BTreeSet::new();
     for name in selected {
-        let aliases: Map<String, Value> = (indices[&name].borrow().aliases)
+        let aliases: Map<String, Value> = indices[&name]
+            .aliases()
             .iter()
             .inspect(|(a, _)| {
                 if let Some(ps) = &patterns {
@@ -252,7 +253,7 @@ fn get_response(
     index: Option<&str>,
     names: Option<&str>,
 ) -> Result<Response, AppError> {
-    let (mut body, missing) = lookup(&state.read().all(), index, names)?;
+    let (mut body, missing) = lookup(&*state.read(), index, names)?;
     if missing.is_empty() {
         return Ok(Json(body).into_response());
     }
@@ -306,7 +307,7 @@ pub async fn get_for_index_named(
 }
 
 fn exists(state: &AppState, index: Option<&str>, names: &str) -> StatusCode {
-    match lookup(&state.read().all(), index, Some(names)) {
+    match lookup(&*state.read(), index, Some(names)) {
         Ok((body, missing))
             if missing.is_empty() && body.as_object().is_some_and(|o| !o.is_empty()) =>
         {

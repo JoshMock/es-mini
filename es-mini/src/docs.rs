@@ -56,7 +56,7 @@ fn write<T>(
 ) -> Result<(T, u64, String), AppError> {
     let shared = state.read();
     // A write to an existing index locks only that index; auto-creating one locks them all.
-    let target = write_target(&shared, name)?;
+    let target = aliases::resolve_write(&*shared, name)?;
     if let Some(mut index) = shared.write(&target) {
         return Ok(apply(&mut index, target, f));
     }
@@ -75,15 +75,6 @@ fn write<T>(
     Ok(apply(index, target, f))
 }
 
-/// [`aliases::resolve_write`] without locking any index when `name` is one.
-pub(crate) fn write_target(shared: &crate::store::Shared, name: &str) -> Result<String, AppError> {
-    match shared.read(name).map(|ix| ix.closed) {
-        Some(true) => Err(aliases::ResolveError::IndexClosed(name.to_owned()).into()),
-        Some(false) => Ok(name.to_owned()),
-        None => Ok(aliases::resolve_write(&shared.all(), name)?),
-    }
-}
-
 /// `f`'s result on `index`, with its shard total and name.
 fn apply<T>(index: &mut Index, name: String, f: impl FnOnce(&mut Index) -> T) -> (T, u64, String) {
     let replicas = index
@@ -96,7 +87,7 @@ fn apply<T>(index: &mut Index, name: String, f: impl FnOnce(&mut Index) -> T) ->
 
 /// The one concrete index a single-document read targets.
 pub(crate) fn single_index(
-    indices: &es_index::aliases::Map<impl std::borrow::Borrow<Index>>,
+    indices: &es_index::aliases::Map<impl aliases::IndexMeta>,
     name: &str,
 ) -> Result<String, AppError> {
     let targets = aliases::resolve_data(indices, name)?;
@@ -217,7 +208,7 @@ fn require_alias(
     index: &str,
 ) -> Result<(), AppError> {
     let flagged = params.get("require_alias").is_some_and(|v| v == "true");
-    match flagged && !aliases::is_alias(&state.read().all(), index) {
+    match flagged && !aliases::is_alias(&*state.read(), index) {
         true => Err(AppError::RequireAlias(index.to_owned())),
         false => Ok(()),
     }
@@ -361,9 +352,8 @@ pub async fn get(
 ) -> Reply {
     params::check(&uri, &params, &GET_PARAMS)?;
     let shared = state.read();
-    let indices = shared.all();
-    let index = single_index(&indices, &index)?;
-    let i = &indices[&index];
+    let index = single_index(&*shared, &index)?;
+    let i = shared.read(&index).expect("resolved");
     // A non-realtime get sees what search sees, unless it asks for a refresh first.
     let realtime = params.get("realtime").is_none_or(|v| v != "false")
         || params.get("refresh").is_some_and(|v| v != "false");

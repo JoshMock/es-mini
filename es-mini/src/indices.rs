@@ -207,7 +207,7 @@ pub async fn delete(
 /// Concrete indices a metadata request names (GET index, mappings, settings, open/close, ...),
 /// honoring its `ignore_unavailable`, `allow_no_indices` and `expand_wildcards`.
 fn read_indices(
-    indices: &aliases::Map<impl std::borrow::Borrow<es_index::Index>>,
+    indices: &aliases::Map<impl aliases::IndexMeta>,
     expr: &str,
     params: &HashMap<String, String>,
 ) -> Result<Vec<String>, AppError> {
@@ -220,7 +220,7 @@ fn read_indices(
 
 /// Search/count targets for `expr`, honoring the request's indices options.
 pub fn data_targets(
-    indices: &aliases::Map<impl std::borrow::Borrow<es_index::Index>>,
+    indices: &aliases::Map<impl aliases::IndexMeta>,
     expr: &str,
     params: &HashMap<String, String>,
 ) -> Result<Vec<aliases::Target>, AppError> {
@@ -247,9 +247,9 @@ pub async fn get(
 ) -> Result<Json<Value>, AppError> {
     check(&uri, &params, &GET_PARAMS)?;
     let shared = state.read();
-    let indices = shared.all();
-    let body: Map<String, Value> = read_indices(&indices, &name, &params)?
-        .into_iter()
+    let names = read_indices(&*shared, &name, &params)?;
+    let indices = shared.lock(&names);
+    let body: Map<String, Value> = (names.into_iter())
         .map(|n| {
             let i = &indices[&n];
             let mut settings = i.settings.to_json();
@@ -281,7 +281,7 @@ pub async fn get(
 }
 
 pub async fn head(State(state): State<AppState>, Path(name): Path<String>) -> StatusCode {
-    match aliases::resolve_read(&state.read().all(), &name) {
+    match aliases::resolve_read(&*state.read(), &name) {
         Ok(t) if !t.is_empty() => StatusCode::OK,
         _ => StatusCode::NOT_FOUND,
     }
@@ -377,10 +377,10 @@ fn settings_response(
         out
     };
     let shared = state.read();
-    let indices = shared.all();
-    let out: Map<String, Value> = read_indices(&indices, &name, &params)?
-        .into_iter()
-        .map(|n| (n.clone(), render(&indices[&n])))
+    let names = read_indices(&*shared, &name, &params)?;
+    let indices = shared.lock(&names);
+    let out: Map<String, Value> = (names.iter())
+        .map(|n| (n.clone(), render(&indices[n])))
         .collect();
     Ok(Json(Value::Object(out)))
 }
@@ -590,10 +590,10 @@ pub async fn get_mapping(
 ) -> Result<Json<Value>, AppError> {
     check(&uri, &params, &["local", "master_timeout"])?;
     let shared = state.read();
-    let indices = shared.all();
-    let out: Map<String, Value> = read_indices(&indices, &name, &params)?
-        .into_iter()
-        .map(|n| (n.clone(), json!({"mappings": indices[&n].mappings})))
+    let names = read_indices(&*shared, &name, &params)?;
+    let indices = shared.lock(&names);
+    let out: Map<String, Value> = (names.iter())
+        .map(|n| (n.clone(), json!({"mappings": indices[n].mappings})))
         .collect();
     Ok(Json(Value::Object(out)))
 }
@@ -629,12 +629,12 @@ pub async fn stats(
     let metric = path.get("metric").map_or("_all", String::as_str);
     let wanted = |m: &str| metric == "_all" || metric.split(',').any(|x| x == m);
     let shared = state.read();
-    let indices = shared.all();
     let names = read_indices(
-        &indices,
+        &*shared,
         path.get("index").map_or("_all", String::as_str),
         &params,
     )?;
+    let indices = shared.lock(&names);
     let section = |docs: usize, (hits, misses, bytes): (u64, u64, usize)| {
         let mut s = Map::new();
         if wanted("docs") {

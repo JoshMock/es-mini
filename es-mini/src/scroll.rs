@@ -141,8 +141,9 @@ pub async fn open_pit(
     let keep = keep_alive(keep)?;
     let targets: Vec<_> = {
         let shared = state.read();
-        let indices = shared.all();
-        crate::indices::data_targets(&indices, &name, &params)?
+        let resolved = crate::indices::data_targets(&*shared, &name, &params)?;
+        let indices = shared.lock(resolved.iter().map(|t| &t.index));
+        resolved
             .into_iter()
             .map(|t| (t.index.clone(), indices[&t.index].snapshot(), t.filter))
             .collect()

@@ -864,7 +864,7 @@ fn problems(found: Vec<(Pos, String)>) -> EsqlError {
 }
 
 pub fn run(
-    indices: &aliases::Map<impl std::borrow::Borrow<Index>>,
+    indices: &aliases::Map<impl aliases::IndexMeta + std::borrow::Borrow<Index>>,
     query: &str,
 ) -> Result<Response, EsqlError> {
     let (toks, eof) = lex(query)?;

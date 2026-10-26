@@ -479,3 +479,26 @@ async fn bare_typed_keys_flag_is_true() {
     let (_, r) = call(&app, Method::POST, "/idx/_search?typed_keys", Some(body)).await;
     assert_eq!(r["aggregations"]["max#m"]["value"], 3.0);
 }
+
+#[test]
+fn searches_do_not_wait_for_writes_to_other_indices() {
+    let state = std::sync::Arc::new(crate::store::Store::new(es_index::Indices::from(
+        ["a", "b"].map(|n| (n.to_owned(), es_index::Index::default())),
+    )));
+    let app = crate::router(state.clone());
+    let shared = state.read();
+    let writing_a = shared.write("a").unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let search_b = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let (status, _) = rt.block_on(call(&app, Method::GET, "/b/_search", None));
+        tx.send(status).unwrap();
+    });
+    let searched = rx.recv_timeout(std::time::Duration::from_secs(10));
+    drop(writing_a);
+    drop(shared);
+    search_b.join().unwrap();
+    assert_eq!(searched, Ok(StatusCode::OK));
+}
