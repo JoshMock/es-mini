@@ -687,6 +687,13 @@ fn flush_threshold(ix: &Index) -> u64 {
 /// translog outgrows `index.translog.flush_threshold_size` (default 512mb). [`open`] replays
 /// the translog. Writes to indices with `index.translog.durability: async` are left for [`sync`].
 pub fn persist(data_dir: &Path, indices: &mut Indices) -> es_codec::Result<()> {
+    begin_persist(data_dir, indices)?.finish()
+}
+
+/// [`persist`] in two steps, for a caller that locks `indices`: this one takes the writes to log
+/// (or commits, when a flush is due) and [`Pending::finish`] appends and fsyncs them without
+/// `indices`, so the caller can release its lock meanwhile. Saves stay serialized until then.
+pub fn begin_persist(data_dir: &Path, indices: &mut Indices) -> es_codec::Result<Pending> {
     log(data_dir, indices, false)
 }
 
@@ -695,7 +702,27 @@ pub fn persist(data_dir: &Path, indices: &mut Indices) -> es_codec::Result<()> {
 /// `indices.memory.shard_inactive_time`). Run it every [`sync_interval`]. It commits no cluster
 /// metadata: that is [`persist`]'s job.
 pub fn sync(data_dir: &Path, indices: &mut Indices) -> es_codec::Result<()> {
-    log(data_dir, indices, true)
+    log(data_dir, indices, true)?.finish()
+}
+
+/// Translog appends taken by [`begin_persist`], not yet durable.
+pub struct Pending {
+    appends: Vec<(
+        std::path::PathBuf,
+        es_codec::translog::TranslogCheckpoint,
+        Vec<u8>,
+    )>,
+    _one_at_a_time: std::sync::MutexGuard<'static, ()>,
+}
+
+impl Pending {
+    /// Appends and fsyncs the taken writes to their translogs.
+    pub fn finish(self) -> es_codec::Result<()> {
+        for (dir, cp, bytes) in &self.appends {
+            append(dir, cp, bytes)?;
+        }
+        Ok(())
+    }
 }
 
 /// Elasticsearch's default `indices.memory.shard_inactive_time`.
@@ -714,10 +741,13 @@ pub fn sync_interval(indices: &Indices) -> Duration {
     indices.values().map(every).min().unwrap_or(default)
 }
 
-fn log(data_dir: &Path, indices: &mut Indices, all: bool) -> es_codec::Result<()> {
-    let _one_at_a_time = SAVING
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+fn log(data_dir: &Path, indices: &mut Indices, all: bool) -> es_codec::Result<Pending> {
+    let mut pending = Pending {
+        appends: vec![],
+        _one_at_a_time: SAVING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    };
     let metas = metas(indices);
     let unchanged = read_indices(data_dir).is_ok_and(|saved| saved == metas);
     let mut logs = vec![];
@@ -736,7 +766,7 @@ fn log(data_dir: &Path, indices: &mut Indices, all: bool) -> es_codec::Result<()
     }
     let mut flush = !unchanged || logs.len() != indices.len();
     if flush && all {
-        return Ok(());
+        return Ok(pending);
     }
     if !flush {
         for ((dir, cp), ix) in logs.into_iter().zip(indices.values_mut()) {
@@ -753,40 +783,31 @@ fn log(data_dir: &Path, indices: &mut Indices, all: bool) -> es_codec::Result<()
                     .is_ok_and(|t| t.elapsed().is_ok_and(|e| e >= INACTIVE))
             };
             flush |= all && ops.is_empty() && cp.num_ops > 0 && idle();
-            let size = if ops.is_empty() {
-                cp.offset
-            } else {
-                append(&dir, cp, &ops)?
-            };
-            flush |= size as u64 > flush_threshold(ix);
+            if ops.is_empty() {
+                continue;
+            }
+            let bytes: Vec<u8> = ops.iter().flat_map(es_codec::translog::encode).collect();
+            // A flush commits these ops too, so they need no append first.
+            flush |= (cp.offset as u64 + bytes.len() as u64) > flush_threshold(ix);
+            pending
+                .appends
+                .push((dir, advance(cp, &ops, bytes.len()), bytes));
         }
     }
     if flush {
         commit(data_dir, indices)?;
         indices.values_mut().for_each(|ix| drop(ix.take_unlogged()));
+        pending.appends.clear();
     }
-    Ok(())
+    Ok(pending)
 }
 
-/// Appends `ops` to the current translog generation in `dir` (overwriting any torn bytes past the
-/// checkpoint), fsyncs it, then rewrites the checkpoint in place, as Elasticsearch does.
-/// Returns the generation's new size.
-fn append(
-    dir: &Path,
+/// `cp` after appending `ops`, encoded in `len` bytes.
+fn advance(
     mut cp: es_codec::translog::TranslogCheckpoint,
     ops: &[es_codec::translog::Op],
-) -> es_codec::Result<i64> {
-    use std::io::{Seek, SeekFrom, Write};
-    let bytes: Vec<u8> = ops.iter().flat_map(es_codec::translog::encode).collect();
-    let path = dir.join(format!("translog-{}.tlog", cp.generation));
-    let write = || -> std::io::Result<()> {
-        let mut f = std::fs::OpenOptions::new().write(true).open(&path)?;
-        f.set_len(cp.offset as u64)?;
-        f.seek(SeekFrom::End(0))?;
-        f.write_all(&bytes)?;
-        f.sync_all()
-    };
-    write().map_err(|e| es_codec::Error(format!("{}: {e}", path.display())))?;
+    len: usize,
+) -> es_codec::translog::TranslogCheckpoint {
     let seq_nos = ops.iter().map(|o| o.seq_no());
     let (min, max) = (
         seq_nos.clone().min().unwrap_or(-1),
@@ -795,20 +816,40 @@ fn append(
     if cp.num_ops == 0 {
         cp.min_seq_no = min;
     }
-    cp.offset += bytes.len() as i64;
+    cp.offset += len as i64;
     cp.num_ops += ops.len() as i32;
     cp.min_seq_no = cp.min_seq_no.min(min);
     cp.max_seq_no = cp.max_seq_no.max(max);
     cp.global_checkpoint = cp.global_checkpoint.max(max);
+    cp
+}
+
+/// Appends `bytes` to the current translog generation in `dir` (overwriting any torn bytes past
+/// the old checkpoint), fsyncs it, then rewrites the checkpoint in place as `cp`, the one after
+/// the append, as Elasticsearch does.
+fn append(
+    dir: &Path,
+    cp: &es_codec::translog::TranslogCheckpoint,
+    bytes: &[u8],
+) -> es_codec::Result<()> {
+    use std::io::{Seek, SeekFrom, Write};
+    let path = dir.join(format!("translog-{}.tlog", cp.generation));
+    let write = || -> std::io::Result<()> {
+        let mut f = std::fs::OpenOptions::new().write(true).open(&path)?;
+        f.set_len(cp.offset as u64 - bytes.len() as u64)?;
+        f.seek(SeekFrom::End(0))?;
+        f.write_all(bytes)?;
+        f.sync_all()
+    };
+    write().map_err(|e| es_codec::Error(format!("{}: {e}", path.display())))?;
     // A fixed-size record rewritten in place and fsynced, like Elasticsearch's Checkpoint.write.
     let ckp = dir.join("translog.ckp");
     let write = || -> std::io::Result<()> {
         let mut f = std::fs::OpenOptions::new().write(true).open(&ckp)?;
-        f.write_all(&es_codec::translog::checkpoint(&cp))?;
+        f.write_all(&es_codec::translog::checkpoint(cp))?;
         f.sync_all()
     };
-    write().map_err(|e| es_codec::Error(format!("{}: {e}", ckp.display())))?;
-    Ok(cp.offset)
+    write().map_err(|e| es_codec::Error(format!("{}: {e}", ckp.display())))
 }
 
 /// Commits every index's documents into segments (see [`save`]); the caller holds `SAVING`.

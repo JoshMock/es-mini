@@ -179,3 +179,21 @@ fn creating_an_index_commits() {
     let back = disk::open(&dir).unwrap();
     assert_eq!(back["other"].get("x").unwrap().source, json!({}));
 }
+
+#[test]
+fn begun_persists_log_only_the_writes_taken() {
+    let dir = scratch("begun");
+    let mut indices = created();
+    disk::persist(&dir, &mut indices).unwrap();
+    indices.get_mut("idx").unwrap().put("2", json!({}));
+    let pending = disk::begin_persist(&dir, &mut indices).unwrap();
+    assert_eq!(ckp(&dir).num_ops, 0);
+    // The caller can release its lock and take more writes while the fsync runs.
+    indices.get_mut("idx").unwrap().put("3", json!({}));
+    pending.finish().unwrap();
+    let back = disk::open(&dir).unwrap();
+    assert!(back["idx"].get("2").is_some());
+    assert!(back["idx"].get("3").is_none());
+    disk::persist(&dir, &mut indices).unwrap();
+    assert!(disk::open(&dir).unwrap()["idx"].get("3").is_some());
+}
