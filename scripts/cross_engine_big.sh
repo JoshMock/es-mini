@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Task: es-mini writes a 20000-doc index (full postings blocks, level-1 skip data) and
 # Elasticsearch 9.5.5 (Docker, 1 CPU, 1 GB, docker exec, container always removed) must return
-# the right _count for term, match, range and bool queries on every field.
+# the right _count for term, match, range and bool queries on every field, and for ranges over
+# a 100000-doc index (multi-leaf BKD trees, 21-bit doc ids).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DATA="$(mktemp -d)"; PORT=${ES_MINI_PORT:-9392}
@@ -25,6 +26,20 @@ for i in range(20000):
     print('{"kw":"%s","flag":%s,"body":"%s","n":%d}' % ("even" if i % 2 == 0 else "odd", "true" if i % 3 == 0 else "false", " ".join(words), i))
 PY
 curl -sf -X POST "localhost:$PORT/big/_bulk?refresh=true" -H 'content-type: application/x-ndjson' --data-binary @"$DATA.bulk" >/dev/null
+# range: n = i*7 - 350000 (distinct, negative to positive); dup = i % 100 (low cardinality)
+curl -sf -X PUT "localhost:$PORT/range" -H 'content-type: application/json' --data-binary \
+  '{"settings":{"number_of_shards":1,"number_of_replicas":0},"mappings":{"properties":{"n":{"type":"long"},"dup":{"type":"integer"}}}}' >/dev/null
+# in 25000-doc requests: es-mini takes bodies up to 2 MB
+for start in 0 25000 50000 75000; do
+  python3 - $start <<'PY' > "$DATA.bulk"
+import sys
+for i in range(int(sys.argv[1]), int(sys.argv[1]) + 25000):
+    print('{"index":{"_id":"%d"}}' % i)
+    print('{"n":%d,"dup":%d}' % (i * 7 - 350000, i % 100))
+PY
+  curl -sf -X POST "localhost:$PORT/range/_bulk" -H 'content-type: application/x-ndjson' --data-binary @"$DATA.bulk" >/dev/null
+done
+curl -sf -X POST "localhost:$PORT/range/_refresh" >/dev/null
 rm -f "$DATA.bulk"
 kill $PID; wait $PID 2>/dev/null || true
 
@@ -45,8 +60,8 @@ until req GET '/_cluster/health?wait_for_status=green&timeout=1s' 2>/dev/null | 
 done
 
 fail=0
-check() { # expected query-json
-  raw=$(req POST /big/_count "{\"query\":$2}")
+check() { # expected query-json [index]
+  raw=$(req POST "/${3:-big}/_count" "{\"query\":$2}")
   got=$(printf '%s' "$raw" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("count"))')
   if [ "$got" = "$1" ]; then echo "ok   $2"; else echo "FAIL $2: want $1 got $got: ${raw:0:400}"; fail=1; fi
 }
@@ -65,4 +80,12 @@ check 1000 '{"range":{"n":{"gte":5000,"lt":6000}}}'
 check 5000 '{"bool":{"must":[{"term":{"kw":"even"}},{"match":{"body":"common"}}],"filter":{"range":{"n":{"lt":10000}}}}}'
 check 667 '{"bool":{"must":[{"term":{"flag":true}},{"match":{"body":"mid"}}],"must_not":{"term":{"kw":"odd"}}}}'
 check 4 '{"bool":{"must":[{"match":{"body":"rare"}},{"term":{"flag":true}},{"term":{"kw":"even"}}]}}'
+check 100000 '{"match_all":{}}' range
+check 50000 '{"range":{"n":{"gte":0}}}' range
+check 285 '{"range":{"n":{"gte":-1000,"lt":1000}}}' range
+check 143 '{"range":{"n":{"lt":-349000}}}' range
+check 7142 '{"range":{"n":{"gt":300000}}}' range
+check 10000 '{"range":{"dup":{"gte":10,"lte":19}}}' range
+check 1000 '{"term":{"dup":42}}' range
+check 143 '{"bool":{"filter":[{"range":{"n":{"gte":-1000,"lt":1000}}},{"range":{"dup":{"lt":50}}}]}}' range
 exit $fail
