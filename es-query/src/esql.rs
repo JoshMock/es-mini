@@ -56,14 +56,27 @@ enum Tok {
     Sym(&'static str),
 }
 
-fn lex(src: &str) -> Result<Vec<Tok>, EsqlError> {
+/// A token's `(line, column)`, both 1-based, as Elasticsearch reports them.
+type Pos = (usize, usize);
+
+/// An identifier and where it starts.
+type Name = (String, Pos);
+
+fn lex(src: &str) -> Result<Vec<(Tok, Pos)>, EsqlError> {
     let err = |m: String| EsqlError::Parse(m);
     let mut out = Vec::new();
     let mut it = src.char_indices().peekable();
+    let (mut line, mut line_start) = (1, 0);
     while let Some(&(i, c)) = it.peek() {
+        let at = (line, src[line_start..i].chars().count() + 1);
         if c.is_whitespace() {
             it.next();
-        } else if c == '"' {
+            if c == '\n' {
+                (line, line_start) = (line + 1, i + 1);
+            }
+            continue;
+        }
+        let tok = if c == '"' {
             it.next();
             let mut s = String::new();
             loop {
@@ -79,7 +92,7 @@ fn lex(src: &str) -> Result<Vec<Tok>, EsqlError> {
                     Some((_, c)) => s.push(c),
                 }
             }
-            out.push(Tok::Str(s));
+            Tok::Str(s)
         } else if c == '`' {
             it.next();
             let mut s = String::new();
@@ -90,7 +103,7 @@ fn lex(src: &str) -> Result<Vec<Tok>, EsqlError> {
                     Some((_, c)) => s.push(c),
                 }
             }
-            out.push(Tok::Word(s));
+            Tok::Word(s)
         } else if c.is_ascii_digit() {
             let mut s = String::new();
             while let Some(&(_, c)) = it.peek().filter(|(_, c)| c.is_ascii_digit() || *c == '.') {
@@ -101,9 +114,7 @@ fn lex(src: &str) -> Result<Vec<Tok>, EsqlError> {
                 true => s.parse::<f64>().ok().map(Value::from),
                 false => s.parse::<i64>().ok().map(Value::from),
             };
-            out.push(Tok::Num(
-                n.ok_or_else(|| err(format!("invalid number [{s}]")))?,
-            ));
+            Tok::Num(n.ok_or_else(|| err(format!("invalid number [{s}]")))?)
         } else if c.is_alphabetic() || "_@*".contains(c) {
             let mut s = String::new();
             while let Some(&(_, c)) = it
@@ -113,7 +124,7 @@ fn lex(src: &str) -> Result<Vec<Tok>, EsqlError> {
                 s.push(c);
                 it.next();
             }
-            out.push(Tok::Word(s));
+            Tok::Word(s)
         } else {
             let rest = &src[i..];
             let sym = ["==", "!=", "<=", ">=", "<", ">", "|", "(", ")", ","]
@@ -123,15 +134,16 @@ fn lex(src: &str) -> Result<Vec<Tok>, EsqlError> {
             sym.chars().for_each(|_| {
                 it.next();
             });
-            out.push(Tok::Sym(sym));
-        }
+            Tok::Sym(sym)
+        };
+        out.push((tok, at));
     }
     Ok(out)
 }
 
 #[derive(Debug, Clone, PartialEq)]
 enum Expr {
-    Field(String),
+    Field(String, Pos),
     Lit(Value),
     Cmp(&'static str, Box<Expr>, Box<Expr>),
     And(Box<Expr>, Box<Expr>),
@@ -143,6 +155,7 @@ enum Expr {
 #[derive(Debug, Clone, PartialEq)]
 struct SortKey {
     field: String,
+    at: Pos,
     desc: bool,
     nulls_first: bool,
 }
@@ -151,22 +164,22 @@ struct SortKey {
 enum Command {
     Where(Expr),
     Limit(usize),
-    Keep(Vec<String>),
-    Drop(Vec<String>),
+    Keep(Vec<Name>),
+    Drop(Vec<Name>),
     Sort(Vec<SortKey>),
 }
 
 struct Parser {
-    toks: Vec<Tok>,
+    toks: Vec<(Tok, Pos)>,
     pos: usize,
 }
 
 impl Parser {
     fn peek(&self) -> Option<&Tok> {
-        self.toks.get(self.pos)
+        self.toks.get(self.pos).map(|(t, _)| t)
     }
 
-    fn next(&mut self) -> Option<Tok> {
+    fn next(&mut self) -> Option<(Tok, Pos)> {
         self.pos += 1;
         self.toks.get(self.pos - 1).cloned()
     }
@@ -190,18 +203,17 @@ impl Parser {
         Err(EsqlError::Parse(format!("expected {what}, found {found}")))
     }
 
-    fn ident(&mut self) -> Result<String, EsqlError> {
-        match self.peek() {
-            Some(Tok::Word(w)) => {
-                let w = w.clone();
-                self.pos += 1;
-                Ok(w)
+    fn ident(&mut self) -> Result<Name, EsqlError> {
+        match self.next() {
+            Some((Tok::Word(w), at)) => Ok((w, at)),
+            _ => {
+                self.pos -= 1;
+                self.fail("an identifier")
             }
-            _ => self.fail("an identifier"),
         }
     }
 
-    fn ident_list(&mut self) -> Result<Vec<String>, EsqlError> {
+    fn ident_list(&mut self) -> Result<Vec<Name>, EsqlError> {
         let mut out = vec![self.ident()?];
         while self.sym(",") {
             out.push(self.ident()?);
@@ -213,13 +225,13 @@ impl Parser {
         if !self.keyword("from") {
             return self.fail("FROM");
         }
-        let sources = self.ident_list()?;
+        let sources = self.ident_list()?.into_iter().map(|(s, _)| s).collect();
         let mut cmds = Vec::new();
         while self.sym("|") {
-            let cmd = match self.ident()?.to_ascii_lowercase().as_str() {
+            let cmd = match self.ident()?.0.to_ascii_lowercase().as_str() {
                 "where" => Command::Where(self.or()?),
                 "limit" => match self.next() {
-                    Some(Tok::Num(n)) if n.is_u64() => {
+                    Some((Tok::Num(n), _)) if n.is_u64() => {
                         Command::Limit(n.as_u64().unwrap_or_default() as usize)
                     }
                     _ => return self.fail("an integer"),
@@ -229,7 +241,7 @@ impl Parser {
                 "sort" => {
                     let mut keys = Vec::new();
                     loop {
-                        let field = self.ident()?;
+                        let (field, at) = self.ident()?;
                         let desc = self.keyword("desc");
                         if !desc {
                             self.keyword("asc");
@@ -245,6 +257,7 @@ impl Parser {
                         }
                         keys.push(SortKey {
                             field,
+                            at,
                             desc,
                             nulls_first,
                         });
@@ -314,13 +327,17 @@ impl Parser {
                 false => self.fail(")"),
             };
         }
-        match self.next() {
-            Some(Tok::Num(n)) => Ok(Expr::Lit(n)),
-            Some(Tok::Str(s)) => Ok(Expr::Lit(Value::String(s))),
-            Some(Tok::Word(w)) if w.eq_ignore_ascii_case("null") => Ok(Expr::Lit(Value::Null)),
-            Some(Tok::Word(w)) if w.eq_ignore_ascii_case("true") => Ok(Expr::Lit(true.into())),
-            Some(Tok::Word(w)) if w.eq_ignore_ascii_case("false") => Ok(Expr::Lit(false.into())),
-            Some(Tok::Word(w)) => Ok(Expr::Field(w)),
+        let Some((tok, at)) = self.next() else {
+            self.pos -= 1;
+            return self.fail("an expression");
+        };
+        match tok {
+            Tok::Num(n) => Ok(Expr::Lit(n)),
+            Tok::Str(s) => Ok(Expr::Lit(Value::String(s))),
+            Tok::Word(w) if w.eq_ignore_ascii_case("null") => Ok(Expr::Lit(Value::Null)),
+            Tok::Word(w) if w.eq_ignore_ascii_case("true") => Ok(Expr::Lit(true.into())),
+            Tok::Word(w) if w.eq_ignore_ascii_case("false") => Ok(Expr::Lit(false.into())),
+            Tok::Word(w) => Ok(Expr::Field(w, at)),
             _ => {
                 self.pos -= 1;
                 self.fail("an expression")
@@ -360,7 +377,7 @@ fn types_of(m: &FieldMapping) -> (String, String) {
 }
 
 /// ES's message for a field whose types disagree across indices (`TypeConflictedField`).
-fn conflict_error(field: &str, types: &BTreeMap<String, Vec<String>>) -> EsqlError {
+fn conflict_error(field: &str, types: &BTreeMap<String, Vec<String>>) -> String {
     let listed: Vec<String> = types
         .iter()
         .map(|(t, indices)| {
@@ -376,11 +393,11 @@ fn conflict_error(field: &str, types: &BTreeMap<String, Vec<String>>) -> EsqlErr
             s
         })
         .collect();
-    EsqlError::Verification(format!(
+    format!(
         "Cannot use field [{field}] due to ambiguities being mapped as [{}] incompatible types: {}",
         types.len(),
         listed.join(", ")
-    ))
+    )
 }
 
 fn flatten_types(prefix: &str, v: &Value, cols: &mut BTreeMap<String, String>) {
@@ -467,7 +484,7 @@ fn eval(e: &Expr, row: &BTreeMap<&str, Value>) -> Option<Value> {
     let truth = |e: &Expr| eval(e, row).and_then(|v| v.as_bool());
     match e {
         Expr::Lit(v) => Some(v.clone()).filter(|v| !v.is_null()),
-        Expr::Field(f) => row.get(f.as_str()).cloned().filter(|v| !v.is_null()),
+        Expr::Field(f, _) => row.get(f.as_str()).cloned().filter(|v| !v.is_null()),
         Expr::IsNull(x, negated) => Some(Value::Bool(eval(x, row).is_none() != *negated)),
         Expr::Not(x) => truth(x).map(|b| Value::Bool(!b)),
         Expr::And(a, b) => match (truth(a), truth(b)) {
@@ -496,9 +513,9 @@ fn eval(e: &Expr, row: &BTreeMap<&str, Value>) -> Option<Value> {
     }
 }
 
-fn fields(e: &Expr, out: &mut Vec<String>) {
+fn fields(e: &Expr, out: &mut Vec<Name>) {
     match e {
-        Expr::Field(f) => out.push(f.clone()),
+        Expr::Field(f, at) => out.push((f.clone(), *at)),
         Expr::Lit(_) => {}
         Expr::Not(x) | Expr::IsNull(x, _) => fields(x, out),
         Expr::Cmp(_, a, b) | Expr::And(a, b) | Expr::Or(a, b) => {
@@ -508,8 +525,30 @@ fn fields(e: &Expr, out: &mut Vec<String>) {
     }
 }
 
-fn unknown(c: &str) -> EsqlError {
-    EsqlError::Verification(format!("Unknown column [{c}]"))
+fn names(e: &Expr) -> Vec<String> {
+    let mut out = Vec::new();
+    fields(e, &mut out);
+    out.into_iter().map(|(f, _)| f).collect()
+}
+
+fn unknown(c: &str) -> String {
+    format!("Unknown column [{c}]")
+}
+
+/// ES's verification failure listing each distinct problem with where it occurs.
+fn problems(found: Vec<(Pos, String)>) -> EsqlError {
+    let mut seen = BTreeSet::new();
+    let lines: Vec<String> = found
+        .into_iter()
+        .filter(|(_, m)| seen.insert(m.clone()))
+        .map(|((line, col), m)| format!("\nline {line}:{col}: {m}"))
+        .collect();
+    let s = if lines.len() == 1 { "" } else { "s" };
+    EsqlError::Verification(format!(
+        "Found {} problem{s}{}",
+        lines.len(),
+        lines.concat()
+    ))
 }
 
 pub fn run(indices: &BTreeMap<String, Index>, query: &str) -> Result<Response, EsqlError> {
@@ -588,9 +627,9 @@ pub fn run(indices: &BTreeMap<String, Index>, query: &str) -> Result<Response, E
         .collect();
     // A referenced column must exist and have one type.
     let check = |cols: &[String], f: &str| match conflicts.get(f) {
-        _ if !cols.iter().any(|c| c == f) => Err(unknown(f)),
-        Some(m) => Err(conflict_error(f, m)),
-        None => Ok(()),
+        _ if !cols.iter().any(|c| c == f) => Some(unknown(f)),
+        Some(m) => Some(conflict_error(f, m)),
+        None => None,
     };
     let mut cols: Vec<String> = types.keys().cloned().collect();
     // One group of rows per index, for counting what Elasticsearch's per-shard plan loads.
@@ -619,13 +658,34 @@ pub fn run(indices: &BTreeMap<String, Index>, query: &str) -> Result<Response, E
     let mut explicit_limit = false;
 
     for cmd in &cmds {
-        match cmd {
+        // Like ES, report every problem of the first command that has any.
+        let bad: Vec<(Pos, String)> = match cmd {
             Command::Where(e) => {
                 let mut refs = Vec::new();
                 fields(e, &mut refs);
-                for f in &refs {
-                    check(&cols, f)?;
-                }
+                refs.into_iter()
+                    .filter_map(|(f, at)| Some((at, check(&cols, &f)?)))
+                    .collect()
+            }
+            Command::Keep(patterns) | Command::Drop(patterns) => patterns
+                .iter()
+                .filter(|(p, _)| !cols.iter().any(|c| aliases::glob(p, c)))
+                .map(|(p, at)| match p.contains('*') {
+                    true => (*at, format!("No matches found for pattern [{p}]")),
+                    false => (*at, unknown(p)),
+                })
+                .collect(),
+            Command::Sort(keys) => keys
+                .iter()
+                .filter_map(|k| Some((k.at, check(&cols, &k.field)?)))
+                .collect(),
+            Command::Limit(_) => Vec::new(),
+        };
+        if !bad.is_empty() {
+            return Err(problems(bad));
+        }
+        match cmd {
+            Command::Where(e) => {
                 rows.retain(|r| eval(e, r) == Some(Value::Bool(true)));
             }
             &Command::Limit(n) => {
@@ -634,31 +694,20 @@ pub fn run(indices: &BTreeMap<String, Index>, query: &str) -> Result<Response, E
             }
             Command::Keep(patterns) => {
                 let mut kept = Vec::new();
-                for p in patterns {
+                for (p, _) in patterns {
                     let hits: Vec<_> = cols
                         .iter()
                         .filter(|c| aliases::glob(p, c) && !kept.contains(*c))
                         .cloned()
                         .collect();
-                    if hits.is_empty() && !p.contains('*') {
-                        return Err(unknown(p));
-                    }
                     kept.extend(hits);
                 }
                 cols = kept;
             }
             Command::Drop(patterns) => {
-                for p in patterns {
-                    if !p.contains('*') && !cols.contains(p) {
-                        return Err(unknown(p));
-                    }
-                }
-                cols.retain(|c| !patterns.iter().any(|p| aliases::glob(p, c)));
+                cols.retain(|c| !patterns.iter().any(|(p, _)| aliases::glob(p, c)));
             }
             Command::Sort(keys) => {
-                for k in keys {
-                    check(&cols, &k.field)?;
-                }
                 sort_rows(&mut rows, keys);
             }
         }
@@ -765,7 +814,7 @@ fn load_counts(
     let mut later: Vec<String> = out.to_vec();
     for c in tail {
         match c {
-            Command::Where(e) => fields(e, &mut later),
+            Command::Where(e) => later.extend(names(e)),
             Command::Sort(keys) => later.extend(keys.iter().map(|k| k.field.clone())),
             _ => {}
         }
@@ -802,9 +851,7 @@ fn load_counts(
     // ponytail: reads every match; ES's source can stop early once a plain LIMIT fills
     let mut rows: Vec<&Row> = found.flatten().collect();
     let documents = rows.len();
-    let mut loaded = Vec::new();
-    residual.iter().for_each(|e| fields(e, &mut loaded));
-    let mut loaded: BTreeSet<String> = loaded.into_iter().collect();
+    let mut loaded: BTreeSet<String> = residual.iter().flat_map(|e| names(e)).collect();
     let mut n = values(&rows, &loaded);
     rows.retain(|r| passes(r, &residual));
     n += values(&rows, &(&keys - &loaded));
@@ -828,9 +875,9 @@ fn conjuncts<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
 /// Whether Lucene can run the filter: anything but a comparison of two fields.
 fn pushable(e: &Expr) -> bool {
     match e {
-        Expr::Cmp(_, a, b) => !matches!((&**a, &**b), (Expr::Field(_), Expr::Field(_))),
+        Expr::Cmp(_, a, b) => !matches!((&**a, &**b), (Expr::Field(..), Expr::Field(..))),
         Expr::Not(x) | Expr::IsNull(x, _) => pushable(x),
         Expr::And(a, b) | Expr::Or(a, b) => pushable(a) && pushable(b),
-        Expr::Field(_) | Expr::Lit(_) => true,
+        Expr::Field(..) | Expr::Lit(_) => true,
     }
 }

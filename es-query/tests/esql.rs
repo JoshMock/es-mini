@@ -119,7 +119,7 @@ fn errors() {
     ));
     assert_eq!(
         run(&indices(), "FROM people | KEEP zzz").unwrap_err(),
-        EsqlError::Verification("Unknown column [zzz]".into())
+        EsqlError::Verification("Found 1 problem\nline 1:20: Unknown column [zzz]".into())
     );
     assert!(matches!(
         run(&indices(), "FROM people | WHERE zzz > 1"),
@@ -264,17 +264,17 @@ fn conflicting_types_are_unsupported_with_null_values() {
 #[test]
 fn using_a_conflicting_field_fails_verification() {
     let all = conflicting();
-    for q in [
-        "FROM people, b, c | WHERE age > 1",
-        "FROM people, b, c | SORT age",
+    for (q, at) in [
+        ("FROM people, b, c | WHERE age > 1", "1:27"),
+        ("FROM people, b, c | SORT age", "1:26"),
     ] {
         assert_eq!(
             run(&all, q).unwrap_err(),
-            EsqlError::Verification(
-                "Cannot use field [age] due to ambiguities being mapped as [3] incompatible types: \
-                 [datetime] in [c], [keyword] in [b], [long] in [people]"
-                    .into()
-            ),
+            EsqlError::Verification(format!(
+                "Found 1 problem\nline {at}: Cannot use field [age] due to ambiguities being \
+                 mapped as [3] incompatible types: [datetime] in [c], [keyword] in [b], [long] in \
+                 [people]"
+            )),
             "{q}"
         );
     }
@@ -341,6 +341,64 @@ fn documents_found_and_values_loaded_follow_the_plan() {
         assert_eq!(
             (r.documents_found, r.values_loaded),
             (docs, values),
+            "{query}"
+        );
+    }
+}
+
+/// Messages a live Elasticsearch 9.5.5 returned for the same queries: every problem in the first
+/// command that has any, with its line and column.
+#[test]
+fn verification_errors_match_elasticsearch() {
+    let mut all = indices();
+    let people = all.remove("people").unwrap();
+    all.insert("idx".into(), people);
+    for (query, problems) in [
+        (
+            "FROM idx | KEEP zzz, yyy",
+            "Found 2 problems\nline 1:17: Unknown column [zzz]\nline 1:22: Unknown column [yyy]",
+        ),
+        (
+            "from idx | where zzz > 1 and qq < 2 | sort ww",
+            "Found 2 problems\nline 1:18: Unknown column [zzz]\nline 1:30: Unknown column [qq]",
+        ),
+        (
+            "FROM idx | DROP zzz*, yyy",
+            "Found 2 problems\nline 1:17: No matches found for pattern [zzz*]\n\
+             line 1:23: Unknown column [yyy]",
+        ),
+        (
+            "FROM idx | KEEP zzz*, name | KEEP age",
+            "Found 1 problem\nline 1:17: No matches found for pattern [zzz*]",
+        ),
+        (
+            "FROM idx\n| WHERE\n  zzz > 1",
+            "Found 1 problem\nline 3:3: Unknown column [zzz]",
+        ),
+        (
+            "FROM idx | WHERE `zzz` > 1",
+            "Found 1 problem\nline 1:18: Unknown column [zzz]",
+        ),
+        (
+            "FROM idx | WHERE zzz > zzz",
+            "Found 1 problem\nline 1:18: Unknown column [zzz]",
+        ),
+        (
+            "FROM idx | SORT zzz, yyy | KEEP qqq",
+            "Found 2 problems\nline 1:17: Unknown column [zzz]\nline 1:22: Unknown column [yyy]",
+        ),
+        (
+            "FROM idx | DROP zzz, name | KEEP name",
+            "Found 1 problem\nline 1:17: Unknown column [zzz]",
+        ),
+        (
+            "FROM idx | KEEP name, zzz | WHERE age > 1",
+            "Found 1 problem\nline 1:23: Unknown column [zzz]",
+        ),
+    ] {
+        assert_eq!(
+            run(&all, query).unwrap_err(),
+            EsqlError::Verification(problems.into()),
             "{query}"
         );
     }
