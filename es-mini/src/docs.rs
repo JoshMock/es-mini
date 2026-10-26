@@ -171,12 +171,17 @@ fn force_refresh(
     index: &str,
     reply: &mut (StatusCode, Json<Value>),
 ) -> Result<(), AppError> {
-    if params
-        .get("refresh")
-        .is_some_and(|v| v.is_empty() || v == "true")
-    {
-        write(state, index, Index::refresh)?;
-        reply.1.0["forced_refresh"] = true.into();
+    match params.get("refresh").map(String::as_str) {
+        Some("" | "true") => {
+            write(state, index, Index::refresh)?;
+            reply.1.0["forced_refresh"] = true.into();
+        }
+        // ponytail: refreshes now instead of waiting for the scheduled refresh, which exposes
+        // other writes up to one interval early
+        Some("wait_for") => {
+            write(state, index, Index::refresh)?;
+        }
+        _ => {}
     }
     Ok(())
 }

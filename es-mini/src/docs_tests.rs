@@ -295,6 +295,23 @@ async fn non_realtime_get_sees_refreshed_docs_only() {
 }
 
 #[tokio::test]
+async fn refresh_wait_for_returns_once_the_write_is_searchable() {
+    let app = app();
+    let settings = json!({"settings": {"refresh_interval": "1h"}});
+    call(&app, Method::PUT, "/idx", Some(settings)).await;
+    let (_, r) = call(
+        &app,
+        Method::PUT,
+        "/idx/_doc/1?refresh=wait_for",
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(r.get("forced_refresh"), None);
+    let (_, r) = call(&app, Method::GET, "/idx/_doc/1?realtime=false", None).await;
+    assert_eq!(r["found"], json!(true));
+}
+
+#[tokio::test]
 async fn every_write_endpoint_honors_refresh_and_require_alias() {
     let app = app();
     let doc = || Some(json!({"a": 1}));
