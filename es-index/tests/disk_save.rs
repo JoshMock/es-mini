@@ -153,9 +153,13 @@ fn saves_and_reloads_many_terms_and_docs() {
     idx.mappings
         .properties
         .insert("title".into(), FieldMapping::Text { store: false });
-    idx.mappings
-        .properties
-        .insert("tag".into(), FieldMapping::Keyword { ignore_above: None });
+    idx.mappings.properties.insert(
+        "tag".into(),
+        FieldMapping::Keyword {
+            ignore_above: None,
+            split_queries_on_whitespace: false,
+        },
+    );
     for i in 0..200 {
         idx.put(
             &i.to_string(),
@@ -180,9 +184,13 @@ fn saves_and_reloads_many_terms_and_docs() {
 fn a_term_in_256_docs_saves_every_document() {
     use es_index::{FieldMapping, Index};
     let mut idx = Index::default();
-    idx.mappings
-        .properties
-        .insert("tag".into(), FieldMapping::Keyword { ignore_above: None });
+    idx.mappings.properties.insert(
+        "tag".into(),
+        FieldMapping::Keyword {
+            ignore_above: None,
+            split_queries_on_whitespace: false,
+        },
+    );
     idx.mappings
         .properties
         .insert("ok".into(), FieldMapping::Boolean);

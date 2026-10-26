@@ -1099,7 +1099,7 @@ fn doc_value(s: &Searcher, field: &str, mapping: &FieldMapping, v: &Value) -> Op
             Value::String(b) => b.parse::<bool>().ok().map(Value::Bool),
             _ => None,
         },
-        M::Keyword { ignore_above } => {
+        M::Keyword { ignore_above, .. } => {
             let t = es_index::postings::text(v);
             ignore_above
                 .is_none_or(|n| t.chars().count() <= n as usize)
@@ -2023,7 +2023,13 @@ mod tests {
         let props = &mut ix.mappings.properties;
         props.insert("i".into(), FieldMapping::Integer);
         props.insert("f".into(), FieldMapping::Float);
-        props.insert("k".into(), FieldMapping::Keyword { ignore_above: None });
+        props.insert(
+            "k".into(),
+            FieldMapping::Keyword {
+                ignore_above: None,
+                split_queries_on_whitespace: false,
+            },
+        );
         let date = FieldMapping::Date {
             format: None,
             locale: None,
@@ -2273,7 +2279,10 @@ mod tests {
     #[test]
     fn top_hits_explain_the_frequencies_and_lengths_they_score_from() {
         let mut ix = Index::default();
-        let keyword = FieldMapping::Keyword { ignore_above: None };
+        let keyword = FieldMapping::Keyword {
+            ignore_above: None,
+            split_queries_on_whitespace: false,
+        };
         ix.mappings.properties.insert("k".into(), keyword);
         ix.put("1", json!({"k": ["a", "a", "b"]}));
         let body = json!({"query": {"term": {"k": "a"}},
@@ -2574,8 +2583,20 @@ mod tests {
     fn cardinality_counts_like_elasticsearch() {
         let mut ix = Index::default();
         let props = &mut ix.mappings.properties;
-        props.insert("k".into(), FieldMapping::Keyword { ignore_above: None });
-        props.insert("ks".into(), FieldMapping::Keyword { ignore_above: None });
+        props.insert(
+            "k".into(),
+            FieldMapping::Keyword {
+                ignore_above: None,
+                split_queries_on_whitespace: false,
+            },
+        );
+        props.insert(
+            "ks".into(),
+            FieldMapping::Keyword {
+                ignore_above: None,
+                split_queries_on_whitespace: false,
+            },
+        );
         props.insert("i".into(), FieldMapping::Long);
         props.insert("d".into(), FieldMapping::Double);
         props.insert("f".into(), FieldMapping::Float);

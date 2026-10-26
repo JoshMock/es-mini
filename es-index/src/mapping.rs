@@ -24,6 +24,9 @@ pub enum FieldMapping {
     Keyword {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ignore_above: Option<u32>,
+        /// Match queries on this field split their text on whitespace into terms.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        split_queries_on_whitespace: bool,
     },
     Long,
     Integer,
@@ -187,6 +190,7 @@ impl Index {
                         "keyword".to_owned(),
                         FieldMapping::Keyword {
                             ignore_above: Some(256),
+                            split_queries_on_whitespace: false,
                         },
                     )]
                     .into(),
@@ -194,6 +198,7 @@ impl Index {
             }
             Value::String(_) => FieldMapping::Keyword {
                 ignore_above: Some(256),
+                split_queries_on_whitespace: false,
             },
             Value::Bool(_) => FieldMapping::Boolean,
             Value::Number(n) if n.is_f64() => FieldMapping::Float,

@@ -1317,7 +1317,10 @@ mod tests {
         let m: Mappings = serde_json::from_value(raw.clone()).unwrap();
         assert_eq!(
             m.properties["tag"],
-            FieldMapping::Keyword { ignore_above: None }
+            FieldMapping::Keyword {
+                ignore_above: None,
+                split_queries_on_whitespace: false
+            }
         );
         assert_eq!(serde_json::to_value(&m).unwrap(), raw);
     }
@@ -1645,7 +1648,13 @@ mod tests {
         props.insert("n".into(), FieldMapping::Long);
         props.insert("d".into(), FieldMapping::Double);
         props.insert("f".into(), FieldMapping::Float);
-        props.insert("k".into(), FieldMapping::Keyword { ignore_above: None });
+        props.insert(
+            "k".into(),
+            FieldMapping::Keyword {
+                ignore_above: None,
+                split_queries_on_whitespace: false,
+            },
+        );
         props.insert("ok".into(), FieldMapping::Boolean);
         let date = FieldMapping::Date {
             format: None,
@@ -1749,7 +1758,13 @@ mod tests {
         let mut ix = Index::default();
         let props = &mut ix.mappings.properties;
         props.insert("t".into(), FieldMapping::Text { store: false });
-        props.insert("k".into(), FieldMapping::Keyword { ignore_above: None });
+        props.insert(
+            "k".into(),
+            FieldMapping::Keyword {
+                ignore_above: None,
+                split_queries_on_whitespace: false,
+            },
+        );
         let long = vec!["fox"; 100].join(" ");
         ix.put("1", json!({"t": "fox fox dog", "k": ["a", "a", "b"]}));
         ix.put("2", json!({"t": ["fox", "a b c"]}));

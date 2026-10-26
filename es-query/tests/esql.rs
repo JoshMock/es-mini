@@ -5,9 +5,13 @@ use std::collections::BTreeMap;
 
 fn indices() -> BTreeMap<String, Index> {
     let mut i = Index::default();
-    i.mappings
-        .properties
-        .insert("name".into(), FieldMapping::Keyword { ignore_above: None });
+    i.mappings.properties.insert(
+        "name".into(),
+        FieldMapping::Keyword {
+            ignore_above: None,
+            split_queries_on_whitespace: false,
+        },
+    );
     i.mappings
         .properties
         .insert("age".into(), FieldMapping::Long);
@@ -163,9 +167,13 @@ fn from_aliases_and_multiple_sources_with_filters() {
     use es_index::aliases::Alias;
     let mut all = indices();
     let mut more = Index::default();
-    more.mappings
-        .properties
-        .insert("name".into(), FieldMapping::Keyword { ignore_above: None });
+    more.mappings.properties.insert(
+        "name".into(),
+        FieldMapping::Keyword {
+            ignore_above: None,
+            split_queries_on_whitespace: false,
+        },
+    );
     more.put("9", json!({"name": "dee", "age": 50}));
     more.aliases.insert(
         "crowd".into(),
@@ -252,12 +260,20 @@ fn implicit_limit_is_1000_and_explicit_limit_up_to_10000() {
 fn conflicting() -> BTreeMap<String, Index> {
     let mut all = indices();
     let mut b = Index::default();
-    b.mappings
-        .properties
-        .insert("age".into(), FieldMapping::Keyword { ignore_above: None });
-    b.mappings
-        .properties
-        .insert("name".into(), FieldMapping::Keyword { ignore_above: None });
+    b.mappings.properties.insert(
+        "age".into(),
+        FieldMapping::Keyword {
+            ignore_above: None,
+            split_queries_on_whitespace: false,
+        },
+    );
+    b.mappings.properties.insert(
+        "name".into(),
+        FieldMapping::Keyword {
+            ignore_above: None,
+            split_queries_on_whitespace: false,
+        },
+    );
     b.put("1", json!({"name": "dan", "age": "old"}));
     let mut c = Index::default();
     c.mappings.properties.insert(
@@ -1459,7 +1475,13 @@ fn from_reads_fields_like_doc_values() {
         },
     );
     p.insert("n".into(), FieldMapping::Long);
-    p.insert("k".into(), FieldMapping::Keyword { ignore_above: None });
+    p.insert(
+        "k".into(),
+        FieldMapping::Keyword {
+            ignore_above: None,
+            split_queries_on_whitespace: false,
+        },
+    );
     i.put(
         "1",
         json!({"d": "2019-03-15T09:30:00Z", "n": [9, 1, 9], "k": ["b", "a", "b"], "t": ["y", "x"]}),

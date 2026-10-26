@@ -4,9 +4,13 @@ use serde_json::{Value, json};
 
 fn index() -> Index {
     let mut i = Index::default();
-    i.mappings
-        .properties
-        .insert("tag".into(), FieldMapping::Keyword { ignore_above: None });
+    i.mappings.properties.insert(
+        "tag".into(),
+        FieldMapping::Keyword {
+            ignore_above: None,
+            split_queries_on_whitespace: false,
+        },
+    );
     i.put(
         "1",
         json!({"title": "The quick brown fox", "tag": "animal", "n": 5, "ok": true}),
@@ -946,7 +950,13 @@ fn match_phrase_prefix_expands_from_an_opened_index() {
 #[test]
 fn multi_match_combines_per_field_queries_by_type() {
     let mut idx = Index::default();
-    (idx.mappings.properties).insert("tag".into(), FieldMapping::Keyword { ignore_above: None });
+    (idx.mappings.properties).insert(
+        "tag".into(),
+        FieldMapping::Keyword {
+            ignore_above: None,
+            split_queries_on_whitespace: false,
+        },
+    );
     idx.put("1", json!({"title": "quick brown fox", "body": "lazy dog"}));
     idx.put(
         "2",
@@ -1065,7 +1075,13 @@ fn multi_match_scores_an_opened_index_like_memory() {
 fn query_string_parses_lucene_syntax() {
     let mut idx = Index::default();
     let props = &mut idx.mappings.properties;
-    props.insert("tag".into(), FieldMapping::Keyword { ignore_above: None });
+    props.insert(
+        "tag".into(),
+        FieldMapping::Keyword {
+            ignore_above: None,
+            split_queries_on_whitespace: false,
+        },
+    );
     props.insert("n".into(), FieldMapping::Integer);
     idx.put("1", json!({"title": "quick brown fox", "tag": "a", "n": 1}));
     idx.put("2", json!({"title": "lazy brown dog", "tag": "b", "n": 5}));
@@ -1197,4 +1213,24 @@ fn query_string_parses_lucene_syntax() {
             "{q}: {e:?}"
         );
     }
+}
+
+#[test]
+fn match_on_a_keyword_splitting_queries_on_whitespace_matches_any_word() {
+    let mut idx = Index::default();
+    idx.mappings.properties.insert(
+        "t".into(),
+        FieldMapping::Keyword {
+            ignore_above: None,
+            split_queries_on_whitespace: true,
+        },
+    );
+    idx.put("1", json!({"t": "foo"}));
+    idx.put("2", json!({"t": "foo bar"}));
+    let req = SearchRequest::parse(&json!({"query": {"match": {"t": "foo bar"}}})).unwrap();
+    let hits = search(&idx, &req).hits;
+    assert_eq!(
+        hits.iter().map(|h| h.id.to_owned()).collect::<Vec<_>>(),
+        ["1"]
+    );
 }

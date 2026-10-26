@@ -263,10 +263,22 @@ impl<'a> Searcher<'a> {
         (kind, path(literal))
     }
 
+    /// The terms a match query on `field` looks up: a keyword mapped with
+    /// `split_queries_on_whitespace` reads each word as a term.
+    fn match_terms(&self, field: &str, query: &str) -> Vec<String> {
+        match self.index.mappings.properties.get(field) {
+            Some(FieldMapping::Keyword {
+                split_queries_on_whitespace: true,
+                ..
+            }) => query.split_whitespace().map(str::to_owned).collect(),
+            _ => query_terms(self.kind(field).0, query),
+        }
+    }
+
     /// Precomputes BM25 statistics for every scored (field, term) in the query.
     fn gather(&mut self, q: &Query) {
         let (field, wanted) = match q {
-            Query::Match { field, query, .. } => (field, query_terms(self.kind(field).0, query)),
+            Query::Match { field, query, .. } => (field, self.match_terms(field, query)),
             Query::MatchPhrase { .. } | Query::MatchPhrasePrefix { .. } => {
                 let Some((field, terms, _)) = self.phrase(q) else {
                     return;
@@ -354,8 +366,7 @@ impl<'a> Searcher<'a> {
                 ..
             } => self.number_docs(field, [gt, gte, lt, lte].map(Option::as_ref), exact),
             Query::Match { field, query, and } => {
-                let (kind, _) = self.kind(field);
-                self.term_docs(field, &query_terms(kind, query), *and, exact)
+                self.term_docs(field, &self.match_terms(field, query), *and, exact)
             }
             // documents with a term of each position, whatever their positions
             Query::MatchPhrase { .. } | Query::MatchPhrasePrefix { .. } if !exact => {
@@ -428,7 +439,7 @@ impl<'a> Searcher<'a> {
                 ..
             } => numbers(field, [gt, gte, lt, lte].map(Option::as_ref)),
             Query::Match { field, query, and } => {
-                lookup(field, &query_terms(self.kind(field).0, query), *and)
+                lookup(field, &self.match_terms(field, query), *and)
             }
             Query::MatchPhrase { .. } | Query::MatchPhrasePrefix { .. } => {
                 let (field, terms, _) = self.phrase(q)?;
@@ -683,7 +694,7 @@ impl<'a> Searcher<'a> {
         match q {
             Query::MatchAll => Some(1.0),
             Query::Match { field, query, and } => {
-                let wanted = query_terms(self.kind(field).0, query);
+                let wanted = self.match_terms(field, query);
                 self.score_terms(field, &wanted, *and, id, d)
             }
             Query::Term { field, value } if field == "_id" => (text(value) == id).then_some(1.0),
@@ -853,7 +864,7 @@ impl<'a> Searcher<'a> {
             }
             Query::Term { field, value } => terms(field, &[text(value)], true),
             Query::Match { field, query, and } => {
-                terms(field, &query_terms(self.kind(field).0, query), *and)
+                terms(field, &self.match_terms(field, query), *and)
             }
             // ponytail: postings positions are not read; scores come from the source
             Query::MatchPhrase { .. } | Query::MatchPhrasePrefix { .. } => None,
@@ -1119,7 +1130,10 @@ impl<'a> Searcher<'a> {
                     | M::Byte
                     | M::Double
                     | M::Boolean
-                    | M::Keyword { ignore_above: None },
+                    | M::Keyword {
+                        ignore_above: None,
+                        split_queries_on_whitespace: false,
+                    },
                 ) => Some(Some(self.index.disk_values(&f.field))),
                 _ => None,
             })
@@ -1495,7 +1509,13 @@ mod tests {
         let mut ix = Index::default();
         let props = &mut ix.mappings.properties;
         props.insert("title".into(), FieldMapping::Text { store: false });
-        props.insert("tag".into(), FieldMapping::Keyword { ignore_above: None });
+        props.insert(
+            "tag".into(),
+            FieldMapping::Keyword {
+                ignore_above: None,
+                split_queries_on_whitespace: false,
+            },
+        );
         props.insert("ok".into(), FieldMapping::Boolean);
         for i in 0..50 {
             let tag = if i % 10 == 0 { "ten" } else { "other" };
@@ -1674,7 +1694,13 @@ mod tests {
         let mut ix = Index::default();
         let props = &mut ix.mappings.properties;
         props.insert("title".into(), FieldMapping::Text { store: false });
-        props.insert("tag".into(), FieldMapping::Keyword { ignore_above: None });
+        props.insert(
+            "tag".into(),
+            FieldMapping::Keyword {
+                ignore_above: None,
+                split_queries_on_whitespace: false,
+            },
+        );
         props.insert("n".into(), FieldMapping::Long);
         props.insert("ok".into(), FieldMapping::Boolean);
         for i in 0..30 {
@@ -1745,7 +1771,13 @@ mod tests {
         let mut ix = Index::default();
         let props = &mut ix.mappings.properties;
         props.insert("title".into(), FieldMapping::Text { store: false });
-        props.insert("tag".into(), FieldMapping::Keyword { ignore_above: None });
+        props.insert(
+            "tag".into(),
+            FieldMapping::Keyword {
+                ignore_above: None,
+                split_queries_on_whitespace: false,
+            },
+        );
         props.insert("n".into(), FieldMapping::Long);
         for i in 0..30 {
             let title = format!("doc {i} {}", "fox ".repeat(i % 4));
@@ -1788,7 +1820,10 @@ mod tests {
     #[test]
     fn keyword_scores_count_a_term_once() {
         let mut ix = Index::default();
-        let keyword = FieldMapping::Keyword { ignore_above: None };
+        let keyword = FieldMapping::Keyword {
+            ignore_above: None,
+            split_queries_on_whitespace: false,
+        };
         ix.mappings.properties.insert("tag".into(), keyword);
         ix.put("1", json!({"tag": ["a", "a", "b"]}));
         ix.put("2", json!({"tag": "a"}));

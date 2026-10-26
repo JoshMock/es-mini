@@ -10,7 +10,10 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The default `value_type` of an unmapped field.
-pub(super) static KEYWORD: FieldMapping = FieldMapping::Keyword { ignore_above: None };
+pub(super) static KEYWORD: FieldMapping = FieldMapping::Keyword {
+    ignore_above: None,
+    split_queries_on_whitespace: false,
+};
 
 /// A `terms` request.
 #[derive(Debug, Clone, PartialEq)]
@@ -650,7 +653,13 @@ mod tests {
     fn index() -> Index {
         let mut ix = Index::default();
         let props = &mut ix.mappings.properties;
-        props.insert("k".into(), FieldMapping::Keyword { ignore_above: None });
+        props.insert(
+            "k".into(),
+            FieldMapping::Keyword {
+                ignore_above: None,
+                split_queries_on_whitespace: false,
+            },
+        );
         props.insert("n".into(), FieldMapping::Long);
         props.insert("d".into(), FieldMapping::Double);
         props.insert("b".into(), FieldMapping::Boolean);
@@ -841,7 +850,13 @@ mod tests {
         // from Elasticsearch's terms.yml "Partitioned string/integer test"
         let mut ix = Index::default();
         let props = &mut ix.mappings.properties;
-        props.insert("k".into(), FieldMapping::Keyword { ignore_above: None });
+        props.insert(
+            "k".into(),
+            FieldMapping::Keyword {
+                ignore_above: None,
+                split_queries_on_whitespace: false,
+            },
+        );
         props.insert("n".into(), FieldMapping::Long);
         ix.put("1", json!({"k": "abc", "n": 1234}));
         ix.put("2", json!({"k": "bcd", "n": 5678}));
@@ -912,7 +927,10 @@ mod tests {
         // each shard returns its top shard_size terms; the error is their last counts' sum
         let (mut one, mut two) = (Index::default(), Index::default());
         for (ix, ks) in [(&mut one, ["a", "a", "b"]), (&mut two, ["b", "b", "a"])] {
-            let kw = FieldMapping::Keyword { ignore_above: None };
+            let kw = FieldMapping::Keyword {
+                ignore_above: None,
+                split_queries_on_whitespace: false,
+            };
             ix.mappings.properties.insert("k".into(), kw);
             for (i, k) in ks.iter().enumerate() {
                 ix.put(&i.to_string(), json!({ "k": k }));
