@@ -1009,8 +1009,7 @@ mod tests {
 
     /// Field "plain" (positions, no offsets or payloads) of tests/data/positions, written by
     /// Lucene 10.5.1. Its postings come last in `.doc` (fields go by name), whose skip data
-    /// points into `.pos`. `.pos` itself differs (Lucene patches PFor exceptions), so it is
-    /// checked by reading it back.
+    /// points into `.pos`, which must match too.
     #[test]
     fn writes_the_positions_lucene_writes() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/positions");
@@ -1033,6 +1032,13 @@ mod tests {
         header.index_header("Lucene104PostingsWriterDoc", 0, &r.seg.info.id, &suffix);
         let lucene = r.cfs_file(&format!("_{suffix}.doc")).unwrap();
         let body = &ours.doc[header.0.len()..ours.doc.len() - FOOTER_LEN as usize];
+        let lucene = &lucene[..lucene.len() - FOOTER_LEN as usize];
+        assert!(body.len() > 100, "{}", body.len());
+        assert_eq!(&lucene[lucene.len() - body.len()..], body);
+        let mut header = crate::output::Output::default();
+        header.index_header("Lucene104PostingsWriterPos", 0, &r.seg.info.id, &suffix);
+        let lucene = r.cfs_file(&format!("_{suffix}.pos")).unwrap();
+        let body = &ours.pos[header.0.len()..ours.pos.len() - FOOTER_LEN as usize];
         let lucene = &lucene[..lucene.len() - FOOTER_LEN as usize];
         assert!(body.len() > 100, "{}", body.len());
         assert_eq!(&lucene[lucene.len() - body.len()..], body);

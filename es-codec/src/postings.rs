@@ -397,18 +397,45 @@ fn pack_lane(ints: &[u32], words: &mut [u32], word_bits: u32, bits: u32) {
     }
 }
 
-/// `PForUtil.encode` without exceptions: every value gets as many bits as the widest needs.
+/// `PForUtil.encode`: up to 7 values too wide for the block keep their high bits (at most 8) as
+/// patched exceptions, so a few huge freqs do not widen the whole block.
 fn write_pfor(out: &mut Output, ints: &[u32]) {
-    let bits = 32 - ints.iter().fold(0, |a, d| a | d).leading_zeros();
-    if ints.iter().all(|i| *i == ints[0]) {
-        out.byte(0);
+    const MAX_EXCEPTIONS: usize = 7;
+    let bits_of = |v: u32| (32 - v.leading_zeros()).max(1);
+    let mut histogram = [0usize; 33];
+    ints.iter()
+        .for_each(|&v| histogram[bits_of(v) as usize] += 1);
+    let max_bits = ints.iter().map(|&v| bits_of(v)).max().unwrap_or(1);
+    assert!(max_bits < 32, "freqs are below 2^31");
+    let (mut bits, mut exceptions, mut cumulative) = (max_bits, 0, 0);
+    for b in (max_bits.saturating_sub(8)..=max_bits).rev() {
+        if cumulative > MAX_EXCEPTIONS {
+            break;
+        }
+        (bits, exceptions) = (b, cumulative);
+        cumulative += histogram[b as usize];
+    }
+    let mut ints = ints.to_vec();
+    let mut patches = Vec::with_capacity(exceptions * 2);
+    for (i, v) in ints.iter_mut().enumerate() {
+        if *v >> bits != 0 {
+            patches.extend([i as u8, (*v >> bits) as u8]);
+            *v &= mask(bits);
+        }
+    }
+    if ints.iter().all(|&i| i == ints[0]) && max_bits <= 8 {
+        patches
+            .iter_mut()
+            .skip(1)
+            .step_by(2)
+            .for_each(|p| *p <<= bits);
+        out.byte((exceptions << 5) as u8);
         out.vint(ints[0] as i32);
     } else {
-        // ponytail: no patched exceptions, a few huge freqs widen the whole block.
-        assert!(bits < 32, "freqs are below 2^31");
-        out.byte(bits as u8);
-        write_for(out, ints, bits);
+        out.byte((exceptions << 5) as u8 | bits as u8);
+        write_for(out, &ints, bits);
     }
+    out.bytes(&patches);
 }
 
 fn read_vint15(input: &mut DataInput) -> Result<i32> {
@@ -765,6 +792,36 @@ mod tests {
             let mut out = Output::default();
             write_for(&mut out, &ints, bits);
             assert_eq!(read_for(&mut DataInput::new(&out.0), bits).unwrap(), ints);
+        }
+    }
+
+    #[test]
+    fn huge_freqs_become_patched_exceptions() {
+        // (block, expected token, expected size): small values plus a few wide outliers keep
+        // the narrow width and patch the outliers' high bits; too many outliers widen the
+        // block; equal small values with outliers patch over a single vint.
+        let block = |base: u32, outliers: &[(usize, u32)]| {
+            let mut b: Vec<u32> = (0..BLOCK_SIZE as u32).map(|i| base + i % 3).collect();
+            outliers.iter().for_each(|&(i, v)| b[i] = v);
+            b
+        };
+        let mut flat = vec![1; BLOCK_SIZE];
+        flat[9] = 201;
+        let cases = [
+            (block(1, &[(5, 600), (200, 1000)]), 2 << 5 | 2, 1 + 64 + 4),
+            (
+                block(1, &(0..8).map(|i| (i, 300)).collect::<Vec<_>>()),
+                9,
+                1 + 288,
+            ),
+            (flat, 1 << 5, 1 + 1 + 2),
+            (vec![1000; BLOCK_SIZE], 10, 1 + 320),
+        ];
+        for (ints, token, len) in cases {
+            let mut out = Output::default();
+            write_pfor(&mut out, &ints);
+            assert_eq!((out.0[0], out.0.len()), (token, len));
+            assert_eq!(read_pfor(&mut DataInput::new(&out.0)).unwrap(), ints);
         }
     }
 }
