@@ -894,12 +894,6 @@ pub fn run(indices: &BTreeMap<String, Index>, query: &str) -> Result<Response, E
         }
     };
     let targets = aliases::resolve_data(indices, &sources.join(",")).map_err(unknown_index)?;
-    if targets.is_empty() {
-        return Err(EsqlError::Verification(format!(
-            "Unknown index [{}]",
-            sources.join(",")
-        )));
-    }
     // Per column: its ES|QL type, and the indices for each mapping type (named like ES|QL does).
     let mut mapped: BTreeMap<String, (String, BTreeMap<String, Vec<String>>)> = BTreeMap::new();
     let mut docs = Vec::new();
@@ -1055,6 +1049,20 @@ pub fn run(indices: &BTreeMap<String, Index>, query: &str) -> Result<Response, E
         rows.truncate(DEFAULT_LIMIT);
     }
     let (documents_found, values_loaded) = load_counts(&groups, &cmds, &cols, &types);
+    if targets.is_empty() {
+        // Wildcards that match nothing: Elasticsearch answers with a placeholder column.
+        return Ok(Response {
+            columns: vec![Column {
+                name: "<no-fields>".into(),
+                r#type: "null".into(),
+                original_types: None,
+                suggested_cast: None,
+            }],
+            values: Vec::new(),
+            documents_found,
+            values_loaded,
+        });
+    }
     Ok(Response {
         documents_found,
         values_loaded,

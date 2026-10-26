@@ -115,6 +115,17 @@ fn missing_indices_match_elasticsearch() {
         EsqlError::IndexNotFound("nope2".into())
     );
     assert!(run(&indices(), "FROM nope*, people").is_ok());
+    // Wildcards that match nothing give no rows and a placeholder column.
+    let r = q("FROM nope*");
+    assert_eq!(
+        (col_names(&r), r.columns[0].r#type.as_str()),
+        (vec!["<no-fields>"], "null")
+    );
+    assert!(r.values.is_empty());
+    assert_eq!(
+        err("FROM nope* | KEEP x"),
+        EsqlError::Verification("Found 1 problem\nline 1:19: Unknown column [x]".into())
+    );
 }
 
 #[test]
@@ -181,10 +192,6 @@ fn from_aliases_and_multiple_sources_with_filters() {
         names("FROM people, more | WHERE age > 40 | KEEP name | SORT name"),
         [json!("cid"), json!("dee")]
     );
-    assert!(matches!(
-        run(&all, "FROM nope*"),
-        Err(EsqlError::Verification(_))
-    ));
 }
 
 #[test]
