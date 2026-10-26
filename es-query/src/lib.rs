@@ -1347,7 +1347,7 @@ pub fn check_sortable(targets: &[Target], req: &SearchRequest) -> Result<(), Que
                         Some(FieldMapping::TextKeyword { .. })
                     )
                 })
-                // ponytail: object fields are not mapped here, so accept any path present in a source
+                // ponytail: a path a source has but the mappings lack is accepted; ES refuses it
                 || index
                     .docs()
                     .any(|(_, d)| !values(&d.source, &f.field).is_empty());
@@ -1536,8 +1536,9 @@ fn cmp_sorted(sort: &[SortField], (a, sa): (&[Value], f64), (b, sb): (&[Value], 
         })
 }
 
+/// [`search_many`] of one index; panics where it fails (e.g. on a date that does not parse).
 pub fn search<'a>(index: &'a Index, req: &SearchRequest) -> SearchResult<'a> {
-    search_many(&[("", index, None)], req).expect("no alias filter to parse")
+    search_many(&[("", index, None)], req).expect("search_many failed")
 }
 
 /// Searches several indices and merges the hits. Each index is scored with its own statistics,
@@ -1643,8 +1644,9 @@ pub fn search_many<'a>(
     })
 }
 
+/// [`count_many`] of one index; panics where it fails (e.g. on a date that does not parse).
 pub fn count(index: &Index, q: &Query) -> usize {
-    count_many(&[("", index, None)], q).expect("no alias filter to parse")
+    count_many(&[("", index, None)], q).expect("count_many failed")
 }
 
 /// Counts from postings and doc values where they answer the query exactly, on disk and in
@@ -1727,7 +1729,6 @@ fn exact<K: Copy + Eq + std::hash::Hash>(
     }
 }
 
-/// Terms a match query looks up: analyzed for text fields, verbatim otherwise.
 /// How often the terms with positions `lists` occur in a row: Lucene's ExactPhraseMatcher.
 fn exact_phrase_freq(lists: &[Vec<u32>]) -> f64 {
     let at = |i: usize, p: u32| lists[i].binary_search(&(p + i as u32)).is_ok();
@@ -1783,6 +1784,7 @@ fn sloppy_phrase_freq(lists: &[Vec<u32>], slop: u32) -> f64 {
     f64::from(freq)
 }
 
+/// Terms a match query looks up: analyzed for text fields, verbatim otherwise.
 fn query_terms(kind: Kind, query: &str) -> Vec<String> {
     match kind {
         Kind::Text => Analyzer::Standard.analyze(query),
