@@ -97,6 +97,26 @@ fn sort_nulls_and_multiple_keys() {
     );
 }
 
+/// As a live Elasticsearch 9.5.5 answered: a missing index is a verification problem only when
+/// the whole expression matches nothing.
+#[test]
+fn missing_indices_match_elasticsearch() {
+    let err = |query| run(&indices(), query).unwrap_err();
+    assert_eq!(
+        err("FROM nope, nope2"),
+        EsqlError::Verification("Unknown index [nope,nope2]".into())
+    );
+    assert_eq!(
+        err("FROM nope*, nope"),
+        EsqlError::Verification("Unknown index [nope*,nope]".into())
+    );
+    assert_eq!(
+        err("FROM nope2, people, nope"),
+        EsqlError::IndexNotFound("nope2".into())
+    );
+    assert!(run(&indices(), "FROM nope*, people").is_ok());
+}
+
 #[test]
 fn errors() {
     for bad in [

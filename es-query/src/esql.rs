@@ -28,6 +28,8 @@ pub enum EsqlError {
     Verification(String),
     /// A source names a closed index (`index_closed_exception`).
     IndexClosed(String),
+    /// A source names a missing index while others match (`index_not_found_exception`).
+    IndexNotFound(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -873,10 +875,19 @@ pub fn run(indices: &BTreeMap<String, Index>, query: &str) -> Result<Response, E
         follow: "<EOF>",
     }
     .query()?;
+    // Like Elasticsearch: a missing index is only "unknown" when no source matches anything.
+    let none_match = || {
+        sources
+            .iter()
+            .all(|s| !aliases::resolve_data(indices, s).is_ok_and(|t| !t.is_empty()))
+    };
     let unknown_index = |e| match e {
         ResolveError::IndexClosed(i) => EsqlError::IndexClosed(i),
-        ResolveError::IndexNotFound(i)
-        | ResolveError::NoWriteIndex(i)
+        ResolveError::IndexNotFound(i) if !none_match() => EsqlError::IndexNotFound(i),
+        ResolveError::IndexNotFound(_) => {
+            EsqlError::Verification(format!("Unknown index [{}]", sources.join(",")))
+        }
+        ResolveError::NoWriteIndex(i)
         | ResolveError::InvalidIndexName(i)
         | ResolveError::AliasNotAllowed(i) => {
             EsqlError::Verification(format!("Unknown index [{i}]"))

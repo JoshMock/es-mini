@@ -544,6 +544,7 @@ pub async fn esql(
         EsqlError::Parse(m) => AppError::ParsingException(m),
         EsqlError::Verification(m) => AppError::Verification(m),
         EsqlError::IndexClosed(i) => AppError::IndexClosed(i),
+        EsqlError::IndexNotFound(i) => AppError::IndexNotFound(i),
     })?;
     Ok(Json(json!({
         "took": start.elapsed().as_millis() as u64,
