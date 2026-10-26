@@ -248,15 +248,15 @@ impl Index {
         }
     }
 
-    /// Removes a live document, returning its source if it was in memory: one on disk stays
-    /// counted in its segment's statistics, as a deleted document does in Lucene.
+    /// Removes a live document, returning its source if no segment holds it: one in a segment
+    /// stays counted in its statistics, as a deleted document does in Lucene.
     fn take(&mut self, id: &str) -> Option<Option<Value>> {
         if let Some(d) = self.docs.remove(id) {
             self.postings
                 .get_mut()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .remove(id);
-            return Some(Some(d.source));
+            return Some((d.seq_no >= self.persisted).then_some(d.source));
         }
         self.disk.as_mut()?.remove(id).map(|_| None)
     }

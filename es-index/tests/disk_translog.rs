@@ -239,3 +239,23 @@ fn flushed_statistics_match_the_committed_segments() {
         stats(&indices["idx"])
     );
 }
+
+/// A committed document replaced in memory stays counted once, as a deleted document of its
+/// segment, not again as a superseded in-memory source.
+#[test]
+fn replacing_a_committed_document_counts_it_once() {
+    let dir = scratch("recount");
+    let mut ix = Index::default();
+    ix.settings.record_creation("idx");
+    ix.mappings
+        .properties
+        .insert("t".into(), FieldMapping::Text { store: false });
+    ix.put("a", json!({"t": "fox"}));
+    let mut indices = Indices::from([("idx".to_owned(), ix)]);
+    disk::persist(&dir, &mut indices).unwrap();
+    let ix = indices.get_mut("idx").unwrap();
+    ix.put("a", json!({"t": "cat"}));
+    let s = ix.field_stats("t", "t", true, &["fox".into()]).unwrap();
+    // The deleted "fox" in the segment, and "cat" in memory.
+    assert_eq!((s.docs, s.total_terms, s.doc_freq["fox"]), (2.0, 2.0, 1.0));
+}
