@@ -96,6 +96,12 @@ pub struct Mappings {
     /// The `_source` mapping section, e.g. `{"enabled": false}`.
     #[serde(default, rename = "_source", skip_serializing_if = "Option::is_none")]
     pub source: Option<Value>,
+    /// Whether dynamic strings may map as dates (default true).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub date_detection: Option<bool>,
+    /// Whether dynamic strings that parse as numbers map as `long` or `float` (default false).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub numeric_detection: Option<bool>,
     /// Leaf fields by dotted path (`obj.field`); JSON nests them in `properties` objects.
     #[serde(
         default,
@@ -140,11 +146,30 @@ impl Index {
             }
             // Array elements map in order; the first scalar wins.
             Value::Array(a) => return a.iter().for_each(|x| self.map_value(path, x)),
-            d @ Value::String(_) if parse_date_millis(d).is_some() => FieldMapping::Date {
-                format: None,
-                locale: None,
-                fields: BTreeMap::new(),
-            },
+            // Like Elasticsearch's DynamicFieldsBuilder: numeric strings are never dates.
+            // ponytail: Rust's f64 parse stands in for Java's Double.parseDouble (which also
+            // takes `1f`, hex and surrounding spaces, but not `inf`)
+            Value::String(s)
+                if self.mappings.numeric_detection == Some(true) && s.parse::<i64>().is_ok() =>
+            {
+                FieldMapping::Long
+            }
+            Value::String(s)
+                if self.mappings.numeric_detection == Some(true) && s.parse::<f64>().is_ok() =>
+            {
+                FieldMapping::Float
+            }
+            d @ Value::String(s)
+                if self.mappings.date_detection != Some(false)
+                    && s.parse::<f64>().is_err()
+                    && parse_date_millis(d).is_some() =>
+            {
+                FieldMapping::Date {
+                    format: None,
+                    locale: None,
+                    fields: BTreeMap::new(),
+                }
+            }
             Value::String(_)
                 if self.settings.get("index.mapping.dynamic_strings.auto_text")
                     != Some("false") =>

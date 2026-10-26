@@ -1211,6 +1211,32 @@ mod tests {
     }
 
     #[test]
+    fn numeric_and_date_detection() {
+        let doc = json!({"l": "-12", "f": "1.5", "y": "2024", "d": "2024-01-02", "s": "x"});
+        let detect = |mappings: Value| {
+            let mut i = Index {
+                mappings: serde_json::from_value(mappings.clone()).unwrap(),
+                ..Default::default()
+            };
+            assert_eq!(serde_json::to_value(&i.mappings).unwrap(), mappings);
+            i.map_dynamic(&doc);
+            let p = i.mappings.properties;
+            ["l", "f", "y", "d", "s"].map(|f| p[f].type_name())
+        };
+        // Strings that parse as numbers are never dates.
+        let (text, date) = ("text", "date");
+        assert_eq!(detect(json!({})), [text, text, text, date, text]);
+        assert_eq!(
+            detect(json!({"numeric_detection": true})),
+            ["long", "double", "long", date, text]
+        );
+        assert_eq!(
+            detect(json!({"date_detection": false})),
+            [text, text, text, text, text]
+        );
+    }
+
+    #[test]
     fn object_mappings_round_trip_through_dotted_paths() {
         let raw = json!({"properties": {
             "o": {"properties": {"a": {"type": "keyword"}, "b": {"properties": {"c": {"type": "long"}}}}}
@@ -1323,7 +1349,6 @@ mod tests {
         // The disk writer skips a date field whose values do not parse, so every string
         // map_dynamic detects as a date must parse.
         for (s, ms) in [
-            ("2024", 1_704_067_200_000),
             ("2024-01", 1_704_067_200_000),
             ("2024-01-02T03", 1_704_164_400_000),
             ("2024-01-02T03:04:05+01:00", 1_704_161_045_000),
