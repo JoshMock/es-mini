@@ -358,8 +358,8 @@ impl<'a> Searcher<'a> {
         }
     }
 
-    /// The in-memory documents `q` can match, from in-memory postings; `None` if it cannot
-    /// narrow them (numbers and ranges scan).
+    /// The in-memory documents `q` can match, from in-memory postings and numeric indices;
+    /// `None` if it cannot narrow them. Exact for term and match queries on other fields.
     fn memory_candidates(&self, q: &Query) -> Option<HashSet<String>> {
         let lookup = |field: &str, terms: &[String], all: bool| {
             let (kind, path) = self.kind(field);
@@ -368,10 +368,24 @@ impl<'a> Searcher<'a> {
                 _ => self.index.memory_docs(path, kind == Kind::Text, terms, all),
             }
         };
+        let numbers = |field: &str, bounds| {
+            let (_, path) = self.kind(field);
+            self.index.memory_numbers(field, path, bounds)
+        };
         match q {
             // An `_id` term matches the document's id, not a source field.
             Query::Term { field, value } if field == "_id" => Some(HashSet::from([text(value)])),
+            Query::Term { field, value } if self.kind(field).0 == Kind::Number => {
+                numbers(field, [None, Some(value), None, Some(value)])
+            }
             Query::Term { field, value } => lookup(field, &[text(value)], true),
+            Query::Range {
+                field,
+                gt,
+                gte,
+                lt,
+                lte,
+            } => numbers(field, [gt, gte, lt, lte].map(Option::as_ref)),
             Query::Match { field, query, and } => {
                 lookup(field, &query_terms(self.kind(field).0, query), *and)
             }
@@ -1253,6 +1267,7 @@ pub fn count_many(targets: &[Target], q: &Query) -> Result<usize, QueryError> {
         let (disk, memory) = index.live();
         let on_disk = exact(&q, &disk, &|c| s.disk_leaf(c));
         let in_memory = exact(&q, &memory, &|c| match c {
+            Query::Term { field, .. } if s.kind(field).0 == Kind::Number => None,
             Query::Term { .. } | Query::Match { .. } => {
                 let ids = s.memory_candidates(c)?;
                 Some(

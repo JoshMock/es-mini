@@ -5,10 +5,13 @@
 //! taken as exact strings, and built the first time a query needs them; writes then keep the
 //! built ones current. Terms come from [`field_terms`], which scoring uses too, so a document
 //! the postings leave out can never match.
+//!
+//! Numeric and date fields get a sorted index of their values (dates as epoch millis) for
+//! range and term queries, built and kept current the same way.
 
-use crate::analysis::Analyzer;
+use crate::{FieldMapping, analysis::Analyzer};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// A JSON scalar as the string ES would index (`5` → "5", `true` → "true").
 pub fn text(v: &Value) -> String {
@@ -119,9 +122,81 @@ impl Field {
     }
 }
 
-/// Built postings per (source path, analyzed).
+/// How a numeric or date field reads a value as a number.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Key {
+    Number,
+    /// Epoch millis, with the mapping's `format` and `locale`.
+    Date(Option<String>, Option<String>),
+}
+
+impl Key {
+    fn of(m: &FieldMapping) -> Option<Key> {
+        match m {
+            FieldMapping::Date { format, locale, .. }
+            | FieldMapping::DateNanos { format, locale } => {
+                Some(Key::Date(format.clone(), locale.clone()))
+            }
+            m if m.is_numeric() => Some(Key::Number),
+            _ => None,
+        }
+    }
+
+    /// `v` as a number, ordered like `f64::total_cmp` (Lucene's `doubleToSortableLong`).
+    fn read(&self, v: &Value) -> Option<i64> {
+        let x = match self {
+            Key::Number => v.as_f64().or_else(|| v.as_str()?.parse().ok())?,
+            Key::Date(format, locale) => {
+                crate::date_millis(format.as_deref(), locale.as_deref(), v)? as f64
+            }
+        };
+        let bits = x.to_bits() as i64;
+        Some(bits ^ ((bits >> 63) & i64::MAX))
+    }
+}
+
+/// The values of one numeric or date field, sorted.
+// ponytail: longs above 2^53 key as their nearest f64, so ranges narrow to a superset there
 #[derive(Debug, Default)]
-pub struct Postings(HashMap<(String, bool), Field>);
+struct Numbers {
+    docs: BTreeMap<i64, HashSet<String>>,
+    /// Live document id → its distinct values.
+    live: HashMap<String, HashSet<i64>>,
+}
+
+impl Numbers {
+    fn add(&mut self, id: &str, values: HashSet<i64>) {
+        for v in &values {
+            self.docs.entry(*v).or_default().insert(id.to_owned());
+        }
+        self.live.insert(id.to_owned(), values);
+    }
+
+    fn remove(&mut self, id: &str) {
+        for v in self.live.remove(id).into_iter().flatten() {
+            if let Some(ids) = self.docs.get_mut(&v) {
+                ids.remove(id);
+                if ids.is_empty() {
+                    self.docs.remove(&v);
+                }
+            }
+        }
+    }
+}
+
+fn keys(key: &Key, source: &Value, path: &str) -> HashSet<i64> {
+    values(source, path)
+        .into_iter()
+        .filter_map(|v| key.read(v))
+        .collect()
+}
+
+/// Built postings per (source path, analyzed), and numeric indices per (source path, key).
+#[derive(Debug, Default)]
+pub struct Postings(
+    HashMap<(String, bool), Field>,
+    HashMap<(String, Key), Numbers>,
+);
 
 impl Postings {
     /// The postings of `path`, built from `live` documents and `superseded` sources if new.
@@ -156,10 +231,14 @@ impl Postings {
         for ((path, analyzed), f) in &mut self.0 {
             f.add(id, field_terms(source, path, *analyzed), true);
         }
+        for ((path, key), n) in &mut self.1 {
+            n.add(id, keys(key, source, path));
+        }
     }
 
     pub(crate) fn remove(&mut self, id: &str) {
         self.0.values_mut().for_each(|f| f.remove(id));
+        self.1.values_mut().for_each(|n| n.remove(id));
     }
 }
 
@@ -188,6 +267,40 @@ impl crate::Index {
             let first = sets.next().unwrap_or_default();
             Some(sets.fold(first, |a, b| if all { &a & &b } else { &a | &b }))
         })
+    }
+
+    /// The in-memory documents with a value of numeric or date `field` (at source `path`)
+    /// within `[gt, gte, lt, lte]` (or at them: the bounds are inclusive), compared as numbers
+    /// (dates as instants); `None` for other fields, or for a bound that is not a number or
+    /// date of the field.
+    pub fn memory_numbers(
+        &self,
+        field: &str,
+        path: &str,
+        bounds: [Option<&Value>; 4],
+    ) -> Option<HashSet<String>> {
+        let key = Key::of(self.mappings.field(field)?)?;
+        let read = |b: Option<&Value>| b.map_or(Some(None), |b| key.read(b).map(Some));
+        let [gt, gte, lt, lte] = bounds.map(read);
+        // Inclusive bounds narrow to a superset; scoring checks each candidate.
+        let lo = gt?.max(gte?).unwrap_or(i64::MIN);
+        let hi = [lt?, lte?].into_iter().flatten().min().unwrap_or(i64::MAX);
+        if lo > hi {
+            return Some(HashSet::new());
+        }
+        let mut postings =
+            (self.postings.lock()).unwrap_or_else(std::sync::PoisonError::into_inner);
+        let numbers = (postings.1)
+            .entry((path.to_owned(), key))
+            .or_insert_with_key(|(path, key)| {
+                let mut n = Numbers::default();
+                for (id, d) in &self.docs {
+                    n.add(id, keys(key, &d.source, path));
+                }
+                n
+            });
+        let ids = numbers.docs.range(lo..=hi).flat_map(|(_, ids)| ids);
+        Some(ids.cloned().collect())
     }
 
     /// BM25 statistics of `field` (at source `path`) for `wanted` terms: those of the segments
@@ -278,6 +391,56 @@ mod tests {
         assert_eq!(ids(i.memory_docs("t", true, &["fox".into()], false)), ["4"]);
         assert_eq!(ids(i.memory_docs("t", true, &["cat".into()], false)), ["1"]);
         assert!(ids(i.memory_docs("t", true, &["lazy".into()], false)).is_empty());
+    }
+
+    #[test]
+    fn numeric_ranges_narrow_memory_docs() {
+        let mappings = json!({"properties": {
+            "n": {"type": "long"},
+            "d": {"type": "date"},
+            "k": {"type": "keyword"},
+        }});
+        let mut i = Index {
+            mappings: serde_json::from_value(mappings).unwrap(),
+            ..Index::default()
+        };
+        i.put("1", json!({"n": 5, "d": "2024-01-01T00:00:00Z"}));
+        i.put(
+            "2",
+            json!({"n": [10, 30], "d": "2024-01-01T01:00:00+02:00"}),
+        );
+        i.put("3", json!({"n": "20", "d": 1704067200001i64}));
+        i.put("4", json!({"k": "x"}));
+        let range = |i: &Index, f: &str, b: [Option<serde_json::Value>; 4]| {
+            ids(i.memory_numbers(f, f, b.each_ref().map(Option::as_ref)))
+        };
+        let (n, s) = (|x: i64| Some(json!(x)), |x: &str| Some(json!(x)));
+        assert_eq!(range(&i, "n", [None, n(10), None, n(20)]), ["2", "3"]);
+        // Bounds are inclusive: scoring, not the index, leaves out 2's values at them.
+        assert_eq!(range(&i, "n", [n(10), None, n(30), None]), ["2", "3"]);
+        assert_eq!(range(&i, "n", [None, s("20"), None, s("20")]), ["3"]);
+        // Dates compare as instants, whatever their notation: 2 is 23:00 the day before.
+        assert_eq!(
+            range(&i, "d", [None, s("2024-01-01"), None, None]),
+            ["1", "3"]
+        );
+        assert_eq!(
+            range(&i, "d", [None, None, None, s("2023-12-31T23:30:00Z")]),
+            ["2"]
+        );
+        // Writes keep a built index current.
+        i.put("1", json!({"n": 15}));
+        i.delete("2");
+        assert_eq!(range(&i, "n", [None, n(10), None, n(20)]), ["1", "3"]);
+        // Fields that are not numbers or dates, and bounds that are not, cannot narrow.
+        assert_eq!(
+            i.memory_numbers("k", "k", [None, Some(&json!("x")), None, None]),
+            None
+        );
+        assert_eq!(
+            i.memory_numbers("n", "n", [None, Some(&json!("x")), None, None]),
+            None
+        );
     }
 
     /// Like Elasticsearch's soft deletes, replaced and deleted docs still count: merges keep
