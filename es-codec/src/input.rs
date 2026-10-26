@@ -92,6 +92,24 @@ impl<'a> DataInput<'a> {
         String::from_utf8(self.read_bytes(n)?.to_vec()).or_else(|_| err("invalid UTF-8 string"))
     }
 
+    /// Elasticsearch's `StreamInput.readString`: a vint count of UTF-16 units, each in one to
+    /// three bytes (surrogates encoded separately).
+    pub fn read_es_string(&mut self) -> Result<String> {
+        let n = self.read_len()?;
+        let mut units = Vec::with_capacity(n.min(self.remaining()));
+        for _ in 0..n {
+            let b = u16::from(self.read_byte()?);
+            let mut next = || Ok::<_, crate::Error>(u16::from(self.read_byte()?) & 0x3f);
+            units.push(match b >> 4 {
+                0..=7 => b,
+                12 | 13 => (b & 0x1f) << 6 | next()?,
+                14 => (b & 0x0f) << 12 | next()? << 6 | next()?,
+                _ => return err(format!("invalid string byte {b:#x}")),
+            });
+        }
+        String::from_utf16(&units).or_else(|_| err("invalid UTF-16 string"))
+    }
+
     pub fn read_set_of_strings(&mut self) -> Result<BTreeSet<String>> {
         (0..self.read_len()?).map(|_| self.read_string()).collect()
     }
@@ -122,6 +140,15 @@ mod tests {
         assert_eq!(i.read_vint().unwrap(), -1);
         assert_eq!(i.read_string().unwrap(), "hi");
         assert!(i.read_byte().is_err());
+    }
+
+    #[test]
+    fn elasticsearch_strings_count_utf16_units() {
+        let bytes = [4, 0xc3, 0xa9, 0xed, 0xa0, 0xbd, 0xed, 0xb8, 0x80, b'a'];
+        assert_eq!(DataInput::new(&bytes).read_es_string().unwrap(), "é😀a");
+        let mut out = crate::output::Output::default();
+        out.es_string("é😀a");
+        assert_eq!(out.0, bytes);
     }
 
     #[test]

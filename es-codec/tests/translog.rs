@@ -11,6 +11,15 @@ fn data(name: &str) -> Vec<u8> {
     .unwrap()
 }
 
+/// tests/data/es-translog-records, written by tests/gen/gen_translog.sh.
+fn records() -> Vec<u8> {
+    std::fs::read(format!(
+        "{}/tests/data/es-translog-records/translog-2.tlog",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap()
+}
+
 fn index(id: &str, source: &str, seq_no: i64, version: i64) -> Op {
     Op::Index {
         id: id.into(),
@@ -18,6 +27,7 @@ fn index(id: &str, source: &str, seq_no: i64, version: i64) -> Op {
         seq_no,
         version,
         primary_term: 1,
+        routing: None,
     }
 }
 
@@ -75,4 +85,46 @@ fn reading_stops_at_a_torn_last_record() {
     let file = data("translog-2.tlog");
     let (_, ops) = translog::read(&file[..file.len() - 3]).unwrap();
     assert_eq!(ops, expected()[..5]);
+}
+
+#[test]
+fn reads_and_writes_routing_and_no_ops() {
+    let file = records();
+    // header: magic(4) + string(9) + version(4) + len(4) + uuid(22) + term(8) + crc(4)
+    let start = translog::header(std::str::from_utf8(&file[21..43]).unwrap(), 1).len();
+    let reason = "java.lang.IllegalArgumentException: Document contains at least one immense term \
+                  in field=\"w\"";
+    let mut ops = vec![
+        Op::Index {
+            id: "r1".into(),
+            source: br#"{"a":1}"#.to_vec(),
+            seq_no: 0,
+            version: 1,
+            primary_term: 1,
+            routing: Some("user1".into()),
+        },
+        Op::Delete {
+            id: "gone".into(),
+            seq_no: 1,
+            version: 1,
+            primary_term: 1,
+        },
+    ];
+    let encoded: Vec<u8> = ops.iter().flat_map(translog::encode).collect();
+    let no_op = 4 + i32::from_be_bytes(file[start + encoded.len()..][..4].try_into().unwrap());
+    let end = start + encoded.len() + no_op as usize;
+    let (_, read) = translog::read(&file[..end]).unwrap();
+    let Some(Op::NoOp {
+        seq_no: 2,
+        primary_term: 1,
+        reason: r,
+    }) = read.get(2)
+    else {
+        panic!("{:?}", read.get(2));
+    };
+    assert!(r.starts_with(reason), "{r}");
+    ops.push(read[2].clone());
+    assert_eq!(read, ops);
+    let encoded: Vec<u8> = ops.iter().flat_map(translog::encode).collect();
+    assert_eq!(encoded, file[start..end]);
 }

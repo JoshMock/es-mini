@@ -1,12 +1,13 @@
 //! Elasticsearch translog generations (`translog-N.tlog`) and their checkpoint
 //! (`translog.ckp`), in the format Elasticsearch 9.5.5 writes: a header, then length-prefixed,
-//! CRC32-checked index and delete operations (`Translog.Index`/`Delete`, serialization formats
-//! 12 and 8).
+//! CRC32-checked operations (`Translog.Index`/`Delete`/`NoOp`; index and delete in serialization
+//! formats 12 and 8).
 
 use crate::{Error, Result, codec_util::crc32, err, input::DataInput, output::Output};
 
 const INDEX: u8 = 2;
 const DELETE: u8 = 3;
+const NO_OP: u8 = 4;
 /// `Translog.Index.FORMAT_REORDERED` and `Translog.Delete.FORMAT_REORDERED`.
 const INDEX_FORMAT: i32 = 12;
 const DELETE_FORMAT: i32 = 8;
@@ -20,6 +21,7 @@ pub enum Op {
         seq_no: i64,
         version: i64,
         primary_term: i64,
+        routing: Option<String>,
     },
     Delete {
         id: String,
@@ -27,12 +29,20 @@ pub enum Op {
         version: i64,
         primary_term: i64,
     },
+    /// A sequence number that holds no document (e.g. one Lucene rejected after it was assigned).
+    NoOp {
+        seq_no: i64,
+        primary_term: i64,
+        reason: String,
+    },
 }
 
 impl Op {
     pub fn seq_no(&self) -> i64 {
         match self {
-            Op::Index { seq_no, .. } | Op::Delete { seq_no, .. } => *seq_no,
+            Op::Index { seq_no, .. } | Op::Delete { seq_no, .. } | Op::NoOp { seq_no, .. } => {
+                *seq_no
+            }
         }
     }
 }
@@ -81,6 +91,7 @@ pub fn encode(op: &Op) -> Vec<u8> {
             seq_no,
             version,
             primary_term,
+            routing,
         } => {
             body.byte(INDEX);
             body.vint(INDEX_FORMAT);
@@ -91,7 +102,13 @@ pub fn encode(op: &Op) -> Vec<u8> {
             let uid = crate::uid::encode_id(id);
             body.vint(uid.len() as i32);
             body.bytes(&uid);
-            body.byte(0); // no routing
+            match routing {
+                Some(r) => {
+                    body.byte(1);
+                    body.es_string(r);
+                }
+                None => body.byte(0),
+            }
             body.vint(source.len() as i32);
             body.bytes(source);
         }
@@ -109,6 +126,16 @@ pub fn encode(op: &Op) -> Vec<u8> {
             let uid = crate::uid::encode_id(id);
             body.vint(uid.len() as i32);
             body.bytes(&uid);
+        }
+        Op::NoOp {
+            seq_no,
+            primary_term,
+            reason,
+        } => {
+            body.byte(NO_OP);
+            body.be_long(*seq_no);
+            body.be_long(*primary_term);
+            body.es_string(reason);
         }
     }
     let crc = crc32(&body.0);
@@ -190,6 +217,13 @@ pub fn read(file: &[u8]) -> Result<(Header, Vec<Op>)> {
 fn decode(body: &[u8]) -> Result<Op> {
     let input = &mut DataInput::new(body);
     let kind = input.read_byte()?;
+    if kind == NO_OP {
+        return Ok(Op::NoOp {
+            seq_no: input.read_be_long()?,
+            primary_term: input.read_be_long()?,
+            reason: input.read_es_string()?,
+        });
+    }
     let format = input.read_vint()?;
     let (version, seq_no, primary_term) = (
         input.read_be_long()?,
@@ -201,9 +235,10 @@ fn decode(body: &[u8]) -> Result<Op> {
             input.read_be_long()?; // auto-generated id timestamp
             let n = input.read_len()?;
             let id = crate::uid::decode_id(input.read_bytes(n)?);
-            if input.read_byte()? != 0 {
-                return err("translog operations with routing are not supported");
-            }
+            let routing = match input.read_byte()? {
+                0 => None,
+                _ => Some(input.read_es_string()?),
+            };
             let n = input.read_len()?;
             Ok(Op::Index {
                 id,
@@ -211,6 +246,7 @@ fn decode(body: &[u8]) -> Result<Op> {
                 seq_no,
                 version,
                 primary_term,
+                routing,
             })
         }
         (DELETE, DELETE_FORMAT) => {
@@ -222,7 +258,7 @@ fn decode(body: &[u8]) -> Result<Op> {
                 primary_term,
             })
         }
-        // ponytail: older formats, no-ops and batches; Elasticsearch 9.5.5 writes these two
+        // ponytail: older formats and batches; Elasticsearch 9.5.5 writes these two
         _ => err(format!(
             "unsupported translog operation type {kind} format {format}"
         )),

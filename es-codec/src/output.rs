@@ -57,6 +57,22 @@ impl Output {
         self.bytes(s.as_bytes());
     }
 
+    /// Elasticsearch's `StreamOutput.writeString`; see [`crate::input::DataInput::read_es_string`].
+    pub fn es_string(&mut self, s: &str) {
+        self.vint(s.encode_utf16().count() as i32);
+        for c in s.encode_utf16() {
+            match c {
+                0..=0x7f => self.byte(c as u8),
+                0x80..=0x7ff => self.bytes(&[0xc0 | (c >> 6) as u8, 0x80 | (c & 0x3f) as u8]),
+                _ => self.bytes(&[
+                    0xe0 | (c >> 12) as u8,
+                    0x80 | (c >> 6 & 0x3f) as u8,
+                    0x80 | (c & 0x3f) as u8,
+                ]),
+            }
+        }
+    }
+
     pub fn map_of_strings(&mut self, m: &BTreeMap<String, String>) {
         self.vint(m.len() as i32);
         for (k, v) in m {

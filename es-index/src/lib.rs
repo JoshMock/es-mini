@@ -301,6 +301,7 @@ impl Index {
             seq_no: seq_no as i64,
             version: version as i64,
             primary_term: 1,
+            routing: None,
         });
         let result = self.store(id, source, version, seq_no);
         WriteResult {
@@ -358,6 +359,7 @@ impl Index {
             Op::Delete { id, version, .. } => {
                 self.remove(&id, version as u64);
             }
+            Op::NoOp { .. } => {}
         }
     }
 
