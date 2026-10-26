@@ -1,5 +1,5 @@
 //! Lucene 10 BKD points (`.kdm`/`.kdi`/`.kdd`): a reader of one-dimensional trees that narrows a
-//! range by walking them, and a writer of one single-leaf tree per field.
+//! range by walking them, and their writer (`BKDWriter` for one dimension).
 
 use crate::{
     Result, SegmentReader,
@@ -347,10 +347,12 @@ pub fn sortable_bytes(v: i64, width: usize) -> Vec<u8> {
 /// `(doc, sortable value bytes)` pairs of one field, in doc order.
 pub type PointValues = Vec<(u32, Vec<u8>)>;
 
-/// `(meta, index, data)` files. `fields` is `(field number, (doc, value) pairs)`; every value in
-/// a field has the same width, and a doc may have none or several, but a field has at least one.
-// ponytail: one leaf per field regardless of size; a real tree if Elasticsearch must range-search
-// huge shards fast.
+/// Points per leaf (`BKDConfig.DEFAULT_MAX_POINTS_IN_LEAF_NODE`).
+const LEAF: usize = 512;
+
+/// `(meta, index, data)` files, as Lucene's `OneDimensionBKDWriter` writes them. `fields` is
+/// `(field number, (doc, value) pairs)`; every value in a field has the same width, and a doc
+/// may have none or several, but a field has at least one.
 pub fn write_points(
     fields: &[(i32, PointValues)],
     id: &[u8; ID_LEN],
@@ -360,71 +362,40 @@ pub fn write_points(
     index.index_header("Lucene90PointsFormatIndex", 1, id, "");
     data.index_header("Lucene90PointsFormatData", 1, id, "");
     for (number, pairs) in fields {
-        let values: Vec<&[u8]> = pairs.iter().map(|p| p.1.as_slice()).collect();
-        let Some(width) = values.first().map(|v| v.len()) else {
+        let Some(width) = pairs.first().map(|p| p.1.len()) else {
             return crate::err(format!("points field {number} has no values"));
         };
-        let mut order: Vec<usize> = (0..values.len()).collect();
-        order.sort_by(|a, b| values[*a].cmp(values[*b]).then(a.cmp(b)));
-        let (min, max) = (values[order[0]], values[order[order.len() - 1]]);
-        let prefix = min
-            .iter()
-            .zip(max.iter())
-            .take_while(|(a, b)| a == b)
-            .count();
-        let leaf = data.0.len() as i64;
-        data.vint(values.len() as i32);
-        let ids: Vec<u32> = order.iter().map(|i| pairs[*i].0).collect();
-        if ids.windows(2).all(|w| w[1] == w[0] + 1) {
-            data.byte(254); // CONTIGUOUS_ID: the run starting at one doc id
-            data.vint(ids[0] as i32);
-        } else {
-            // ponytail: Lucene also packs ids as 16/21/24-bit or a bitset; plain ints read the same.
-            data.byte(32);
-            for id in &ids {
-                data.bytes(&(*id as i32).to_le_bytes());
-            }
+        if pairs.iter().any(|p| p.1.len() != width) {
+            return crate::err(format!("points field {number} has values of mixed widths"));
         }
-        data.vint(prefix as i32);
-        data.bytes(&min[..prefix]);
-        if prefix == width {
-            data.byte(0xff);
-        } else {
-            data.byte(0);
-            let mut i = 0;
-            while i < order.len() {
-                let b = values[order[i]][prefix];
-                let run = order[i..]
-                    .iter()
-                    .take(255)
-                    .take_while(|j| values[**j][prefix] == b)
-                    .count();
-                data.byte(b);
-                data.byte(run as u8);
-                for j in &order[i..i + run] {
-                    data.bytes(&values[*j][prefix + 1..]);
-                }
-                i += run;
-            }
+        // by value, then doc; pairs are in doc order
+        let mut sorted: Vec<(&[u8], u32)> = pairs.iter().map(|p| (p.1.as_slice(), p.0)).collect();
+        sorted.sort();
+        let data_start = data.0.len() as u64;
+        let mut fps = Vec::new();
+        for leaf in sorted.chunks(LEAF) {
+            fps.push(data.0.len() as u64);
+            write_leaf(&mut data, leaf, width);
         }
-        let index_start = index.0.len() as i64;
-        index.vlong(leaf);
+        let splits: Vec<&[u8]> = sorted.chunks(LEAF).skip(1).map(|l| l[0].0).collect();
+        let packed = pack_index(&fps, &splits, 0, &mut vec![0; width], false, 0, fps.len());
         meta.bytes(&number.to_le_bytes());
         meta.header("BKD", 10);
         meta.vint(1);
         meta.vint(1);
-        meta.vint(values.len().max(512) as i32);
+        meta.vint(LEAF as i32);
         meta.vint(width as i32);
-        meta.vint(1);
-        meta.bytes(min);
-        meta.bytes(max);
-        meta.vlong(values.len() as i64);
+        meta.vint(fps.len() as i32);
+        meta.bytes(sorted[0].0);
+        meta.bytes(sorted[sorted.len() - 1].0);
+        meta.vlong(sorted.len() as i64);
         let mut docs: Vec<u32> = pairs.iter().map(|p| p.0).collect();
         docs.dedup(); // pairs are in doc order
         meta.vint(docs.len() as i32);
-        meta.vint((index.0.len() as i64 - index_start) as i32);
-        meta.long(leaf);
-        meta.long(index_start);
+        meta.vint(packed.len() as i32);
+        meta.long(data_start as i64);
+        meta.long(index.0.len() as i64);
+        index.bytes(&packed);
     }
     let (index, data) = (index.finish(), data.finish());
     meta.bytes(&(-1i32).to_le_bytes());
@@ -433,9 +404,219 @@ pub fn write_points(
     Ok((meta.finish(), index, data))
 }
 
+/// `OneDimensionBKDWriter.writeLeafBlock`: doc ids, the common prefix, then the values all
+/// equal, by distinct value (low cardinality), or by runs of their first differing byte,
+/// whichever is smaller.
+fn write_leaf(out: &mut Output, leaf: &[(&[u8], u32)], w: usize) {
+    out.vint(leaf.len() as i32);
+    write_doc_ids(out, &leaf.iter().map(|p| p.1).collect::<Vec<_>>());
+    let (first, last) = (leaf[0].0, leaf[leaf.len() - 1].0);
+    let prefix = first.iter().zip(last).take_while(|(a, b)| a == b).count();
+    out.vint(prefix as i32);
+    out.bytes(&first[..prefix]);
+    if prefix == w {
+        out.byte(0xff);
+        return;
+    }
+    let distinct = 1 + leaf.windows(2).filter(|p| p[0].0 != p[1].0).count();
+    // runs of at most 255 values sharing the byte after the prefix
+    let runs = |out: Option<&mut Output>| {
+        let (mut i, mut n, mut out) = (0, 0, out);
+        while i < leaf.len() {
+            let b = leaf[i].0[prefix];
+            let run = (leaf[i..].iter().take(255))
+                .take_while(|p| p.0[prefix] == b)
+                .count();
+            if let Some(out) = out.as_deref_mut() {
+                out.byte(b);
+                out.byte(run as u8);
+                leaf[i..i + run]
+                    .iter()
+                    .for_each(|p| out.bytes(&p.0[prefix + 1..]));
+            }
+            (i, n) = (i + run, n + 1);
+        }
+        n
+    };
+    let (high, low) = if distinct == leaf.len() {
+        (0, 1)
+    } else {
+        (
+            leaf.len() * (w - prefix - 1) + 2 * runs(None),
+            distinct * (w - prefix + 1),
+        )
+    };
+    if low <= high {
+        out.byte(0xfe);
+        for group in leaf.chunk_by(|a, b| a.0 == b.0) {
+            out.vint(group.len() as i32);
+            out.bytes(&group[0].0[prefix..]);
+        }
+    } else {
+        out.byte(0);
+        runs(Some(out));
+    }
+}
+
+/// `DocIdsWriter.writeDocIds` (BKD version 10): the most compact of its encodings.
+fn write_doc_ids(out: &mut Output, ids: &[u32]) {
+    let (min, max) = (ids.iter().min(), ids.iter().max());
+    let (min, max) = (*min.unwrap_or(&0), *max.unwrap_or(&0));
+    let (n, span) = (ids.len(), (max - min + 1) as usize);
+    let short = |out: &mut Output, v: u32| out.bytes(&(v as u16).to_le_bytes());
+    if ids.windows(2).all(|w| w[0] < w[1]) {
+        if span == n {
+            out.byte(0xfe);
+            out.vint(min as i32);
+            return;
+        }
+        if span <= n << 4 {
+            out.byte(0xff);
+            let base = min / 64;
+            let mut words = vec![0u64; (max / 64 - base + 1) as usize];
+            for id in ids {
+                words[(id / 64 - base) as usize] |= 1 << (id % 64);
+            }
+            out.vint(base as i32);
+            out.vint(words.len() as i32);
+            words.iter().for_each(|w| out.long(*w as i64));
+            return;
+        }
+    }
+    if span <= 0xffff {
+        out.byte(16);
+        out.vint(min as i32);
+        let half = n / 2;
+        for i in 0..half {
+            out.int(((ids[i] - min) << 16 | (ids[half + i] - min)) as i32);
+        }
+        if n % 2 == 1 {
+            short(out, ids[n - 1] - min);
+        }
+    } else if max <= 0x1f_ffff {
+        out.byte(21);
+        let third = (n / 3) & !15;
+        let mut ints: Vec<u32> = ids[..third * 2].iter().map(|id| id << 11).collect();
+        for i in 0..third {
+            let id = ids[third * 2 + i];
+            ints[i] |= id & 0x7ff;
+            ints[i + third] |= (id >> 11) & 0x7ff;
+        }
+        ints.iter().for_each(|v| out.int(*v as i32));
+        let mut i = third * 3;
+        while i + 2 < n {
+            let l = (0..3).fold(0u64, |l, k| l | u64::from(ids[i + k]) << (21 * k));
+            out.long(l as i64);
+            i += 3;
+        }
+        for id in &ids[i..] {
+            short(out, *id);
+            out.byte((id >> 16) as u8);
+        }
+    } else if max <= 0xff_ffff {
+        out.byte(24);
+        let quarter = n / 4;
+        let mut ints: Vec<u32> = ids[..quarter * 3].iter().map(|id| id << 8).collect();
+        for i in 0..quarter {
+            let id = ids[quarter * 3 + i];
+            ints[i] |= id & 0xff;
+            ints[i + quarter] |= (id >> 8) & 0xff;
+            ints[i + quarter * 2] |= id >> 16;
+        }
+        ints.iter().for_each(|v| out.int(*v as i32));
+        for id in &ids[quarter * 4..] {
+            short(out, *id);
+            out.byte((id >> 16) as u8);
+        }
+    } else {
+        out.byte(32);
+        ids.iter().for_each(|id| out.int(*id as i32));
+    }
+}
+
+/// How many of `n > 1` leaves go left (`BKDWriter.getNumLeftLeafNodes`): fill the last full
+/// level, putting the rest on the left.
+fn left_leaves(n: usize) -> usize {
+    let full = 1 << n.ilog2();
+    full / 2 + (n - full).min(full / 2)
+}
+
+/// `BKDWriter.recursePackIndex` for one dimension: the packed index of `n` leaves from `off`,
+/// whose leaf file pointers are `fps` and split values `splits` (the first value of each leaf
+/// but the first). `last` is the nearest ancestor's split value, `min_fp` the leftmost leaf of
+/// the parent; a left child (`negative`) stores neither its pointer nor a positive delta.
+fn pack_index(
+    fps: &[u64],
+    splits: &[&[u8]],
+    min_fp: u64,
+    last: &mut [u8],
+    negative: bool,
+    off: usize,
+    n: usize,
+) -> Vec<u8> {
+    let mut out = Output::default();
+    if !negative {
+        out.vlong((fps[off] - min_fp) as i64);
+    }
+    if n == 1 {
+        return out.0;
+    }
+    let left = left_leaves(n);
+    let split = splits[off + left - 1];
+    let w = split.len();
+    let prefix = split
+        .iter()
+        .zip(last.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let delta = if prefix < w {
+        (i32::from(split[prefix]) - i32::from(last[prefix])).abs()
+    } else {
+        0
+    };
+    out.vint(delta * (w as i32 + 1) + prefix as i32);
+    if prefix + 1 < w {
+        out.bytes(&split[prefix + 1..]);
+    }
+    let saved = last.to_vec();
+    last[prefix..].copy_from_slice(&split[prefix..]);
+    let left_bytes = pack_index(fps, splits, fps[off], last, true, off, left);
+    if left > 1 {
+        out.vint(left_bytes.len() as i32);
+    }
+    out.bytes(&left_bytes);
+    let right = pack_index(fps, splits, fps[off], last, false, off + left, n - left);
+    out.bytes(&right);
+    last.copy_from_slice(&saved);
+    out.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every doc id encoding, including the 24- and 32-bit ones the Lucene-written test data
+    /// does not reach, reads back what was written.
+    #[test]
+    fn doc_ids_round_trip() {
+        let sets: [Vec<u32>; 7] = [
+            (5..517).collect(),                               // contiguous
+            (0..300).map(|i| i * 3).collect(),                // bitset
+            (0..301).rev().map(|i| i * 200).collect(),        // 16-bit deltas
+            (0..511).map(|i| i * 4001 % 2_000_000).collect(), // 21 bits
+            (0..203).map(|i| i * 80_021).collect(),           // 24 bits
+            vec![1 << 30, 7, 1 << 25],                        // 32 bits
+            vec![9],
+        ];
+        for (ids, kind) in sets.iter().zip([0xfe, 0xff, 16, 21, 24, 32, 0xfe]) {
+            let mut out = Output::default();
+            write_doc_ids(&mut out, ids);
+            assert_eq!(out.0[0], kind);
+            let r = &mut DataInput::new(&out.0);
+            assert_eq!(&read_doc_ids(r, ids.len()).unwrap(), ids);
+            assert_eq!(r.remaining(), 0);
+        }
+    }
 
     #[test]
     fn sortable_bytes_order_like_numbers() {
@@ -443,6 +624,15 @@ mod tests {
         assert_eq!(sortable_bytes(-1, 4), [0x7f, 0xff, 0xff, 0xff]);
         assert_eq!(sortable_bytes(-1, 2), [0x7f, 0xff]);
         assert!(sortable_bytes(-5, 8) < sortable_bytes(3, 8));
+        for (v, w) in [
+            (i64::MIN, 8),
+            (-3, 8),
+            (i64::from(i32::MIN), 4),
+            (70_000, 4),
+            (-2, 2),
+        ] {
+            assert_eq!(decode(&sortable_bytes(v, w)), v);
+        }
     }
 
     /// Elasticsearch's own `_seq_no` points, rebuilt from its doc values, must match byte for byte.

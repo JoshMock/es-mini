@@ -91,3 +91,31 @@ fn fields_without_points_err() {
     let field = &r.fields[0].name;
     assert!(r.point_docs(field, place(0, 1)).is_err());
 }
+
+/// es-codec writes the same tree bytes as Lucene for the same points.
+#[test]
+fn written_trees_match_lucene() {
+    use es_codec::points::{sortable_bytes, write_points};
+    let r = common::open("points");
+    // in the order Lucene's flush wrote them (its field hash table's)
+    let fields: Vec<_> = ["sparse", "mod", "const", "seq"]
+        .iter()
+        .map(|name| {
+            let f = r.field(name).unwrap();
+            let width = f.point_num_bytes as usize;
+            let pairs = (expected(name).into_iter())
+                .map(|(d, v)| (d, sortable_bytes(v, width)))
+                .collect();
+            (f.number, pairs)
+        })
+        .collect();
+    let (meta, index, data) = write_points(&fields, &r.seg.info.id).unwrap();
+    for (ext, ours) in [(".kdm", meta), (".kdi", index), (".kdd", data)] {
+        let real = r.cfs.file(ext).unwrap().unwrap();
+        let at = (real.iter().zip(&ours)).position(|(a, b)| a != b);
+        assert!(
+            at.is_none() && real.len() == ours.len(),
+            "{ext} differs at {at:?}"
+        );
+    }
+}
