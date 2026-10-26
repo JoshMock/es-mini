@@ -902,6 +902,8 @@ fn eval(e: &Expr, row: &Row) -> Option<Value> {
                 return match f {
                     "SUBSTRING" | "TRIM" => string_fn(f, &args),
                     "MV_COUNT" | "MV_MIN" | "MV_MAX" => mv_fn(f, &args[0]),
+                    // ponytail: read per row; ES fixes `now` once per query
+                    "NOW" => Some(es_index::iso_date(crate::dates::now_millis()).into()),
                     _ => math_fn(f, t, &args),
                 };
             }
@@ -980,8 +982,9 @@ fn arith(op: &str, t: &str, a: &Value, b: &Value) -> Option<Value> {
 }
 
 /// The conversion functions and their result types.
-const CONVERSIONS: [(&str, &str); 5] = [
+const CONVERSIONS: [(&str, &str); 6] = [
     ("TO_STRING", "keyword"),
+    ("TO_DATETIME", "date"),
     ("TO_INTEGER", "integer"),
     ("TO_LONG", "long"),
     ("TO_DOUBLE", "double"),
@@ -989,7 +992,8 @@ const CONVERSIONS: [(&str, &str); 5] = [
 ];
 
 /// The scalar functions and how many arguments they take.
-const SCALAR_FNS: [(&str, RangeInclusive<usize>); 10] = [
+const SCALAR_FNS: [(&str, RangeInclusive<usize>); 11] = [
+    ("NOW", 0..=0),
     ("SUBSTRING", 2..=3),
     ("TRIM", 1..=1),
     ("ABS", 1..=1),
@@ -1184,6 +1188,9 @@ fn convert(f: &str, t: &str, v: &Value) -> Option<Value> {
             .or_else(|| v.as_u64().map(|u| Ok(u as f64))),
     };
     match (f, v) {
+        ("TO_DATETIME", _) => {
+            es_index::parse_date_millis(v).map(|ms| es_index::iso_date(ms).into())
+        }
         ("TO_STRING", Value::String(_)) | ("TO_BOOLEAN", Value::Bool(_)) => Some(v.clone()),
         ("TO_STRING", Value::Bool(b)) => Some(b.to_string().into()),
         ("TO_STRING", _) => match num()? {
@@ -1379,6 +1386,7 @@ fn resolve(
                     "SUBSTRING" => "keyword",
                     "TRIM" if ts[0] != "null" => "keyword",
                     "MV_COUNT" => "integer",
+                    "NOW" => "date",
                     "MV_MIN" | "MV_MAX" => "null",
                     "POW" => "double",
                     _ => NUMERIC.iter().find(|n| **n == ts[0]).unwrap_or(&"null"),
@@ -1399,11 +1407,15 @@ fn resolve(
                 return None;
             };
             let ta = resolve(arg, src, types, bad)?;
-            // ponytail: dates, ips, versions and the like are not converted yet
+            // ponytail: dates, ips, versions and the like are not converted yet, nor booleans,
+            // doubles and unsigned longs to dates
             let Some(&ta) = ["null", "boolean", "keyword", "text"]
                 .iter()
                 .chain(&NUMERIC)
                 .find(|n| **n == ta)
+                .filter(|t| {
+                    name != "TO_DATETIME" || !matches!(**t, "boolean" | "double" | "unsigned_long")
+                })
             else {
                 bad.push((*at, format!("[{f}] of [{ta}] is not supported by es-mini")));
                 return None;

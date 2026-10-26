@@ -1079,3 +1079,21 @@ fn mv_count_min_max_match_elasticsearch() {
     let r = q("FROM people | EVAL c = MV_COUNT(city), m = MV_MAX(age) | KEEP c, m | SORT m");
     assert_eq!(r.values[0], [json!(null), json!(25)]);
 }
+
+#[test]
+fn to_datetime_and_now_match_elasticsearch() {
+    let r = q(
+        r#"ROW a = TO_DATETIME("2024-02-29T12:00:00Z"), b = TO_DATETIME(0), c = TO_DATETIME("nope"), d = NOW() > TO_DATETIME("2025-01-01T00:00:00Z")"#,
+    );
+    let types: Vec<&str> = r.columns.iter().map(|c| c.r#type.as_str()).collect();
+    assert_eq!(types, ["date", "date", "date", "boolean"]);
+    assert_eq!(
+        r.values,
+        [[
+            json!("2024-02-29T12:00:00.000Z"),
+            json!("1970-01-01T00:00:00.000Z"),
+            Value::Null,
+            json!(true)
+        ]]
+    );
+}
