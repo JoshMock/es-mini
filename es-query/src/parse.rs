@@ -12,6 +12,12 @@ pub enum Query {
         query: String,
         and: bool,
     },
+    /// The analyzed terms in order, at most `slop` position moves apart in all.
+    MatchPhrase {
+        field: String,
+        query: String,
+        slop: u32,
+    },
     Term {
         field: String,
         value: Value,
@@ -207,6 +213,37 @@ fn parse_kind(kind: &str, body: &Value) -> Result<Query, QueryError> {
                 field: field.clone(),
                 query: text(query),
                 and,
+            })
+        }
+        "match_phrase" => {
+            let (field, p) = single_field(kind, body)?;
+            let (query, slop) = match p {
+                Value::Object(o) => {
+                    check_keys(
+                        "match_phrase",
+                        o,
+                        &[
+                            "query",
+                            "slop",
+                            "analyzer",
+                            "zero_terms_query",
+                            "boost",
+                            "_name",
+                        ],
+                    )?;
+                    let slop = match o.get("slop") {
+                        None => 0,
+                        Some(s) => (s.as_u64().and_then(|s| u32::try_from(s).ok()))
+                            .ok_or("[match_phrase] slop must be a non-negative integer")?,
+                    };
+                    (o.get("query").ok_or("[match_phrase] requires query")?, slop)
+                }
+                q => (q, 0),
+            };
+            Ok(Query::MatchPhrase {
+                field: field.clone(),
+                query: text(query),
+                slop,
             })
         }
         "term" => {

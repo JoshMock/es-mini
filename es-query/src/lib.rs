@@ -258,7 +258,7 @@ impl<'a> Searcher<'a> {
     /// Precomputes BM25 statistics for every scored (field, term) in the query.
     fn gather(&mut self, q: &Query) {
         let (field, wanted) = match q {
-            Query::Match { field, query, .. } => {
+            Query::Match { field, query, .. } | Query::MatchPhrase { field, query, .. } => {
                 let (kind, _) = self.kind(field);
                 let t = query_terms(kind, query);
                 (field, t)
@@ -346,6 +346,10 @@ impl<'a> Searcher<'a> {
                 let (kind, _) = self.kind(field);
                 self.term_docs(field, &query_terms(kind, query), *and, exact)
             }
+            // documents with every term, whatever their positions
+            Query::MatchPhrase { field, query, .. } if !exact => {
+                self.term_docs(field, &query_terms(self.kind(field).0, query), true, false)
+            }
             Query::Named { query, .. } => self.candidates(query, exact),
             Query::Bool {
                 must,
@@ -407,6 +411,9 @@ impl<'a> Searcher<'a> {
             } => numbers(field, [gt, gte, lt, lte].map(Option::as_ref)),
             Query::Match { field, query, and } => {
                 lookup(field, &query_terms(self.kind(field).0, query), *and)
+            }
+            Query::MatchPhrase { field, query, .. } => {
+                lookup(field, &query_terms(self.kind(field).0, query), true)
             }
             Query::Named { query, .. } => self.memory_candidates(query),
             Query::Bool {
@@ -656,6 +663,29 @@ impl<'a> Searcher<'a> {
             }
             Query::Term { field, value } if field == "_id" => (text(value) == id).then_some(1.0),
             Query::Term { field, value } => self.score_terms(field, &[text(value)], true, id, d),
+            Query::MatchPhrase { field, query, slop } => {
+                let (kind, path) = self.kind(field);
+                let wanted = query_terms(kind, query);
+                // Lucene rewrites a one-term phrase to a term query
+                if wanted.len() < 2 || kind != Kind::Text {
+                    return self.score_terms(field, &wanted, true, id, d);
+                }
+                let (lists, len) = es_index::postings::positions(&values(&d.source, path), &wanted);
+                let freq = match slop {
+                    _ if lists.iter().any(Vec::is_empty) => return None,
+                    0 => exact_phrase_freq(&lists),
+                    _ => sloppy_phrase_freq(&lists, *slop),
+                };
+                if freq == 0.0 {
+                    return None;
+                }
+                // PhraseWeight: one BM25 score with the terms' idfs summed
+                let idf: f64 = (wanted.iter())
+                    .map(|w| self.bm25_parts(field, w, freq, len as f64)[4])
+                    .sum();
+                let [.., tf] = self.bm25_parts(field, &wanted[0], freq, len as f64);
+                Some(idf * (1.0 + K1) * tf)
+            }
             Query::Prefix { field, prefix } => {
                 let (kind, path) = self.kind(field);
                 terms(kind, &values(&d.source, path))
@@ -781,6 +811,8 @@ impl<'a> Searcher<'a> {
             Query::Match { field, query, and } => {
                 terms(field, &query_terms(self.kind(field).0, query), *and)
             }
+            // ponytail: postings positions are not read; scores come from the source
+            Query::MatchPhrase { .. } => None,
             Query::Named { query, .. } => self.postings_score(query, id, matched),
             // Unless the document is known to match, its filters would need checking.
             Query::Bool {
@@ -1139,7 +1171,11 @@ fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, QueryError>
     };
     Ok(match q {
         Query::Term { field, value } if date(&field) => term(field, value)?,
-        Query::Match { field, query, .. } if date(&field) => term(field, query.into())?,
+        Query::Match { field, query, .. } | Query::MatchPhrase { field, query, .. }
+            if date(&field) =>
+        {
+            term(field, query.into())?
+        }
         Query::Bool {
             must,
             should,
@@ -1379,7 +1415,7 @@ fn sort_value(f: &SortField, mut values: Vec<&Value>) -> Value {
 /// The score of every document `q` matches, if it does not vary (see [`Searcher::score`]).
 fn constant_score(q: &Query) -> Option<f64> {
     match q {
-        Query::Match { .. } => None,
+        Query::Match { .. } | Query::MatchPhrase { .. } => None,
         Query::Term { field, .. } if field != "_id" => None,
         Query::Named { query, .. } => constant_score(query),
         Query::Bool { must, should, .. } if should.is_empty() => {
@@ -1616,6 +1652,61 @@ fn exact<K: Copy + Eq + std::hash::Hash>(
 }
 
 /// Terms a match query looks up: analyzed for text fields, verbatim otherwise.
+/// How often the terms with positions `lists` occur in a row: Lucene's ExactPhraseMatcher.
+fn exact_phrase_freq(lists: &[Vec<u32>]) -> f64 {
+    let at = |i: usize, p: u32| lists[i].binary_search(&(p + i as u32)).is_ok();
+    let n = lists[0]
+        .iter()
+        .filter(|&&p| (1..lists.len()).all(|i| at(i, p)));
+    n.count() as f64
+}
+
+/// The summed `1 / (1 + match length)` of the phrase's matches within `slop`: Lucene's
+/// SloppyPhraseMatcher, with each term's positions moved back by its place in the phrase.
+// ponytail: no repeated-term handling (Lucene's rptGroups), so a term repeated in a sloppy
+// phrase may match one position twice
+fn sloppy_phrase_freq(lists: &[Vec<u32>], slop: u32) -> f64 {
+    let mut cur = vec![0; lists.len()];
+    let pos = |cur: &[usize], i: usize| i64::from(lists[i][cur[i]]) - i as i64;
+    let mut end = (0..lists.len()).map(|i| pos(&cur, i)).max().unwrap_or(0);
+    let mut queue: Vec<usize> = (0..lists.len()).collect();
+    // the queue is ordered by position, then by place in the phrase
+    let pop = |queue: &mut Vec<usize>, cur: &[usize]| {
+        let k = (0..queue.len()).min_by_key(|&k| (pos(cur, queue[k]), queue[k]))?;
+        Some(queue.swap_remove(k))
+    };
+    let top = |queue: &[usize], cur: &[usize]| queue.iter().map(|&i| pos(cur, i)).min();
+    let mut freq = 0.0;
+    let slop = i64::from(slop);
+    'matches: while let Some(mut pp) = pop(&mut queue, &cur) {
+        let mut next = top(&queue, &cur).unwrap_or(i64::MAX);
+        let mut len = end - pos(&cur, pp);
+        loop {
+            cur[pp] += 1;
+            if cur[pp] == lists[pp].len() {
+                if len <= slop {
+                    freq += 1.0 / (1.0 + len as f32);
+                }
+                break 'matches;
+            }
+            end = end.max(pos(&cur, pp));
+            if pos(&cur, pp) > next {
+                queue.push(pp);
+                if len <= slop {
+                    freq += 1.0 / (1.0 + len as f32);
+                    continue 'matches;
+                }
+                pp = pop(&mut queue, &cur).unwrap_or(pp);
+                next = top(&queue, &cur).unwrap_or(i64::MAX);
+                len = end - pos(&cur, pp);
+            } else {
+                len = len.min(end - pos(&cur, pp));
+            }
+        }
+    }
+    f64::from(freq)
+}
+
 fn query_terms(kind: Kind, query: &str) -> Vec<String> {
     match kind {
         Kind::Text => Analyzer::Standard.analyze(query),

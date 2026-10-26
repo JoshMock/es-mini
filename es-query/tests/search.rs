@@ -784,3 +784,76 @@ fn simple_query_string_matches_each_whitespace_term_across_fields() {
     err(json!({"fields": ["title"], "query": "brown -dog"}));
     err(json!({"query": "dog"}));
 }
+
+/// Scores are Elasticsearch 9.5.5's for `index()`'s documents.
+#[test]
+fn match_phrase_matches_terms_in_order_within_slop() {
+    let hits = |p: Value| {
+        let req = SearchRequest::parse(&json!({"query": {"match_phrase": {"title": p}}})).unwrap();
+        let idx = index();
+        let hits: Vec<_> = (search(&idx, &req).hits.iter())
+            .map(|h| (h.id.to_owned(), h.score.unwrap()))
+            .collect();
+        hits
+    };
+    let close = |got: Vec<(String, f32)>, want: &[(&str, f32)]| {
+        assert_eq!(got.len(), want.len(), "{got:?}");
+        for ((id, s), (wid, ws)) in got.iter().zip(want) {
+            assert_eq!(id, wid, "{got:?}");
+            assert!((s - ws).abs() < 1e-5, "{got:?} vs {want:?}");
+        }
+    };
+    close(hits(json!("quick brown")), &[("1", 1.2199391)]);
+    close(hits(json!("the, quick!")), &[("1", 1.6694658)]);
+    close(hits(json!("quick")), &[("2", 0.9530773), ("1", 0.60996956)]);
+    close(hits(json!("quick quick")), &[("2", 1.3862942)]);
+    // values are 100 positions apart
+    close(hits(json!("brown dog")), &[]);
+    close(
+        hits(json!({"query": "brown dog", "slop": 101})),
+        &[("4", 0.024957895)],
+    );
+    close(
+        hits(json!({"query": "quick fox", "slop": 1})),
+        &[("1", 1.043416)],
+    );
+    close(hits(json!({"query": "fox quick", "slop": 2})), &[]);
+    close(
+        hits(json!({"query": "fox quick", "slop": 3})),
+        &[("1", 0.59623766)],
+    );
+    let err = |p: Value| {
+        parse_query(&json!({"match_phrase": {"title": p}}))
+            .unwrap_err()
+            .to_string()
+    };
+    assert_eq!(
+        err(json!({"query": "x", "operator": "and"})),
+        "[match_phrase] query does not support [operator]"
+    );
+}
+
+#[test]
+fn match_phrase_scores_an_opened_index_like_memory() {
+    let mut memory = index();
+    let dir = std::env::temp_dir().join(format!("esq-phrase-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    es_index::disk::save(&dir, &es_index::Indices::from([("idx".into(), index())])).unwrap();
+    let mut opened = es_index::disk::open(&dir).unwrap().remove("idx").unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    for idx in [&mut memory, &mut opened] {
+        idx.put("5", json!({"title": "brown quick fox"}));
+    }
+    let q = json!({"query": {"match_phrase": {"title": {"query": "quick fox", "slop": 1}}}});
+    let req = SearchRequest::parse(&q).unwrap();
+    let scores = |idx: &Index| {
+        let mut v: Vec<_> = (search(idx, &req).hits.iter())
+            .map(|h| (h.id.to_owned(), h.score))
+            .collect();
+        v.sort_by(|a, b| a.0.cmp(&b.0));
+        v
+    };
+    assert_eq!(scores(&memory).len(), 2);
+    assert_eq!(scores(&opened), scores(&memory));
+    assert_eq!(count(&opened, &req.query), 2);
+}
