@@ -1186,6 +1186,46 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_mapping_maps_object_fields() {
+        let mut i = Index::default();
+        i.map_dynamic(&json!({
+            "o": {"a": 1, "b": {"c": true}}, "p.q": 1.5,
+            "arr": [{"x": 1}, {"y": false}], "e": {}
+        }));
+        assert_eq!(
+            serde_json::to_value(&i.mappings).unwrap(),
+            json!({"properties": {
+                "arr": {"properties": {"x": {"type": "long"}, "y": {"type": "boolean"}}},
+                "o": {"properties": {
+                    "a": {"type": "long"},
+                    "b": {"properties": {"c": {"type": "boolean"}}}
+                }},
+                "p": {"properties": {"q": {"type": "float"}}}
+            }})
+        );
+        assert_eq!(i.mappings.field("o.b.c"), Some(&FieldMapping::Boolean));
+        // A leaf cannot become an object, nor an object a leaf.
+        i.map_dynamic(&json!({"o": {"a": {"z": 1}}, "p": 2}));
+        assert!(i.mappings.field("o.a.z").is_none());
+        assert!(i.mappings.field("p").is_none());
+    }
+
+    #[test]
+    fn object_mappings_round_trip_through_dotted_paths() {
+        let raw = json!({"properties": {
+            "o": {"properties": {"a": {"type": "keyword"}, "b": {"properties": {"c": {"type": "long"}}}}}
+        }});
+        let m: Mappings = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(m.properties.keys().collect::<Vec<_>>(), ["o.a", "o.b.c"]);
+        assert_eq!(serde_json::to_value(&m).unwrap(), raw);
+        let typed: Mappings = serde_json::from_value(json!({"properties": {
+            "o": {"type": "object", "properties": {"a": {"type": "long"}}}, "d.e": {"type": "long"}
+        }}))
+        .unwrap();
+        assert_eq!(typed.properties.keys().collect::<Vec<_>>(), ["d.e", "o.a"]);
+    }
+
+    #[test]
     fn empty_mappings_serialize_as_empty_object() {
         assert_eq!(
             serde_json::to_value(Mappings::default()).unwrap(),

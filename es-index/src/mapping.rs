@@ -1,11 +1,11 @@
 //! Field mappings and dynamic mapping.
 
 use crate::{Index, parse_date_millis};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _, ser::Error as _};
+use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 
-/// MVP field types; flat mappings only (no object/nested).
+/// MVP leaf field types; objects live in [`Mappings::properties`] as dotted paths (no `nested`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum FieldMapping {
@@ -96,7 +96,13 @@ pub struct Mappings {
     /// The `_source` mapping section, e.g. `{"enabled": false}`.
     #[serde(default, rename = "_source", skip_serializing_if = "Option::is_none")]
     pub source: Option<Value>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    /// Leaf fields by dotted path (`obj.field`); JSON nests them in `properties` objects.
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        serialize_with = "nest",
+        deserialize_with = "flatten"
+    )]
     pub properties: BTreeMap<String, FieldMapping>,
 }
 
@@ -116,29 +122,34 @@ impl Mappings {
 }
 
 impl Index {
-    /// Adds dynamic mappings for fields of `source` not yet mapped.
+    /// Adds dynamic mappings for fields of `source` not yet mapped, object fields under their
+    /// dotted paths.
     pub fn map_dynamic(&mut self, source: &Value) {
-        // ponytail: top-level fields only; no nested objects or numeric_detection
-        let auto_text =
-            self.settings.get("index.mapping.dynamic_strings.auto_text") != Some("false");
-        let Some(obj) = source.as_object() else {
-            return;
-        };
-        for (k, v) in obj {
-            // An array maps like its first non-null element.
-            let v = match v {
-                Value::Array(a) => a.iter().find(|e| !e.is_null()),
-                v => Some(v),
-            };
-            let mapping = match v {
-                Some(d @ Value::String(_)) if parse_date_millis(d).is_some() => {
-                    FieldMapping::Date {
-                        format: None,
-                        locale: None,
-                        fields: BTreeMap::new(),
-                    }
-                }
-                Some(Value::String(_)) if auto_text => FieldMapping::TextKeyword {
+        if let Some(obj) = source.as_object() {
+            obj.iter().for_each(|(k, v)| self.map_value(k, v));
+        }
+    }
+
+    fn map_value(&mut self, path: &str, v: &Value) {
+        let mapping = match v {
+            // ponytail: empty objects map nothing; ES maps them as `{"type": "object"}`
+            Value::Object(o) => {
+                return o
+                    .iter()
+                    .for_each(|(k, x)| self.map_value(&format!("{path}.{k}"), x));
+            }
+            // Array elements map in order; the first scalar wins.
+            Value::Array(a) => return a.iter().for_each(|x| self.map_value(path, x)),
+            d @ Value::String(_) if parse_date_millis(d).is_some() => FieldMapping::Date {
+                format: None,
+                locale: None,
+                fields: BTreeMap::new(),
+            },
+            Value::String(_)
+                if self.settings.get("index.mapping.dynamic_strings.auto_text")
+                    != Some("false") =>
+            {
+                FieldMapping::TextKeyword {
                     fields: [(
                         "keyword".to_owned(),
                         FieldMapping::Keyword {
@@ -146,16 +157,79 @@ impl Index {
                         },
                     )]
                     .into(),
-                },
-                Some(Value::String(_)) => FieldMapping::Keyword {
-                    ignore_above: Some(256),
-                },
-                Some(Value::Bool(_)) => FieldMapping::Boolean,
-                Some(Value::Number(n)) if n.is_f64() => FieldMapping::Float,
-                Some(Value::Number(_)) => FieldMapping::Long,
-                _ => continue,
-            };
-            self.mappings.properties.entry(k.clone()).or_insert(mapping);
+                }
+            }
+            Value::String(_) => FieldMapping::Keyword {
+                ignore_above: Some(256),
+            },
+            Value::Bool(_) => FieldMapping::Boolean,
+            Value::Number(n) if n.is_f64() => FieldMapping::Float,
+            Value::Number(_) => FieldMapping::Long,
+            Value::Null => return,
+        };
+        let props = &mut self.mappings.properties;
+        // ponytail: a leaf meeting an object (or the reverse) is left unmapped; ES rejects the document
+        let child = format!("{path}.");
+        let conflict = path
+            .match_indices('.')
+            .any(|(i, _)| props.contains_key(&path[..i]))
+            || props
+                .range(child.clone()..)
+                .next()
+                .is_some_and(|(p, _)| p.starts_with(&child));
+        if !conflict {
+            props.entry(path.to_owned()).or_insert(mapping);
         }
     }
+}
+
+/// Serializes dotted paths as nested `properties` objects, like Elasticsearch's object mappers.
+fn nest<S: Serializer>(props: &BTreeMap<String, FieldMapping>, s: S) -> Result<S::Ok, S::Error> {
+    let mut root = Map::new();
+    for (path, m) in props {
+        let (parents, leaf) = path
+            .rsplit_once('.')
+            .map_or((None, path.as_str()), |(p, l)| (Some(p), l));
+        let mut node = &mut root;
+        for part in parents.into_iter().flat_map(|p| p.split('.')) {
+            let obj = node
+                .entry(part)
+                .or_insert_with(|| json!({"properties": {}}));
+            node = obj["properties"]
+                .as_object_mut()
+                .ok_or_else(|| S::Error::custom(path))?;
+        }
+        node.insert(
+            leaf.to_owned(),
+            serde_json::to_value(m).map_err(S::Error::custom)?,
+        );
+    }
+    root.serialize(s)
+}
+
+/// Reads nested object mappings (no `type`, or `object`) into dotted paths.
+fn flatten<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeMap<String, FieldMapping>, D::Error> {
+    fn walk(
+        prefix: &str,
+        props: Map<String, Value>,
+        out: &mut BTreeMap<String, FieldMapping>,
+    ) -> serde_json::Result<()> {
+        for (k, mut v) in props {
+            let path = format!("{prefix}{k}");
+            if v.is_object() && v.get("type").is_none_or(|t| t == "object") {
+                // ponytail: an object without properties maps nothing (see map_value)
+                let sub = match v["properties"].take() {
+                    Value::Null => Map::new(),
+                    p => serde_json::from_value(p)?,
+                };
+                walk(&format!("{path}."), sub, out)?;
+            } else {
+                out.insert(path, serde_json::from_value(v)?);
+            }
+        }
+        Ok(())
+    }
+    let mut out = BTreeMap::new();
+    walk("", Map::deserialize(d)?, &mut out).map_err(D::Error::custom)?;
+    Ok(out)
 }

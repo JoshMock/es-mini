@@ -200,6 +200,25 @@ async fn rejected_document_adds_no_dynamic_mappings() {
 }
 
 #[tokio::test]
+async fn object_fields_map_dynamically_and_are_searchable() {
+    let app = app();
+    let doc = json!({"o": {"n": 5, "t": "Hi there"}});
+    call(&app, Method::PUT, "/idx/_doc/1?refresh=true", Some(doc)).await;
+    let (_, r) = call(&app, Method::GET, "/idx/_mapping", None).await;
+    assert_eq!(
+        r["idx"]["mappings"]["properties"]["o"]["properties"]["n"],
+        json!({"type": "long"})
+    );
+    for q in [
+        json!({"term": {"o.n": 5}}),
+        json!({"term": {"o.t.keyword": "Hi there"}}),
+    ] {
+        let (_, r) = call(&app, Method::POST, "/idx/_count", Some(json!({"query": q}))).await;
+        assert_eq!(r["count"], 1, "{q}");
+    }
+}
+
+#[tokio::test]
 async fn id_over_512_bytes_is_rejected() {
     let uri = format!("/idx/_doc/{}", "a".repeat(513));
     let (s, _) = call(&app(), Method::POST, &uri, Some(json!({"a": 1}))).await;

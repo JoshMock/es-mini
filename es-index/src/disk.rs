@@ -478,14 +478,10 @@ fn user_fields(
     use std::collections::BTreeMap;
     let mut out = UserFields::default();
     for (name, mapping) in &mappings.properties {
-        // Values per doc: arrays flatten, nulls and absent fields are no values.
+        // Values per doc at the dotted path: arrays flatten, nulls and absent fields are no values.
         let values: Vec<Vec<&Value>> = docs
             .iter()
-            .map(|(_, d)| match d.source.get(name) {
-                Some(Value::Array(a)) => a.iter().filter(|v| !v.is_null()).collect(),
-                Some(v) if !v.is_null() => vec![v],
-                _ => vec![],
-            })
+            .map(|(_, d)| crate::postings::values(&d.source, name))
             .collect();
         let flat = || values.iter().flatten();
         if flat().next().is_none() || flat().any(|v| v.is_array() || v.is_object()) {

@@ -37,4 +37,7 @@ count 1 '{"match_phrase":{"t":{"query":"fox quick","slop":2}}}'
 # Values of an array are 100 positions apart (position_increment_gap).
 count 0 '{"match_phrase":{"m":{"query":"cat red","slop":99}}}'
 count 1 '{"match_phrase":{"m":{"query":"cat red","slop":100}}}'
+# Dynamic object fields, written under their dotted paths.
+count 1 '{"term":{"o.n":5}}'
+count 1 '{"match":{"o.s":"x"}}'
 exit $fail

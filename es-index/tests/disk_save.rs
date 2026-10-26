@@ -238,6 +238,30 @@ fn text_fields_save_positions() {
     assert_eq!(got, want);
 }
 
+/// Object fields save under their dotted paths.
+#[test]
+fn object_fields_save_under_dotted_paths() {
+    use es_codec::{SegmentInfos, SegmentReader};
+    use es_index::Index;
+    let mut idx = Index::default();
+    let doc = json!({"o": {"n": [5, 6]}});
+    idx.map_dynamic(&doc);
+    idx.put("1", doc);
+    let dir = scratch("objects").join("data");
+    disk::save(&dir, &Indices::from([("idx".to_owned(), idx)])).unwrap();
+    let uuid = &es_codec::cluster_state::read_indices(&dir).unwrap()[0].uuid;
+    let shard = dir.join("indices").join(uuid).join("0/index");
+    let seg = SegmentInfos::read_latest(&shard)
+        .unwrap()
+        .segments
+        .remove(0);
+    let r = SegmentReader::open(&shard, seg).unwrap();
+    assert!(r.field("o.n").is_ok());
+    let reopened = disk::open(&dir).unwrap();
+    let props = &reopened["idx"].mappings.properties;
+    assert_eq!(props.keys().collect::<Vec<_>>(), ["o.n"]);
+}
+
 #[test]
 fn a_corrupt_segment_fails_open() {
     let dir = scratch("corrupt").join("data");
