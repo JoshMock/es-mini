@@ -261,3 +261,69 @@ fn using_a_conflicting_field_fails_verification() {
         );
     }
 }
+
+/// Counts Elasticsearch 9.5.5 reported for the same documents and queries.
+#[test]
+fn documents_found_and_values_loaded_follow_the_plan() {
+    let mut all = indices();
+    let mut other = Index::default();
+    other.put("1", json!({"n": 1}));
+    all.insert("pets".into(), other);
+    for (query, docs, values) in [
+        ("FROM people", 3, 10),
+        ("FROM people | LIMIT 2", 2, 6),
+        // Pushed filters load nothing; filters on two fields load them for every document.
+        ("FROM people | WHERE age > 26 | KEEP name", 2, 2),
+        ("FROM people | WHERE age > age | KEEP name", 3, 3),
+        (
+            "FROM people | WHERE age > 26 OR age > age | KEEP name",
+            3,
+            5,
+        ),
+        (
+            "FROM people | WHERE age > 26 AND age > age | KEEP name",
+            2,
+            2,
+        ),
+        // Text sorts are not pushed: the key loads for every match, the rest after the top N.
+        ("FROM people | SORT city | KEEP name | LIMIT 1", 3, 3),
+        (
+            "FROM people | SORT city.keyword | KEEP name | LIMIT 1",
+            1,
+            2,
+        ),
+        (
+            "FROM people | SORT age | WHERE name == \"ann\" | KEEP city",
+            1,
+            2,
+        ),
+        (
+            "FROM people | WHERE age > age OR city IS NULL | SORT name | KEEP city | LIMIT 1",
+            3,
+            6,
+        ),
+        // Everything after the first LIMIT loads for the rows it keeps.
+        ("FROM people | LIMIT 2 | WHERE age > 26 | KEEP name", 2, 4),
+        ("FROM people | LIMIT 2 | SORT city | KEEP name", 2, 3),
+        (
+            "FROM people | SORT name | LIMIT 2 | SORT age | KEEP age",
+            2,
+            4,
+        ),
+        // A pushed LIMIT is shared across indices; a pushed top N runs per index.
+        ("FROM people, pets | LIMIT 1", 1, 4),
+        (
+            "FROM people, pets | SORT city.keyword | KEEP city | LIMIT 1",
+            2,
+            2,
+        ),
+        ("FROM people, pets | SORT city | KEEP city | LIMIT 1", 4, 2),
+    ] {
+        let r = run(&all, query).unwrap();
+        assert_eq!(
+            (r.documents_found, r.values_loaded),
+            (docs, values),
+            "{query}"
+        );
+    }
+}

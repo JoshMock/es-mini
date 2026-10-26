@@ -9,7 +9,10 @@ use es_index::{
 };
 use serde::Serialize;
 use serde_json::Value;
-use std::{cmp::Ordering, collections::BTreeMap};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet},
+};
 
 /// ES applies an implicit `LIMIT 1000`.
 const DEFAULT_LIMIT: usize = 1000;
@@ -559,7 +562,7 @@ pub fn run(indices: &BTreeMap<String, Index>, query: &str) -> Result<Response, E
             .map(|(_, d)| d)
             .collect();
         mine.sort_by_key(|d| d.seq_no);
-        docs.extend(mine);
+        docs.push(mine);
     }
     let conflicts: BTreeMap<String, BTreeMap<String, Vec<String>>> = mapped
         .iter_mut()
@@ -587,40 +590,46 @@ pub fn run(indices: &BTreeMap<String, Index>, query: &str) -> Result<Response, E
         None => Ok(()),
     };
     let mut cols: Vec<String> = types.keys().cloned().collect();
-    let mut rows: Vec<BTreeMap<&str, Value>> = docs
+    // One group of rows per index, for counting what Elasticsearch's per-shard plan loads.
+    let groups: Vec<Vec<Row>> = docs
         .iter()
-        .map(|d| {
-            types
-                .keys()
-                .map(|c| {
-                    let v = match conflicts.contains_key(c) {
-                        true => Value::Null,
-                        false => cell(&d.source, c),
-                    };
-                    (c.as_str(), v)
+        .map(|g| {
+            g.iter()
+                .map(|d| {
+                    types
+                        .keys()
+                        .map(|c| {
+                            let v = match conflicts.contains_key(c) {
+                                true => Value::Null,
+                                false => cell(&d.source, c),
+                            };
+                            (c.as_str(), v)
+                        })
+                        .collect()
                 })
                 .collect()
         })
         .collect();
+    let mut rows: Vec<&Row> = groups.iter().flatten().collect();
     let mut explicit_limit = false;
 
-    for cmd in cmds {
+    for cmd in &cmds {
         match cmd {
             Command::Where(e) => {
                 let mut refs = Vec::new();
-                fields(&e, &mut refs);
+                fields(e, &mut refs);
                 for f in &refs {
                     check(&cols, f)?;
                 }
-                rows.retain(|r| eval(&e, r) == Some(Value::Bool(true)));
+                rows.retain(|r| eval(e, r) == Some(Value::Bool(true)));
             }
-            Command::Limit(n) => {
+            &Command::Limit(n) => {
                 rows.truncate(n.min(MAX_LIMIT));
                 explicit_limit = true;
             }
             Command::Keep(patterns) => {
                 let mut kept = Vec::new();
-                for p in &patterns {
+                for p in patterns {
                     let hits: Vec<_> = cols
                         .iter()
                         .filter(|c| aliases::glob(p, c) && !kept.contains(*c))
@@ -634,7 +643,7 @@ pub fn run(indices: &BTreeMap<String, Index>, query: &str) -> Result<Response, E
                 cols = kept;
             }
             Command::Drop(patterns) => {
-                for p in &patterns {
+                for p in patterns {
                     if !p.contains('*') && !cols.contains(p) {
                         return Err(unknown(p));
                     }
@@ -642,45 +651,17 @@ pub fn run(indices: &BTreeMap<String, Index>, query: &str) -> Result<Response, E
                 cols.retain(|c| !patterns.iter().any(|p| aliases::glob(p, c)));
             }
             Command::Sort(keys) => {
-                for k in &keys {
+                for k in keys {
                     check(&cols, &k.field)?;
                 }
-                rows.sort_by(|a, b| {
-                    keys.iter().fold(Ordering::Equal, |acc, k| {
-                        acc.then_with(|| {
-                            let (x, y) = (&a[k.field.as_str()], &b[k.field.as_str()]);
-                            match (x.is_null(), y.is_null()) {
-                                (true, true) => Ordering::Equal,
-                                (true, false) => {
-                                    if k.nulls_first {
-                                        Ordering::Less
-                                    } else {
-                                        Ordering::Greater
-                                    }
-                                }
-                                (false, true) => {
-                                    if k.nulls_first {
-                                        Ordering::Greater
-                                    } else {
-                                        Ordering::Less
-                                    }
-                                }
-                                _ => {
-                                    let o = compare(x, y).unwrap_or(Ordering::Equal);
-                                    if k.desc { o.reverse() } else { o }
-                                }
-                            }
-                        })
-                    })
-                });
+                sort_rows(&mut rows, keys);
             }
         }
     }
     if !explicit_limit {
         rows.truncate(DEFAULT_LIMIT);
     }
-    // ponytail: assumes top-N pushdown, so only returned rows are loaded; ES's real counts vary by plan
-    let (documents_found, values_loaded) = (rows.len(), rows.len() * cols.len());
+    let (documents_found, values_loaded) = load_counts(&groups, &cmds, &cols, &types);
     Ok(Response {
         documents_found,
         values_loaded,
@@ -709,4 +690,142 @@ pub fn run(indices: &BTreeMap<String, Index>, query: &str) -> Result<Response, E
             .map(|r| cols.iter().map(|c| r[c.as_str()].clone()).collect())
             .collect(),
     })
+}
+
+type Row<'a> = BTreeMap<&'a str, Value>;
+
+fn sort_rows(rows: &mut [&Row], keys: &[SortKey]) {
+    rows.sort_by(|a, b| {
+        keys.iter().fold(Ordering::Equal, |acc, k| {
+            acc.then_with(|| {
+                let (x, y) = (&a[k.field.as_str()], &b[k.field.as_str()]);
+                match (x.is_null(), y.is_null()) {
+                    (true, true) => Ordering::Equal,
+                    (true, false) => {
+                        if k.nulls_first {
+                            Ordering::Less
+                        } else {
+                            Ordering::Greater
+                        }
+                    }
+                    (false, true) => {
+                        if k.nulls_first {
+                            Ordering::Greater
+                        } else {
+                            Ordering::Less
+                        }
+                    }
+                    _ => {
+                        let o = compare(x, y).unwrap_or(Ordering::Equal);
+                        if k.desc { o.reverse() } else { o }
+                    }
+                }
+            })
+        })
+    });
+}
+
+/// `documents_found` and `values_loaded` as Elasticsearch 9.5.5's plan counts them. Up to the
+/// first LIMIT (implicitly 1000) the plan runs per shard: Lucene runs the filters on a field and a
+/// literal and, with no other filter, the LIMIT or a non-`text` SORT (a top N per index); each
+/// field is loaded only for the rows still alive when the plan first needs it. Everything after the
+/// first LIMIT runs on its output, so the fields it uses load for those rows.
+fn load_counts(
+    groups: &[Vec<Row>],
+    cmds: &[Command],
+    out: &[String],
+    types: &BTreeMap<String, String>,
+) -> (usize, usize) {
+    let (head, tail) = cmds.split_at(
+        cmds.iter()
+            .position(|c| matches!(c, Command::Limit(_)))
+            .unwrap_or(cmds.len()),
+    );
+    let limit = match tail.first() {
+        Some(&Command::Limit(n)) => n.min(MAX_LIMIT),
+        _ => DEFAULT_LIMIT,
+    };
+    let mut filters = Vec::new();
+    let mut sort: &[SortKey] = &[];
+    for c in head {
+        match c {
+            Command::Where(e) => conjuncts(e, &mut filters),
+            // ES drops a SORT that a later SORT overrides.
+            Command::Sort(keys) => sort = keys,
+            _ => {}
+        }
+    }
+    let (pushed, residual): (Vec<&Expr>, Vec<&Expr>) =
+        filters.into_iter().partition(|e| pushable(e));
+    let mut later: Vec<String> = out.to_vec();
+    for c in tail {
+        match c {
+            Command::Where(e) => fields(e, &mut later),
+            Command::Sort(keys) => later.extend(keys.iter().map(|k| k.field.clone())),
+            _ => {}
+        }
+    }
+    let keys: BTreeSet<String> = sort.iter().map(|k| k.field.clone()).collect();
+    let later: BTreeSet<String> = later.into_iter().collect();
+    let passes = |r: &Row, es: &[&Expr]| es.iter().all(|e| eval(e, r) == Some(true.into()));
+    let values = |rows: &[&Row], fields: &BTreeSet<String>| -> usize {
+        let count = |v: &Value| match v {
+            Value::Null => 0,
+            Value::Array(a) => a.len(),
+            _ => 1,
+        };
+        rows.iter()
+            .flat_map(|r| fields.iter().filter_map(|f| r.get(f.as_str()).map(count)))
+            .sum()
+    };
+    let found = groups
+        .iter()
+        .map(|g| g.iter().filter(|r| passes(r, &pushed)).collect::<Vec<_>>());
+    if residual.is_empty() && keys.iter().all(|k| types[k] != "text") {
+        let emitted: Vec<&Row> = match sort.is_empty() {
+            true => found.flatten().take(limit).collect(),
+            false => found
+                .flat_map(|mut g| {
+                    sort_rows(&mut g, sort);
+                    g.truncate(limit);
+                    g
+                })
+                .collect(),
+        };
+        return (emitted.len(), values(&emitted, &(&keys | &later)));
+    }
+    // ponytail: reads every match; ES's source can stop early once a plain LIMIT fills
+    let mut rows: Vec<&Row> = found.flatten().collect();
+    let documents = rows.len();
+    let mut loaded = Vec::new();
+    residual.iter().for_each(|e| fields(e, &mut loaded));
+    let mut loaded: BTreeSet<String> = loaded.into_iter().collect();
+    let mut n = values(&rows, &loaded);
+    rows.retain(|r| passes(r, &residual));
+    n += values(&rows, &(&keys - &loaded));
+    loaded.extend(keys);
+    sort_rows(&mut rows, sort);
+    rows.truncate(limit);
+    n += values(&rows, &(&later - &loaded));
+    (documents, n)
+}
+
+fn conjuncts<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
+    match e {
+        Expr::And(a, b) => {
+            conjuncts(a, out);
+            conjuncts(b, out);
+        }
+        _ => out.push(e),
+    }
+}
+
+/// Whether Lucene can run the filter: anything but a comparison of two fields.
+fn pushable(e: &Expr) -> bool {
+    match e {
+        Expr::Cmp(_, a, b) => !matches!((&**a, &**b), (Expr::Field(_), Expr::Field(_))),
+        Expr::Not(x) | Expr::IsNull(x, _) => pushable(x),
+        Expr::And(a, b) | Expr::Or(a, b) => pushable(a) && pushable(b),
+        Expr::Field(_) | Expr::Lit(_) => true,
+    }
 }
