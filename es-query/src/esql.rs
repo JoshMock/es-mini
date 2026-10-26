@@ -585,11 +585,7 @@ fn columns(index: &Index) -> BTreeMap<String, (String, String)> {
 
 /// `(mapping type, ES|QL type)` of a mapped field.
 fn types_of(m: &FieldMapping) -> (String, String) {
-    let t = m.type_name().to_owned();
-    let es_type = serde_json::to_value(m)
-        .ok()
-        .and_then(|v| Some(v["type"].as_str()?.to_owned()));
-    (es_type.unwrap_or_else(|| t.clone()), t)
+    (m.mapping_type(), m.type_name().to_owned())
 }
 
 /// ES's message for a field whose types disagree across indices (`TypeConflictedField`).

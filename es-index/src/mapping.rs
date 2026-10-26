@@ -78,6 +78,14 @@ impl FieldMapping {
         }
     }
 
+    /// The mapping's `type` as Elasticsearch names it (`float`, `short`, `text`, ...).
+    pub fn mapping_type(&self) -> String {
+        serde_json::to_value(self).expect("mappings serialize")["type"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    }
+
     /// The multi-fields indexed from this field's value.
     pub fn fields(&self) -> Option<&BTreeMap<String, FieldMapping>> {
         match self {

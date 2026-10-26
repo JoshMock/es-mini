@@ -151,10 +151,7 @@ fn cap(t: &str, metadata: bool, searchable: bool, aggregatable: bool) -> Value {
 /// An index's fields as (name, type, metadata, searchable, aggregatable), honoring the `filters` parameter.
 fn fields(index: &Index, filters: &[&str]) -> Vec<(String, String, bool, bool, bool)> {
     let mapped = |name: String, m: &FieldMapping| {
-        let t = serde_json::to_value(m).expect("mappings serialize")["type"]
-            .as_str()
-            .unwrap_or_default()
-            .to_owned();
+        let t = m.mapping_type();
         let aggregatable = t != "text";
         (name, t, false, true, aggregatable)
     };
