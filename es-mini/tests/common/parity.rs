@@ -163,7 +163,6 @@ pub async fn compare(app: &Router, xfail: &BTreeSet<String>) {
     );
     let aggs = fs::read_to_string(fixtures().join("generate_aggs.sh")).unwrap();
     cases.extend(recorded(&aggs, "expected-aggs"));
-    let verbose = std::env::var("PARITY_VERBOSE").is_ok();
     let mut problems = vec![];
     for c in &cases {
         let expected: Value = serde_json::from_slice(&fs::read(&c.expected).unwrap()).unwrap();
@@ -173,17 +172,22 @@ pub async fn compare(app: &Router, xfail: &BTreeSet<String>) {
         }
         let mut diffs = vec![];
         diff("", &expected, &actual, &mut diffs);
-        let listed = xfail.contains(&c.name);
-        match (diffs.is_empty(), listed) {
-            (true, true) => {
-                problems.push(format!("XPASS {} (delete it from its xfail list)", c.name))
-            }
-            (false, false) => problems.push(format!("FAIL {}", c.name)),
-            _ => {}
-        }
-        if !diffs.is_empty() && (verbose || !listed) {
-            println!("DIFF {}\n  {}", c.name, diffs.join("\n  "));
-        }
+        report(&c.name, &diffs, xfail, &mut problems);
     }
     assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+/// Records a FAIL for a case with `diffs` not in `xfail`, or an XPASS for a listed case without
+/// any, in `problems`, and prints the differences of unlisted cases (of every case with
+/// `PARITY_VERBOSE=1`).
+pub fn report(name: &str, diffs: &[String], xfail: &BTreeSet<String>, problems: &mut Vec<String>) {
+    let listed = xfail.contains(name);
+    match (diffs.is_empty(), listed) {
+        (true, true) => problems.push(format!("XPASS {name} (delete it from its xfail list)")),
+        (false, false) => problems.push(format!("FAIL {name}")),
+        _ => {}
+    }
+    if !diffs.is_empty() && (!listed || std::env::var("PARITY_VERBOSE").is_ok()) {
+        println!("DIFF {name}\n  {}", diffs.join("\n  "));
+    }
 }
