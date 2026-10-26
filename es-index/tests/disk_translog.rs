@@ -197,6 +197,24 @@ fn begun_persists_log_only_the_writes_taken() {
     disk::persist(&dir, &mut indices).unwrap();
     assert!(disk::open(&dir).unwrap()["idx"].get("3").is_some());
 }
+#[test]
+fn begun_syncs_log_only_the_writes_taken() {
+    let dir = scratch("begun-sync");
+    let mut indices = created();
+    let ix = indices.get_mut("idx").unwrap();
+    ix.settings
+        .merge(&json!({"index.translog.durability": "async"}));
+    disk::persist(&dir, &mut indices).unwrap();
+    indices.get_mut("idx").unwrap().put("2", json!({}));
+    let pending = disk::begin_sync(&dir, &mut indices).unwrap();
+    assert_eq!(ckp(&dir).num_ops, 0);
+    // The syncer can release its lock and take more writes while the fsync runs.
+    indices.get_mut("idx").unwrap().put("3", json!({}));
+    pending.finish().unwrap();
+    let back = disk::open(&dir).unwrap();
+    assert!(back["idx"].get("2").is_some());
+    assert!(back["idx"].get("3").is_none());
+}
 
 /// A flush commits every write, so statistics then come from the committed segments (deleted
 /// documents included until a merge drops them), as reopening the directory reads them.

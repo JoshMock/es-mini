@@ -294,7 +294,10 @@ fn spawn_syncer(dir: std::path::PathBuf, state: std::sync::Weak<RwLock<Indices>>
                 continue;
             }
             last = Instant::now();
-            if let Err(e) = es_index::disk::sync(&dir, &mut state.write().expect("lock poisoned")) {
+            // The fsync runs without the indices lock, as in `Group::persist`.
+            let begun =
+                es_index::disk::begin_sync(&dir, &mut state.write().expect("lock poisoned"));
+            if let Err(e) = begun.and_then(es_index::disk::Pending::finish) {
                 tracing::error!("syncing {}: {e}", dir.display());
             }
         }

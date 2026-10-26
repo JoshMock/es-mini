@@ -795,10 +795,15 @@ pub fn begin_persist(data_dir: &Path, indices: &mut Indices) -> es_codec::Result
 /// `indices.memory.shard_inactive_time`). Run it every [`sync_interval`]. It commits no cluster
 /// metadata: that is [`persist`]'s job.
 pub fn sync(data_dir: &Path, indices: &mut Indices) -> es_codec::Result<()> {
-    log(data_dir, indices, true)?.finish()
+    begin_sync(data_dir, indices)?.finish()
 }
 
-/// Translog appends taken by [`begin_persist`], not yet durable.
+/// [`sync`] in two steps, like [`begin_persist`].
+pub fn begin_sync(data_dir: &Path, indices: &mut Indices) -> es_codec::Result<Pending> {
+    log(data_dir, indices, true)
+}
+
+/// Translog appends taken by [`begin_persist`] or [`begin_sync`], not yet durable.
 pub struct Pending {
     appends: Vec<(
         std::path::PathBuf,
