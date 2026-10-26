@@ -1039,3 +1039,31 @@ fn math_functions_match_elasticsearch() {
         }
     }
 }
+
+#[test]
+fn mv_count_min_max_match_elasticsearch() {
+    let r = q(
+        r#"ROW a = MV_MIN([3, 1, 2]), b = MV_MAX(["b", "c", "a"]), c = MV_COUNT([1, 2, 3]), d = MV_COUNT("x"), e = MV_MAX(2.5), f = MV_MIN([true, false]), g = MV_COUNT(null)"#,
+    );
+    let types: Vec<&str> = r.columns.iter().map(|c| c.r#type.as_str()).collect();
+    assert_eq!(
+        types,
+        [
+            "integer", "keyword", "integer", "integer", "double", "boolean", "integer"
+        ]
+    );
+    assert_eq!(
+        r.values,
+        [[
+            json!(1),
+            json!("c"),
+            json!(3),
+            json!(1),
+            json!(2.5),
+            json!(false),
+            Value::Null
+        ]]
+    );
+    let r = q("FROM people | EVAL c = MV_COUNT(city), m = MV_MAX(age) | KEEP c, m | SORT m");
+    assert_eq!(r.values[0], [json!(null), json!(25)]);
+}

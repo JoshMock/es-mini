@@ -901,6 +901,7 @@ fn eval(e: &Expr, row: &Row) -> Option<Value> {
                 let args: Vec<Value> = args.iter().map(|a| eval(a, row)).collect::<Option<_>>()?;
                 return match f {
                     "SUBSTRING" | "TRIM" => string_fn(f, &args),
+                    "MV_COUNT" | "MV_MIN" | "MV_MAX" => mv_fn(f, &args[0]),
                     _ => math_fn(f, t, &args),
                 };
             }
@@ -988,7 +989,7 @@ const CONVERSIONS: [(&str, &str); 5] = [
 ];
 
 /// The scalar functions and how many arguments they take.
-const SCALAR_FNS: [(&str, RangeInclusive<usize>); 7] = [
+const SCALAR_FNS: [(&str, RangeInclusive<usize>); 10] = [
     ("SUBSTRING", 2..=3),
     ("TRIM", 1..=1),
     ("ABS", 1..=1),
@@ -996,6 +997,9 @@ const SCALAR_FNS: [(&str, RangeInclusive<usize>); 7] = [
     ("FLOOR", 1..=1),
     ("POW", 2..=2),
     ("ROUND", 1..=2),
+    ("MV_COUNT", 1..=1),
+    ("MV_MIN", 1..=1),
+    ("MV_MAX", 1..=1),
 ];
 
 /// What argument `i` of scalar function `f` must be, in Elasticsearch's words, and whether type
@@ -1004,6 +1008,8 @@ fn accepts(f: &str, i: usize, t: &str) -> (&'static str, bool) {
     let (accepted, ok) = match (f, i) {
         ("SUBSTRING" | "TRIM", 0) => ("string", t == "keyword" || t == "text"),
         ("SUBSTRING", _) => ("integer", t == "integer"),
+        // ponytail: spatial types are not refused
+        ("MV_COUNT" | "MV_MIN" | "MV_MAX", _) => ("any", true),
         ("ROUND", 1) => (
             "whole number except unsigned_long or counter types",
             t == "integer" || t == "long",
@@ -1092,6 +1098,25 @@ fn round_double(x: f64, decimals: i64) -> f64 {
         mid.abs()
     };
     rounded / scale * mid.signum()
+}
+
+/// Multi-value function `f` of `v`, ignoring nulls: its count, or its least or greatest value.
+fn mv_fn(f: &str, v: &Value) -> Option<Value> {
+    let vs = match v {
+        Value::Array(a) => &a[..],
+        v => std::slice::from_ref(v),
+    };
+    let vs = vs.iter().filter(|v| !v.is_null());
+    if f == "MV_COUNT" {
+        return Some(vs.count().into());
+    }
+    let pick = if f == "MV_MIN" {
+        Ordering::Less
+    } else {
+        Ordering::Greater
+    };
+    vs.reduce(|a, b| if compare(b, a) == Some(pick) { b } else { a })
+        .cloned()
 }
 
 /// Java's `Character.isWhitespace`.
@@ -1349,15 +1374,20 @@ fn resolve(
                         return None;
                     }
                 }
-                // The result type: a string, a double, or the first argument's.
+                // The result type: a string, an integer, a double, or the first argument's.
                 let out = match *name {
                     "SUBSTRING" => "keyword",
                     "TRIM" if ts[0] != "null" => "keyword",
+                    "MV_COUNT" => "integer",
+                    "MV_MIN" | "MV_MAX" => "null",
                     "POW" => "double",
                     _ => NUMERIC.iter().find(|n| **n == ts[0]).unwrap_or(&"null"),
                 };
                 let _ = t.set((*name, out));
-                return Some(out.into());
+                return Some(match *name {
+                    "MV_MIN" | "MV_MAX" => ts[0].clone(),
+                    _ => out.into(),
+                });
             }
             let Some(&(name, out)) = CONVERSIONS.iter().find(|(n, _)| *n == upper) else {
                 bad.push((*at, format!("Unknown function [{f}]")));
