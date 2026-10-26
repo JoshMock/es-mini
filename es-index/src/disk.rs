@@ -473,7 +473,7 @@ fn user_fields(
     docs: &[(&str, &Document)],
     meta: &[es_codec::field_infos::FieldInfo],
 ) -> UserFields {
-    use crate::{FieldMapping as M, analysis::Analyzer};
+    use crate::FieldMapping as M;
     use es_codec::{field_infos::DocValuesType, terms::TermPostings};
     use std::collections::BTreeMap;
     let mut out = UserFields::default();
@@ -517,24 +517,18 @@ fn user_fields(
                 let Some(texts) = typed(&values, &|v| v.as_str().map(str::to_owned)) else {
                     continue;
                 };
-                // Like Lucene's IndexingChain: positions run on across a doc's values, with ES's
-                // default position_increment_gap of 100 after each value.
                 let mut m = BTreeMap::<Vec<u8>, Vec<(u32, Vec<u32>)>>::new();
                 let mut lens = vec![];
                 for (doc, ts) in (0u32..).zip(&texts) {
-                    let (mut position, mut len) = (-1i64, 0);
-                    for t in ts {
-                        for tok in Analyzer::Standard.analyze(t) {
-                            (position, len) = (position + 1, len + 1);
-                            let docs = m.entry(tok.into_bytes()).or_default();
-                            match docs.last_mut() {
-                                Some((d, ps)) if *d == doc => ps.push(position as u32),
-                                _ => docs.push((doc, vec![position as u32])),
-                            }
+                    let tokens = crate::postings::positions(ts);
+                    lens.push(tokens.len() as u32);
+                    for (tok, position) in tokens {
+                        let docs = m.entry(tok.into_bytes()).or_default();
+                        match docs.last_mut() {
+                            Some((d, ps)) if *d == doc => ps.push(position),
+                            _ => docs.push((doc, vec![position])),
                         }
-                        position += 100;
                     }
-                    lens.push(len);
                 }
                 if m.is_empty() {
                     continue;

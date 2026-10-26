@@ -61,22 +61,20 @@ pub fn terms(analyzed: bool, vals: &[&Value]) -> Vec<String> {
     }
 }
 
-/// The positions of each of `wanted` among the analyzed tokens of `vals`, and their count.
-/// Like Lucene's IndexingChain, positions run on across values, with ES's default
+/// The analyzed tokens of one document's values of a text field, with their positions. Like
+/// Lucene's IndexingChain, positions run on across values, with ES's default
 /// position_increment_gap of 100 between them.
-pub fn positions(vals: &[&Value], wanted: &[String]) -> (Vec<Vec<u32>>, usize) {
-    let mut out = vec![vec![]; wanted.len()];
-    let (mut position, mut len) = (-1i64, 0);
+pub fn positions<S: AsRef<str>>(vals: &[S]) -> Vec<(String, u32)> {
+    let mut out = vec![];
+    let mut position = -1i64;
     for v in vals {
-        for tok in Analyzer::Standard.analyze(&text(v)) {
-            (position, len) = (position + 1, len + 1);
-            for (i, _) in wanted.iter().enumerate().filter(|(_, w)| **w == tok) {
-                out[i].push(position as u32);
-            }
+        for tok in Analyzer::Standard.analyze(v.as_ref()) {
+            position += 1;
+            out.push((tok, position as u32));
         }
         position += 100;
     }
-    (out, len)
+    out
 }
 
 /// The terms a document indexes at `path`.

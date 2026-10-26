@@ -679,14 +679,14 @@ impl<'a> Searcher<'a> {
                 if terms.len() < 2 || kind != Kind::Text {
                     return self.score_terms(field, &wanted, false, id, d);
                 }
-                let (lists, len) = es_index::postings::positions(&values(&d.source, path), &wanted);
+                let texts: Vec<String> = values(&d.source, path).into_iter().map(text).collect();
+                let tokens = es_index::postings::positions(&texts);
+                let len = tokens.len();
                 // a position's terms' positions merged, as MultiPhraseQuery's UnionPostingsEnum
-                let mut lists = lists.into_iter();
                 let lists: Vec<Vec<u32>> = (terms.iter())
                     .map(|t| {
-                        let mut p: Vec<u32> = lists.by_ref().take(t.len()).flatten().collect();
-                        p.sort_unstable();
-                        p
+                        let at = tokens.iter().filter(|(tok, _)| t.contains(tok));
+                        at.map(|&(_, p)| p).collect()
                     })
                     .collect();
                 let freq = match slop {
