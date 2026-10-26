@@ -16,6 +16,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::{
     borrow::Cow,
+    cmp::Ordering,
     collections::{BTreeSet, HashMap, HashSet},
     path::Path,
     time::Duration,
@@ -206,22 +207,25 @@ impl Shard {
         Some(out)
     }
 
-    /// The docs with a value of numeric `field` that `keep` accepts, from doc values, and every
-    /// doc of a segment without readable doc values for the field, or `None` there if `exact`.
-    /// Some may no longer be live.
-    // ponytail: decodes the whole doc values column; walk the points tree if that shows up
+    /// The docs with a value of numeric `field` that monotone `place` puts in a range, walking
+    /// its points tree or else decoding its doc values, and every doc of a segment with neither
+    /// readable, or `None` there if `exact`. Some may no longer be live.
     pub(crate) fn number_docs(
         &self,
         field: &str,
-        keep: impl Fn(i64) -> bool,
+        place: impl Fn(i64) -> Ordering,
         exact: bool,
     ) -> Option<BTreeSet<DiskPos>> {
         let mut out = BTreeSet::new();
         for (s, seg) in self.segments.iter().enumerate() {
+            if let Ok(docs) = seg.point_docs(field, &place) {
+                out.extend(docs.into_iter().map(|d| (s, d as usize)));
+                continue;
+            }
             match seg.doc_values(field) {
                 Ok(DocValues::Numbers(n)) => out.extend(
                     (n.iter().enumerate())
-                        .filter(|(_, v)| v.iter().any(|v| keep(*v)))
+                        .filter(|(_, v)| v.iter().any(|v| place(*v).is_eq()))
                         .map(|(d, _)| (s, d)),
                 ),
                 _ if exact => return None,

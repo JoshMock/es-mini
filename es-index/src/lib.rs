@@ -14,6 +14,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::{
     borrow::Cow,
+    cmp::Ordering,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     time::{Duration, Instant},
 };
@@ -536,14 +537,15 @@ impl Index {
         )
     }
 
-    /// The on-disk documents with a value of numeric or date `field` that `keep` accepts, from
-    /// doc values (dates as epoch millis); `None` for other fields. With `exact`, only those
-    /// that have one, or `None` if some segment has no doc values for the field to read.
-    /// Floats are their f32 values, so `keep` compares them with float semantics.
+    /// The on-disk documents with a value of numeric or date `field` that `place` puts in a
+    /// range (`Equal`), from its points tree or else its doc values (dates as epoch millis);
+    /// `None` for other fields. `place` must be monotone: `Less` below the range, `Greater`
+    /// above. With `exact`, only those that have one, or `None` if some segment has neither to
+    /// read. Floats are their f32 values, so `place` compares them with float semantics.
     pub fn disk_numbers(
         &self,
         field: &str,
-        keep: impl Fn(&Value) -> bool,
+        place: impl Fn(&Value) -> Ordering,
         exact: bool,
     ) -> Option<BTreeSet<disk::DiskPos>> {
         use FieldMapping as M;
@@ -555,7 +557,7 @@ impl Index {
         };
         self.disk.as_ref().map_or_else(
             || Some(BTreeSet::new()),
-            |d| d.number_docs(field, |v| keep(&decode(v)), exact),
+            |d| d.number_docs(field, |v| place(&decode(v)), exact),
         )
     }
 
@@ -1434,15 +1436,59 @@ mod tests {
         let opened = disk::open(&dir).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         let ix = &opened["i"];
-        let ids = |keep: fn(f64) -> bool| {
-            let docs = ix.disk_numbers("f", |v| keep(v.as_f64().unwrap()), true);
+        let ids = |lo: f64, hi: f64| {
+            let place = |v: &Value| {
+                let v = v.as_f64().unwrap();
+                if v < lo {
+                    Ordering::Less
+                } else if v > hi {
+                    Ordering::Greater
+                } else {
+                    Ordering::Equal
+                }
+            };
+            let docs = ix.disk_numbers("f", place, true);
             let has = |id: &&str| docs.as_ref().unwrap().contains(&ix.disk_pos(id).unwrap());
             ["1", "2", "3"].into_iter().filter(has).collect::<Vec<_>>()
         };
-        // values are their f32 doc values
-        assert_eq!(ids(|v| v == f64::from(1.1f32)), ["1"]);
-        assert_eq!(ids(|v| v < 0.0), ["2"]);
-        assert_eq!(ids(|v| v > 1.0), ["1", "2"]);
+        // values are their f32 values
+        let f = f64::from(1.1f32);
+        assert_eq!(ids(f, f), ["1"]);
+        assert_eq!(ids(f64::MIN, -0.1), ["2"]);
+        assert_eq!(ids(1.01, f64::MAX), ["1", "2"]);
+    }
+
+    /// A narrow range reads the points tree's leaves around it, not every value.
+    #[test]
+    fn number_ranges_walk_the_points_tree() {
+        let dir = std::env::temp_dir().join(format!("esm-disk-points-{}", std::process::id()));
+        let mut ix = Index::default();
+        (ix.mappings.properties).insert("n".into(), FieldMapping::Long);
+        for i in 0..5000 {
+            ix.put(&i.to_string(), json!({"n": i}));
+        }
+        disk::save(&dir, &Indices::from([("i".to_owned(), ix)])).unwrap();
+        let opened = disk::open(&dir).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let ix = &opened["i"];
+        let calls = std::cell::Cell::new(0);
+        let place = |v: &Value| {
+            calls.set(calls.get() + 1);
+            let v = v.as_i64().unwrap();
+            if v < 2000 {
+                Ordering::Less
+            } else if v > 2009 {
+                Ordering::Greater
+            } else {
+                Ordering::Equal
+            }
+        };
+        let docs = ix.disk_numbers("n", place, true).unwrap();
+        let want: BTreeSet<_> = (2000..2010)
+            .map(|i| ix.disk_pos(&i.to_string()).unwrap())
+            .collect();
+        assert_eq!(docs, want);
+        assert!(calls.get() < 1000, "{} values compared", calls.get());
     }
 
     #[test]

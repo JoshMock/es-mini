@@ -119,11 +119,20 @@ fn int(v: &Value) -> Option<i64> {
 /// Whether a value passes a range query's `[gt, gte, lt, lte]` bounds, given how it compares
 /// with a bound.
 fn in_range(bounds: [Option<&Value>; 4], cmp: impl Fn(&Value) -> Ordering) -> bool {
+    range_place(bounds, cmp).is_eq()
+}
+
+/// Where a value is against a range query's `[gt, gte, lt, lte]` bounds, given how it compares
+/// with a bound: `Less` if it fails a lower bound, else `Greater` if it fails an upper one.
+fn range_place(bounds: [Option<&Value>; 4], cmp: impl Fn(&Value) -> Ordering) -> Ordering {
     let [gt, gte, lt, lte] = bounds;
-    gt.is_none_or(|b| cmp(b).is_gt())
-        && gte.is_none_or(|b| cmp(b).is_ge())
-        && lt.is_none_or(|b| cmp(b).is_lt())
-        && lte.is_none_or(|b| cmp(b).is_le())
+    if !(gt.is_none_or(|b| cmp(b).is_gt()) && gte.is_none_or(|b| cmp(b).is_ge())) {
+        Ordering::Less
+    } else if !(lt.is_none_or(|b| cmp(b).is_lt()) && lte.is_none_or(|b| cmp(b).is_le())) {
+        Ordering::Greater
+    } else {
+        Ordering::Equal
+    }
 }
 
 fn scalar_cmp(a: &Value, b: &Value) -> Ordering {
@@ -452,8 +461,8 @@ impl<'a> Searcher<'a> {
         sets.try_fold(first, |a, b| Some(if all { &a & &b? } else { &a | &b? }))
     }
 
-    /// The on-disk documents whose doc values of numeric or date `field` are within `bounds`
-    /// (see [`in_range`] and [`Index::disk_numbers`]).
+    /// The on-disk documents whose values of numeric or date `field` are within `bounds`
+    /// (see [`range_place`] and [`Index::disk_numbers`]).
     fn number_docs(
         &self,
         field: &str,
@@ -472,7 +481,7 @@ impl<'a> Searcher<'a> {
         self.index.disk_numbers(
             field,
             |v| {
-                in_range(bounds, |b| match &instant {
+                range_place(bounds, |b| match &instant {
                     None => scalar_cmp(v, b),
                     // as scoring does, a bound that is not a date is above every value
                     Some(instant) => {
@@ -489,12 +498,14 @@ impl<'a> Searcher<'a> {
     fn float_docs(&self, field: &str, bounds: [Option<&Value>; 4]) -> Option<BTreeSet<DiskPos>> {
         let round = |b: &Value| num(b).map_or(b.clone(), |x| Value::from(f64::from(x as f32)));
         let [gt, gte, lt, lte] = bounds.map(|b| b.map(round));
-        let keep = |v: &Value| {
+        let place = |v: &Value| {
             let cmp = |b: &Value| scalar_cmp(v, b);
-            in_range([None, gt.as_ref(), None, lt.as_ref()], cmp)
-                && in_range([None, gte.as_ref(), None, lte.as_ref()], cmp)
+            match range_place([None, gt.as_ref(), None, lt.as_ref()], cmp) {
+                Ordering::Equal => range_place([None, gte.as_ref(), None, lte.as_ref()], cmp),
+                place => place,
+            }
         };
-        self.index.disk_numbers(field, keep, false)
+        self.index.disk_numbers(field, place, false)
     }
 
     /// For a date field, how it reads a value as epoch millis.
