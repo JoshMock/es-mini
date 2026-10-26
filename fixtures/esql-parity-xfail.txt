@@ -12,8 +12,6 @@ FROM emp | WHERE age IN (28, 51) | KEEP name, age | SORT name
 FROM emp | WHERE hired > "2020-01-01" | KEEP name, hired | SORT hired
 FROM emp | DROP bio, tags, scores | SORT name | LIMIT 2
 FROM emp | DROP h* | SORT name | LIMIT 2
-FROM emp | EVAL level = CASE(age >= 45, "senior", age >= 30, "mid", "junior") | KEEP name, level | SORT name
-FROM emp | EVAL a = COALESCE(age, 0), s = COALESCE(salary, -1) | KEEP name, a, s | SORT name
 FROM emp | EVAL y = DATE_EXTRACT("year", hired), m = DATE_EXTRACT("month_of_year", hired) | KEEP name, y, m | SORT name
 FROM emp | EVAL d = DATE_FORMAT("yyyy-MM-dd", hired) | KEEP name, d | SORT name
 FROM emp | EVAL d = DATE_FORMAT(hired) | KEEP d | SORT d | LIMIT 2

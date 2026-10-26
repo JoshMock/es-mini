@@ -1227,3 +1227,67 @@ fn string_functions_match_elasticsearch() {
         }
     }
 }
+
+#[test]
+fn case_and_coalesce_match_elasticsearch() {
+    let r = q(
+        r#"FROM people | EVAL level = CASE(age >= 40, "senior", age >= 30, "mid", "junior"), c = COALESCE(city, name), x = CASE(age > 99, 1), d = COALESCE(null, age, 2), e = CASE(age < 30, 1.5, age) | KEEP name, level, c, x, d, e | SORT name"#,
+    );
+    let types: Vec<&str> = r.columns.iter().map(|c| c.r#type.as_str()).collect();
+    assert_eq!(
+        types,
+        ["keyword", "keyword", "keyword", "integer", "long", "double"]
+    );
+    assert_eq!(
+        r.values,
+        [
+            [
+                json!("ann"),
+                json!("mid"),
+                json!("Oslo"),
+                Value::Null,
+                json!(30),
+                json!(30.0)
+            ],
+            [
+                json!("bob"),
+                json!("junior"),
+                json!("bob"),
+                Value::Null,
+                json!(25),
+                json!(1.5)
+            ],
+            [
+                json!("cid"),
+                json!("senior"),
+                json!("Rome"),
+                Value::Null,
+                json!(41),
+                json!(41.0)
+            ],
+        ]
+    );
+    // A multi-valued condition is false; multi-valued values pass through.
+    let r = q("ROW a = CASE([true, false], 1, 2), b = COALESCE(null, [1, 2]), c = CASE(null, 1)");
+    assert_eq!(r.values, [[json!(2), json!([1, 2]), Value::Null]]);
+    for (query, problem) in [
+        (
+            "FROM people | EVAL x = CASE(age, 1)",
+            "line 1:24: first argument of [CASE(age, 1)] must be [boolean], found value [age] type [long]",
+        ),
+        (
+            r#"FROM people | EVAL x = CASE(age > 1, "a", 2)"#,
+            r#"line 1:24: third argument of [CASE(age > 1, "a", 2)] must be [keyword], found value [2] type [integer]"#,
+        ),
+        // Numbers only widen to the first numeric argument's type.
+        (
+            "FROM people | EVAL x = COALESCE(1, age)",
+            "line 1:24: second argument of [COALESCE(1, age)] must be [integer], found value [age] type [long]",
+        ),
+    ] {
+        match run(&indices(), query) {
+            Err(EsqlError::Verification(m)) => assert_eq!(m, format!("Found 1 problem\n{problem}")),
+            other => panic!("{other:?}"),
+        }
+    }
+}

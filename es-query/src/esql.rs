@@ -954,6 +954,28 @@ fn eval(e: &Expr, row: &Row) -> Option<Value> {
         }
         Expr::Call(_, args, ft, _) => {
             let &(f, t) = ft.get()?;
+            if let "CASE" | "COALESCE" = f {
+                let v = match f {
+                    "COALESCE" => args.iter().find_map(|a| eval(a, row)),
+                    // A multi-valued condition is false, like ES (which warns).
+                    _ => args
+                        .chunks(2)
+                        .find_map(|c| match c {
+                            [cond, v] => {
+                                (eval(cond, row) == Some(true.into())).then(|| eval(v, row))
+                            }
+                            _ => Some(eval(&c[0], row)),
+                        })
+                        .flatten(),
+                }?;
+                // Numbers widened to double by `conditional_type`.
+                let double = |v: &Value| v.as_f64().map_or(v.clone(), Value::from);
+                return Some(match (t, v) {
+                    ("double", Value::Array(a)) => Value::Array(a.iter().map(double).collect()),
+                    ("double", v) => double(&v),
+                    (_, v) => v,
+                });
+            }
             if SCALAR_FNS.iter().any(|(n, _)| *n == f) {
                 let args: Vec<Value> = args.iter().map(|a| eval(a, row)).collect::<Option<_>>()?;
                 return match f {
@@ -1050,8 +1072,10 @@ const CONVERSIONS: [(&str, &str); 6] = [
 ];
 
 /// The scalar functions and how many arguments they take.
-const SCALAR_FNS: [(&str, RangeInclusive<usize>); 17] = [
+const SCALAR_FNS: [(&str, RangeInclusive<usize>); 19] = [
     ("NOW", 0..=0),
+    ("CASE", 2..=usize::MAX),
+    ("COALESCE", 1..=usize::MAX),
     ("CONCAT", 2..=usize::MAX),
     ("LENGTH", 1..=1),
     ("SUBSTRING", 2..=3),
@@ -1088,6 +1112,46 @@ fn accepts(f: &str, i: usize, t: &str) -> (&'static str, bool) {
         _ => ("numeric", NUMERIC.contains(&t)),
     };
     (accepted, ok || t == "null")
+}
+
+/// How Elasticsearch names argument `i` in a type error (`ParamOrdinal.fromIndex`).
+fn ordinal(i: usize) -> &'static str {
+    ["first ", "second ", "third ", "fourth ", "fifth "]
+        .get(i)
+        .unwrap_or(&"")
+}
+
+/// The type of `CASE` or `COALESCE` over arguments of types `ts`, like Elasticsearch's type
+/// resolution after its `ImplicitCasting` rule: numbers widen to the first numeric argument's
+/// type when all of them can, then every value must have the first non-null value's type (text
+/// counting as keyword) and every `CASE` condition must be boolean. Otherwise, the position of
+/// the first argument that fails and the type it must be.
+fn conditional_type(f: &str, ts: &[String]) -> Result<String, (usize, String)> {
+    let numeric = |t: &str| NUMERIC.contains(&t);
+    let target = ts.iter().map(String::as_str).find(|t| numeric(t));
+    // ponytail: unsigned_long widens to double here; not checked against Elasticsearch
+    let widens = |t: &str| {
+        Some(t) == target || target == Some("double") || (t, target) == ("integer", Some("long"))
+    };
+    let cast = target.filter(|_| ts.iter().all(|t| !numeric(t) || widens(t)));
+    let mut out = "null";
+    for (i, t) in ts.iter().enumerate() {
+        let t = match (t.as_str(), cast) {
+            ("text", _) => "keyword",
+            (t, Some(c)) if numeric(t) => c,
+            (t, _) => t,
+        };
+        if f == "CASE" && i % 2 == 0 && i + 1 < ts.len() {
+            if t != "boolean" && t != "null" {
+                return Err((i, "boolean".into()));
+            }
+        } else if out == "null" {
+            out = t;
+        } else if t != out && t != "null" {
+            return Err((i, out.into()));
+        }
+    }
+    Ok(out.into())
 }
 
 /// Math function `f` of its arguments, the first of type `t`, like Elasticsearch's evaluators:
@@ -1441,27 +1505,37 @@ fn resolve(
                 }
                 let ts: Vec<_> = args.iter().map(|a| resolve(a, src, types, bad)).collect();
                 let ts: Vec<String> = ts.into_iter().collect::<Option<_>>()?;
-                for (i, (a, ta)) in args.iter().zip(&ts).enumerate() {
-                    let (accepted, ok) = accepts(name, i, ta);
-                    if !ok {
-                        let nth = match (*name, i) {
-                            ("TRIM" | "ABS" | "CEIL" | "FLOOR" | "CONCAT" | "LENGTH", _)
-                            | ("TO_LOWER" | "TO_UPPER", _) => "",
-                            (_, 0) => "first ",
-                            (_, 1) => "second ",
-                            _ => "third ",
-                        };
-                        bad.push((
-                            *at,
-                            format!(
-                                "{nth}argument of [{}] must be [{accepted}], found value [{}] \
-                                 type [{ta}]",
-                                text(e),
-                                text(a)
-                            ),
-                        ));
-                        return None;
-                    }
+                // The first argument of the wrong type, and what it must be.
+                let mismatch = match *name {
+                    "CASE" | "COALESCE" => match conditional_type(name, &ts) {
+                        Ok(out) => {
+                            let _ = t.set((*name, if out == "double" { "double" } else { "any" }));
+                            return Some(out);
+                        }
+                        Err(found) => Some(found),
+                    },
+                    _ => ts.iter().enumerate().find_map(|(i, ta)| {
+                        let (accepted, ok) = accepts(name, i, ta);
+                        (!ok).then(|| (i, accepted.to_owned()))
+                    }),
+                };
+                if let Some((i, accepted)) = mismatch {
+                    let nth = match *name {
+                        "TRIM" | "ABS" | "CEIL" | "FLOOR" | "CONCAT" | "LENGTH" | "TO_LOWER"
+                        | "TO_UPPER" => "",
+                        _ => ordinal(i),
+                    };
+                    bad.push((
+                        *at,
+                        format!(
+                            "{nth}argument of [{}] must be [{accepted}], found value [{}] type \
+                             [{}]",
+                            text(e),
+                            text(&args[i]),
+                            ts[i]
+                        ),
+                    ));
+                    return None;
                 }
                 // The result type: a string, an integer, a double, or the first argument's.
                 let out = match *name {
