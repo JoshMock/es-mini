@@ -441,8 +441,8 @@ pub fn norm_len(norm: i8) -> u32 {
 /// arrays of scalars. Field numbers start at 6, after the metadata fields.
 // ponytail: fields the writer cannot encode yet are left out of the segment, which only
 // Elasticsearch notices (es-mini rebuilds every field from `_source` on open): values of the
-// wrong type or nested objects, custom date formats, `date_nanos`, multi-fields, and any field
-// with a term in 256+ docs.
+// wrong type or nested objects, `date_nanos`, multi-fields, and any field with a term in 256+
+// docs.
 #[derive(Default)]
 struct UserFields {
     fields: Vec<es_codec::field_infos::FieldInfo>,
@@ -645,7 +645,12 @@ fn user_fields(
                             v.as_f64().map(|f| crate::half_float_sortable(f as f32))
                         }),
                     ),
-                    M::Date { .. } => (8, typed(&values, &crate::parse_date_millis)),
+                    M::Date { format, locale, .. } => (
+                        8,
+                        typed(&values, &|v| {
+                            crate::date_millis(format.as_deref(), locale.as_deref(), v)
+                        }),
+                    ),
                     _ => (4, typed(&values, &|v| v.as_i64())),
                 };
                 let Some(nums) = nums else {
@@ -973,8 +978,9 @@ fn commit(data_dir: &Path, indices: &Indices) -> es_codec::Result<()> {
 /// Marks the segments es-mini writes, the only ones a later save reuses: Elasticsearch indexes
 /// some fields differently (`_seq_no` points) and Lucene rejects a field with two schemas, so an
 /// Elasticsearch-written index is rewritten whole on its first save. Version 2 added text
-/// positions, so version 1 segments are rewritten too.
-const WRITER: (&str, &str) = ("es-mini.writer", "2");
+/// positions and version 3 read dates with their mapping's format, so older segments are
+/// rewritten too.
+const WRITER: (&str, &str) = ("es-mini.writer", "3");
 
 // Elasticsearch 9.5.5's merge policy defaults (MergePolicyConfig) for TieredMergePolicy.
 const FLOOR_SEGMENT: u64 = 16 << 20;

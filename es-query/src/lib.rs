@@ -1578,6 +1578,23 @@ mod tests {
         assert!(Searcher::new(ix, &q).field_stats.is_empty());
     }
 
+    /// Doc values hold dates as their mapping's `format` reads them, so ranges counted from
+    /// them agree with the sources.
+    #[test]
+    fn date_ranges_on_an_opened_index_read_the_mapping_format() {
+        let dir = std::env::temp_dir().join(format!("esm-date-format-{}", std::process::id()));
+        let mut ix = Index::default();
+        let mapping = json!({"type": "date", "format": "epoch_second"});
+        let mapping = serde_json::from_value(mapping).unwrap();
+        ix.mappings.properties.insert("d".into(), mapping);
+        ix.put("1", json!({"d": 1_704_067_200}));
+        disk::save(&dir, &Indices::from([("i".to_owned(), ix)])).unwrap();
+        let opened = disk::open(&dir).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let q = json!({"range": {"d": {"gte": 1_704_067_200, "lte": 1_704_067_200}}});
+        assert_eq!(count(&opened["i"], &parse_query(&q).unwrap()), 1);
+    }
+
     #[test]
     fn float_ranges_on_an_opened_index_narrow_by_their_f32_doc_values() {
         let dir = std::env::temp_dir().join(format!("esm-float-ranges-{}", std::process::id()));
