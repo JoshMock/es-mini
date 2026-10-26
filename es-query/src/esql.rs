@@ -1,6 +1,6 @@
 //! ES|QL subset: `FROM` (with `METADATA _id, _index, _version`), `ROW` and `SHOW INFO`, with
 //! `WHERE`, `EVAL`, `LIMIT`, `KEEP`, `DROP`, `RENAME`, `SORT`, and `STATS ... [BY ...]` over
-//! `COUNT`, `MIN`, `MAX`, `SUM` and `AVG`.
+//! `COUNT`, `MIN`, `MAX`, `SUM`, `AVG`, `MEDIAN` and `PERCENTILE`.
 //!
 //! Expressions support comparisons (`== != < <= > >=`), `AND`/`OR`/`NOT`, parentheses,
 //! `IS [NOT] NULL`, arithmetic, and the functions in `CONVERSIONS` and `SCALAR_FNS` over field
@@ -286,7 +286,7 @@ enum Command {
     /// `old AS new` (or `new = old`) pairs, each with its text.
     Rename(Vec<(Name, String, String)>),
     Sort(Vec<SortKey>),
-    /// Aggregates (`COUNT`, `MIN`, `MAX`, `SUM` or `AVG`), then the named grouping expressions.
+    /// Aggregates (see `aggregate`), then the named grouping expressions.
     Stats(Vec<(String, Expr)>, Vec<(String, Expr)>),
 }
 
@@ -1872,15 +1872,17 @@ fn resolve(
     }
 }
 
-/// A STATS aggregate's function, upper case, and its argument (`None` for `COUNT(*)`).
-fn aggregate(e: &Expr) -> Option<(String, Option<&Expr>)> {
+/// A STATS aggregate's function, upper case, its argument (`None` for `COUNT(*)`) and its
+/// parameter (`PERCENTILE`'s percentile).
+fn aggregate(e: &Expr) -> Option<(String, Option<&Expr>, Option<&Expr>)> {
     let Expr::Call(f, args, ..) = e else {
         return None;
     };
     let f = f.to_ascii_uppercase();
     match (f.as_str(), &args[..]) {
-        ("COUNT", [Expr::Field(s, _)]) if s == "*" => Some((f, None)),
-        ("COUNT" | "MIN" | "MAX" | "SUM" | "AVG", [arg]) => Some((f, Some(arg))),
+        ("COUNT", [Expr::Field(s, _)]) if s == "*" => Some((f, None, None)),
+        ("COUNT" | "MIN" | "MAX" | "SUM" | "AVG" | "MEDIAN", [arg]) => Some((f, Some(arg), None)),
+        ("PERCENTILE", [arg, p]) => Some((f, Some(arg), Some(p))),
         _ => None,
     }
 }
@@ -2042,12 +2044,12 @@ pub fn run(
             }
             Command::Limit(_) => Vec::new(),
             Command::Stats(aggs, by) => {
-                // ponytail: COUNT, MIN, MAX, SUM and AVG are the only aggregates; the esql-stats
-                // goal adds the rest
+                // ponytail: COUNT, MIN, MAX, SUM, AVG, MEDIAN and PERCENTILE are the only
+                // aggregates; the esql-stats goal adds the rest
                 let mut bad = Vec::new();
                 let mut out = Vec::new();
                 for (name, e) in aggs {
-                    let Some((f, arg)) = aggregate(e) else {
+                    let Some((f, arg, param)) = aggregate(e) else {
                         let msg = format!(
                             "[{}] is not supported by es-mini in STATS",
                             &query[span(e).1.clone()]
@@ -2061,6 +2063,7 @@ pub fn run(
                     };
                     let mut refs = Vec::new();
                     fields(arg, &mut refs);
+                    param.into_iter().for_each(|p| fields(p, &mut refs));
                     bad.extend(
                         refs.into_iter()
                             .filter_map(|(f, at)| Some((at, check(&cols, &conflicts, &f)?))),
@@ -2073,22 +2076,58 @@ pub fn run(
                     };
                     let numeric =
                         t == "null" || (NUMERIC.contains(&t.as_str()) && t != "unsigned_long");
-                    if (f == "SUM" || f == "AVG") && !numeric {
+                    let source = &query[span(e).1.clone()];
+                    let expected = match f.as_str() {
+                        "SUM" | "AVG" => {
+                            "argument of [{e}] must be [aggregate_metric_double, \
+                                          exponential_histogram, tdigest or numeric except \
+                                          unsigned_long or counter types]"
+                        }
+                        "MEDIAN" => {
+                            "argument of [{e}] must be [exponential_histogram, tdigest or \
+                                     numeric except unsigned_long or counter types]"
+                        }
+                        "PERCENTILE" => {
+                            "first argument of [{e}] must be [exponential_histogram, \
+                                         tdigest or numeric except unsigned_long]"
+                        }
+                        _ => "",
+                    };
+                    if !expected.is_empty() && !numeric {
+                        let found = &query[span(arg).1.clone()];
+                        let msg = expected.replace("{e}", source);
                         bad.push((
                             span(e).0,
-                            format!(
-                                "argument of [{}] must be [aggregate_metric_double, \
-                                 exponential_histogram, tdigest or numeric except unsigned_long \
-                                 or counter types], found value [{}] type [{t}]",
-                                &query[span(e).1.clone()],
-                                &query[span(arg).1.clone()]
-                            ),
+                            format!("{msg}, found value [{found}] type [{t}]"),
                         ));
                         continue;
                     }
+                    if let Some(p) = param {
+                        let text = &query[span(p).1.clone()];
+                        let Some(pt) = resolve(p, query, &types, &mut bad) else {
+                            continue;
+                        };
+                        let msg = if !NUMERIC.contains(&pt.as_str()) || pt == "unsigned_long" {
+                            format!(
+                                "second argument of [{source}] must be [numeric except \
+                                 unsigned_long], found value [{text}] type [{pt}]"
+                            )
+                        } else if !names(p).is_empty() {
+                            format!(
+                                "second argument of [{source}] must be a constant, received \
+                                 [{text}]"
+                            )
+                        } else {
+                            String::new()
+                        };
+                        if !msg.is_empty() {
+                            bad.push((span(e).0, msg));
+                            continue;
+                        }
+                    }
                     let t = match f.as_str() {
                         "COUNT" => "long".into(),
-                        "AVG" => "double".into(),
+                        "AVG" | "MEDIAN" | "PERCENTILE" => "double".into(),
                         "SUM" if t == "integer" => "long".into(),
                         _ => t,
                     };
@@ -2201,7 +2240,7 @@ pub fn run(
                     buckets.push((Vec::new(), Vec::new()));
                 }
                 let agg = |name: &str, e: &Expr, group: &[&Row]| {
-                    let (f, arg) = aggregate(e).expect("STATS was verified");
+                    let (f, arg, param) = aggregate(e).expect("STATS was verified");
                     let Some(arg) = arg else {
                         return group.len().into();
                     };
@@ -2228,6 +2267,19 @@ pub fn run(
                             .map_or(Value::Null, Value::from),
                         // Doubles sum with Kahan compensation, like ES's CompensatedSum.
                         "SUM" => crate::aggs::compensated_sum(doubles).into(),
+                        "MEDIAN" | "PERCENTILE" => {
+                            let p = match param {
+                                Some(p) => eval(p, &Row::new()).as_ref().and_then(Value::as_f64),
+                                None => Some(50.0),
+                            };
+                            let Some(p) = p.filter(|p| (0.0..=100.0).contains(p)) else {
+                                return Value::Null;
+                            };
+                            // Like ES's QuantileStates, a t-digest of compression 1000.
+                            let mut digest = crate::tdigest::TDigest::new(1000.0);
+                            doubles.for_each(|x| digest.add(x, 1));
+                            digest.quantile(p / 100.0).into()
+                        }
                         _ => (crate::aggs::compensated_sum(doubles) / all.len() as f64).into(),
                     }
                 };

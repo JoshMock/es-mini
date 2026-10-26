@@ -2,7 +2,6 @@
 # Fix one, then delete its line. Run the esql_parity test with PARITY_VERBOSE=1 to see the
 # differences. This list may only shrink.
 FROM emp | STATS d = COUNT_DISTINCT(tags), da = COUNT_DISTINCT(age)
-FROM emp | STATS m = MEDIAN(salary), p = PERCENTILE(salary, 90), p0 = PERCENTILE(age, 0)
 FROM emp | WHERE active | STATS v = VALUES(name)
 FROM emp | STATS c = COUNT(*) BY b = BUCKET(salary, 50000) | SORT b
 FROM emp | STATS c = COUNT(*) BY b = BUCKET(age, 10, 20, 60) | SORT b

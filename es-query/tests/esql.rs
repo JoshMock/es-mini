@@ -1516,3 +1516,33 @@ fn in_matches_any_listed_value() {
     let r = q("ROW a = 1 | EVAL t = a IN (2, 1), n = a IN (2, null), m = [1, 2] IN (1)");
     assert_eq!(r.values[0][1..], [json!(true), Value::Null, Value::Null]);
 }
+
+#[test]
+fn stats_median_percentile() {
+    let r =
+        q("FROM people | STATS m = MEDIAN(age), p = PERCENTILE(age, 75), p0 = PERCENTILE(age, 0)");
+    let types: Vec<&str> = r.columns.iter().map(|c| c.r#type.as_str()).collect();
+    assert_eq!(types, ["double", "double", "double"]);
+    assert_eq!(r.values, [[json!(30.0), json!(35.5), json!(25.0)]]);
+    // Out-of-range percentiles and empty groups are null.
+    let r = q(
+        "FROM people | STATS p = PERCENTILE(age, 101), m = MEDIAN(age) BY name | SORT name | LIMIT 1",
+    );
+    assert_eq!(r.values, [[Value::Null, json!(30.0), json!("ann")]]);
+    let r = q("FROM people | WHERE age > 99 | STATS m = MEDIAN(age)");
+    assert_eq!(r.values, [[Value::Null]]);
+    assert!(matches!(
+        run(&indices(), "FROM people | STATS m = MEDIAN(name)"),
+        Err(EsqlError::Verification(m)) if m.contains(
+            "argument of [MEDIAN(name)] must be [exponential_histogram, tdigest or numeric except \
+             unsigned_long or counter types], found value [name] type [keyword]"
+        )
+    ));
+    assert!(matches!(
+        run(&indices(), "FROM people | STATS p = PERCENTILE(age, name)"),
+        Err(EsqlError::Verification(m)) if m.contains(
+            "second argument of [PERCENTILE(age, name)] must be [numeric except unsigned_long], \
+             found value [name] type [keyword]"
+        )
+    ));
+}
