@@ -188,10 +188,10 @@ fn persisted(dir: &std::path::Path) -> Result<(Router, AppState), String> {
     };
     let state = Arc::new(RwLock::new(indices));
     spawn_syncer(dir.to_owned(), Arc::downgrade(&state));
-    let (dir, saved) = (dir.to_owned(), state.clone());
+    let (dir, saved, group) = (dir.to_owned(), state.clone(), Arc::new(Group::default()));
     let app = with_es_405(router(state.clone()).layer(axum::middleware::from_fn(
         move |req: axum::extract::Request, next: axum::middleware::Next| {
-            let (dir, state) = (dir.clone(), saved.clone());
+            let (dir, state, group) = (dir.clone(), saved.clone(), group.clone());
             async move {
                 let route = req.extensions().get::<axum::extract::MatchedPath>();
                 let reads = req.method().is_safe()
@@ -207,9 +207,11 @@ fn persisted(dir: &std::path::Path) -> Result<(Router, AppState), String> {
                 if reads || !res.status().is_success() {
                     return res;
                 }
-                let saved =
-                    es_index::disk::persist(&dir, &mut state.write().expect("lock poisoned"));
-                match saved {
+                let saved = {
+                    let dir = dir.clone();
+                    tokio::task::spawn_blocking(move || group.persist(&dir, &state)).await
+                };
+                match saved.unwrap_or_else(|e| Err(e.to_string())) {
                     Ok(()) => res,
                     // ponytail: the change stays applied in memory; a later successful save persists it
                     Err(e) => {
@@ -225,6 +227,56 @@ fn persisted(dir: &std::path::Path) -> Result<(Router, AppState), String> {
         },
     )));
     Ok((app, state))
+}
+
+/// Group commit: one write request at a time persists (a round), covering every write applied
+/// before it took the unlogged operations; writes that finish meanwhile wait and share the
+/// next round's fsync.
+#[derive(Default)]
+struct Group {
+    rounds: std::sync::Mutex<Rounds>,
+    done: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct Rounds {
+    started: u64,
+    finished: u64,
+    running: bool,
+    /// The last round that failed, and why.
+    failed: (u64, String),
+}
+
+impl Group {
+    /// Returns once a round that began after this call made the caller's writes durable.
+    fn persist(&self, dir: &std::path::Path, state: &RwLock<Indices>) -> Result<(), String> {
+        let mut r = self.rounds.lock().expect("lock poisoned");
+        let mine = r.started + 1;
+        while r.finished < mine {
+            if r.running {
+                r = self.done.wait(r).expect("lock poisoned");
+                continue;
+            }
+            (r.running, r.started) = (true, mine);
+            drop(r);
+            // The fsync runs without the indices lock, so other writes apply meanwhile.
+            let begun =
+                es_index::disk::begin_persist(dir, &mut state.write().expect("lock poisoned"));
+            let saved = begun.and_then(es_index::disk::Pending::finish);
+            r = self.rounds.lock().expect("lock poisoned");
+            (r.running, r.finished) = (false, mine);
+            if let Err(e) = saved {
+                r.failed = (mine, e.0);
+            }
+            self.done.notify_all();
+        }
+        // ponytail: only the last failure is kept, so a later round's failure also fails a write
+        // whose round succeeded (never the reverse); keep per-round results if that matters
+        match &r.failed {
+            (round, e) if *round >= mine => Err(e.clone()),
+            _ => Ok(()),
+        }
+    }
 }
 
 /// Runs [`es_index::disk::sync`] every [`es_index::disk::sync_interval`] until `state` is dropped.

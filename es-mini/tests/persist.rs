@@ -226,3 +226,30 @@ async fn async_durability_syncs_on_a_timer() {
     drop(app);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_writes_are_all_durable() {
+    let dir = std::env::temp_dir().join(format!("esm-persist-group-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let app = es_mini::app_persisted(&dir).unwrap();
+    call(&app, "PUT", "/books", json!({})).await;
+    let writes: Vec<_> = (0..64)
+        .map(|i| {
+            let app = app.clone();
+            tokio::spawn(async move {
+                call(&app, "PUT", &format!("/books/_doc/{i}"), json!({ "n": i })).await
+            })
+        })
+        .collect();
+    for w in writes {
+        assert_eq!(w.await.unwrap()["result"], "created");
+    }
+    // Acknowledged means logged: reopen the directory as it is now, without a flush.
+    let back = es_index::disk::open(&dir).unwrap();
+    for i in 0..64 {
+        let doc = back["books"].get(&i.to_string()).expect("doc lost");
+        assert_eq!(doc.source, json!({ "n": i }));
+    }
+    drop(app);
+    let _ = std::fs::remove_dir_all(&dir);
+}
