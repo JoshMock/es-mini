@@ -254,15 +254,16 @@ mod tests {
             })
             .collect();
         let n = docs.len();
+        let col = |v: Vec<i64>| v.into_iter().map(|x| vec![x]).collect();
         let numeric = [
-            (2, vec![1; n]),
-            (3, (0..n as i64).collect()),
-            (4, vec![1; n]),
+            (2, vec![vec![1]; n]),
+            (3, col((0..n as i64).collect())),
+            (4, vec![vec![1]; n]),
             (5, vec![]),
-            (8, docs.iter().map(|d| d.3).collect()),
-            (9, docs.iter().map(|d| d.4.to_bits() as i64).collect()),
-            (10, docs.iter().map(|d| i64::from(d.5)).collect()),
-            (11, docs.iter().map(|d| d.6).collect()),
+            (8, col(docs.iter().map(|d| d.3).collect())),
+            (9, col(docs.iter().map(|d| d.4.to_bits() as i64).collect())),
+            (10, col(docs.iter().map(|d| i64::from(d.5)).collect())),
+            (11, col(docs.iter().map(|d| d.6).collect())),
         ];
         let keyword = [(
             7,

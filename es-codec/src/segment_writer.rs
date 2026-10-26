@@ -28,8 +28,8 @@ pub struct NewSegment<'a> {
     pub max_doc: i32,
     pub fields: &'a [FieldInfo],
     pub stored: &'a [Vec<(i32, StoredValue)>],
-    /// `(field number, value per doc)`
-    pub numeric: &'a [(i32, Vec<i64>)],
+    /// `(field number, values per doc)`, at most one per doc
+    pub numeric: &'a [(i32, Vec<Vec<i64>>)],
     /// `(field number, one value per doc)` for single-valued SORTED_NUMERIC fields
     pub sorted_numeric: &'a [(i32, Vec<Vec<i64>>)],
     /// `(field number, terms per doc)` for keyword fields
@@ -183,7 +183,7 @@ mod tests {
         let stored: Vec<_> = (0..5)
             .map(|i| vec![(0, StoredValue::String(format!("doc {i}")))])
             .collect();
-        let numeric = [(1, vec![10, 20, 30, 40, 50])];
+        let numeric = [(1, vec![vec![10], vec![20], vec![30], vec![40], vec![50]])];
         let keyword = [(
             2,
             (0..5)
@@ -236,7 +236,7 @@ mod tests {
         assert_eq!(info.diagnostics["lucene.version"], "10.5.1");
         assert_eq!(r.stored_fields().unwrap(), stored);
         assert_eq!(r.terms("title").unwrap(), terms[0].1);
-        let want = DocValues::Numbers(numeric[0].1.iter().map(|v| vec![*v]).collect());
+        let want = DocValues::Numbers(numeric[0].1.clone());
         assert_eq!(r.doc_values("n").unwrap(), want);
         let DocValues::Ordinals { ords, terms } = r.doc_values("tag").unwrap() else {
             panic!("tag should be ordinals")

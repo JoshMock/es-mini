@@ -197,13 +197,13 @@ fn write_terms_dict(dvm: &mut Output, dvd: &mut Output, terms: &[&[u8]]) {
     dvd.bytes(&index_addr);
 }
 
-/// Returns `(.dvm, .dvd)` for dense `numeric` fields (one `(field number, value per doc)` each)
-/// and `keyword` fields as SORTED_SET (`(field number, terms per doc)`; a doc may have none or
-/// several).
+/// Returns `(.dvm, .dvd)` for `numeric` fields (`(field number, values per doc)`; a doc has at
+/// most one) and `keyword` fields as SORTED_SET (`(field number, terms per doc)`; a doc may have
+/// none or several).
 ///
 /// ponytail: no table, gcd, or block encoding; add them when size demands.
 pub fn write_doc_values(
-    numeric: &[(i32, Vec<i64>)],
+    numeric: &[(i32, Vec<Vec<i64>>)],
     keyword: &[(i32, Vec<Vec<Vec<u8>>>)],
     id: &[u8; codec_util::ID_LEN],
     suffix: &str,
@@ -214,7 +214,7 @@ pub fn write_doc_values(
 /// Like [`write_doc_values`], plus `sorted_numeric` fields (what ES uses for `long`, `double`,
 /// `boolean`, ...): `(field number, values per doc)`.
 pub fn write_doc_values_with(
-    numeric: &[(i32, Vec<i64>)],
+    numeric: &[(i32, Vec<Vec<i64>>)],
     sorted_numeric: &[(i32, Vec<Vec<i64>>)],
     keyword: &[(i32, Vec<Vec<Vec<u8>>>)],
     id: &[u8; codec_util::ID_LEN],
@@ -226,8 +226,8 @@ pub fn write_doc_values_with(
     for (number, values) in numeric {
         dvm.bytes(&number.to_le_bytes());
         dvm.byte(0);
-        let docs: Vec<u32> = (0..values.len() as u32).collect();
-        write_numeric_entry(&mut dvm, &mut dvd, values, &docs, values.len());
+        let (docs, flat) = flatten(values);
+        write_numeric_entry(&mut dvm, &mut dvd, &flat, &docs, values.len());
     }
     for (number, values) in sorted_numeric {
         dvm.bytes(&number.to_le_bytes());

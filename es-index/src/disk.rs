@@ -1209,11 +1209,11 @@ fn write_docs(
             ]
         })
         .collect();
-    let col = |f: fn(&Document) -> u64| docs.iter().map(|(_, d)| f(d) as i64).collect();
+    let col = |f: fn(&Document) -> u64| docs.iter().map(|(_, d)| vec![f(d) as i64]).collect();
     let numeric = [
         (2, col(|d| d.version)),
         (3, col(|d| d.seq_no)),
-        (4, vec![1; docs.len()]),
+        (4, vec![vec![1]; docs.len()]),
         (5, vec![]),
     ];
     let mut ids: Vec<_> = docs

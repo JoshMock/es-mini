@@ -43,18 +43,20 @@ mod tests {
     #[test]
     fn write_then_read_numeric_round_trips() {
         let id = [3u8; 16];
-        let a: Vec<i64> = (0..1000).map(|i| i * 37 - 5000).collect();
-        let b = vec![i64::MIN, i64::MAX, 0];
-        let c = vec![42; 1000];
-        let fields = [(0, a.clone()), (1, c.clone())];
+        let wrap = |v: Vec<i64>| v.into_iter().map(|x| vec![x]).collect::<Vec<_>>();
+        let a = wrap((0..1000).map(|i| i * 37 - 5000).collect());
+        let b = wrap(vec![i64::MIN, i64::MAX, 0]);
+        let c = wrap(vec![42; 1000]);
+        let sparse: Vec<Vec<i64>> = (0..1000).map(|i| vec![i * 3; i as usize % 2]).collect();
+        let fields = [(0, a.clone()), (1, c.clone()), (2, sparse.clone())];
         let (m, d) = write_doc_values(&fields, &[], &id, "Lucene90_0");
         let read = |n, len| decode(&m, &d, (&id, len), "Lucene90_0", n, &|_| Ok(false)).unwrap();
-        let wrap = |v: Vec<i64>| DocValues::Numbers(v.into_iter().map(|x| vec![x]).collect());
-        assert_eq!(read(0, 1000), wrap(a));
-        assert_eq!(read(1, 1000), wrap(c));
+        assert_eq!(read(0, 1000), DocValues::Numbers(a));
+        assert_eq!(read(1, 1000), DocValues::Numbers(c));
+        assert_eq!(read(2, 1000), DocValues::Numbers(sparse));
         let (m, d) = write_doc_values(&[(7, b.clone())], &[], &id, "Lucene90_0");
         let got = decode(&m, &d, (&id, 3), "Lucene90_0", 7, &|_| Ok(false)).unwrap();
-        assert_eq!(got, wrap(b));
+        assert_eq!(got, DocValues::Numbers(b));
     }
 
     #[test]
@@ -143,7 +145,7 @@ mod tests {
             })
             .collect();
         let (m, d) = write_doc_values(
-            &[(0, vec![5; 300])],
+            &[(0, vec![vec![5]; 300])],
             &[(1, vals.iter().map(|v| vec![v.clone()]).collect())],
             &id,
             "Lucene90_0",
