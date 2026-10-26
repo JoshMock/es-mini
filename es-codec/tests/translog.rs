@@ -28,6 +28,7 @@ fn index(id: &str, source: &str, seq_no: i64, version: i64) -> Op {
         version,
         primary_term: 1,
         routing: None,
+        auto_id_timestamp: -1,
     }
 }
 
@@ -102,6 +103,7 @@ fn reads_and_writes_routing_and_no_ops() {
             version: 1,
             primary_term: 1,
             routing: Some("user1".into()),
+            auto_id_timestamp: -1,
         },
         Op::Delete {
             id: "gone".into(),
@@ -166,4 +168,18 @@ fn reads_index_batches_as_their_operations() {
     let shapes =
         r#"{"u":{"arr":[1,"a",[2.5,null],false],"fix":[1,2],"objs":[{"p":1,"q":[true]}],"e":{}}}"#;
     assert_eq!(ops[48], index("e1", shapes, 48, 1));
+}
+
+#[test]
+fn keeps_the_auto_generated_id_timestamp() {
+    let mut op = index("abc", "{}", 0, 1);
+    if let Op::Index {
+        auto_id_timestamp, ..
+    } = &mut op
+    {
+        *auto_id_timestamp = 1_700_000_000_123;
+    }
+    let mut file = translog::header("0123456789abcdefghijkl", 1);
+    file.extend(translog::encode(&op));
+    assert_eq!(translog::read(&file).unwrap().1, vec![op]);
 }

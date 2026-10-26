@@ -17,8 +17,10 @@ use serde_json::Value;
 use std::{
     borrow::Cow,
     cmp::Ordering,
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
-    time::{Duration, Instant},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque, hash_map::RandomState},
+    hash::BuildHasher,
+    sync::{Mutex, OnceLock, PoisonError},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 /// Index settings stored the way ES normalizes them: flat `index.*` keys whose values are
@@ -336,6 +338,11 @@ impl Index {
 
     /// Creates or overwrites a document.
     pub fn put(&mut self, id: &str, source: Value) -> WriteResult {
+        self.put_auto(id, source, -1)
+    }
+
+    /// Like [`Index::put`] for an id Elasticsearch generated at `auto_id_timestamp` (-1: none).
+    pub fn put_auto(&mut self, id: &str, source: Value, auto_id_timestamp: i64) -> WriteResult {
         self.prune_tombstones();
         let version = self.last_version(id) + 1;
         let seq_no = self.next_seq_no();
@@ -346,6 +353,7 @@ impl Index {
             version: version as i64,
             primary_term: 1,
             routing: None,
+            auto_id_timestamp,
         });
         let result = self.store(id, source, version, seq_no);
         WriteResult {
@@ -409,9 +417,19 @@ impl Index {
 
     /// Creates a document; `Err(current_version)` if it already exists.
     pub fn create(&mut self, id: &str, source: Value) -> Result<WriteResult, u64> {
+        self.create_auto(id, source, -1)
+    }
+
+    /// Like [`Index::create`] for a generated id; see [`Index::put_auto`].
+    pub fn create_auto(
+        &mut self,
+        id: &str,
+        source: Value,
+        auto_id_timestamp: i64,
+    ) -> Result<WriteResult, u64> {
         match self.meta(id) {
             Some((version, _)) => Err(version),
-            None => Ok(self.put(id, source)),
+            None => Ok(self.put_auto(id, source, auto_id_timestamp)),
         }
     }
 
@@ -744,6 +762,37 @@ fn merge(target: &mut Value, patch: &Value) {
 
 /// `index.version.created` of indices created by Elasticsearch 9.5.5 (read from the fixture).
 pub const VERSION_CREATED: i64 = es_codec::segment_infos::INDEX_VERSION_ID;
+
+/// An id from Elasticsearch's `TimeBasedUUIDGenerator` (15 bytes, URL-safe base64 without
+/// padding) and the millisecond timestamp it embeds.
+pub fn auto_id() -> (String, i64) {
+    static STATE: Mutex<(u32, i64)> = Mutex::new((0, 0));
+    static MAC: OnceLock<[u8; 6]> = OnceLock::new();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    let (seq, ts) = {
+        let mut st = STATE.lock().unwrap_or_else(PoisonError::into_inner);
+        st.0 = st.0.wrapping_add(1) & 0xff_ffff;
+        st.1 = st.1.max(now) + i64::from(st.0 == 0);
+        *st
+    };
+    // ponytail: random per-process node bytes stand in for the munged MAC address
+    let mac = MAC.get_or_init(|| {
+        let r = RandomState::new().hash_one(0u8).to_be_bytes();
+        [r[0] | 1, r[1], r[2], r[3], r[4], r[5]]
+    });
+    let (s, t) = (seq.to_be_bytes(), ts.to_be_bytes());
+    let bytes = [
+        s[3], s[1], t[5], t[4], t[3], t[2], mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], t[6],
+        s[2], t[7],
+    ];
+    (
+        es_codec::base64::encode(&bytes, es_codec::base64::URL, false),
+        ts,
+    )
+}
 
 /// A 22-character URL-safe base64 id like Elasticsearch's index UUIDs.
 fn random_uuid() -> String {
@@ -1354,6 +1403,26 @@ mod tests {
             s.to_json(),
             json!({"index": {"number_of_shards": "3", "number_of_replicas": "1", "refresh_interval": "1s", "foo": "true"}})
         );
+    }
+
+    #[test]
+    fn generated_ids_log_their_timestamp() {
+        let mut ix = Index::default();
+        ix.put("a", json!({}));
+        let (id, ts) = auto_id();
+        assert_eq!(id.len(), 20);
+        ix.put_auto(&id, json!({}), ts);
+        let stamps: Vec<i64> = ix
+            .take_unlogged()
+            .into_iter()
+            .map(|op| match op {
+                es_codec::translog::Op::Index {
+                    auto_id_timestamp, ..
+                } => auto_id_timestamp,
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(stamps, [-1, ts]);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use crate::{
     AppState,
-    docs::{auto_id, delete_doc, parse_json, put_or_create, update_doc},
+    docs::{delete_doc, parse_json, put_or_create, update_doc},
     error::AppError,
     params,
 };
@@ -10,7 +10,7 @@ use axum::{
     extract::{Path, Query, State},
     http::Uri,
 };
-use es_index::aliases;
+use es_index::{aliases, auto_id};
 use serde_json::{Value, json};
 use std::{collections::HashMap, time::Instant};
 
@@ -112,7 +112,7 @@ fn execute(state: &AppState, a: Action) -> Value {
         resolve_alias(state, &a.index)
     };
     let target = resolved.as_deref().unwrap_or(&a.index).to_owned();
-    let id = a.id.unwrap_or_else(auto_id);
+    let (id, ts) = a.id.map_or_else(auto_id, |id| (id, -1));
     let body = a.body.unwrap_or(Value::Null);
     let result = (|| {
         resolved?;
@@ -122,8 +122,8 @@ fn execute(state: &AppState, a: Action) -> Value {
             ));
         }
         match a.op.as_str() {
-            "index" => put_or_create(state, &target, &id, body, false),
-            "create" => put_or_create(state, &target, &id, body, true),
+            "index" => put_or_create(state, &target, &id, body, false, ts),
+            "create" => put_or_create(state, &target, &id, body, true, ts),
             "update" => update_doc(state, &target, &id, &body),
             _ => delete_doc(state, &target, &id),
         }

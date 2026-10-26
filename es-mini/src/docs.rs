@@ -5,13 +5,9 @@ use axum::{
     extract::{Path, Query, State},
     http::{StatusCode, Uri},
 };
-use es_index::{DocResult, FieldMapping, Index, WriteResult, aliases};
+use es_index::{DocResult, FieldMapping, Index, WriteResult, aliases, auto_id};
 use serde_json::{Value, json};
-use std::{
-    collections::HashMap,
-    sync::atomic::{AtomicU32, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::collections::HashMap;
 
 type Reply = Result<(StatusCode, Json<Value>), AppError>;
 
@@ -49,20 +45,6 @@ fn array_objects(v: &Value, in_array: bool) -> usize {
         Value::Array(a) => a.iter().map(|v| array_objects(v, true)).sum(),
         _ => 0,
     }
-}
-
-// ponytail: time+counter hex ids; ES uses base64 time-based UUIDs, same length
-pub fn auto_id() -> String {
-    static COUNTER: AtomicU32 = AtomicU32::new(0);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    format!(
-        "{:012x}{:08x}",
-        nanos & 0xffff_ffff_ffff,
-        COUNTER.fetch_add(1, Ordering::Relaxed)
-    )
 }
 
 /// Runs `f` against the write target `name` resolves to (an index, created if missing as ES
@@ -127,6 +109,7 @@ pub fn put_or_create(
     id: &str,
     source: Value,
     create: bool,
+    auto_id_timestamp: i64,
 ) -> Reply {
     if id.len() > 512 {
         return Err(AppError::IllegalArgument(format!(
@@ -170,8 +153,8 @@ pub fn put_or_create(
         // only once the document is accepted; dynamic dates never fail the check above
         i.map_dynamic(&source);
         Ok(match create {
-            true => i.create(id, source),
-            false => Ok(i.put(id, source)),
+            true => i.create_auto(id, source, auto_id_timestamp),
+            false => Ok(i.put_auto(id, source, auto_id_timestamp)),
         })
     })?;
     let w = w?.map_err(|current_version| AppError::VersionConflict {
@@ -250,7 +233,7 @@ pub async fn index_with_id(
     params::check(&uri, &params, &WRITE_PARAMS)?;
     let create = params.get("op_type").is_some_and(|o| o == "create");
     with_write_params(&state, &params, &index, || {
-        put_or_create(&state, &index, &id, parse_source(&body)?, create)
+        put_or_create(&state, &index, &id, parse_source(&body)?, create, -1)
     })
 }
 
@@ -263,7 +246,8 @@ pub async fn index_auto_id(
 ) -> Reply {
     params::check(&uri, &params, &WRITE_PARAMS)?;
     with_write_params(&state, &params, &index, || {
-        put_or_create(&state, &index, &auto_id(), parse_source(&body)?, true)
+        let (id, ts) = auto_id();
+        put_or_create(&state, &index, &id, parse_source(&body)?, true, ts)
     })
 }
 
@@ -276,7 +260,7 @@ pub async fn create(
 ) -> Reply {
     params::check(&uri, &params, &WRITE_PARAMS)?;
     with_write_params(&state, &params, &index, || {
-        put_or_create(&state, &index, &id, parse_source(&body)?, true)
+        put_or_create(&state, &index, &id, parse_source(&body)?, true, -1)
     })
 }
 
