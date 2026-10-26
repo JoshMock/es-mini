@@ -343,6 +343,10 @@ fn load_shard(index: &mut Index, dir: &Path) -> es_codec::Result<()> {
     };
     for seg in infos.segments {
         let seg = SegmentReader::open(dir, seg)?;
+        // Documents are read from the segment later; a corrupt one fails here instead.
+        seg.cfs
+            .verify()
+            .map_err(|e| es_codec::Error(format!("{}: {}", seg.seg.name, e.0)))?;
         add_stats(&mut stats, &seg);
         let (versions, seq_nos) = (longs(&seg, "_version"), longs(&seg, "_seq_no"));
         let live = seg.live_docs()?;

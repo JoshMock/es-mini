@@ -61,6 +61,29 @@ impl CompoundFile {
         Ok(cfs)
     }
 
+    /// Checks the CRC32 of the whole `.cfs` against its footer (Lucene's
+    /// `CodecUtil.checksumEntireFile`), reading it a chunk at a time.
+    pub fn verify(&self) -> Result<()> {
+        let io = |e: std::io::Error| crate::Error(format!("reading compound file: {e}"));
+        let len = self.data.metadata().map_err(io)?.len();
+        let footer = codec_util::check_footer_structure(&self.read_at(
+            len - codec_util::FOOTER_LEN as u64,
+            codec_util::FOOTER_LEN as u64,
+        )?)?;
+        let (mut crc, mut at, end) = (0, 0, len - 8);
+        while at < end {
+            let n = (end - at).min(1 << 20);
+            crc = codec_util::crc32_update(crc, &self.read_at(at, n)?);
+            at += n;
+        }
+        if i64::from(crc) != footer {
+            return err(format!(
+                "compound file checksum mismatch: expected {footer:#x}, got {crc:#x}"
+            ));
+        }
+        Ok(())
+    }
+
     fn read_at(&self, offset: u64, len: u64) -> Result<Vec<u8>> {
         let mut buf = vec![0; len as usize];
         self.data

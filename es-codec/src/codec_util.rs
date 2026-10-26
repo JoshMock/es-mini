@@ -116,7 +116,12 @@ const CRC_TABLE: [u32; 256] = {
 
 /// CRC-32 (IEEE), as java.util.zip.CRC32.
 pub fn crc32(data: &[u8]) -> u32 {
-    let mut crc = !0u32;
+    crc32_update(0, data)
+}
+
+/// The CRC-32 of the bytes `crc` covers followed by `data`.
+pub fn crc32_update(crc: u32, data: &[u8]) -> u32 {
+    let mut crc = !crc;
     for &b in data {
         crc = (crc >> 8) ^ CRC_TABLE[((crc ^ b as u32) & 0xff) as usize];
     }

@@ -466,7 +466,8 @@ impl Index {
             return Some(Cow::Borrowed(d));
         }
         let disk = self.disk.as_ref()?;
-        // ponytail: a document whose segment cannot be read is reported missing
+        // ponytail: open checksums the segments, so only an I/O error since (e.g. a deleted
+        // file) leaves a document unreadable; it is then reported missing
         disk.load(&disk.meta(id)?).ok().map(Cow::Owned)
     }
 
@@ -496,7 +497,8 @@ impl Index {
         // results that depend on the visiting order (floating-point sums) are then deterministic
         memory.sort_unstable_by_key(|(_, d)| d.seq_no);
         on_disk
-            // ponytail: documents whose segment cannot be read are skipped
+            // ponytail: open checksums the segments; documents an I/O error since makes
+            // unreadable are skipped
             .filter_map(Result::ok)
             .map(|(id, d)| (id, Cow::Owned(d)))
             .chain(

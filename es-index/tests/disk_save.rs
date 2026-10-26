@@ -237,3 +237,23 @@ fn text_fields_save_positions() {
     let want: Vec<_> = want.map(|(t, p)| (t.to_owned(), p)).into();
     assert_eq!(got, want);
 }
+
+#[test]
+fn a_corrupt_segment_fails_open() {
+    let dir = scratch("corrupt").join("data");
+    disk::save(&dir, &one_doc(json!({"v": "corrupt-me"}))).unwrap();
+    let meta = es_codec::cluster_state::read_indices(&dir).unwrap();
+    let shard = dir.join("indices").join(&meta[0].uuid).join("0/index");
+    let cfs = fs::read_dir(&shard)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.extension().is_some_and(|e| e == "cfs"))
+        .unwrap();
+    let mut bytes = fs::read(&cfs).unwrap();
+    // Breaks the stored _source, which only reading the document would notice otherwise.
+    let at = bytes.windows(10).position(|w| w == b"corrupt-me").unwrap();
+    bytes[at - 1] = b'x';
+    fs::write(&cfs, bytes).unwrap();
+    let e = disk::open(&dir).unwrap_err().0;
+    assert!(e.contains("checksum"), "{e}");
+}
