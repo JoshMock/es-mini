@@ -6,7 +6,7 @@
 mod read;
 mod write;
 
-pub(crate) use read::read_field_values;
+pub(crate) use read::{read_docs_with_field, read_field_values};
 pub(crate) use write::write_docs_with_field;
 pub use write::{write_doc_values, write_doc_values_with};
 

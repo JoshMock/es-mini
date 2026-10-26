@@ -342,3 +342,14 @@ fn reads_sorted_set_doc_values() {
     );
     assert_eq!(tags(1), [one("news"), one("animal"), vec![]]);
 }
+
+#[test]
+fn reads_norms() {
+    let segs = segments();
+    // Field lengths of the titles of docs 1-5 (Lucene's SmallFloat bytes equal small lengths).
+    assert_eq!(segs[0].norms("title").unwrap(), Some(vec![4, 3, 3, 6, 5]));
+    // sparse: the delete tombstone has no title
+    assert_eq!(segs[1].norms("title").unwrap(), Some(vec![3, 3, 0]));
+    // keyword fields omit norms
+    assert_eq!(segs[0].norms("tag").unwrap(), None);
+}

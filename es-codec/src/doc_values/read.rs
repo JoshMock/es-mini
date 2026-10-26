@@ -27,14 +27,14 @@ pub(crate) fn read_field_values(r: &SegmentReader, field: &str) -> Result<DocVal
 
 /// Location of the `IndexedDISI` listing docs with a value; offset -2 is none, -1 is all docs.
 #[derive(Debug, Clone, Copy)]
-struct DocsWithField {
+pub(crate) struct DocsWithField {
     offset: i64,
     length: i64,
     jump_table_entries: i16,
     dense_rank_power: i8,
 }
 
-fn read_docs_with_field(meta: &mut DataInput) -> Result<DocsWithField> {
+pub(crate) fn read_docs_with_field(meta: &mut DataInput) -> Result<DocsWithField> {
     Ok(DocsWithField {
         offset: meta.read_long()?,
         length: meta.read_long()?,
@@ -53,7 +53,7 @@ fn slice(data: &[u8], offset: i64, length: i64) -> Result<&[u8]> {
 
 impl DocsWithField {
     /// Decodes the `IndexedDISI` into sorted doc ids.
-    fn doc_ids(&self, data: &[u8], max_doc: i32) -> Result<Vec<u32>> {
+    pub(crate) fn doc_ids(&self, data: &[u8], max_doc: i32) -> Result<Vec<u32>> {
         match self.offset {
             -2 => return Ok(vec![]),
             -1 => return Ok((0..max_doc as u32).collect()),

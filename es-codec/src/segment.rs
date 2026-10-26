@@ -3,7 +3,7 @@
 use crate::{
     CompoundFile, Result, SegmentCommitInfo, doc_values, err,
     field_infos::{self, FieldInfo},
-    live_docs, stored_fields, terms,
+    live_docs, norms, stored_fields, terms,
 };
 use std::path::{Path, PathBuf};
 
@@ -107,6 +107,11 @@ impl SegmentReader {
     /// One term of `field` with its docs and freqs (no positions), if the field has it.
     pub fn term(&self, field: &str, term: &[u8]) -> Result<Option<terms::TermPostings>> {
         Ok(terms::read_terms(self, field, Some(term))?.pop())
+    }
+
+    /// Each doc's norm of `field` (0 for docs without one); `None` if the field omits norms.
+    pub fn norms(&self, field: &str) -> Result<Option<Vec<i64>>> {
+        norms::read_norms(self, field)
     }
 
     /// A field's doc values, from the field's latest doc values generation.

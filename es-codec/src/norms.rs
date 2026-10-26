@@ -1,5 +1,64 @@
-//! `Lucene90NormsFormat` writer for fields that have a norm on every doc (`.nvm` meta, `.nvd` data).
-use crate::{codec_util::ID_LEN, doc_values::write_docs_with_field, output::Output};
+//! `Lucene90NormsFormat` (`.nvm` meta, `.nvd` data): its reader, and a writer of 1-byte norms.
+use crate::{
+    Result, SegmentReader,
+    codec_util::{self, ID_LEN},
+    doc_values::{read_docs_with_field, write_docs_with_field},
+    err,
+    field_infos::IndexOptions,
+    input::DataInput,
+    output::Output,
+};
+
+/// Each doc's norm of `field` (0 for docs without one); `None` if the field has no norms.
+pub(crate) fn read_norms(r: &SegmentReader, field: &str) -> Result<Option<Vec<i64>>> {
+    let info = r.field(field)?;
+    if info.omit_norms || info.index_options == IndexOptions::None {
+        return Ok(None);
+    }
+    let (meta, data) = (r.cfs_file(".nvm")?, r.cfs_file(".nvd")?);
+    let (id, max_doc) = (&r.seg.info.id, r.seg.info.max_doc);
+    codec_util::check_footer(&meta)?;
+    codec_util::check_footer(&data)?;
+    let m = &mut DataInput::new(&meta);
+    codec_util::check_index_header(m, "Lucene90NormsMetadata", 0, 0, id, "")?;
+    let d = &mut DataInput::new(&data);
+    codec_util::check_index_header(d, "Lucene90NormsData", 0, 0, id, "")?;
+    loop {
+        let number = m.read_int()?;
+        if number == -1 {
+            return err(format!("{} has no norms for {field}", r.seg.name));
+        }
+        let docs = read_docs_with_field(m)?;
+        m.read_int()?; // numDocsWithField
+        let bytes = m.read_byte()? as usize;
+        let offset = m.read_long()?;
+        if number != info.number {
+            continue;
+        }
+        let mut out = vec![0; max_doc.max(0) as usize];
+        for (i, doc) in docs.doc_ids(&data, max_doc)?.into_iter().enumerate() {
+            let at = |n| {
+                let start = usize::try_from(offset).ok()? + i * n;
+                data.get(start..start + n)
+            };
+            let norm = match bytes {
+                // constant: the offset slot holds the value
+                0 => Some(offset),
+                // little-endian, sign-extended
+                n @ (1 | 2 | 4 | 8) => at(n).map(|b| {
+                    let v = (b.iter().rev()).fold(0i64, |v, byte| v << 8 | i64::from(*byte));
+                    v << (64 - 8 * n) >> (64 - 8 * n)
+                }),
+                n => return err(format!("invalid bytes per norm {n}")),
+            };
+            match (norm, out.get_mut(doc as usize)) {
+                (Some(norm), Some(slot)) => *slot = norm,
+                _ => return err(format!("norms of {field} extend past their data")),
+            }
+        }
+        return Ok(Some(out));
+    }
+}
 
 /// Returns `(nvm, nvd)` for `fields` of `(field number, norm per doc, `None` for docs without one)`.
 ///
