@@ -1504,7 +1504,7 @@ pub fn run(
     };
     let Table {
         mut types,
-        conflicts,
+        mut conflicts,
         groups,
         mut cols,
         empty,
@@ -1521,7 +1521,7 @@ pub fn run(
         },
     };
     // A referenced column must exist and have one type.
-    let check = |cols: &[String], f: &str| match conflicts.get(f) {
+    let check = |cols: &[String], conflicts: &BTreeMap<String, _>, f: &str| match conflicts.get(f) {
         _ if !cols.iter().any(|c| c == f) => Some(unknown(f)),
         Some(m) => Some(conflict_error(f, m)),
         None => None,
@@ -1537,7 +1537,7 @@ pub fn run(
                 fields(e, &mut refs);
                 let mut bad: Vec<_> = refs
                     .into_iter()
-                    .filter_map(|(f, at)| Some((at, check(&cols, &f)?)))
+                    .filter_map(|(f, at)| Some((at, check(&cols, &conflicts, &f)?)))
                     .collect();
                 if bad.is_empty()
                     && let Some(t) = resolve(e, query, &types, &mut bad)
@@ -1559,7 +1559,7 @@ pub fn run(
                     fields(e, &mut refs);
                     bad.extend(
                         refs.into_iter()
-                            .filter_map(|(f, at)| Some((at, check(&cols, &f)?))),
+                            .filter_map(|(f, at)| Some((at, check(&cols, &conflicts, &f)?))),
                     );
                     if !bad.is_empty() {
                         break;
@@ -1570,6 +1570,7 @@ pub fn run(
                     cols.retain(|c| c != name);
                     cols.push(name.clone());
                     types.insert(name.clone(), t);
+                    conflicts.remove(name);
                 }
                 bad
             }
@@ -1583,7 +1584,7 @@ pub fn run(
                 .collect(),
             Command::Sort(keys) => keys
                 .iter()
-                .filter_map(|k| Some((k.at, check(&cols, &k.field)?)))
+                .filter_map(|k| Some((k.at, check(&cols, &conflicts, &k.field)?)))
                 .collect(),
             Command::Limit(_) => Vec::new(),
         };

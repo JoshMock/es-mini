@@ -307,6 +307,18 @@ fn using_a_conflicting_field_fails_verification() {
     }
 }
 
+#[test]
+fn eval_replaces_a_conflicting_field() {
+    let r = run(
+        &conflicting(),
+        "FROM people, b | EVAL age = 1 | SORT age | KEEP age",
+    )
+    .unwrap();
+    let cols = serde_json::to_value(&r.columns).unwrap();
+    assert_eq!(cols, json!([{"name": "age", "type": "integer"}]));
+    assert!(r.values.iter().all(|row| row[0] == json!(1)));
+}
+
 /// Counts Elasticsearch 9.5.5 reported for the same documents and queries.
 #[test]
 fn documents_found_and_values_loaded_follow_the_plan() {
