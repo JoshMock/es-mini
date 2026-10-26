@@ -1,9 +1,6 @@
 # ES|QL queries (lines of esql-queries.txt) whose responses es-mini does not match yet.
 # Fix one, then delete its line. Run the esql_parity test with PARITY_VERBOSE=1 to see the
 # differences. This list may only shrink.
-ROW a = 1, b = "two", c = true, d = 1.5, e = null
-ROW a = [1, 2, 3], b = ["x", "y"]
-SHOW INFO
 FROM emp | SORT name | LIMIT 3
 FROM emp | KEEP name, bio, age, salary, height, active, hired, tags, scores | SORT name
 FROM emp METADATA _id, _index, _version | KEEP _id, _index, _version, name | SORT _id
@@ -25,7 +22,6 @@ FROM emp | DROP bio, tags, scores | SORT name | LIMIT 2
 FROM emp | DROP h* | SORT name | LIMIT 2
 FROM emp | LIMIT 2 | STATS c = COUNT(*)
 ROW a = 7, b = 2 | EVAL s = a + b, d = a - b, p = a * b, q = a / b, r = a % b, f = a / 2.0
-ROW a = 1 < 2, b = 2 <= 2, c = 3 > 4, d = "a" == "a", e = 1 != 1, f = null == 1
 ROW a = 1 + 1.5, b = 1 + 3000000000
 ROW a = 5 / 0
 ROW a = 2147483647 + 1

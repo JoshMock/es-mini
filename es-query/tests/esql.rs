@@ -720,3 +720,39 @@ fn parse_errors_match_elasticsearch() {
         );
     }
 }
+
+#[test]
+fn row_and_show_info_are_sources() {
+    let r = q(r#"ROW a = 1, b = "two", c = true, d = -1.5, e = null, f = [1, 2], 3000000000"#);
+    assert_eq!(col_names(&r), ["a", "b", "c", "d", "e", "f", "3000000000"]);
+    let types: Vec<&str> = r.columns.iter().map(|c| c.r#type.as_str()).collect();
+    assert_eq!(
+        types,
+        [
+            "integer", "keyword", "boolean", "double", "null", "integer", "long"
+        ]
+    );
+    assert_eq!(
+        r.values,
+        [[
+            json!(1),
+            json!("two"),
+            json!(true),
+            json!(-1.5),
+            Value::Null,
+            json!([1, 2]),
+            json!(3000000000u64)
+        ]]
+    );
+    assert_eq!((r.documents_found, r.values_loaded), (0, 0));
+    assert_eq!(q("ROW a = 1, b = 2, a = 3 | KEEP a").values, [[json!(3)]]);
+    assert_eq!(q("ROW a = 1 < 2").values, [[json!(true)]]);
+    let r = q("SHOW INFO | KEEP version");
+    assert_eq!(r.values, [[json!("9.5.5")]]);
+    match run(&indices(), "ROW a = x") {
+        Err(EsqlError::Verification(m)) => {
+            assert_eq!(m, "Found 1 problem\nline 1:9: Unknown column [x]")
+        }
+        other => panic!("{other:?}"),
+    }
+}

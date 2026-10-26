@@ -1,4 +1,4 @@
-//! ES|QL subset: `FROM` with `WHERE`, `LIMIT`, `KEEP`, `DROP`, and `SORT`.
+//! ES|QL subset: `FROM`, `ROW` and `SHOW INFO`, with `WHERE`, `LIMIT`, `KEEP`, `DROP`, and `SORT`.
 //!
 //! WHERE supports comparisons (`== != < <= > >=`), `AND`/`OR`/`NOT`, parentheses, and
 //! `IS [NOT] NULL` over field names and literals. Anything else is a parse error.
@@ -166,7 +166,7 @@ fn lex(src: &str) -> Result<(Vec<Token>, Pos), EsqlError> {
         } else {
             let rest = &src[i..];
             let sym = [
-                "==", "!=", "<=", ">=", "<", ">", "=", "-", "|", "(", ")", ",",
+                "==", "!=", "<=", ">=", "<", ">", "=", "-", "|", "(", ")", ",", "[", "]",
             ]
             .into_iter()
             .find(|s| rest.starts_with(s))
@@ -182,6 +182,11 @@ fn lex(src: &str) -> Result<(Vec<Token>, Pos), EsqlError> {
     }
     Ok((out, (line, src[line_start..].chars().count() + 1)))
 }
+
+// What `SHOW INFO` reports: the Elasticsearch 9.5.5 build this server matches.
+const INFO_VERSION: &str = "9.5.5";
+const INFO_DATE: &str = "2026-09-30T22:12:03.984586187Z";
+const INFO_HASH: &str = "48acba663b09e70b115dd879329141506c377890";
 
 // The token sets Elasticsearch 9.5.5's ANTLR parser reports as expected at each point.
 const SOURCE_COMMANDS: &str = "{, 'row', 'from', 'ts', 'promql', 'set', 'show'}";
@@ -231,6 +236,14 @@ struct SortKey {
     at: Pos,
     desc: bool,
     nulls_first: bool,
+}
+
+/// Where the rows come from.
+#[derive(Debug, Clone, PartialEq)]
+enum Source {
+    From(Vec<String>),
+    /// `ROW`, and `SHOW INFO` as a row of constants: named expressions without fields.
+    Row(Vec<(String, Expr)>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -382,13 +395,51 @@ impl Parser<'_> {
         ))
     }
 
-    fn query(&mut self) -> Result<(Vec<String>, Vec<Command>), EsqlError> {
+    fn source(&mut self) -> Result<Source, EsqlError> {
+        if self.keyword("show") {
+            if !self.keyword("info") {
+                return self.mismatched("'info'");
+            }
+            let lit = |v: &str| Expr::Lit(v.into(), ((1, 1), 0..0));
+            return Ok(Source::Row(vec![
+                ("version".into(), lit(INFO_VERSION)),
+                ("date".into(), lit(INFO_DATE)),
+                ("hash".into(), lit(INFO_HASH)),
+            ]));
+        }
+        if self.keyword("row") {
+            let mut fields = Vec::new();
+            loop {
+                let named = matches!(
+                    (self.peek(), self.toks.get(self.pos + 1)),
+                    (Some(Tok::Word(_)), Some((Tok::Sym("="), ..)))
+                );
+                let name = match named {
+                    true => {
+                        self.pos += 2;
+                        Some(self.toks[self.pos - 2].2.clone())
+                    }
+                    false => None,
+                };
+                let e = self.or()?;
+                let name = name.unwrap_or_else(|| span(&e).1.clone());
+                fields.push((self.src[name].to_owned(), e));
+                if !self.sym(",") {
+                    break;
+                }
+            }
+            return Ok(Source::Row(fields));
+        }
         if !self.keyword("from") {
             return self.unsupported(SOURCE_COMMANDS);
         }
         let sources = self.ident_list(INDEX_PATTERN)?;
-        let sources = sources.into_iter().map(|(s, _)| s).collect();
         self.follow = AFTER_SOURCES;
+        Ok(Source::From(sources.into_iter().map(|(s, _)| s).collect()))
+    }
+
+    fn query(&mut self) -> Result<(Source, Vec<Command>), EsqlError> {
+        let sources = self.source()?;
         let mut cmds = Vec::new();
         while self.sym("|") {
             let command = match self.peek() {
@@ -535,11 +586,40 @@ impl Parser<'_> {
             self.follow = AFTER_PARENS;
             return Ok(e);
         }
-        let Some((tok, at, r)) = self.toks.get(self.pos).cloned() else {
+        let start = self.pos;
+        if self.sym("[") {
+            let mut items = Vec::new();
+            loop {
+                match self.primary()? {
+                    Expr::Lit(v, _) => items.push(v),
+                    _ => return self.mismatched(CONSTANT),
+                }
+                if !self.sym(",") {
+                    break;
+                }
+            }
+            if !self.sym("]") {
+                return self.mismatched("{',', ']'}");
+            }
+            return Ok(Expr::Lit(Value::Array(items), self.span(start)));
+        }
+        let negative = matches!(
+            (self.peek(), self.toks.get(self.pos + 1)),
+            (Some(Tok::Sym("-")), Some((Tok::Num(_), ..)))
+        );
+        self.pos += negative as usize;
+        let Some((tok, _, r)) = self.toks.get(self.pos).cloned() else {
             return self.bad_expression();
         };
-        let span = (at, r);
+        let span = (self.toks[start].1, self.toks[start].2.start..r.end);
         let (e, follow) = match tok {
+            Tok::Num(n) if negative => {
+                let n = match n.as_i64() {
+                    Some(i) => Value::from(-i),
+                    None => Value::from(-n.as_f64().unwrap_or_default()),
+                };
+                (Expr::Lit(n, span), AFTER_LITERAL)
+            }
             Tok::Num(n) => (Expr::Lit(n, span), AFTER_LITERAL),
             Tok::Str(s) => (Expr::Lit(Value::String(s), span), AFTER_LITERAL),
             Tok::Word(w) => {
@@ -692,7 +772,7 @@ fn compare(a: &Value, b: &Value) -> Option<Ordering> {
 }
 
 /// Three-valued logic: `None` is SQL NULL.
-fn eval(e: &Expr, row: &BTreeMap<&str, Value>) -> Option<Value> {
+fn eval(e: &Expr, row: &Row) -> Option<Value> {
     let truth = |e: &Expr| eval(e, row).and_then(|v| v.as_bool());
     match e {
         Expr::Lit(v, _) => Some(v.clone()).filter(|v| !v.is_null()),
@@ -761,6 +841,17 @@ fn number_type(n: &Value, negative: bool) -> &'static str {
     }
 }
 
+/// The ES|QL type of a literal; a list has its first item's type.
+fn literal_type(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => number_type(v, false),
+        Value::Array(a) => a.first().map_or("null", literal_type),
+        _ => "keyword",
+    }
+}
+
 /// The ES|QL type of an expression whose fields all exist, like Elasticsearch's type
 /// resolution. `None` once a problem is recorded in `bad`: like Elasticsearch, an expression
 /// is only checked when its operands resolved.
@@ -777,17 +868,7 @@ fn resolve(
     };
     let problem = match e {
         Expr::Field(f, _) => return Some(types[f].clone()),
-        Expr::Lit(v, _) => {
-            return Some(
-                match v {
-                    Value::Null => "null",
-                    Value::Bool(_) => "boolean",
-                    Value::Number(_) => number_type(v, false),
-                    _ => "keyword",
-                }
-                .into(),
-            );
-        }
+        Expr::Lit(v, _) => return Some(literal_type(v).into()),
         Expr::IsNull(x, ..) => {
             resolve(x, src, types, bad)?;
             None
@@ -864,7 +945,7 @@ pub fn run(
     query: &str,
 ) -> Result<Response, EsqlError> {
     let (toks, eof) = lex(query)?;
-    let (sources, cmds) = Parser {
+    let (source, cmds) = Parser {
         src: query,
         toks,
         eof,
@@ -874,106 +955,23 @@ pub fn run(
         follow: "<EOF>",
     }
     .query()?;
-    // Like Elasticsearch: a missing index is only "unknown" when no source matches anything.
-    let none_match = || {
-        sources
-            .iter()
-            .all(|s| !aliases::resolve_data(indices, s).is_ok_and(|t| !t.is_empty()))
+    let Table {
+        types,
+        conflicts,
+        groups,
+        mut cols,
+        empty,
+        counted,
+    } = match source {
+        Source::From(sources) => table_from(indices, &sources)?,
+        Source::Row(fields) => table_row(fields, query)?,
     };
-    let unknown_index = |e| match e {
-        ResolveError::IndexClosed(i) => EsqlError::IndexClosed(i),
-        ResolveError::IndexNotFound(i) if !none_match() => EsqlError::IndexNotFound(i),
-        ResolveError::IndexNotFound(_) => {
-            EsqlError::Verification(format!("Unknown index [{}]", sources.join(",")))
-        }
-        ResolveError::NoWriteIndex(i)
-        | ResolveError::InvalidIndexName(i)
-        | ResolveError::AliasNotAllowed(i) => {
-            EsqlError::Verification(format!("Unknown index [{i}]"))
-        }
-    };
-    let targets = aliases::resolve_data(indices, &sources.join(",")).map_err(unknown_index)?;
-    // Per column: its ES|QL type, and the indices for each mapping type (named like ES|QL does).
-    let mut mapped: BTreeMap<String, (String, BTreeMap<String, Vec<String>>)> = BTreeMap::new();
-    let mut docs = Vec::new();
-    for t in &targets {
-        let index: &Index = indices[&t.index].borrow();
-        for (c, (es_type, ty)) in columns(index) {
-            let es_type = if es_type == "date" {
-                "datetime".into()
-            } else {
-                es_type
-            };
-            let e = mapped.entry(c).or_insert_with(|| (ty, BTreeMap::new()));
-            e.1.entry(es_type).or_default().push(t.index.clone());
-        }
-        let filter = t
-            .filter
-            .as_ref()
-            .map(crate::parse_query)
-            .transpose()
-            .map_err(|e| EsqlError::Verification(e.msg))?;
-        let searcher = filter.as_ref().map(|f| (crate::Searcher::new(index, f), f));
-        let mut mine: Vec<_> = index
-            .docs()
-            .filter(|(id, d)| {
-                searcher
-                    .as_ref()
-                    .is_none_or(|(s, f)| s.score(f, id, d).is_some())
-            })
-            .map(|(_, d)| d)
-            .collect();
-        mine.sort_by_key(|d| d.seq_no);
-        docs.push(mine);
-    }
-    let conflicts: BTreeMap<String, BTreeMap<String, Vec<String>>> = mapped
-        .iter_mut()
-        .filter(|(_, (_, m))| m.len() > 1)
-        .map(|(c, (_, m))| {
-            m.values_mut().for_each(|v| v.sort());
-            (c.clone(), m.clone())
-        })
-        .collect();
-    let types: BTreeMap<String, String> = mapped
-        .into_iter()
-        .map(|(c, (t, _))| {
-            let t = if conflicts.contains_key(&c) {
-                "unsupported".into()
-            } else {
-                t
-            };
-            (c, t)
-        })
-        .collect();
     // A referenced column must exist and have one type.
     let check = |cols: &[String], f: &str| match conflicts.get(f) {
         _ if !cols.iter().any(|c| c == f) => Some(unknown(f)),
         Some(m) => Some(conflict_error(f, m)),
         None => None,
     };
-    let mut cols: Vec<String> = types.keys().cloned().collect();
-    // One group of rows per index, for counting what Elasticsearch's per-shard plan loads.
-    let groups: Vec<Vec<Row>> = docs
-        .iter()
-        .zip(&targets)
-        .map(|(g, t)| {
-            let mappings = &indices[&t.index].borrow().mappings;
-            g.iter()
-                .map(|d| {
-                    types
-                        .keys()
-                        .map(|c| {
-                            let v = match conflicts.contains_key(c) {
-                                true => Value::Null,
-                                false => cell(&d.source, c, mappings),
-                            };
-                            (c.as_str(), v)
-                        })
-                        .collect()
-                })
-                .collect()
-        })
-        .collect();
     let mut rows: Vec<&Row> = groups.iter().flatten().collect();
     let mut explicit_limit = false;
 
@@ -1047,8 +1045,11 @@ pub fn run(
     if !explicit_limit {
         rows.truncate(DEFAULT_LIMIT);
     }
-    let (documents_found, values_loaded) = load_counts(&groups, &cmds, &cols, &types);
-    if targets.is_empty() {
+    let (documents_found, values_loaded) = match counted {
+        true => load_counts(&groups, &cmds, &cols, &types),
+        false => (0, 0),
+    };
+    if empty {
         // Wildcards that match nothing: Elasticsearch answers with a placeholder column.
         return Ok(Response {
             columns: vec![Column {
@@ -1092,7 +1093,160 @@ pub fn run(
     })
 }
 
-type Row<'a> = BTreeMap<&'a str, Value>;
+type Row = BTreeMap<String, Value>;
+
+/// The rows a source command yields, before any processing command.
+struct Table {
+    /// Each column's ES|QL type (`unsupported` for a type conflict).
+    types: BTreeMap<String, String>,
+    /// For each conflicting column, the indices per mapping type.
+    conflicts: BTreeMap<String, BTreeMap<String, Vec<String>>>,
+    /// One group of rows per index.
+    groups: Vec<Vec<Row>>,
+    /// The columns, in output order.
+    cols: Vec<String>,
+    /// No index matched: the response is a placeholder column.
+    empty: bool,
+    /// Whether the rows came from documents, for `documents_found` and `values_loaded`.
+    counted: bool,
+}
+
+/// The table of one `ROW` (or `SHOW INFO`): a later field with the same name replaces an earlier.
+fn table_row(named: Vec<(String, Expr)>, query: &str) -> Result<Table, EsqlError> {
+    let (mut types, mut cols, mut row) = (BTreeMap::new(), Vec::new(), Row::new());
+    for (name, e) in named {
+        let mut bad = Vec::new();
+        fields(&e, &mut bad);
+        let bad: Vec<_> = bad.into_iter().map(|(f, at)| (at, unknown(&f))).collect();
+        if !bad.is_empty() {
+            return Err(problems(bad));
+        }
+        let mut bad = Vec::new();
+        let Some(t) = resolve(&e, query, &types, &mut bad) else {
+            return Err(problems(bad));
+        };
+        cols.retain(|c| *c != name);
+        cols.push(name.clone());
+        types.insert(name.clone(), t);
+        row.insert(name, eval(&e, &Row::new()).unwrap_or(Value::Null));
+    }
+    Ok(Table {
+        types,
+        conflicts: BTreeMap::new(),
+        groups: vec![vec![row]],
+        cols,
+        empty: false,
+        counted: false,
+    })
+}
+
+/// The table of `FROM sources`: every document of the indices they resolve to.
+fn table_from(
+    indices: &aliases::Map<impl aliases::IndexMeta + std::borrow::Borrow<Index>>,
+    sources: &[String],
+) -> Result<Table, EsqlError> {
+    // Like Elasticsearch: a missing index is only "unknown" when no source matches anything.
+    let none_match = || {
+        sources
+            .iter()
+            .all(|s| !aliases::resolve_data(indices, s).is_ok_and(|t| !t.is_empty()))
+    };
+    let unknown_index = |e| match e {
+        ResolveError::IndexClosed(i) => EsqlError::IndexClosed(i),
+        ResolveError::IndexNotFound(i) if !none_match() => EsqlError::IndexNotFound(i),
+        ResolveError::IndexNotFound(_) => {
+            EsqlError::Verification(format!("Unknown index [{}]", sources.join(",")))
+        }
+        ResolveError::NoWriteIndex(i)
+        | ResolveError::InvalidIndexName(i)
+        | ResolveError::AliasNotAllowed(i) => {
+            EsqlError::Verification(format!("Unknown index [{i}]"))
+        }
+    };
+    let targets = aliases::resolve_data(indices, &sources.join(",")).map_err(unknown_index)?;
+    // Per column: its ES|QL type, and the indices for each mapping type (named like ES|QL does).
+    let mut mapped: BTreeMap<String, (String, BTreeMap<String, Vec<String>>)> = BTreeMap::new();
+    let mut docs = Vec::new();
+    for t in &targets {
+        let index: &Index = indices[&t.index].borrow();
+        for (c, (es_type, ty)) in columns(index) {
+            let es_type = if es_type == "date" {
+                "datetime".into()
+            } else {
+                es_type
+            };
+            let e = mapped.entry(c).or_insert_with(|| (ty, BTreeMap::new()));
+            e.1.entry(es_type).or_default().push(t.index.clone());
+        }
+        let filter = t
+            .filter
+            .as_ref()
+            .map(crate::parse_query)
+            .transpose()
+            .map_err(|e| EsqlError::Verification(e.msg))?;
+        let searcher = filter.as_ref().map(|f| (crate::Searcher::new(index, f), f));
+        let mut mine: Vec<_> = index
+            .docs()
+            .filter(|(id, d)| {
+                searcher
+                    .as_ref()
+                    .is_none_or(|(s, f)| s.score(f, id, d).is_some())
+            })
+            .map(|(_, d)| d)
+            .collect();
+        mine.sort_by_key(|d| d.seq_no);
+        docs.push(mine);
+    }
+    let conflicts: BTreeMap<String, BTreeMap<String, Vec<String>>> = mapped
+        .iter_mut()
+        .filter(|(_, (_, m))| m.len() > 1)
+        .map(|(c, (_, m))| {
+            m.values_mut().for_each(|v| v.sort());
+            (c.clone(), m.clone())
+        })
+        .collect();
+    let types: BTreeMap<String, String> = mapped
+        .into_iter()
+        .map(|(c, (t, _))| {
+            let t = if conflicts.contains_key(&c) {
+                "unsupported".into()
+            } else {
+                t
+            };
+            (c, t)
+        })
+        .collect();
+    // One group of rows per index, for counting what Elasticsearch's per-shard plan loads.
+    let groups = docs
+        .iter()
+        .zip(&targets)
+        .map(|(g, t)| {
+            let mappings = &indices[&t.index].borrow().mappings;
+            g.iter()
+                .map(|d| {
+                    types
+                        .keys()
+                        .map(|c| {
+                            let v = match conflicts.contains_key(c) {
+                                true => Value::Null,
+                                false => cell(&d.source, c, mappings),
+                            };
+                            (c.clone(), v)
+                        })
+                        .collect()
+                })
+                .collect()
+        })
+        .collect();
+    Ok(Table {
+        cols: types.keys().cloned().collect(),
+        types,
+        conflicts,
+        groups,
+        empty: targets.is_empty(),
+        counted: true,
+    })
+}
 
 fn sort_rows(rows: &mut [&Row], keys: &[SortKey]) {
     rows.sort_by(|a, b| {
