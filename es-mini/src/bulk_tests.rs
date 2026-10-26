@@ -130,3 +130,26 @@ async fn missing_trailing_newline_is_request_error() {
         "The bulk request must be terminated by a newline [\\n]"
     );
 }
+
+#[tokio::test]
+async fn refresh_makes_bulk_writes_searchable() {
+    let app = app();
+    let settings = json!({"settings": {"refresh_interval": "1h"}});
+    call(&app, Method::PUT, "/idx", Some(settings)).await;
+    let (_, r) = bulk(
+        &app,
+        "/_bulk?refresh=true",
+        "{\"index\":{\"_index\":\"idx\",\"_id\":\"1\"}}\n{}\n",
+    )
+    .await;
+    assert_eq!(r["items"][0]["index"]["forced_refresh"], true);
+    let (_, r) = bulk(
+        &app,
+        "/idx/_bulk?refresh=wait_for",
+        "{\"index\":{\"_id\":\"2\"}}\n{}\n",
+    )
+    .await;
+    assert_eq!(r["items"][0]["index"].get("forced_refresh"), None);
+    let (_, r) = call(&app, Method::GET, "/idx/_count", None).await;
+    assert_eq!(r["count"], 2);
+}

@@ -1,6 +1,6 @@
 use crate::{
     AppState,
-    docs::{delete_doc, parse_json, put_or_create, update_doc},
+    docs::{delete_doc, force_refresh, parse_json, put_or_create, update_doc},
     error::AppError,
     params,
 };
@@ -105,7 +105,7 @@ fn is_alias(state: &AppState, name: &str) -> bool {
     aliases::is_alias(&state.read().expect("lock poisoned"), name)
 }
 
-fn execute(state: &AppState, a: Action) -> Value {
+fn execute(state: &AppState, params: &HashMap<String, String>, a: Action) -> Value {
     let resolved = if a.require_alias && !is_alias(state, &a.index) {
         Err(AppError::RequireAlias(a.index.clone()))
     } else {
@@ -121,12 +121,14 @@ fn execute(state: &AppState, a: Action) -> Value {
                 "if _id is specified it must not be empty".into(),
             ));
         }
-        match a.op.as_str() {
+        let mut reply = match a.op.as_str() {
             "index" => put_or_create(state, &target, &id, body, false, ts),
             "create" => put_or_create(state, &target, &id, body, true, ts),
             "update" => update_doc(state, &target, &id, &body),
             _ => delete_doc(state, &target, &id),
-        }
+        }?;
+        force_refresh(state, params, &target, &mut reply)?;
+        Ok(reply)
     })();
     let item = match result {
         Ok((status, Json(mut v))) => {
@@ -147,13 +149,13 @@ fn execute(state: &AppState, a: Action) -> Value {
 async fn run(
     state: AppState,
     default_index: Option<&str>,
-    require_alias: bool,
+    params: &HashMap<String, String>,
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
     let start = Instant::now();
-    let items: Vec<Value> = parse(&body, default_index, require_alias)?
+    let items: Vec<Value> = parse(&body, default_index, flag(params))?
         .into_iter()
-        .map(|a| execute(&state, a))
+        .map(|a| execute(&state, params, a))
         .collect();
     let errors = items.iter().any(|i| {
         i.as_object()
@@ -191,7 +193,7 @@ pub async fn bulk(
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
     params::check(&uri, &params, &BULK_PARAMS)?;
-    run(state, None, flag(&params), body).await
+    run(state, None, &params, body).await
 }
 
 pub async fn bulk_index(
@@ -202,7 +204,7 @@ pub async fn bulk_index(
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
     params::check(&uri, &params, &BULK_PARAMS)?;
-    run(state, Some(&index), flag(&params), body).await
+    run(state, Some(&index), &params, body).await
 }
 
 #[cfg(test)]

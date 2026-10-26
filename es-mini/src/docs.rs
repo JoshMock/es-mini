@@ -165,7 +165,7 @@ pub fn put_or_create(
     Ok(reply(&index, id, w, total))
 }
 
-fn force_refresh(
+pub(crate) fn force_refresh(
     state: &AppState,
     params: &HashMap<String, String>,
     index: &str,
