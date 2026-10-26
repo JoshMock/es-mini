@@ -4,7 +4,8 @@
 //! grouped by expressions such as `BUCKET`.
 //!
 //! Expressions support comparisons (`== != < <= > >=`), `AND`/`OR`/`NOT`, parentheses,
-//! `IS [NOT] NULL`, arithmetic, and the functions in `CONVERSIONS` and `SCALAR_FNS` over field
+//! `IS [NOT] NULL`, `[NOT] IN`, `[NOT] LIKE`/`RLIKE`, arithmetic and unary minus, time span
+//! literals (`1 day`), and the functions in `CONVERSIONS` and `SCALAR_FNS` over field
 //! names and literals. Any other syntax is a parse error; any other function fails verification.
 
 use es_index::{
@@ -1017,7 +1018,7 @@ fn eval(e: &Expr, row: &Row) -> Option<Value> {
     let truth = |e: &Expr| eval(e, row).and_then(|v| v.as_bool());
     match e {
         Expr::Lit(v, _) => Some(v.clone()).filter(|v| !v.is_null()),
-        // ponytail: only DATE_TRUNC reads a time span, straight from the literal
+        // ponytail: only DATE_TRUNC and BUCKET read a time span, straight from the literal
         Expr::Interval(..) => None,
         Expr::Field(f, _) => row.get(f.as_str()).cloned().filter(|v| !v.is_null()),
         Expr::IsNull(x, negated, _) => Some(Value::Bool(eval(x, row).is_none() != *negated)),
