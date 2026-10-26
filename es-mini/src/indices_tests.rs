@@ -466,3 +466,43 @@ async fn wrong_method_is_es_405() {
         "{e}"
     );
 }
+
+#[tokio::test]
+async fn put_mapping_adds_and_updates_fields() {
+    let app = app();
+    call(
+        &app,
+        Method::PUT,
+        "/idx",
+        Some(json!({"mappings": {"properties": {"a": {"type": "keyword"}}}})),
+    )
+    .await;
+    let (s, r) = call(
+        &app,
+        Method::PUT,
+        "/idx/_mapping",
+        Some(json!({"properties": {
+            "a": {"type": "keyword", "split_queries_on_whitespace": true},
+            "b": {"type": "long"},
+        }})),
+    )
+    .await;
+    assert_eq!((s, r), (StatusCode::OK, json!({"acknowledged": true})));
+    let (_, r) = call(&app, Method::POST, "/idx/_mapping", Some(json!({}))).await;
+    assert_eq!(r, json!({"acknowledged": true}));
+    let (_, r) = call(&app, Method::GET, "/idx/_mapping", None).await;
+    assert_eq!(
+        r["idx"]["mappings"]["properties"],
+        json!({"a": {"type": "keyword", "split_queries_on_whitespace": true}, "b": {"type": "long"}})
+    );
+
+    let (s, r) = call(
+        &app,
+        Method::PUT,
+        "/idx/_mapping",
+        Some(json!({"properties": {"b": {"type": "keyword"}}})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(r["error"]["type"], "illegal_argument_exception");
+}

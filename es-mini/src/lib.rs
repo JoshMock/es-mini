@@ -391,7 +391,12 @@ fn router(state: AppState) -> Router {
             "/_refresh",
             get(indices::refresh_all).post(indices::refresh_all),
         )
-        .route("/{index}/_mapping", get(indices::get_mapping))
+        .route(
+            "/{index}/_mapping",
+            get(indices::get_mapping)
+                .put(indices::put_mapping)
+                .post(indices::put_mapping),
+        )
         .route("/_mapping", get(indices::get_all_mappings))
         .route("/_stats", get(indices::stats))
         .route("/_stats/{metric}", get(indices::stats))

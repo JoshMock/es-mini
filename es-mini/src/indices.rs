@@ -601,6 +601,48 @@ pub async fn get_mapping(
     Ok(Json(Value::Object(out)))
 }
 
+/// `PUT|POST /{index}/_mapping`: adds fields and updates the parameters of existing ones.
+// ponytail: only `properties` merge; a field cannot change type, and other mapping sections are ignored
+pub async fn put_mapping(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    uri: Uri,
+    Query(params): Query<HashMap<String, String>>,
+    body: Bytes,
+) -> Result<Json<Value>, AppError> {
+    check(&uri, &params, &["master_timeout", "timeout"])?;
+    let body = parse_body(&body)?;
+    for (field, spec) in body["properties"].as_object().into_iter().flatten() {
+        check_field_type(field, spec)?;
+    }
+    let new = Mappings::deserialize(&body).map_err(|e| AppError::MapperParsing(e.to_string()))?;
+    let mut indices = state.write();
+    let names = read_indices(&indices, &name, &params)?;
+    for n in &names {
+        let props = &indices[n].mappings.properties;
+        for (field, m) in &new.properties {
+            if let Some(old) = props.get(field)
+                && old.mapping_type() != m.mapping_type()
+            {
+                return Err(AppError::IllegalArgument(format!(
+                    "mapper [{field}] cannot be changed from type [{}] to [{}]",
+                    old.mapping_type(),
+                    m.mapping_type()
+                )));
+            }
+        }
+    }
+    for n in names {
+        let props = &mut indices
+            .get_mut(&n)
+            .expect("resolved index exists")
+            .mappings
+            .properties;
+        props.extend(new.properties.clone());
+    }
+    Ok(Json(json!({"acknowledged": true})))
+}
+
 pub async fn get_all_mappings(
     state: State<AppState>,
     uri: Uri,
