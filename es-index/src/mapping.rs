@@ -5,7 +5,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _, se
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 
-/// MVP leaf field types; objects live in [`Mappings::properties`] as dotted paths (no `nested`).
+/// MVP leaf field types; objects live in [`Mappings::properties`] as dotted paths (`nested`
+/// objects as a [`FieldMapping::Nested`] entry at their path).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum FieldMapping {
@@ -61,6 +62,10 @@ pub enum FieldMapping {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         format: Option<String>,
     },
+    /// Marks an object path as `nested`; its subfields are the entries under `path.`.
+    // ponytail: nested objects are not indexed as separate documents, so nested queries and
+    // aggregations are unsupported; the mapping only round-trips and keeps nested objects out of hit counts
+    Nested,
 }
 
 impl FieldMapping {
@@ -78,6 +83,7 @@ impl FieldMapping {
             Self::DateNanos { .. } => "date_nanos",
             Self::Ip => "ip",
             Self::LongRange | Self::DateRange { .. } => "unsupported",
+            Self::Nested => "nested",
         }
     }
 
@@ -208,13 +214,14 @@ impl Index {
         let props = &mut self.mappings.properties;
         // ponytail: a leaf meeting an object (or the reverse) is left unmapped; ES rejects the document
         let child = format!("{path}.");
-        let conflict = path
-            .match_indices('.')
-            .any(|(i, _)| props.contains_key(&path[..i]))
-            || props
-                .range(child.clone()..)
-                .next()
-                .is_some_and(|(p, _)| p.starts_with(&child));
+        let conflict = path.match_indices('.').any(|(i, _)| {
+            props
+                .get(&path[..i])
+                .is_some_and(|m| *m != FieldMapping::Nested)
+        }) || props
+            .range(child.clone()..)
+            .next()
+            .is_some_and(|(p, _)| p.starts_with(&child));
         if !conflict {
             props.entry(path.to_owned()).or_insert(mapping);
         }
@@ -230,10 +237,12 @@ fn nest<S: Serializer>(props: &BTreeMap<String, FieldMapping>, s: S) -> Result<S
             .map_or((None, path.as_str()), |(p, l)| (Some(p), l));
         let mut node = &mut root;
         for part in parents.into_iter().flat_map(|p| p.split('.')) {
-            let obj = node
-                .entry(part)
-                .or_insert_with(|| json!({"properties": {}}));
-            node = obj["properties"]
+            let obj = node.entry(part).or_insert_with(|| json!({}));
+            node = obj
+                .as_object_mut()
+                .ok_or_else(|| S::Error::custom(path))?
+                .entry("properties")
+                .or_insert_with(|| json!({}))
                 .as_object_mut()
                 .ok_or_else(|| S::Error::custom(path))?;
         }
@@ -245,7 +254,7 @@ fn nest<S: Serializer>(props: &BTreeMap<String, FieldMapping>, s: S) -> Result<S
     root.serialize(s)
 }
 
-/// Reads nested object mappings (no `type`, or `object`) into dotted paths.
+/// Reads nested object mappings (no `type`, `object`, or `nested`) into dotted paths.
 fn flatten<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeMap<String, FieldMapping>, D::Error> {
     fn walk(
         prefix: &str,
@@ -254,7 +263,11 @@ fn flatten<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeMap<String, FieldMapp
     ) -> serde_json::Result<()> {
         for (k, mut v) in props {
             let path = format!("{prefix}{k}");
-            if v.is_object() && v.get("type").is_none_or(|t| t == "object") {
+            let nested = v.get("type").is_some_and(|t| t == "nested");
+            if nested {
+                out.insert(path.clone(), FieldMapping::Nested);
+            }
+            if v.is_object() && (nested || v.get("type").is_none_or(|t| t == "object")) {
                 // ponytail: an object without properties maps nothing (see map_value)
                 let sub = match v["properties"].take() {
                     Value::Null => Map::new(),

@@ -34,7 +34,8 @@ pub fn parse_body(body: &Bytes) -> Result<Value, AppError> {
 }
 
 fn check_field_type(field: &str, spec: &Value) -> Result<(), AppError> {
-    if FieldMapping::deserialize(spec).is_err()
+    if !matches!(spec["type"].as_str(), Some("object" | "nested"))
+        && FieldMapping::deserialize(spec).is_err()
         && let Some(t) = spec["type"].as_str()
     {
         return Err(AppError::MapperParsing(format!(

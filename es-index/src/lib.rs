@@ -1415,6 +1415,20 @@ mod tests {
     }
 
     #[test]
+    fn nested_mappings_round_trip_and_keep_dynamic_subfields() {
+        let raw = json!({"properties": {
+            "n": {"type": "nested", "properties": {"j": {"type": "integer"}}}
+        }});
+        let mut m: Mappings = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(m.properties.keys().collect::<Vec<_>>(), ["n", "n.j"]);
+        assert_eq!(serde_json::to_value(&m).unwrap(), raw);
+        let mut i = Index::default();
+        std::mem::swap(&mut i.mappings, &mut m);
+        i.map_dynamic(&json!({"n": [{"k": true}]}));
+        assert_eq!(i.mappings.properties["n.k"], FieldMapping::Boolean);
+    }
+
+    #[test]
     fn empty_mappings_serialize_as_empty_object() {
         assert_eq!(
             serde_json::to_value(Mappings::default()).unwrap(),

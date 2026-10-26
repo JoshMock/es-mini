@@ -570,7 +570,8 @@ fn user_fields(
                 (IndexOptions::Docs, DocValuesType::SortedSet, true)
             }
             // ponytail: date_nanos and ranges are not indexed on disk; their `_source` is kept
-            M::DateNanos { .. } | M::LongRange | M::DateRange { .. } => continue,
+            // `nested` holds objects, which never reach this match
+            M::DateNanos { .. } | M::LongRange | M::DateRange { .. } | M::Nested => continue,
             M::Ip => {
                 // Like ES: points and sorted-set doc values of the 16-byte encoding, no postings.
                 let Some(ips) = typed(&values, &crate::ip_bytes) else {
