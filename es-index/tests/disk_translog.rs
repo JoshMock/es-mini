@@ -6,26 +6,11 @@ use es_index::{FieldMapping, Index, Indices, disk};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
-struct Scratch(PathBuf, PathBuf);
-
-impl std::ops::Deref for Scratch {
-    type Target = PathBuf;
-    fn deref(&self) -> &PathBuf {
-        &self.0
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.1);
-    }
-}
+mod common;
+use common::Scratch;
 
 fn scratch(name: &str) -> Scratch {
-    let root = std::env::temp_dir().join(format!("esm-tlog-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).unwrap();
-    Scratch(root.join("data"), root)
+    Scratch::new(&format!("tlog-{name}"), Some("data"))
 }
 
 fn shard(dir: &Path) -> PathBuf {

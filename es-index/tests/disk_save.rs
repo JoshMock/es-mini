@@ -5,26 +5,11 @@ use es_index::{Indices, disk};
 use serde_json::json;
 use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
 
-struct Scratch(PathBuf, PathBuf);
-
-impl std::ops::Deref for Scratch {
-    type Target = PathBuf;
-    fn deref(&self) -> &PathBuf {
-        &self.0
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.1);
-    }
-}
+mod common;
+use common::Scratch;
 
 fn scratch(name: &str) -> Scratch {
-    let root = std::env::temp_dir().join(format!("esm-save-{name}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
-    fs::create_dir_all(&root).unwrap();
-    Scratch(root.clone(), root)
+    Scratch::new(&format!("save-{name}"), None)
 }
 
 fn one_doc(source: serde_json::Value) -> Indices {
