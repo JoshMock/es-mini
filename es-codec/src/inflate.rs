@@ -203,10 +203,114 @@ pub fn inflate(data: &[u8]) -> Result<Vec<u8>> {
     }
 }
 
-/// Frames `data` as an Elasticsearch `DFL\0` blob using uncompressed (stored) DEFLATE blocks.
-// ponytail: no compression; valid DEFLATE that any reader accepts, add real deflate if size matters.
+/// Frames `data` as an Elasticsearch `DFL\0` blob: one fixed-Huffman LZ77 DEFLATE block, or
+/// stored blocks when those are smaller (incompressible data).
 pub fn frame(data: &[u8]) -> Vec<u8> {
     let mut out = b"DFL\0".to_vec();
+    let fixed = fixed_block(data);
+    if fixed.len() < data.len() + 5 * data.len().div_ceil(0xFFFF).max(1) {
+        out.extend(fixed);
+    } else {
+        stored_blocks(data, &mut out);
+    }
+    out
+}
+
+struct BitWriter {
+    out: Vec<u8>,
+    acc: u64,
+    n: u32,
+}
+
+impl BitWriter {
+    fn put(&mut self, v: u32, bits: u32) {
+        self.acc |= u64::from(v) << self.n;
+        self.n += bits;
+        while self.n >= 8 {
+            self.out.push(self.acc as u8);
+            self.acc >>= 8;
+            self.n -= 8;
+        }
+    }
+
+    /// Writes a Huffman code, which DEFLATE packs most-significant bit first.
+    fn code(&mut self, code: u32, len: u32) {
+        self.put(code.reverse_bits() >> (32 - len), len);
+    }
+
+    fn literal(&mut self, sym: u32) {
+        match sym {
+            0..=143 => self.code(0x30 + sym, 8),
+            144..=255 => self.code(0x190 + sym - 144, 9),
+            256..=279 => self.code(sym - 256, 7),
+            _ => self.code(0xC0 + sym - 280, 8),
+        }
+    }
+}
+
+// ponytail: fixed Huffman codes and a single-candidate hash match; add dynamic Huffman blocks and
+// hash chains if state file size matters.
+fn fixed_block(data: &[u8]) -> Vec<u8> {
+    let hash = |i: usize| {
+        (u32::from_le_bytes([data[i], data[i + 1], data[i + 2], 0]).wrapping_mul(2654435761) >> 17)
+            as usize
+    };
+    let mut w = BitWriter {
+        out: Vec::new(),
+        acc: 0,
+        n: 0,
+    };
+    w.put(0b011, 3); // BFINAL, BTYPE=01 (fixed Huffman)
+    let mut head = vec![usize::MAX; 1 << 15];
+    let mut i = 0;
+    while i < data.len() {
+        let mut len = 0;
+        if i + 3 <= data.len() {
+            let cand = std::mem::replace(&mut head[hash(i)], i);
+            if cand != usize::MAX && i - cand <= 32768 {
+                len = data[cand..]
+                    .iter()
+                    .zip(&data[i..])
+                    .take(258)
+                    .take_while(|(a, b)| a == b)
+                    .count();
+            }
+            if len >= 3 {
+                let l = LEN_BASE
+                    .iter()
+                    .rposition(|&b| usize::from(b) <= len)
+                    .unwrap_or(0);
+                w.literal(257 + l as u32);
+                w.put(
+                    (len - usize::from(LEN_BASE[l])) as u32,
+                    u32::from(LEN_EXTRA[l]),
+                );
+                let dist = i - cand;
+                let d = DIST_BASE
+                    .iter()
+                    .rposition(|&b| usize::from(b) <= dist)
+                    .unwrap_or(0);
+                w.code(d as u32, 5);
+                w.put(
+                    (dist - usize::from(DIST_BASE[d])) as u32,
+                    u32::from(DIST_EXTRA[d]),
+                );
+                for j in i + 1..(i + len).min(data.len() - 2) {
+                    head[hash(j)] = j;
+                }
+                i += len;
+                continue;
+            }
+        }
+        w.literal(u32::from(data[i]));
+        i += 1;
+    }
+    w.literal(256);
+    w.put(0, 7); // flush the last partial byte
+    w.out
+}
+
+fn stored_blocks(data: &[u8], out: &mut Vec<u8>) {
     let mut blocks = data.chunks(0xFFFF).peekable();
     if blocks.peek().is_none() {
         out.extend([1, 0, 0, 0xFF, 0xFF]);
@@ -218,7 +322,6 @@ pub fn frame(data: &[u8]) -> Vec<u8> {
         out.extend((!len).to_le_bytes());
         out.extend(b);
     }
-    out
 }
 
 #[cfg(test)]
@@ -242,7 +345,24 @@ mod frame_tests {
     }
 
     #[test]
+    fn frame_compresses_repetitive_data() {
+        let data = br#"{"index":{"name":"fixture","settings":{}}},"#.repeat(200);
+        let framed = frame(&data);
+        assert!(framed.len() < data.len() / 10, "{} bytes", framed.len());
+        assert_eq!(inflate(&framed[4..]).unwrap(), data);
+    }
+
+    #[test]
     fn frame_round_trips() {
+        let noise: Vec<u8> = (0..70_000u32)
+            .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8)
+            .collect();
+        let mixed: Vec<u8> = (0..100_000u32)
+            .map(|i| ((i % 251) ^ (i / 1000)) as u8)
+            .collect();
+        for data in [noise, mixed] {
+            assert_eq!(inflate(&frame(&data)[4..]).unwrap(), data);
+        }
         for n in [0, 1, 0xFFFF, 0x10000, 150_000] {
             let data: Vec<u8> = (0..n).map(|i| (i * 7) as u8).collect();
             let framed = frame(&data);
