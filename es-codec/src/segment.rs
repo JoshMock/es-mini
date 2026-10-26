@@ -5,6 +5,7 @@ use crate::{
     field_infos::{self, FieldInfo},
     live_docs, norms, points, stored_fields, terms,
 };
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 pub struct SegmentReader {
@@ -12,17 +13,24 @@ pub struct SegmentReader {
     pub seg: SegmentCommitInfo,
     pub cfs: CompoundFile,
     pub fields: Vec<FieldInfo>,
+    by_number: HashMap<i32, usize>,
 }
 
 impl SegmentReader {
     pub fn open(dir: &Path, seg: SegmentCommitInfo) -> Result<Self> {
         let cfs = CompoundFile::open(dir, &seg.name, &seg.info.id)?;
         let fields = field_infos::read_field_infos(dir, &seg, &cfs)?;
+        let by_number = fields
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (f.number, i))
+            .collect();
         Ok(Self {
             dir: dir.to_path_buf(),
             seg,
             cfs,
             fields,
+            by_number,
         })
     }
 
@@ -37,11 +45,10 @@ impl SegmentReader {
             .map_or_else(|| err(format!("{} has no field {name}", self.seg.name)), Ok)
     }
 
-    // ponytail: linear scan per lookup; index by number in a map if field counts grow.
     pub fn field_by_number(&self, number: i32) -> Result<&FieldInfo> {
-        self.fields.iter().find(|f| f.number == number).map_or_else(
+        self.by_number.get(&number).map_or_else(
             || err(format!("{} has no field {number}", self.seg.name)),
-            Ok,
+            |&i| Ok(&self.fields[i]),
         )
     }
 
