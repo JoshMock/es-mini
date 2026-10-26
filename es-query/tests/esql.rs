@@ -962,3 +962,80 @@ fn substring_and_trim_match_elasticsearch() {
         }
     }
 }
+
+#[test]
+fn math_functions_match_elasticsearch() {
+    let types =
+        |r: &Response| -> Vec<String> { r.columns.iter().map(|c| c.r#type.clone()).collect() };
+    let r = q(
+        "ROW a = ABS(-3), b = ABS(-2.5), c = ROUND(1.23456, 2), d = ROUND(2.5), e = FLOOR(2.7), f = CEIL(2.1), g = POW(2, 10), h = POW(2.0, 0.5)",
+    );
+    assert_eq!(
+        types(&r),
+        [
+            "integer", "double", "double", "double", "double", "double", "double", "double"
+        ]
+    );
+    assert_eq!(
+        r.values,
+        [[
+            json!(3),
+            json!(2.5),
+            json!(1.23),
+            json!(3.0),
+            json!(2.0),
+            json!(3.0),
+            json!(1024.0),
+            json!(std::f64::consts::SQRT_2)
+        ]]
+    );
+    // Overflow and non-finite results are null; ROUND of a negative double rounds half away
+    // from zero; whole numbers round to tens with negative decimals; FLOOR of a whole number
+    // passes multi-values through, while ABS of one is null.
+    let r = q(
+        "ROW a = ABS(-2147483648), b = ROUND(-2.5), c = ROUND(1250, -2), d = ROUND(2147483647, -1), e = POW(0, -1), f = FLOOR([1, 2]), g = ABS([1, -2]), h = ROUND(-1249, -2), i = ROUND(null)",
+    );
+    assert_eq!(
+        types(&r),
+        [
+            "integer", "double", "integer", "integer", "double", "integer", "integer", "integer",
+            "null"
+        ]
+    );
+    assert_eq!(
+        r.values,
+        [[
+            Value::Null,
+            json!(-3.0),
+            json!(1300),
+            Value::Null,
+            Value::Null,
+            json!([1, 2]),
+            Value::Null,
+            json!(-1200),
+            Value::Null
+        ]]
+    );
+    let r = q("FROM people | EVAL a = ABS(age - 30), r = ROUND(age, -1) | KEEP a, r | SORT a");
+    assert_eq!(types(&r), ["long", "long"]);
+    assert_eq!(r.values[0], [json!(0), json!(30)]);
+    for (query, problem) in [
+        (
+            "FROM people | EVAL x = ROUND(age, 1.5)",
+            "line 1:24: second argument of [ROUND(age, 1.5)] must be [whole number except unsigned_long or counter types], found value [1.5] type [double]",
+        ),
+        (
+            "FROM people | EVAL y = ABS(name)",
+            "line 1:24: argument of [ABS(name)] must be [numeric], found value [name] type [keyword]",
+        ),
+        (
+            "FROM people | EVAL z = POW(2, name)",
+            "line 1:24: second argument of [POW(2, name)] must be [numeric], found value [name] type [keyword]",
+        ),
+    ] {
+        match run(&indices(), query) {
+            Err(EsqlError::Verification(m)) => assert_eq!(m, format!("Found 1 problem\n{problem}")),
+            other => panic!("{other:?}"),
+        }
+    }
+}

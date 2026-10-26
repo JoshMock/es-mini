@@ -897,9 +897,12 @@ fn eval(e: &Expr, row: &Row) -> Option<Value> {
         Expr::Arith(op, a, b, t, _) => arith(op, t.get().copied()?, &eval(a, row)?, &eval(b, row)?),
         Expr::Call(_, args, ft, _) => {
             let &(f, t) = ft.get()?;
-            if STRING_FNS.iter().any(|(n, _)| *n == f) {
+            if SCALAR_FNS.iter().any(|(n, _)| *n == f) {
                 let args: Vec<Value> = args.iter().map(|a| eval(a, row)).collect::<Option<_>>()?;
-                return string_fn(f, &args);
+                return match f {
+                    "SUBSTRING" | "TRIM" => string_fn(f, &args),
+                    _ => math_fn(f, t, &args),
+                };
             }
             let v = eval(&args[0], row)?;
             let one = |v: &Value| convert(f, t, v);
@@ -984,8 +987,112 @@ const CONVERSIONS: [(&str, &str); 5] = [
     ("TO_BOOLEAN", "boolean"),
 ];
 
-/// The string functions and how many arguments they take.
-const STRING_FNS: [(&str, RangeInclusive<usize>); 2] = [("SUBSTRING", 2..=3), ("TRIM", 1..=1)];
+/// The scalar functions and how many arguments they take.
+const SCALAR_FNS: [(&str, RangeInclusive<usize>); 7] = [
+    ("SUBSTRING", 2..=3),
+    ("TRIM", 1..=1),
+    ("ABS", 1..=1),
+    ("CEIL", 1..=1),
+    ("FLOOR", 1..=1),
+    ("POW", 2..=2),
+    ("ROUND", 1..=2),
+];
+
+/// What argument `i` of scalar function `f` must be, in Elasticsearch's words, and whether type
+/// `t` is that (null always is).
+fn accepts(f: &str, i: usize, t: &str) -> (&'static str, bool) {
+    let (accepted, ok) = match (f, i) {
+        ("SUBSTRING" | "TRIM", 0) => ("string", t == "keyword" || t == "text"),
+        ("SUBSTRING", _) => ("integer", t == "integer"),
+        ("ROUND", 1) => (
+            "whole number except unsigned_long or counter types",
+            t == "integer" || t == "long",
+        ),
+        _ => ("numeric", NUMERIC.contains(&t)),
+    };
+    (accepted, ok || t == "null")
+}
+
+/// Math function `f` of its arguments, the first of type `t`, like Elasticsearch's evaluators:
+/// `None` on overflow, a non-finite result or a multi-valued argument (where ES warns). Whole
+/// numbers pass through `FLOOR`, `CEIL` and `ROUND` without decimals untouched, multi-values too.
+fn math_fn(f: &str, t: &str, args: &[Value]) -> Option<Value> {
+    let x = &args[0];
+    if f == "POW" {
+        let r = x.as_f64()?.powf(args[1].as_f64()?);
+        return r.is_finite().then(|| r.into());
+    }
+    if t == "double" {
+        let x = x.as_f64()?;
+        let r = match f {
+            "ABS" => x.abs(),
+            "CEIL" => x.ceil(),
+            "FLOOR" => x.floor(),
+            _ => round_double(x, args.get(1).map_or(Some(0), Value::as_i64)?),
+        };
+        return Some(r.into());
+    }
+    match f {
+        "ABS" if t != "unsigned_long" => {
+            let a = x.as_i64()?.checked_abs()?;
+            if t == "integer" {
+                i32::try_from(a).ok().map(Value::from)
+            } else {
+                Some(a.into())
+            }
+        }
+        "ROUND" if args.len() == 2 => {
+            let n = x.as_i64().map(i128::from).or(x.as_u64().map(i128::from))?;
+            let r = round_whole(n, args[1].as_i64()?);
+            // ponytail: an overflowing long fails the query in ES; null here
+            match t {
+                "integer" => i32::try_from(r).ok().map(Value::from),
+                "long" => i64::try_from(r).ok().map(Value::from),
+                _ => u64::try_from(r).ok().map(Value::from),
+            }
+        }
+        _ => Some(x.clone()),
+    }
+}
+
+/// Elasticsearch's `Maths.round(long, long)`: half away from zero at `-decimals` digits.
+fn round_whole(n: i128, decimals: i64) -> i128 {
+    if n == 0 || decimals >= 0 {
+        return n;
+    }
+    let digits = ((n.abs() as f64).log10() + 1.0) as i64;
+    if digits <= -decimals {
+        return 0;
+    }
+    let unit = 10i128.pow((-decimals - 1) as u32);
+    let scale = unit * 10;
+    let (mut mid, rem) = (n / scale, n % scale);
+    if rem >= 5 * unit {
+        mid += 1;
+    } else if rem <= -5 * unit {
+        mid -= 1;
+    }
+    mid * scale
+}
+
+/// Elasticsearch's `Maths.round(Number, long)` for a double: half away from zero.
+// ponytail: past 2^63 ES divides in BigDecimal; an f64 division can differ by an ulp there
+fn round_double(x: f64, decimals: i64) -> f64 {
+    let scale = 10f64.powf(decimals as f64);
+    if scale == 0.0 || x == 0.0 {
+        return 0.0;
+    }
+    let mid = x * scale;
+    if mid.is_infinite() {
+        return x;
+    }
+    let rounded = if mid.abs() < 2f64.powi(63) {
+        java_round(mid.abs())
+    } else {
+        mid.abs()
+    };
+    rounded / scale * mid.signum()
+}
 
 /// Java's `Character.isWhitespace`.
 fn java_whitespace(c: char) -> bool {
@@ -1213,7 +1320,7 @@ fn resolve(
         }
         Expr::Call(f, args, t, (at, _)) => {
             let upper = f.to_ascii_uppercase();
-            if let Some((name, arity)) = STRING_FNS.iter().find(|(n, _)| *n == upper) {
+            if let Some((name, arity)) = SCALAR_FNS.iter().find(|(n, _)| *n == upper) {
                 // ponytail: arity errors are not ES's messages
                 if !arity.contains(&args.len()) {
                     bad.push((*at, format!("[{f}] takes {arity:?} arguments")));
@@ -1221,16 +1328,11 @@ fn resolve(
                 }
                 let ts: Vec<_> = args.iter().map(|a| resolve(a, src, types, bad)).collect();
                 let ts: Vec<String> = ts.into_iter().collect::<Option<_>>()?;
-                // Elasticsearch's `isType`: a string, then integers, or null.
                 for (i, (a, ta)) in args.iter().zip(&ts).enumerate() {
-                    let accepted = if i == 0 { "string" } else { "integer" };
-                    let ok = match i {
-                        0 => ta == "keyword" || ta == "text",
-                        _ => ta == "integer",
-                    };
-                    if !ok && ta != "null" {
+                    let (accepted, ok) = accepts(name, i, ta);
+                    if !ok {
                         let nth = match (*name, i) {
-                            ("TRIM", _) => "",
+                            ("TRIM" | "ABS" | "CEIL" | "FLOOR", _) => "",
                             (_, 0) => "first ",
                             (_, 1) => "second ",
                             _ => "third ",
@@ -1247,9 +1349,15 @@ fn resolve(
                         return None;
                     }
                 }
-                let _ = t.set((*name, "keyword"));
-                let null = *name == "TRIM" && ts[0] == "null";
-                return Some(if null { "null" } else { "keyword" }.into());
+                // The result type: a string, a double, or the first argument's.
+                let out = match *name {
+                    "SUBSTRING" => "keyword",
+                    "TRIM" if ts[0] != "null" => "keyword",
+                    "POW" => "double",
+                    _ => NUMERIC.iter().find(|n| **n == ts[0]).unwrap_or(&"null"),
+                };
+                let _ = t.set((*name, out));
+                return Some(out.into());
             }
             let Some(&(name, out)) = CONVERSIONS.iter().find(|(n, _)| *n == upper) else {
                 bad.push((*at, format!("Unknown function [{f}]")));

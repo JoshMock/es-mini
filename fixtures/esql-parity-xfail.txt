@@ -23,8 +23,6 @@ FROM emp | EVAL full = CONCAT(name, "-", TO_STRING(age)) | KEEP full | SORT full
 FROM emp | EVAL n = LENGTH(name) | KEEP name, n | SORT name
 FROM emp | EVAL l = TO_LOWER(name), u = TO_UPPER(name) | KEEP l, u | SORT l
 FROM emp | WHERE STARTS_WITH(name, "A") OR ENDS_WITH(name, "e") | KEEP name | SORT name
-ROW a = ABS(-3), b = ABS(-2.5), c = ROUND(3.14159, 2), d = ROUND(2.5), e = FLOOR(2.7), f = CEIL(2.1), g = POW(2, 10), h = POW(2.0, 0.5)
-FROM emp | EVAL r = ROUND(height, 1), f = FLOOR(height), c = CEIL(height) | KEEP name, r, f, c | SORT name
 FROM emp | EVAL y = DATE_EXTRACT("year", hired), m = DATE_EXTRACT("month_of_year", hired) | KEEP name, y, m | SORT name
 FROM emp | EVAL d = DATE_FORMAT("yyyy-MM-dd", hired) | KEEP name, d | SORT name
 FROM emp | EVAL d = DATE_FORMAT(hired) | KEEP d | SORT d | LIMIT 2
