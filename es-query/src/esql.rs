@@ -957,7 +957,8 @@ fn eval(e: &Expr, row: &Row) -> Option<Value> {
             if SCALAR_FNS.iter().any(|(n, _)| *n == f) {
                 let args: Vec<Value> = args.iter().map(|a| eval(a, row)).collect::<Option<_>>()?;
                 return match f {
-                    "SUBSTRING" | "TRIM" => string_fn(f, &args),
+                    "SUBSTRING" | "TRIM" | "CONCAT" | "LENGTH" | "TO_LOWER" | "TO_UPPER"
+                    | "STARTS_WITH" | "ENDS_WITH" => string_fn(f, &args),
                     "MV_COUNT" | "MV_MIN" | "MV_MAX" => mv_fn(f, &args[0]),
                     // ponytail: read per row; ES fixes `now` once per query
                     "NOW" => Some(es_index::iso_date(crate::dates::now_millis()).into()),
@@ -1049,10 +1050,16 @@ const CONVERSIONS: [(&str, &str); 6] = [
 ];
 
 /// The scalar functions and how many arguments they take.
-const SCALAR_FNS: [(&str, RangeInclusive<usize>); 11] = [
+const SCALAR_FNS: [(&str, RangeInclusive<usize>); 17] = [
     ("NOW", 0..=0),
+    ("CONCAT", 2..=usize::MAX),
+    ("LENGTH", 1..=1),
     ("SUBSTRING", 2..=3),
+    ("TO_LOWER", 1..=1),
+    ("TO_UPPER", 1..=1),
     ("TRIM", 1..=1),
+    ("STARTS_WITH", 2..=2),
+    ("ENDS_WITH", 2..=2),
     ("ABS", 1..=1),
     ("CEIL", 1..=1),
     ("FLOOR", 1..=1),
@@ -1067,7 +1074,10 @@ const SCALAR_FNS: [(&str, RangeInclusive<usize>); 11] = [
 /// `t` is that (null always is).
 fn accepts(f: &str, i: usize, t: &str) -> (&'static str, bool) {
     let (accepted, ok) = match (f, i) {
-        ("SUBSTRING" | "TRIM", 0) => ("string", t == "keyword" || t == "text"),
+        ("SUBSTRING" | "TRIM", 0)
+        | ("CONCAT" | "LENGTH" | "TO_LOWER" | "TO_UPPER" | "STARTS_WITH" | "ENDS_WITH", _) => {
+            ("string", t == "keyword" || t == "text")
+        }
         ("SUBSTRING", _) => ("integer", t == "integer"),
         // ponytail: spatial types are not refused
         ("MV_COUNT" | "MV_MIN" | "MV_MAX", _) => ("any", true),
@@ -1186,12 +1196,26 @@ fn java_whitespace(c: char) -> bool {
         || c.is_whitespace() && !matches!(c, '\u{85}' | '\u{a0}' | '\u{2007}' | '\u{202f}')
 }
 
-/// String function `f` (`SUBSTRING` or `TRIM`) of its arguments, like Elasticsearch's
-/// evaluators: `None` for a multi-valued argument (where ES warns).
+/// String function `f` of its arguments, like Elasticsearch's evaluators: `None` for a
+/// multi-valued argument (where ES warns).
 fn string_fn(f: &str, args: &[Value]) -> Option<Value> {
     let s = args[0].as_str()?;
-    if f == "TRIM" {
-        return Some(s.trim_matches(java_whitespace).into());
+    match f {
+        "TRIM" => return Some(s.trim_matches(java_whitespace).into()),
+        // ponytail: no 1MB cap on the result, which fails the query in ES
+        "CONCAT" => {
+            return args
+                .iter()
+                .map(Value::as_str)
+                .collect::<Option<String>>()
+                .map(Value::from);
+        }
+        "LENGTH" => return Some(s.chars().count().into()),
+        "TO_LOWER" => return Some(s.to_lowercase().into()),
+        "TO_UPPER" => return Some(s.to_uppercase().into()),
+        "STARTS_WITH" => return Some(s.starts_with(args[1].as_str()?).into()),
+        "ENDS_WITH" => return Some(s.ends_with(args[1].as_str()?).into()),
+        _ => {}
     }
     // SUBSTRING counts code points from 1; 0 counts as 1 and a negative start from the end.
     let n = s.chars().count() as i64;
@@ -1421,7 +1445,8 @@ fn resolve(
                     let (accepted, ok) = accepts(name, i, ta);
                     if !ok {
                         let nth = match (*name, i) {
-                            ("TRIM" | "ABS" | "CEIL" | "FLOOR", _) => "",
+                            ("TRIM" | "ABS" | "CEIL" | "FLOOR" | "CONCAT" | "LENGTH", _)
+                            | ("TO_LOWER" | "TO_UPPER", _) => "",
                             (_, 0) => "first ",
                             (_, 1) => "second ",
                             _ => "third ",
@@ -1440,7 +1465,9 @@ fn resolve(
                 }
                 // The result type: a string, an integer, a double, or the first argument's.
                 let out = match *name {
-                    "SUBSTRING" => "keyword",
+                    "SUBSTRING" | "CONCAT" | "TO_LOWER" | "TO_UPPER" => "keyword",
+                    "LENGTH" => "integer",
+                    "STARTS_WITH" | "ENDS_WITH" => "boolean",
                     "TRIM" if ts[0] != "null" => "keyword",
                     "MV_COUNT" => "integer",
                     "NOW" => "date",

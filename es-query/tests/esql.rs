@@ -1175,3 +1175,55 @@ fn rename_moves_columns_in_place() {
         }
     }
 }
+
+#[test]
+fn string_functions_match_elasticsearch() {
+    let r = q(
+        r#"ROW a = CONCAT("x", "-", "é"), b = LENGTH("Héloïse"), c = TO_LOWER("HéLOÏse"), d = TO_UPPER("Héloïse"), e = STARTS_WITH("hello", "he"), f = ENDS_WITH("hello", "x"), g = CONCAT("x", null), h = LENGTH(["a", "b"]), i = TO_UPPER(null)"#,
+    );
+    let types: Vec<&str> = r.columns.iter().map(|c| c.r#type.as_str()).collect();
+    assert_eq!(
+        types,
+        [
+            "keyword", "integer", "keyword", "keyword", "boolean", "boolean", "keyword", "integer",
+            "keyword"
+        ]
+    );
+    assert_eq!(
+        r.values,
+        [[
+            json!("x-é"),
+            json!(7),
+            json!("héloïse"),
+            json!("HÉLOÏSE"),
+            json!(true),
+            json!(false),
+            Value::Null,
+            Value::Null,
+            Value::Null
+        ]]
+    );
+    let r = q(
+        r#"FROM people | WHERE STARTS_WITH(name, "a") OR ENDS_WITH(city, "me") | EVAL n = CONCAT(name, "/", city) | KEEP n | SORT n"#,
+    );
+    assert_eq!(r.values, [[json!("ann/Oslo")], [json!("cid/Rome")]]);
+    for (query, problem) in [
+        (
+            "FROM people | EVAL x = CONCAT(name, age)",
+            "line 1:24: argument of [CONCAT(name, age)] must be [string], found value [age] type [long]",
+        ),
+        (
+            "FROM people | EVAL x = STARTS_WITH(name, age)",
+            "line 1:24: second argument of [STARTS_WITH(name, age)] must be [string], found value [age] type [long]",
+        ),
+        (
+            "FROM people | EVAL x = LENGTH(age)",
+            "line 1:24: argument of [LENGTH(age)] must be [string], found value [age] type [long]",
+        ),
+    ] {
+        match run(&indices(), query) {
+            Err(EsqlError::Verification(m)) => assert_eq!(m, format!("Found 1 problem\n{problem}")),
+            other => panic!("{other:?}"),
+        }
+    }
+}

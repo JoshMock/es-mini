@@ -14,10 +14,6 @@ FROM emp | DROP bio, tags, scores | SORT name | LIMIT 2
 FROM emp | DROP h* | SORT name | LIMIT 2
 FROM emp | EVAL level = CASE(age >= 45, "senior", age >= 30, "mid", "junior") | KEEP name, level | SORT name
 FROM emp | EVAL a = COALESCE(age, 0), s = COALESCE(salary, -1) | KEEP name, a, s | SORT name
-FROM emp | EVAL full = CONCAT(name, "-", TO_STRING(age)) | KEEP full | SORT full
-FROM emp | EVAL n = LENGTH(name) | KEEP name, n | SORT name
-FROM emp | EVAL l = TO_LOWER(name), u = TO_UPPER(name) | KEEP l, u | SORT l
-FROM emp | WHERE STARTS_WITH(name, "A") OR ENDS_WITH(name, "e") | KEEP name | SORT name
 FROM emp | EVAL y = DATE_EXTRACT("year", hired), m = DATE_EXTRACT("month_of_year", hired) | KEEP name, y, m | SORT name
 FROM emp | EVAL d = DATE_FORMAT("yyyy-MM-dd", hired) | KEEP name, d | SORT name
 FROM emp | EVAL d = DATE_FORMAT(hired) | KEEP d | SORT d | LIMIT 2
