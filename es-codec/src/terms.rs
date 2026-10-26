@@ -203,29 +203,56 @@ fn write_field(
     files: &mut FieldOutputs,
     max: &mut postings::ImpactMax,
 ) -> crate::Result<()> {
-    let FieldOutputs { tim, tip, tmd, doc } = files;
+    let FieldOutputs {
+        tim,
+        tip,
+        tmd,
+        doc,
+        pos,
+    } = files;
     let options = info.index_options;
-    if terms.is_empty() || !matches!(options, IndexOptions::Docs | IndexOptions::DocsAndFreqs) {
+    if terms.is_empty()
+        || info.store_payloads
+        || !matches!(
+            options,
+            IndexOptions::Docs
+                | IndexOptions::DocsAndFreqs
+                | IndexOptions::DocsAndFreqsAndPositions
+        )
+    {
         return crate::err(format!(
-            "field {} needs terms and docs-only or freqs postings",
+            "field {} needs terms and postings without offsets or payloads",
             info.name
         ));
     }
     let has_freqs = options != IndexOptions::Docs;
+    let has_positions = options == IndexOptions::DocsAndFreqsAndPositions;
     let (mut sum_df, mut docs_seen) = (0u64, std::collections::BTreeSet::new());
     let mut metas = Vec::with_capacity(terms.len());
     for t in terms {
         let df = t.docs.len() as u64;
         sum_df += df;
         docs_seen.extend(t.docs.iter().map(|d| d.0));
+        let marks = if has_positions {
+            let freqs_match = t.positions.len() == t.docs.len()
+                && (t.positions.iter().zip(&t.docs)).all(|(p, d)| p.len() == d.1 as usize);
+            if !freqs_match {
+                return crate::err(format!("positions of {} do not match its freqs", info.name));
+            }
+            Some(postings::write_positions(pos, &t.positions)?)
+        } else {
+            None
+        };
         metas.push(TermMeta {
             doc_freq: df,
             total_term_freq: t.total_term_freq,
             doc_fp: doc.0.len() as u64,
             singleton: (df == 1).then(|| t.docs[0].0),
+            pos_fp: marks.as_ref().map(|m| m.start),
+            last_pos_block_offset: marks.as_ref().and_then(|m| m.last_block_offset),
         });
         if df > 1 {
-            postings::write_docs(doc, &t.docs, has_freqs, field_norms, max);
+            postings::write_docs(doc, &t.docs, has_freqs, field_norms, max, marks.as_ref());
         }
     }
     let mut tree = BlockTree {
@@ -277,6 +304,9 @@ struct TermMeta {
     total_term_freq: u64,
     doc_fp: u64,
     singleton: Option<u32>,
+    /// `.pos` start, for fields with positions.
+    pos_fp: Option<u64>,
+    last_pos_block_offset: Option<u64>,
 }
 
 enum Pending {
@@ -511,22 +541,29 @@ fn encode_term(out: &mut crate::output::Output, m: &TermMeta, last: Option<&Term
             }
         }
     }
+    if let Some(fp) = m.pos_fp {
+        out.vlong((fp - last.and_then(|l| l.pos_fp).unwrap_or(0)) as i64);
+        if let Some(offset) = m.last_pos_block_offset {
+            out.vlong(offset as i64);
+        }
+    }
 }
 
-/// The shared `.tim`, `.tip`, `.tmd` and `.doc` outputs.
+/// The shared `.tim`, `.tip`, `.tmd`, `.doc` and `.pos` outputs.
 struct FieldOutputs {
     tim: crate::output::Output,
     tip: crate::output::Output,
     tmd: crate::output::Output,
     doc: crate::output::Output,
+    pos: crate::output::Output,
 }
 
-/// Writes the terms dictionary and docs-only/freqs postings of `fields` (no positions), in
+/// Writes the terms dictionary and postings of `fields` (docs, freqs and positions), in
 /// blocks of 25 to 48 entries like Lucene's `Lucene103BlockTreeTermsWriter`.
 ///
 /// `norms` are the fields' norms per doc, for the competitive impacts of freq fields.
 ///
-/// ponytail: no `.pos`/`.pay`.
+/// ponytail: no offsets or payloads (`.pay`); ES text fields index neither by default.
 pub fn write_terms(
     fields: &[(&FieldInfo, &[TermPostings])],
     id: &[u8; codec_util::ID_LEN],
@@ -547,7 +584,21 @@ pub fn write_terms(
     tmd.index_header("Lucene104PostingsWriterTerms", 0, id, suffix);
     tmd.vint(postings::BLOCK_SIZE as i32);
     tmd.vint(fields.len() as i32);
-    let mut files = FieldOutputs { tim, tip, tmd, doc };
+    // Like Lucene, `.pos` exists when a field has positions (`FieldInfos.hasProx`).
+    let has_prox = fields
+        .iter()
+        .any(|(f, _)| f.index_options >= IndexOptions::DocsAndFreqsAndPositions);
+    let mut pos = Output::default();
+    if has_prox {
+        pos.index_header("Lucene104PostingsWriterPos", 0, id, suffix);
+    }
+    let mut files = FieldOutputs {
+        tim,
+        tip,
+        tmd,
+        doc,
+        pos,
+    };
     let mut max = postings::ImpactMax::default();
     for (info, terms) in fields {
         let field_norms = norms.iter().find(|n| n.0 == info.number).map(|n| n.1);
@@ -558,6 +609,7 @@ pub fn write_terms(
         tip,
         mut tmd,
         doc,
+        pos,
     } = files;
     // Full file lengths (footers included): `.tip` first, then `.tim`.
     tmd.long(tip.0.len() as i64 + FOOTER_LEN);
@@ -574,13 +626,18 @@ pub fn write_terms(
         psm.bytes(&v.to_le_bytes());
     }
     psm.long(doc.len() as i64);
+    let pos = if has_prox { pos.finish() } else { vec![] };
+    if has_prox {
+        psm.long(pos.len() as i64);
+    }
     Ok(TermFiles {
         tim: tim.finish(),
         tip: tip.finish(),
         tmd: tmd.finish(),
         psm: psm.finish(),
         doc,
-        ..Default::default()
+        pos,
+        pay: vec![],
     })
 }
 
@@ -948,6 +1005,79 @@ mod tests {
             let lucene = r.cfs_file(&format!("_{suffix}.{ext}")).unwrap();
             assert_eq!(lucene, &ours[..], ".{ext}");
         }
+    }
+
+    /// Field "plain" (positions, no offsets or payloads) of tests/data/positions, written by
+    /// Lucene 10.5.1. Its postings come last in `.doc` (fields go by name), whose skip data
+    /// points into `.pos`. `.pos` itself differs (Lucene patches PFor exceptions), so it is
+    /// checked by reading it back.
+    #[test]
+    fn writes_the_positions_lucene_writes() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/positions");
+        let seg = crate::SegmentInfos::read_latest(&dir)
+            .unwrap()
+            .segments
+            .remove(0);
+        let r = SegmentReader::open(&dir, seg).unwrap();
+        let info = r.field("plain").unwrap();
+        let terms = r.terms("plain").unwrap();
+        let norms = r.norms("plain").unwrap().unwrap();
+        let norms: Vec<i8> = norms.into_iter().map(|n| n as i8).collect();
+        let suffix = format!(
+            "Lucene104_{}",
+            info.attributes["PerFieldPostingsFormat.suffix"]
+        );
+        let fields = [(info, &terms[..])];
+        let ours = write_terms(&fields, &r.seg.info.id, &suffix, &[(info.number, &norms)]).unwrap();
+        let mut header = crate::output::Output::default();
+        header.index_header("Lucene104PostingsWriterDoc", 0, &r.seg.info.id, &suffix);
+        let lucene = r.cfs_file(&format!("_{suffix}.doc")).unwrap();
+        let body = &ours.doc[header.0.len()..ours.doc.len() - FOOTER_LEN as usize];
+        let lucene = &lucene[..lucene.len() - FOOTER_LEN as usize];
+        assert!(body.len() > 100, "{}", body.len());
+        assert_eq!(&lucene[lucene.len() - body.len()..], body);
+        let infos = [info.clone()];
+        let read = decode_terms(&ours, &r.seg.info.id, &suffix, &infos, info, None).unwrap();
+        assert_eq!(read, terms);
+    }
+
+    #[test]
+    fn positions_round_trip() {
+        // Singletons over a block of positions, level-1 skip data (9000 docs), and terms whose
+        // positions fill blocks exactly or leave a tail.
+        let pos = |ps: &[u32]| -> Vec<Position> {
+            ps.iter()
+                .map(|&position| Position {
+                    position,
+                    offsets: None,
+                    payload: vec![],
+                })
+                .collect()
+        };
+        let term = |t: &str, docs: Vec<(u32, Vec<u32>)>| TermPostings {
+            term: t.into(),
+            total_term_freq: docs.iter().map(|d| d.1.len() as u64).sum(),
+            docs: docs.iter().map(|d| (d.0, d.1.len() as u32)).collect(),
+            positions: docs.iter().map(|d| pos(&d.1)).collect(),
+        };
+        let terms = [
+            term("a", vec![(3, vec![0, 0, 7, 70000])]),
+            term("b", vec![(4, (0..300).map(|i| i * 2).collect())]),
+            term(
+                "c",
+                (0..9000).map(|d| (d, (0..1 + d % 3).collect())).collect(),
+            ),
+            term("d", (0..512).map(|d| (d * 2, vec![d % 5])).collect()),
+            term("e", vec![(1, vec![5]), (2, vec![1, 2, 3])]),
+        ];
+        let mut info = field("f", 0, IndexOptions::DocsAndFreqsAndPositions);
+        info.omit_norms = false;
+        let norms: Vec<i8> = (0..18000).map(|d| (d % 40 + 1) as i8).collect();
+        let id = [3u8; 16];
+        let files = write_terms(&[(&info, &terms)], &id, "Lucene104_0", &[(0, &norms)]).unwrap();
+        let fields = [info.clone()];
+        let read = decode_terms(&files, &id, "Lucene104_0", &fields, &info, None).unwrap();
+        assert_eq!(read, terms);
     }
 
     #[test]

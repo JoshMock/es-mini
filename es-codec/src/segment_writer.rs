@@ -89,6 +89,10 @@ pub fn write_segment(dir: &Path, s: &NewSegment) -> Result<SegmentCommitInfo> {
     ] {
         files.push((format!("_Lucene104_0.{ext}"), bytes));
     }
+    if !t.pos.is_empty() {
+        files.push(("_Lucene104_0.pos".into(), t.pos));
+    }
+
     write_compound(dir, s.name, &s.id, &files)?;
     Ok(SegmentCommitInfo {
         name: s.name.into(),
@@ -240,6 +244,50 @@ mod tests {
         assert_eq!(terms, [b"k0".to_vec(), b"k1".to_vec()]);
         assert_eq!(ords, [[0], [1], [0], [1], [0]]);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn positions_read_back() {
+        let dir = std::env::temp_dir().join(format!("esm-seg-pos-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fields = [FieldInfo {
+            index_options: IndexOptions::DocsAndFreqsAndPositions,
+            ..field("t", 0)
+        }];
+        let at = |position| crate::terms::Position {
+            position,
+            offsets: None,
+            payload: vec![],
+        };
+        let terms = [(
+            0,
+            vec![TermPostings {
+                term: b"fox".to_vec(),
+                total_term_freq: 3,
+                docs: vec![(0, 1), (1, 2)],
+                positions: vec![vec![at(1)], vec![at(0), at(4)]],
+            }],
+        )];
+        let seg = write_segment(
+            &dir,
+            &NewSegment {
+                name: "_0",
+                id: [9; 16],
+                max_doc: 2,
+                fields: &fields,
+                stored: &[vec![], vec![]],
+                numeric: &[],
+                sorted_numeric: &[],
+                keyword: &[],
+                norms: &[],
+                terms: &terms,
+                points: &[],
+            },
+        )
+        .unwrap();
+        let r = SegmentReader::open(&dir, seg).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(r.terms("t").unwrap(), terms[0].1);
     }
 
     #[test]

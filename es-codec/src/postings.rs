@@ -100,17 +100,66 @@ pub struct ImpactMax {
     pub level1_bytes: i32,
 }
 
+/// Where one term's positions are in `.pos`.
+pub struct PosMarks {
+    pub start: u64,
+    /// `lastPosBlockOffset`: where the vint tail starts, for terms with over a block of positions.
+    pub last_block_offset: Option<u64>,
+    /// After each full block of docs: the file pointer and how many positions wait in the buffer.
+    pub blocks: Vec<(u64, u8)>,
+}
+
+/// Lucene's `IndexWriter.MAX_POSITION`.
+const MAX_POSITION: u32 = i32::MAX as u32 - 128;
+
+/// `Lucene104PostingsWriter.addPosition` and `finishTerm` without payloads or offsets: position
+/// deltas (restarting at each doc) in full PFor blocks of [`BLOCK_SIZE`], then the rest as vints.
+pub fn write_positions(out: &mut Output, positions: &[Vec<Position>]) -> Result<PosMarks> {
+    let start = out.0.len() as u64;
+    let (mut buf, mut blocks, mut total) = (Vec::with_capacity(BLOCK_SIZE), vec![], 0);
+    for (i, doc) in positions.iter().enumerate() {
+        let mut last = 0;
+        for p in doc {
+            if p.position < last || p.position > MAX_POSITION {
+                return err(format!("position {} out of order or too large", p.position));
+            }
+            if p.offsets.is_some() || !p.payload.is_empty() {
+                return err("offsets and payloads cannot be written");
+            }
+            buf.push(p.position - last);
+            last = p.position;
+            if buf.len() == BLOCK_SIZE {
+                write_pfor(out, &buf);
+                buf.clear();
+            }
+        }
+        total += doc.len();
+        if (i + 1) % BLOCK_SIZE == 0 {
+            blocks.push((out.0.len() as u64, buf.len() as u8));
+        }
+    }
+    let last_block_offset = (total > BLOCK_SIZE).then(|| out.0.len() as u64 - start);
+    buf.iter().for_each(|d| out.vint(*d as i32));
+    Ok(PosMarks {
+        start,
+        last_block_offset,
+        blocks,
+    })
+}
+
 /// Writes one term's docs (ascending) as `read_docs` reads them: full blocks of [`BLOCK_SIZE`]
 /// behind skip headers (with level-1 headers around each 32 blocks), then a group-varint tail of
 /// doc deltas (low bit set when the freq is 1) and the other freqs. `norms` holds the field's
-/// norm per doc for impacts; without it every norm is 1.
+/// norm per doc for impacts; without it every norm is 1. `pos` adds positions to the skip data.
 pub fn write_docs(
     out: &mut Output,
     docs: &[(u32, u32)],
     has_freqs: bool,
     norms: Option<&[i8]>,
     max: &mut ImpactMax,
+    pos: Option<&PosMarks>,
 ) {
+    let (mut level0_pos, mut level1_pos) = pos.map_or((0, 0), |p| (p.start, p.start));
     let norm = |d: u32| norms.map_or(1, |n| n[d as usize] as i64);
     let pairs = |docs: &[(u32, u32)]| -> Vec<(u32, i64)> {
         docs.iter().map(|&(d, f)| (f, norm(d))).collect()
@@ -136,6 +185,12 @@ pub fn write_docs(
             max.level0_bytes = max.level0_bytes.max(bytes.0.len() as i32);
             after.vint(bytes.0.len() as i32);
             after.bytes(&bytes.0);
+            if let Some(p) = pos {
+                let (fp, upto) = p.blocks[i];
+                after.vlong((fp - level0_pos) as i64);
+                after.byte(upto);
+                level0_pos = fp;
+            }
         }
         let mut header = Output::default();
         write_vint15(&mut header, (last - prev) as i32);
@@ -155,13 +210,21 @@ pub fn write_docs(
             if has_freqs {
                 let impacts = competitive(&group_pairs);
                 write_impacts(&mut skip, &impacts);
+                let impact_bytes = skip.0.len();
                 max.level1_num = max.level1_num.max(impacts.len() as i32);
-                max.level1_bytes = max.level1_bytes.max(skip.0.len() as i32);
-                // The header after its length short is the impacts' length short and the impacts.
+                max.level1_bytes = max.level1_bytes.max(impact_bytes as i32);
+                if let Some(p) = pos {
+                    let (fp, upto) = p.blocks[i];
+                    skip.vlong((fp - level1_pos) as i64);
+                    skip.byte(upto);
+                    level1_pos = fp;
+                }
+                // The header after its length short is the impacts' length short, the impacts
+                // and the positions pointer.
                 let header = 2 + skip.0.len();
                 out.vlong((2 + header + group.0.len()) as i64);
                 out.bytes(&(header as i16).to_le_bytes());
-                out.bytes(&(skip.0.len() as i16).to_le_bytes());
+                out.bytes(&(impact_bytes as i16).to_le_bytes());
                 out.bytes(&skip.0);
             } else {
                 out.vlong(group.0.len() as i64);
@@ -644,7 +707,14 @@ mod tests {
                 .map(|(i, &d)| (d, if has_freqs { 1 + (i as u32 % 3) } else { 1 }))
                 .collect();
             let mut out = Output::default();
-            write_docs(&mut out, &docs, has_freqs, None, &mut ImpactMax::default());
+            write_docs(
+                &mut out,
+                &docs,
+                has_freqs,
+                None,
+                &mut ImpactMax::default(),
+                None,
+            );
             assert_eq!(read_docs(&out.0, 0, docs.len(), has_freqs).unwrap(), docs);
         }
     }
@@ -679,7 +749,7 @@ mod tests {
                         .collect();
                     let mut out = Output::default();
                     let mut max = ImpactMax::default();
-                    write_docs(&mut out, &want, has_freqs, Some(&norms), &mut max);
+                    write_docs(&mut out, &want, has_freqs, Some(&norms), &mut max, None);
                     assert_eq!(read_docs(&out.0, 0, n, has_freqs).unwrap(), want, "{n}");
                 }
             }
