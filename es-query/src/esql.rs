@@ -2219,8 +2219,7 @@ pub fn run(
             }
             Command::Limit(_) => Vec::new(),
             Command::Stats(aggs, by) => {
-                // ponytail: `aggregate` lists the only supported aggregates; the esql-stats goal
-                // adds the rest
+                // ponytail: `aggregate` lists the only supported aggregates
                 let mut bad = Vec::new();
                 let mut out = Vec::new();
                 for (name, e) in aggs {
