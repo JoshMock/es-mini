@@ -1186,17 +1186,8 @@ pub fn json_num(v: &Value) -> Option<f64> {
 
 /// Parses an ES time value (`250ms`, `60s`, `2m`, `1h`, `1d`); `None` for `-1` or junk.
 pub fn parse_time(v: &str) -> Option<Duration> {
-    let units = [
-        ("ms", 1u64),
-        ("s", 1_000),
-        ("m", 60_000),
-        ("h", 3_600_000),
-        ("d", 86_400_000),
-    ];
-    units.iter().find_map(|(unit, millis)| {
-        let n: u64 = v.strip_suffix(unit)?.parse().ok()?;
-        Some(Duration::from_millis(n * millis))
-    })
+    let ms = index_settings::time_millis(v, "").ok()?;
+    (ms >= 0).then(|| Duration::from_millis(ms as u64))
 }
 
 /// Parses an ES byte size (`512mb`, `1kb`, `100b`; `b` to `pb`, any case); `None` for junk.
@@ -1573,6 +1564,9 @@ mod tests {
         assert_eq!(parse_time("1d"), Some(Duration::from_secs(86400)));
         assert_eq!(parse_time("-1"), None);
         assert_eq!(parse_time("soon"), None);
+        // TimeValue.parseTimeValue's case-insensitive units and whitespace
+        assert_eq!(parse_time(" 1H"), Some(Duration::from_secs(3600)));
+        assert_eq!(parse_time("2000000micros"), Some(Duration::from_secs(2)));
     }
 
     #[test]
