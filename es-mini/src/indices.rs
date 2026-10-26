@@ -602,7 +602,9 @@ pub async fn get_mapping(
 }
 
 /// `PUT|POST /{index}/_mapping`: adds fields and updates the parameters of existing ones.
-// ponytail: only `properties` merge; a field cannot change type, and other mapping sections are ignored
+// ponytail: only `properties` merge; a field cannot change type, and other mapping sections are ignored.
+// A restated field replaces the old one whole: it loses multi-fields it omits (ES keeps them), and
+// any parameter may change (ES refuses non-updatable ones such as a date `format`)
 pub async fn put_mapping(
     State(state): State<AppState>,
     Path(name): Path<String>,
