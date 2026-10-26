@@ -941,3 +941,120 @@ fn match_phrase_prefix_expands_from_an_opened_index() {
     assert!((hits[1].1 - 3.684608).abs() < 1e-5, "{hits:?}");
     assert_eq!(count(&opened, &req.query), 2);
 }
+
+/// Scores are Elasticsearch 9.5.5's for the same documents, in one segment.
+#[test]
+fn multi_match_combines_per_field_queries_by_type() {
+    let mut idx = Index::default();
+    (idx.mappings.properties).insert("tag".into(), FieldMapping::Keyword { ignore_above: None });
+    idx.put("1", json!({"title": "quick brown fox", "body": "lazy dog"}));
+    idx.put(
+        "2",
+        json!({"title": "lazy fox", "body": "quick quick brown dog"}),
+    );
+    idx.put(
+        "3",
+        json!({"title": "brown dog", "body": "brown fox jumps"}),
+    );
+    idx.put("4", json!({"title": "slow turtle", "tag": "quick"}));
+    let run = |mut q: Value| {
+        if q.get("fields").is_none() {
+            q["fields"] = json!(["title", "body"]);
+        }
+        let req = SearchRequest::parse(&json!({"query": {"multi_match": q}}))?;
+        es_query::search_many(&[("", &idx, None)], &req).map(|r| {
+            (r.hits.iter())
+                .map(|h| (h.id.to_owned(), h.score.unwrap()))
+                .collect::<Vec<_>>()
+        })
+    };
+    let close = |q: Value, want: &[(&str, f32)]| {
+        let got = run(q).unwrap();
+        assert_eq!(got.len(), want.len(), "{got:?}");
+        for ((id, s), (wid, ws)) in got.iter().zip(want) {
+            assert_eq!(id, wid, "{got:?}");
+            assert!((s - ws).abs() < 1e-5, "{got:?} vs {want:?}");
+        }
+    };
+    close(
+        json!({"query": "quick fox"}),
+        &[("1", 1.6694658), ("2", 1.2330425), ("3", 0.9808291)],
+    );
+    close(
+        json!({"query": "quick fox", "tie_breaker": 0.3}),
+        &[("1", 1.6694658), ("2", 1.4508888), ("3", 0.9808291)],
+    );
+    close(
+        json!({"query": "quick fox", "type": "most_fields"}),
+        &[("2", 1.9591966), ("1", 1.6694658), ("3", 0.9808291)],
+    );
+    close(
+        json!({"query": "quick dog", "operator": "and"}),
+        &[("2", 1.6466458)],
+    );
+    close(
+        json!({"query": "brown fox", "type": "phrase"}),
+        &[("3", 1.4508328), ("1", 1.2199391)],
+    );
+    close(
+        json!({"query": "fox brown", "type": "phrase", "slop": 2}),
+        &[("3", 0.6938765), ("1", 0.55451775)],
+    );
+    close(
+        json!({"query": "brown f", "type": "phrase_prefix"}),
+        &[("3", 1.4508328), ("1", 1.2199391)],
+    );
+    close(
+        json!({"query": "quick", "fields": ["title", "tag"]}),
+        &[("1", 1.0594962), ("4", 0.2876821)],
+    );
+    close(
+        json!({"query": "quick", "fields": ["body"]}),
+        &[("2", 1.2330425)],
+    );
+    assert_eq!(
+        count(
+            &idx,
+            &parse_query(
+                &json!({"multi_match": {"query": "quick fox", "fields": ["title", "body"]}})
+            )
+            .unwrap()
+        ),
+        3
+    );
+    let err = |q: Value| run(q).unwrap_err().to_string();
+    assert_eq!(
+        err(json!({"query": "x", "type": "bogus"})),
+        "failed to parse [multi_match] query type [bogus]. unknown type."
+    );
+    assert_eq!(
+        err(json!({"query": "x", "foo": 1})),
+        "[multi_match] query does not support [foo]"
+    );
+    assert_eq!(err(json!({})), "No text specified for multi_match query");
+}
+
+#[test]
+fn multi_match_scores_an_opened_index_like_memory() {
+    let mut idx = index();
+    let dir = std::env::temp_dir().join(format!("esq-multi-match-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    es_index::disk::save(&dir, &es_index::Indices::from([("idx".into(), index())])).unwrap();
+    let mut opened = es_index::disk::open(&dir).unwrap().remove("idx").unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    for idx in [&mut idx, &mut opened] {
+        idx.put("5", json!({"title": "quick pet", "tag": "quick"}));
+    }
+    let q = json!({"query": {"multi_match": {"query": "quick", "fields": ["title", "tag"], "tie_breaker": 0.5}}});
+    let req = SearchRequest::parse(&q).unwrap();
+    let scores = |idx: &Index| {
+        let mut v: Vec<_> = (search(idx, &req).hits.iter())
+            .map(|h| (h.id.to_owned(), h.score))
+            .collect();
+        v.sort_by(|a, b| a.0.cmp(&b.0));
+        v
+    };
+    assert_eq!(scores(&idx).len(), 3);
+    assert_eq!(scores(&opened), scores(&idx));
+    assert_eq!(count(&opened, &req.query), 3);
+}

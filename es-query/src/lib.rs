@@ -163,6 +163,7 @@ fn named_queries(q: &Query) -> Vec<(String, Query)> {
             } => {
                 (must.iter().chain(should).chain(must_not).chain(filter)).for_each(|c| walk(c, out))
             }
+            Query::DisMax { queries, .. } => queries.iter().for_each(|c| walk(c, out)),
             _ => {}
         }
     }
@@ -270,6 +271,7 @@ impl<'a> Searcher<'a> {
                 must.iter().chain(should).for_each(|c| self.gather(c));
                 return;
             }
+            Query::DisMax { queries, .. } => return queries.iter().for_each(|c| self.gather(c)),
             Query::Named { query, .. } => return self.gather(query),
             _ => return,
         };
@@ -356,6 +358,10 @@ impl<'a> Searcher<'a> {
                     .reduce(|a, b| &a & &b)
             }
             Query::Named { query, .. } => self.candidates(query, exact),
+            Query::DisMax { queries, .. } => (queries.iter())
+                .map(|c| self.candidates(c, exact))
+                .collect::<Option<Vec<_>>>()
+                .map(|s| s.into_iter().flatten().collect()),
             Query::Bool {
                 must,
                 should,
@@ -424,6 +430,10 @@ impl<'a> Searcher<'a> {
                     .reduce(|a, b| &a & &b)
             }
             Query::Named { query, .. } => self.memory_candidates(query),
+            Query::DisMax { queries, .. } => (queries.iter())
+                .map(|c| self.memory_candidates(c))
+                .collect::<Option<Vec<_>>>()
+                .map(|s| s.into_iter().flatten().collect()),
             Query::Bool {
                 must,
                 should,
@@ -775,6 +785,13 @@ impl<'a> Searcher<'a> {
                 let hits: Vec<f64> = should.iter().filter_map(|c| self.score(c, id, d)).collect();
                 (hits.len() >= *min_should).then(|| total + hits.iter().sum::<f64>())
             }
+            Query::DisMax {
+                queries,
+                tie_breaker,
+            } => {
+                let hits = queries.iter().filter_map(|c| self.score(c, id, d));
+                dis_max(hits, *tie_breaker)
+            }
             Query::Named { query, .. } => self.score(query, id, d),
         }
     }
@@ -833,6 +850,16 @@ impl<'a> Searcher<'a> {
             }
             // ponytail: postings positions are not read; scores come from the source
             Query::MatchPhrase { .. } | Query::MatchPhrasePrefix { .. } => None,
+            Query::DisMax {
+                queries,
+                tie_breaker,
+            } => {
+                let mut scores = vec![];
+                for c in queries {
+                    scores.extend(self.postings_score(c, id, false)?);
+                }
+                Some(dis_max(scores.into_iter(), *tie_breaker))
+            }
             Query::Named { query, .. } => self.postings_score(query, id, matched),
             // Unless the document is known to match, its filters would need checking.
             Query::Bool {
@@ -1269,6 +1296,13 @@ fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, QueryError>
             name,
             query: Box::new(resolve_dates(index, *query, now)?),
         },
+        Query::DisMax {
+            queries,
+            tie_breaker,
+        } => Query::DisMax {
+            queries: all(queries)?,
+            tie_breaker,
+        },
         Query::Range {
             field,
             gt,
@@ -1497,7 +1531,7 @@ fn constant_score(q: &Query) -> Option<f64> {
         Query::Bool { must, should, .. } if should.is_empty() => {
             must.iter().map(constant_score).sum()
         }
-        Query::Bool { .. } => None,
+        Query::Bool { .. } | Query::DisMax { .. } => None,
         _ => Some(1.0),
     }
 }
@@ -1727,6 +1761,14 @@ fn exact<K: Copy + Eq + std::hash::Hash>(
         }
         q => Some(&leaf(q)? & all),
     }
+}
+
+/// DisjunctionMaxQuery's score of its clauses' `scores`; `None` if there are none.
+fn dis_max(scores: impl Iterator<Item = f64>, tie_breaker: f64) -> Option<f64> {
+    let (max, sum) = scores.fold(None, |acc: Option<(f64, f64)>, s| {
+        Some(acc.map_or((s, s), |(m, t)| (m.max(s), t + s)))
+    })?;
+    Some(max + (sum - max) * tie_breaker)
 }
 
 /// How often the terms with positions `lists` occur in a row: Lucene's ExactPhraseMatcher.

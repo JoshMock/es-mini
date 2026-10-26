@@ -61,6 +61,12 @@ pub enum Query {
         filter: Vec<Query>,
         min_should: usize,
     },
+    /// Lucene's DisjunctionMaxQuery: documents any of `queries` match, scored by the best
+    /// score plus `tie_breaker` times the others'.
+    DisMax {
+        queries: Vec<Query>,
+        tie_breaker: f64,
+    },
     /// A query given a `_name`, which hits report in `matched_queries`.
     Named {
         name: String,
@@ -448,6 +454,75 @@ fn parse_kind(kind: &str, body: &Value) -> Result<Query, QueryError> {
                 filter,
                 // ES applies only a positive minimum_should_match.
                 min_should: if min_should > 0 { min_should } else { default },
+            })
+        }
+        "multi_match" => {
+            let o = body.as_object().ok_or("[multi_match] query malformed")?;
+            check_keys(
+                kind,
+                o,
+                &[
+                    "query",
+                    "fields",
+                    "type",
+                    "operator",
+                    "tie_breaker",
+                    "slop",
+                    "max_expansions",
+                    "boost",
+                    "_name",
+                ],
+            )?;
+            o.get("query")
+                .ok_or("No text specified for multi_match query")?;
+            // ponytail: no cross_fields or bool_prefix types, field boosts, field patterns or
+            // default `*` fields
+            let (field_kind, params, tie) = match o.get("type").and_then(Value::as_str) {
+                None | Some("best_fields") => ("match", &["query", "operator"][..], 0.0),
+                Some("most_fields") => ("match", &["query", "operator"][..], 1.0),
+                Some("phrase") => ("match_phrase", &["query", "slop"][..], 0.0),
+                Some("phrase_prefix") => (
+                    "match_phrase_prefix",
+                    &["query", "slop", "max_expansions"][..],
+                    0.0,
+                ),
+                Some(t @ ("cross_fields" | "bool_prefix")) => {
+                    return Err(format!("[multi_match] type [{t}] is not supported").into());
+                }
+                Some(t) => {
+                    return Err(format!(
+                        "failed to parse [multi_match] query type [{t}]. unknown type."
+                    )
+                    .into());
+                }
+            };
+            let fields = (o.get("fields").and_then(Value::as_array))
+                .filter(|f| !f.is_empty())
+                .ok_or("[multi_match] requires fields")?;
+            let p: serde_json::Map<_, _> = (o.iter())
+                .filter(|(k, _)| params.contains(&k.as_str()))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            let mut queries = (fields.iter())
+                .map(|f| match f.as_str() {
+                    Some(f) if !f.contains(['^', '*']) => {
+                        parse_kind(field_kind, &serde_json::json!({ f: p }))
+                    }
+                    _ => Err(format!("[multi_match] field [{f}] is not supported").into()),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let tie_breaker = match o.get("tie_breaker") {
+                None => tie,
+                Some(t) => t
+                    .as_f64()
+                    .ok_or("[multi_match] tie_breaker must be a number")?,
+            };
+            Ok(match queries.len() {
+                1 => queries.remove(0),
+                _ => Query::DisMax {
+                    queries,
+                    tie_breaker,
+                },
             })
         }
         "simple_query_string" => {
