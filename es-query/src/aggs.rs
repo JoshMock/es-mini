@@ -2239,6 +2239,21 @@ mod tests {
     }
 
     #[test]
+    fn top_hits_explain_the_frequencies_and_lengths_they_score_from() {
+        let mut ix = Index::default();
+        let keyword = FieldMapping::Keyword { ignore_above: None };
+        ix.mappings.properties.insert("k".into(), keyword);
+        ix.put("1", json!({"k": ["a", "a", "b"]}));
+        let body = json!({"query": {"term": {"k": "a"}},
+            "aggs": {"top": {"top_hits": {"explain": true, "_source": false}}}});
+        let hit = &aggs_of(&ix, body)["top"]["hits"]["hits"][0];
+        assert_eq!(hit["_explanation"]["value"], hit["_score"]);
+        let tf = &hit["_explanation"]["details"][0]["details"][2]["details"];
+        // a keyword counts once and has no norms (length 1)
+        assert_eq!([&tf[0]["value"], &tf[3]["value"]], [1.0, 1.0]);
+    }
+
+    #[test]
     fn top_hits_report_the_named_queries_each_hit_matches() {
         // ordered like Java's HashMap of the names ("a" before "b"), not like the query
         let body = json!({"query": {"bool": {"should": [

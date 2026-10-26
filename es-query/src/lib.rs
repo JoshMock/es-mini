@@ -5,8 +5,9 @@
 //! and doc values answer its query exactly (see [`count_many`]), and a search whose scores do not
 //! matter reads only the on-disk hits it returns (see [`search_many`]).
 //!
-//! ponytail: matched documents are still scored from their sources; score from postings and
-//! norms if loading the hits shows up.
+//! Term and match queries score documents from postings frequencies and norms, so a search
+//! ordered by score reads only the on-disk hits it returns where postings and doc values
+//! answer its query.
 
 mod aggs;
 pub mod esql;
@@ -18,7 +19,7 @@ mod tdigest;
 pub use es_index::date_millis;
 pub use parse::{Query, parse_query, parse_query_string};
 
-use es_index::postings::{text, values};
+use es_index::postings::{TermFreqs, text, values};
 use es_index::{Document, FieldMapping, Index, analysis::Analyzer, disk::DiskPos};
 use serde_json::{Map, Value};
 use std::{
@@ -177,6 +178,8 @@ struct Searcher<'a> {
     /// Per field: (docs with the field, average length).
     field_stats: HashMap<String, (f64, f64)>,
     doc_freq: HashMap<(String, String), f64>,
+    /// Per scored (field, term): its frequencies and field lengths (see [`Index::term_freqs`]).
+    freqs: HashMap<(String, String), TermFreqs>,
     /// Resolved field types, so unmapped fields are sampled once per search.
     /// Per field: its kind, and whether a literal `x.keyword` source key overrides `x`.
     kinds: RefCell<HashMap<String, (Kind, bool)>>,
@@ -208,6 +211,7 @@ impl<'a> Searcher<'a> {
             index,
             field_stats: HashMap::new(),
             doc_freq: HashMap::new(),
+            freqs: HashMap::new(),
             kinds: RefCell::default(),
             on_disk: None,
             in_memory: None,
@@ -264,6 +268,12 @@ impl<'a> Searcher<'a> {
         // they score 1.0 (see score_terms)
         if matches!(kind, Kind::Number | Kind::Bool) {
             return;
+        }
+        for w in &wanted {
+            let key = (field.clone(), w.clone());
+            if let Some(f) = self.index.term_freqs(field, path, kind == Kind::Text, w) {
+                self.freqs.insert(key, f);
+            }
         }
         if let Some(m) = (self.index).field_stats(field, path, kind == Kind::Text, &wanted) {
             let avg = if m.docs > 0.0 {
@@ -514,9 +524,11 @@ impl<'a> Searcher<'a> {
     fn explain_query(&self, q: &Query, id: &str, d: &Document) -> Value {
         let score = self.score(q, id, d).unwrap_or(0.0);
         let mut details = match q {
-            Query::Match { field, query, .. } => self.explain_terms(field, query_terms, query, d),
+            Query::Match { field, query, .. } => {
+                self.explain_terms(field, query_terms, query, id, d)
+            }
             Query::Term { field, value } if field != "_id" => {
-                self.explain_terms(field, |_, v| vec![v.to_owned()], &text(value), d)
+                self.explain_terms(field, |_, v| vec![v.to_owned()], &text(value), id, d)
             }
             Query::Bool { must, should, .. } => {
                 // ponytail: filter/must_not clauses are left out of the explanation
@@ -544,6 +556,7 @@ impl<'a> Searcher<'a> {
         field: &str,
         analyze: fn(Kind, &str) -> Vec<String>,
         query: &str,
+        id: &str,
         d: &Document,
     ) -> Vec<Value> {
         let (kind, path) = self.kind(field);
@@ -553,12 +566,17 @@ impl<'a> Searcher<'a> {
         let doc_terms = terms(kind, &values(&d.source, path));
         let mut out = vec![];
         for w in analyze(kind, query) {
-            let freq = doc_terms.iter().filter(|t| **t == w).count() as f64;
+            let (freq, len) = match self.posting(field, &w, id) {
+                Some(at) => at.map_or((0.0, 0.0), |(f, l)| (f.into(), l.into())),
+                None => {
+                    let freq = doc_terms.iter().filter(|t| **t == w).count();
+                    (freq as f64, doc_terms.len() as f64)
+                }
+            };
             if freq == 0.0 {
                 continue;
             }
-            let [df, n, len, avg, idf, tf] =
-                self.bm25_parts(field, &w, freq, doc_terms.len() as f64);
+            let [df, n, len, avg, idf, tf] = self.bm25_parts(field, &w, freq, len);
             let leaf = |v: f64, desc: &str| explanation(v, desc.into(), vec![]);
             let idf = explanation(
                 idf,
@@ -579,7 +597,7 @@ impl<'a> Searcher<'a> {
                     leaf(avg, "avgdl, average length of field"),
                 ],
             );
-            let weight = self.bm25(field, &w, freq, doc_terms.len() as f64);
+            let weight = self.bm25(field, &w, freq, len);
             let score = explanation(
                 weight,
                 format!("score(freq={freq:?}), computed as boost * idf * tf from:"),
@@ -600,15 +618,11 @@ impl<'a> Searcher<'a> {
         match q {
             Query::MatchAll => Some(1.0),
             Query::Match { field, query, and } => {
-                let (kind, path) = self.kind(field);
-                let wanted = query_terms(kind, query);
-                self.score_terms(field, kind, path, &wanted, *and, d)
+                let wanted = query_terms(self.kind(field).0, query);
+                self.score_terms(field, &wanted, *and, id, d)
             }
             Query::Term { field, value } if field == "_id" => (text(value) == id).then_some(1.0),
-            Query::Term { field, value } => {
-                let (kind, path) = self.kind(field);
-                self.score_terms(field, kind, path, &[text(value)], true, d)
-            }
+            Query::Term { field, value } => self.score_terms(field, &[text(value)], true, id, d),
             Query::Prefix { field, prefix } => {
                 let (kind, path) = self.kind(field);
                 terms(kind, &values(&d.source, path))
@@ -688,15 +702,91 @@ impl<'a> Searcher<'a> {
             .collect()
     }
 
+    /// A document's frequency of `term` in `field` and the field's length, from postings
+    /// (`Some(None)` if it does not hold the term); `None` without postings (see `gather`).
+    fn posting(&self, field: &str, term: &str, id: &str) -> Option<Option<(u32, u32)>> {
+        let f = self.freqs.get(&(field.to_owned(), term.to_owned()))?;
+        let on_disk = || f.disk.get(&self.index.disk_pos(id)?);
+        Some(f.memory.get(id).or_else(on_disk).copied())
+    }
+
+    /// A document's score for `wanted` terms of `field` from their postings (`Some(None)` if
+    /// it does not match); `None` without postings for one of them (see `gather`).
+    fn postings_terms(
+        &self,
+        field: &str,
+        wanted: &[String],
+        all: bool,
+        id: &str,
+    ) -> Option<Option<f64>> {
+        let mut score = 0.0;
+        let mut n = 0;
+        for w in wanted {
+            if let Some((freq, len)) = self.posting(field, w, id)? {
+                n += 1;
+                score += self.bm25(field, w, f64::from(freq), f64::from(len));
+            }
+        }
+        Some((n > 0 && (!all || n == wanted.len())).then_some(score))
+    }
+
+    /// A document's score from postings alone (`Some(None)` if it does not match), given
+    /// whether it is known to match `q`; `None` if postings cannot tell.
+    fn postings_score(&self, q: &Query, id: &str, matched: bool) -> Option<Option<f64>> {
+        let terms = |field: &str, wanted: &[String], all| match self.kind(field).0 {
+            Kind::Number | Kind::Bool => matched.then_some(Some(1.0)),
+            _ => self.postings_terms(field, wanted, all, id),
+        };
+        match q {
+            Query::MatchAll => Some(Some(1.0)),
+            Query::Term { field, value } if field == "_id" => {
+                Some((text(value) == id).then_some(1.0))
+            }
+            Query::Term { field, value } => terms(field, &[text(value)], true),
+            Query::Match { field, query, and } => {
+                terms(field, &query_terms(self.kind(field).0, query), *and)
+            }
+            Query::Named { query, .. } => self.postings_score(query, id, matched),
+            // Unless the document is known to match, its filters would need checking.
+            Query::Bool {
+                must_not, filter, ..
+            } if !matched && !(must_not.is_empty() && filter.is_empty()) => None,
+            Query::Bool {
+                must,
+                should,
+                min_should,
+                ..
+            } => {
+                let mut total = 0.0;
+                for c in must {
+                    match self.postings_score(c, id, matched)? {
+                        Some(s) => total += s,
+                        None => return Some(None),
+                    }
+                }
+                let mut n = 0;
+                for c in should {
+                    if let Some(s) = self.postings_score(c, id, false)? {
+                        total += s;
+                        n += 1;
+                    }
+                }
+                Some((n >= *min_should).then_some(total))
+            }
+            _ if matched => Some(Some(1.0)),
+            _ => None,
+        }
+    }
+
     fn score_terms(
         &self,
         field: &str,
-        kind: Kind,
-        path: &str,
         wanted: &[String],
         all: bool,
+        id: &str,
         d: &Document,
     ) -> Option<f64> {
+        let (kind, path) = self.kind(field);
         let vals = values(&d.source, path);
         let matched = |w: &String| match kind {
             Kind::Number => {
@@ -712,6 +802,9 @@ impl<'a> Searcher<'a> {
         if matches!(kind, Kind::Number | Kind::Bool) {
             let n = wanted.iter().filter(|w| matched(w)).count();
             return (n > 0 && (!all || n == wanted.len())).then_some(1.0);
+        }
+        if let Some(score) = self.postings_terms(field, wanted, all, id) {
+            return score;
         }
         let doc_terms = terms(kind, &vals);
         let mut score = 0.0;
@@ -1030,8 +1123,8 @@ impl<'a> Searcher<'a> {
     }
 
     /// The searchable on-disk documents `q` matches, as hits of `target` ordered by `sort`
-    /// values, from postings and doc values alone; `None` if they cannot tell, or if hits are
-    /// ordered `by_score` and the query's score varies.
+    /// values (and scores, if hits are ordered `by_score`), from postings and doc values alone;
+    /// `None` if they cannot tell.
     fn select_on_disk(
         &self,
         target: usize,
@@ -1040,7 +1133,11 @@ impl<'a> Searcher<'a> {
         by_score: bool,
     ) -> Option<Vec<Found<'a>>> {
         use FieldMapping as M;
-        let score = if by_score { constant_score(q)? } else { 0.0 };
+        let constant = if by_score {
+            constant_score(q)
+        } else {
+            Some(0.0)
+        };
         let mut columns = (sort.iter())
             .map(|f| match self.index.mappings.properties.get(&f.field) {
                 _ if f.field == "_score" => Some(None),
@@ -1064,6 +1161,10 @@ impl<'a> Searcher<'a> {
             if !self.index.searchable(seq_no) {
                 continue;
             }
+            let score = match constant {
+                Some(score) => score,
+                None => self.postings_score(q, id, true)??,
+            };
             let sort = (sort.iter().zip(&mut columns))
                 .map(|(f, column)| match column {
                     None => Some(Value::from(score as f32)),
@@ -1543,5 +1644,63 @@ mod tests {
         assert_eq!(search(ix, filter_only), (9, vec!["30".into()]));
         assert_eq!(search(ix, by_n("desc", 1)), (9, vec!["30".into()]));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn scores_read_no_sources() {
+        let dir = std::env::temp_dir().join(format!("esm-scores-{}", std::process::id()));
+        let mut ix = Index::default();
+        let props = &mut ix.mappings.properties;
+        props.insert("title".into(), FieldMapping::Text { store: false });
+        props.insert("tag".into(), FieldMapping::Keyword { ignore_above: None });
+        props.insert("n".into(), FieldMapping::Long);
+        for i in 0..30 {
+            let title = format!("doc {i} {}", "fox ".repeat(i % 4));
+            let tag = ["a", "b"][i % 2];
+            let doc = json!({"title": title, "tag": tag, "n": i});
+            ix.put(&i.to_string(), doc);
+        }
+        disk::save(&dir, &Indices::from([("i".to_owned(), ix)])).unwrap();
+        let opened = disk::open(&dir).unwrap();
+        let queries = [
+            json!({"match": {"title": "fox 7"}}),
+            json!({"term": {"tag": "a"}}),
+            json!({"bool": {
+                "must": [{"match": {"title": "fox"}}],
+                "should": [{"term": {"tag": "b"}}, {"match": {"title": "3 4"}}],
+                "filter": [{"range": {"n": {"lt": 20}}}],
+                "must_not": [{"term": {"title": "9"}}],
+            }}),
+        ];
+        let search = |ix: &Index, q: &Value, size: usize| {
+            let body = json!({"query": q, "size": size});
+            let r = search(ix, &SearchRequest::parse(&body).unwrap());
+            let hits = r.hits.iter().map(|h| (h.id.to_owned(), h.score));
+            (r.total, r.max_score, hits.collect::<Vec<_>>())
+        };
+        let before: Vec<_> = queries.iter().map(|q| search(&opened["i"], q, 3)).collect();
+        zero_stored_fields(&dir);
+        let ix = &opened["i"];
+        assert!(ix.get("3").is_none(), "on-disk sources are unreadable");
+        // scored without reading a source; the hit returned cannot be read, so is left out
+        for (q, (total, max, _)) in queries.iter().zip(before) {
+            assert!(total > 0 && max.is_some(), "{q}");
+            assert_eq!(search(ix, q, 1), (total, max, vec![]), "{q}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Scores come from postings in memory too: a keyword counts once per document and has
+    /// no norms, as in Elasticsearch, however often a document repeats it.
+    #[test]
+    fn keyword_scores_count_a_term_once() {
+        let mut ix = Index::default();
+        let keyword = FieldMapping::Keyword { ignore_above: None };
+        ix.mappings.properties.insert("tag".into(), keyword);
+        ix.put("1", json!({"tag": ["a", "a", "b"]}));
+        ix.put("2", json!({"tag": "a"}));
+        let body = json!({"query": {"term": {"tag": "a"}}});
+        let r = search(&ix, &SearchRequest::parse(&body).unwrap());
+        assert_eq!(r.hits[0].score, r.hits[1].score);
     }
 }
