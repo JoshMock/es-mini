@@ -2,7 +2,6 @@
 # Fix one, then delete its line. Run the esql_parity test with PARITY_VERBOSE=1 to see the
 # differences. This list may only shrink.
 FROM emp | WHERE name RLIKE "[A-C].*" | KEEP name | SORT name
-FROM emp | EVAL y = DATE_TRUNC(1 year, hired), m = DATE_TRUNC(1 month, hired) | KEEP name, y, m | SORT name
 FROM emp | STATS c = COUNT(*), ca = COUNT(age), cs = COUNT(scores)
 FROM emp | STATS d = COUNT_DISTINCT(tags), da = COUNT_DISTINCT(age)
 FROM emp | STATS a = AVG(salary), s = SUM(salary), mn = MIN(age), mx = MAX(age)

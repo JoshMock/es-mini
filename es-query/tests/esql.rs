@@ -1136,6 +1136,36 @@ fn date_extract_and_date_format_match_elasticsearch() {
 }
 
 #[test]
+fn date_trunc_rounds_down_to_time_spans() {
+    let r = q(
+        r#"ROW t = TO_DATETIME("2024-02-29T08:15:42.123Z") | EVAL y = DATE_TRUNC(1 year, t), q = DATE_TRUNC(1 QUARTER, t), m = DATE_TRUNC(1 mo, t), w = DATE_TRUNC(1 week, t), d = DATE_TRUNC(1 day, t), h = DATE_TRUNC(2 hours, t), s = DATE_TRUNC(15 s, t), n = DATE_TRUNC(1 year, null) | DROP t"#,
+    );
+    assert!(r.columns.iter().all(|c| c.r#type == "date"));
+    assert_eq!(
+        r.values,
+        [[
+            json!("2024-01-01T00:00:00.000Z"),
+            json!("2024-01-01T00:00:00.000Z"),
+            json!("2024-02-01T00:00:00.000Z"),
+            json!("2024-02-26T00:00:00.000Z"),
+            json!("2024-02-29T00:00:00.000Z"),
+            json!("2024-02-29T08:00:00.000Z"),
+            json!("2024-02-29T08:15:30.000Z"),
+            Value::Null
+        ]]
+    );
+    match run(&indices(), "ROW x = DATE_TRUNC(1, NOW())") {
+        Err(EsqlError::Verification(m)) => {
+            assert!(
+                m.contains("first argument of [DATE_TRUNC(1, NOW())] must be"),
+                "{m}"
+            )
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
 fn stats_count_star_by_groups() {
     let r = q("FROM people METADATA _index | STATS c = COUNT(*) BY _index");
     assert_eq!(col_names(&r), ["c", "_index"]);

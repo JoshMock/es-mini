@@ -34,7 +34,7 @@ pub(super) struct Histogram {
 
 /// A `calendar_interval`'s Rounding.DateTimeUnit.
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum Unit {
+pub(crate) enum Unit {
     Second,
     Minute,
     Hour,
@@ -48,7 +48,7 @@ enum Unit {
 impl Unit {
     /// DateHistogramAggregationBuilder.DATE_FIELD_UNITS.
     // ponytail: no `years`/`months` (multiples of a unit)
-    fn parse(s: &str) -> Option<Unit> {
+    pub(crate) fn parse(s: &str) -> Option<Unit> {
         Some(match s {
             "second" | "1s" => Unit::Second,
             "minute" | "1m" => Unit::Minute,
@@ -63,7 +63,7 @@ impl Unit {
     }
 
     /// The start of the unit holding epoch millis `t`, or of the next one.
-    fn round(self, t: i64, next: bool) -> i64 {
+    pub(crate) fn round(self, t: i64, next: bool) -> i64 {
         const DAY: i64 = 86_400_000;
         let fixed = |ms: i64| t.div_euclid(ms) * ms + if next { ms } else { 0 };
         let (y, m, _) = civil_from_days(t.div_euclid(DAY));

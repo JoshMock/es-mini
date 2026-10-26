@@ -225,6 +225,8 @@ const AFTER_LIMIT: &str = "{<EOF>, '|'}";
 enum Expr {
     Field(String, Span),
     Lit(Value, Span),
+    /// A time span literal such as `1 year`: its count and canonical unit (see `time_unit`).
+    Interval(i64, &'static str, Span),
     Cmp(&'static str, Box<Expr>, Box<Expr>, Span),
     And(Box<Expr>, Box<Expr>, Span),
     Or(Box<Expr>, Box<Expr>, Span),
@@ -784,14 +786,25 @@ impl Parser<'_> {
         };
         let span = (self.toks[start].1, self.toks[start].2.start..r.end);
         let (e, follow) = match tok {
-            Tok::Num(n) if negative => {
-                let n = match n.as_i64() {
-                    Some(i) => Value::from(-i),
-                    None => Value::from(-n.as_f64().unwrap_or_default()),
+            Tok::Num(n) => {
+                let n = match (negative, n.as_i64()) {
+                    (false, _) => n,
+                    (true, Some(i)) => Value::from(-i),
+                    (true, None) => Value::from(-n.as_f64().unwrap_or_default()),
                 };
-                (Expr::Lit(n, span), AFTER_LITERAL)
+                let unit = match self.toks.get(self.pos + 1) {
+                    Some((Tok::Word(w), _, r)) => time_unit(w).map(|u| (u, r.end)),
+                    _ => None,
+                };
+                match (n.as_i64(), unit) {
+                    (Some(i), Some((u, end))) => {
+                        self.pos += 1;
+                        let span = (span.0, span.1.start..end);
+                        (Expr::Interval(i, u, span), AFTER_LITERAL)
+                    }
+                    _ => (Expr::Lit(n, span), AFTER_LITERAL),
+                }
             }
-            Tok::Num(n) => (Expr::Lit(n, span), AFTER_LITERAL),
             Tok::Str(s) => (Expr::Lit(Value::String(s), span), AFTER_LITERAL),
             Tok::Word(w)
                 if self
@@ -1001,6 +1014,8 @@ fn eval(e: &Expr, row: &Row) -> Option<Value> {
     let truth = |e: &Expr| eval(e, row).and_then(|v| v.as_bool());
     match e {
         Expr::Lit(v, _) => Some(v.clone()).filter(|v| !v.is_null()),
+        // ponytail: only DATE_TRUNC reads a time span, straight from the literal
+        Expr::Interval(..) => None,
         Expr::Field(f, _) => row.get(f.as_str()).cloned().filter(|v| !v.is_null()),
         Expr::IsNull(x, negated, _) => Some(Value::Bool(eval(x, row).is_none() != *negated)),
         // A multi-value is null, like ES (which warns).
@@ -1036,6 +1051,9 @@ fn eval(e: &Expr, row: &Row) -> Option<Value> {
         }
         Expr::Call(_, args, ft, _) => {
             let &(f, t) = ft.get()?;
+            if let ("DATE_TRUNC", [Expr::Interval(n, unit, _), x]) = (f, &args[..]) {
+                return date_trunc(*n, unit, &eval(x, row)?);
+            }
             if let "CASE" | "COALESCE" = f {
                 let v = match f {
                     "COALESCE" => args.iter().find_map(|a| eval(a, row)),
@@ -1155,8 +1173,9 @@ const CONVERSIONS: [(&str, &str); 6] = [
 ];
 
 /// The scalar functions and how many arguments they take.
-const SCALAR_FNS: [(&str, RangeInclusive<usize>); 21] = [
+const SCALAR_FNS: [(&str, RangeInclusive<usize>); 22] = [
     ("NOW", 0..=0),
+    ("DATE_TRUNC", 2..=2),
     ("DATE_EXTRACT", 2..=2),
     ("DATE_FORMAT", 1..=2),
     ("CASE", 2..=usize::MAX),
@@ -1189,7 +1208,14 @@ fn accepts(f: &str, i: usize, t: &str) -> (&'static str, bool) {
         }
         ("SUBSTRING", _) => ("integer", t == "integer"),
         ("DATE_EXTRACT" | "DATE_FORMAT", 0) => ("string", t == "keyword" || t == "text"),
-        ("DATE_EXTRACT" | "DATE_FORMAT", _) => ("datetime or date_nanos", t == "date"),
+        // ponytail: this message is not checked against Elasticsearch
+        ("DATE_TRUNC", 0) => (
+            "dateperiod or timeduration",
+            t == "date_period" || t == "time_duration",
+        ),
+        ("DATE_EXTRACT" | "DATE_FORMAT" | "DATE_TRUNC", _) => {
+            ("datetime or date_nanos", t == "date")
+        }
         // ponytail: spatial types are not refused
         ("MV_COUNT" | "MV_MIN" | "MV_MAX", _) => ("any", true),
         ("ROUND", 1) => (
@@ -1378,6 +1404,49 @@ fn date_fn(f: &str, args: &[Value]) -> Option<Value> {
     Some(v.into())
 }
 
+/// The canonical unit of a time span literal's unit, like Elasticsearch's
+/// `ExpressionBuilder.visitQualifiedIntegerLiteral` (ignoring case).
+// ponytail: an unknown unit is a parse error of its own in ES; here the literal ends at the number
+fn time_unit(w: &str) -> Option<&'static str> {
+    Some(match w.to_ascii_lowercase().as_str() {
+        "millisecond" | "milliseconds" | "ms" => "millisecond",
+        "second" | "seconds" | "sec" | "s" => "second",
+        "minute" | "minutes" | "min" => "minute",
+        "hour" | "hours" | "h" => "hour",
+        "day" | "days" | "d" => "day",
+        "week" | "weeks" | "w" => "week",
+        "month" | "months" | "mo" => "month",
+        "quarter" | "quarters" | "q" => "quarter",
+        "year" | "years" | "yr" | "y" => "year",
+        _ => return None,
+    })
+}
+
+/// `DATE_TRUNC(n unit, date)` in UTC, like Elasticsearch's `DateTrunc.createRounding`: a single
+/// calendar week, month, quarter or year rounds to its start, anything else to a fixed interval
+/// since the epoch.
+// ponytail: several months, quarters or years, and a zero or negative span, are null where ES
+// rounds or fails the query
+fn date_trunc(n: i64, unit: &str, v: &Value) -> Option<Value> {
+    const DAY: i64 = 86_400_000;
+    let t = es_index::parse_date_millis(v)?;
+    let ms = match unit {
+        "millisecond" => 1,
+        "second" => 1000,
+        "minute" => 60_000,
+        "hour" => 3_600_000,
+        "day" => DAY,
+        "week" if n != 1 => 7 * DAY,
+        _ if n == 1 => {
+            let start = crate::aggs::histogram::Unit::parse(unit)?.round(t, false);
+            return Some(es_index::iso_date(start).into());
+        }
+        _ => return None,
+    };
+    let interval = n.checked_mul(ms).filter(|i| *i > 0)?;
+    Some(es_index::iso_date(t.div_euclid(interval) * interval).into())
+}
+
 /// Java's `Character.isWhitespace`.
 fn java_whitespace(c: char) -> bool {
     matches!(c, '\u{1c}'..='\u{1f}')
@@ -1499,7 +1568,7 @@ fn fields(e: &Expr, out: &mut Vec<Name>) {
     match e {
         Expr::Call(_, args, ..) => args.iter().for_each(|a| fields(a, out)),
         Expr::Field(f, (at, _)) => out.push((f.clone(), *at)),
-        Expr::Lit(..) => {}
+        Expr::Lit(..) | Expr::Interval(..) => {}
         Expr::Not(x, _) | Expr::IsNull(x, ..) | Expr::Neg(x, ..) | Expr::Like(x, ..) => {
             fields(x, out)
         }
@@ -1522,6 +1591,7 @@ fn names(e: &Expr) -> Vec<String> {
 fn span(e: &Expr) -> &Span {
     match e {
         Expr::Field(_, s) | Expr::Lit(_, s) | Expr::Not(_, s) | Expr::IsNull(.., s) => s,
+        Expr::Interval(.., s) => s,
         Expr::Cmp(.., s) | Expr::And(.., s) | Expr::Or(.., s) | Expr::Arith(.., s) => s,
         Expr::Call(.., s) | Expr::Neg(.., s) | Expr::Like(.., s) => s,
     }
@@ -1577,6 +1647,12 @@ fn resolve(
     let problem = match e {
         Expr::Field(f, _) => return Some(types[f].clone()),
         Expr::Lit(v, _) => return Some(literal_type(v).into()),
+        Expr::Interval(_, unit, _) => {
+            return Some(match *unit {
+                "millisecond" | "second" | "minute" | "hour" => "time_duration".into(),
+                _ => "date_period".into(),
+            });
+        }
         Expr::Arith(op, a, b, t, _) => {
             let (ta, tb) = (resolve(a, src, types, bad), resolve(b, src, types, bad));
             let (ta, tb) = (ta?, tb?);
@@ -1673,7 +1749,7 @@ fn resolve(
                     "STARTS_WITH" | "ENDS_WITH" => "boolean",
                     "TRIM" if ts[0] != "null" => "keyword",
                     "MV_COUNT" => "integer",
-                    "NOW" => "date",
+                    "NOW" | "DATE_TRUNC" => "date",
                     "MV_MIN" | "MV_MAX" => "null",
                     "POW" => "double",
                     _ => NUMERIC.iter().find(|n| **n == ts[0]).unwrap_or(&"null"),
@@ -2414,6 +2490,6 @@ fn pushable(e: &Expr) -> bool {
         Expr::Arith(..) | Expr::Call(..) | Expr::Neg(..) => names(e).is_empty(),
         Expr::Not(x, _) | Expr::IsNull(x, ..) | Expr::Like(x, ..) => pushable(x),
         Expr::And(a, b, _) | Expr::Or(a, b, _) => pushable(a) && pushable(b),
-        Expr::Field(..) | Expr::Lit(..) => true,
+        Expr::Field(..) | Expr::Lit(..) | Expr::Interval(..) => true,
     }
 }

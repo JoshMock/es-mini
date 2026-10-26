@@ -5,7 +5,7 @@
 //! Values come from what the field's doc values hold: read from disk for documents in
 //! segments, and converted the same way from the source for documents in memory.
 
-mod histogram;
+pub(crate) mod histogram;
 mod terms;
 
 use crate::hll::{self, Hll};
