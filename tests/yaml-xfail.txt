@@ -1,5 +1,4 @@
 # Known-failing YAML tests. Fix one, then delete its line.
-aggregations/top_hits.yml/having
 aggregations/top_hits.yml/highlight
 aggregations/top_hits.yml/highlight_query
 aggregations/top_hits.yml/runtime fields

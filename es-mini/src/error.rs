@@ -243,6 +243,7 @@ impl From<es_query::QueryError> for AppError {
             es_query::ErrorKind::Parsing => Self::ParsingException(e.msg),
             es_query::ErrorKind::IllegalArgument => Self::IllegalArgument(e.msg),
             es_query::ErrorKind::XContentParse => Self::XContentParse(e.msg),
+            es_query::ErrorKind::Validation => Self::ActionRequestValidation(e.msg),
             es_query::ErrorKind::TooManyBuckets => Self::TooManyBuckets(e.msg),
             // ponytail: ES wraps it in an all-shards-failed search_phase_execution_exception
             es_query::ErrorKind::Parse => Self::Parse(e.msg),

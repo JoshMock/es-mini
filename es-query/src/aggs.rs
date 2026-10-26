@@ -5,6 +5,7 @@
 //! Values come from what the field's doc values hold: read from disk for documents in
 //! segments, and converted the same way from the source for documents in memory.
 
+mod bucket_selector;
 mod bucket_sort;
 pub(crate) mod histogram;
 mod terms;
@@ -15,6 +16,7 @@ use crate::{
     MAX_BUCKETS, Query, QueryError, Searcher, SortField, fielddata_disabled, int, num, parse_query,
     source_path,
 };
+use bucket_selector::BucketSelector;
 use bucket_sort::BucketSort;
 use es_index::{Document, FieldMapping, iso_date, postings::values};
 use histogram::Histogram;
@@ -513,6 +515,8 @@ pub struct Agg {
     subs: Vec<Agg>,
     /// A `bucket_sort` sub-aggregation, which orders and pages this aggregation's buckets.
     bucket_sort: Option<BucketSort>,
+    /// `bucket_selector` sub-aggregations, which drop buckets of this aggregation.
+    bucket_selectors: Vec<BucketSelector>,
 }
 
 /// `aggs` with the queries of their filter aggregations resolved for `index` (see
@@ -540,21 +544,25 @@ pub(crate) fn resolve_dates(
         .collect()
 }
 
-/// Parses the sub-aggregations of an aggregation: `bucket_sort` is kept apart from the rest, as
-/// it computes nothing per bucket.
-fn parse_subs(v: &Value) -> Result<(Vec<Agg>, Option<BucketSort>), QueryError> {
-    let (mut sort, mut rest) = (None, Map::new());
+/// Parses the sub-aggregations of an aggregation: `bucket_sort` and `bucket_selector` are kept
+/// apart from the rest, as they compute nothing per bucket.
+fn parse_subs(v: &Value) -> Result<Pipelines, QueryError> {
+    let (mut sort, mut selectors, mut rest) = (None, vec![], Map::new());
     for (name, body) in v
         .as_object()
         .ok_or("Expected [START_OBJECT] under [aggregations]")?
     {
-        match body.get("bucket_sort") {
-            Some(params) => sort = Some(BucketSort::parse(params)?),
-            None => drop(rest.insert(name.clone(), body.clone())),
+        match (body.get("bucket_sort"), body.get("bucket_selector")) {
+            (Some(params), _) => sort = Some(BucketSort::parse(params)?),
+            (_, Some(params)) => selectors.push(BucketSelector::parse(params)?),
+            _ => drop(rest.insert(name.clone(), body.clone())),
         }
     }
-    Ok((parse(&rest.into())?, sort))
+    Ok((parse(&rest.into())?, sort, selectors))
 }
+
+/// The sub-aggregations, `bucket_sort` and `bucket_selector`s of an aggregation.
+type Pipelines = (Vec<Agg>, Option<BucketSort>, Vec<BucketSelector>);
 
 /// Parses the object under `aggs`/`aggregations`.
 pub(crate) fn parse(v: &Value) -> Result<Vec<Agg>, QueryError> {
@@ -574,7 +582,7 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
         .as_object()
         .ok_or_else(|| format!("Expected [START_OBJECT] under [{name}]"))?;
     let (mut meta, mut kind, mut subs) = (None, None, vec![]);
-    let mut bucket_sort = None;
+    let (mut bucket_sort, mut bucket_selectors) = (None, vec![]);
     for (k, v) in body {
         match k.as_str() {
             "meta" if !v.is_object() => {
@@ -591,7 +599,7 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
                 .into());
             }
             "meta" => meta = Some(v.clone()),
-            "aggs" | "aggregations" => (subs, bucket_sort) = parse_subs(v)?,
+            "aggs" | "aggregations" => (subs, bucket_sort, bucket_selectors) = parse_subs(v)?,
             t => match kind {
                 Some((prev, _)) => {
                     return Err(format!(
@@ -654,7 +662,9 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
         "top_hits" => Metric::TopHits(Box::new(TopHits::parse(object()?)?)),
         _ => return Err(format!("Unknown aggregation type [{t}]").into()),
     };
-    if (!subs.is_empty() || bucket_sort.is_some()) && !metric.buckets() {
+    if (!subs.is_empty() || bucket_sort.is_some() || !bucket_selectors.is_empty())
+        && !metric.buckets()
+    {
         return Err(QueryError::illegal(format!(
             "Aggregator [{name}] of type [{t}] cannot accept sub-aggregations"
         )));
@@ -673,6 +683,7 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
             missing: None,
             subs,
             bucket_sort,
+            bucket_selectors,
         });
     }
     let params = object()?;
@@ -836,6 +847,7 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
         missing: params.get("missing").cloned(),
         subs,
         bucket_sort,
+        bucket_selectors,
     })
 }
 
@@ -1967,10 +1979,13 @@ fn render_counted(
                 }
             }
         }
-        if let (Some(sort), Some(Value::Array(buckets))) =
-            (&agg.bucket_sort, body.get_mut("buckets"))
-        {
-            sort.apply(buckets)?;
+        if let Some(Value::Array(buckets)) = body.get_mut("buckets") {
+            for selector in &agg.bucket_selectors {
+                selector.apply(buckets)?;
+            }
+            if let Some(sort) = &agg.bucket_sort {
+                sort.apply(buckets)?;
+            }
         }
         if let Metric::ExtendedStats { sigma } = agg.metric {
             extended_stats(&mut body, st, sigma);
@@ -2455,6 +2470,24 @@ mod tests {
             aggs(json!({"sort": [{"_key": "desc"}]})),
             ["none", "c", "a"]
         );
+    }
+
+    #[test]
+    fn bucket_selector_keeps_buckets_whose_script_holds() {
+        let keys = |path: &str, script: &str| {
+            let body = json!({"size": 0, "aggs": {"k": {"terms": {"field": "k"}, "aggs": {
+                "top": {"top_hits": {"size": 1, "sort": [{"i": "desc"}]}},
+                "having": {"bucket_selector": {"buckets_path": {"ts": path}, "script": script}},
+            }}}});
+            let aggs = aggs_of(&index(), body);
+            let buckets = aggs["k"]["buckets"].as_array().unwrap().iter();
+            (buckets.map(|b| b["key"].as_str().unwrap().to_owned())).collect::<Vec<_>>()
+        };
+        assert_eq!(keys("top[_source.i]", "params.ts < 120"), ["b", "a"]);
+        assert_eq!(keys("top[_sort]", "params.ts >= 101"), ["b", "c"]);
+        // a null score is NaN, which no comparison holds for
+        assert!(keys("top[_score]", "params.ts < 8000").is_empty());
+        assert_eq!(keys("_count", "params.ts == 1"), ["a", "c"]);
     }
 
     #[test]

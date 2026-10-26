@@ -43,6 +43,8 @@ pub enum ErrorKind {
     TooManyBuckets,
     /// `parse_exception`, such as a date that does not parse
     Parse,
+    /// `action_request_validation_exception`, such as a pipeline aggregation's bad bucket path
+    Validation,
 }
 
 /// ES's `search.max_buckets`: a search fails rather than render more aggregation buckets.

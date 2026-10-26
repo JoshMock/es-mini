@@ -1,7 +1,7 @@
 //! The `bucket_sort` pipeline aggregation: sorts and pages the buckets of its parent
 //! multi-bucket aggregation, like ES's BucketSortPipelineAggregator.
 
-use crate::{QueryError, int};
+use crate::{ErrorKind, QueryError, int};
 use serde_json::Value;
 use std::cmp::Ordering;
 
@@ -121,8 +121,11 @@ fn sort_entry(v: &Value) -> Option<Vec<(String, bool)>> {
 
 /// The value at a bucket path (`_count`, `_key`, or `agg>agg.metric`) of a rendered bucket:
 /// `None` when missing, a number, or a `_key` string.
-fn bucket_value(bucket: &Value, path: &str) -> Result<Option<Value>, QueryError> {
-    let no_agg = || QueryError::illegal(format!("No aggregation found for path [{path}]"));
+pub(super) fn bucket_value(bucket: &Value, path: &str) -> Result<Option<Value>, QueryError> {
+    let no_agg = || QueryError {
+        kind: ErrorKind::Validation,
+        msg: format!("No aggregation found for path [{path}]"),
+    };
     let not_number = || {
         QueryError::illegal(format!(
             "buckets_path must reference either a number value or a single value numeric metric aggregation, got: [{path}]"
@@ -134,6 +137,18 @@ fn bucket_value(bucket: &Value, path: &str) -> Result<Option<Value>, QueryError>
     };
     let (last, metric) = match metric {
         "_count" | "_key" => (metric, None),
+        m if m.ends_with(']') && m.contains('[') => {
+            let (name, prop) = m[..m.len() - 1].split_once('[').unwrap_or_default();
+            let mut at = bucket;
+            for name in names.into_iter().flat_map(|n| n.split('>')) {
+                at = at.get(name).ok_or_else(no_agg)?;
+            }
+            let hits = at.get(name).ok_or_else(no_agg)?["hits"]["hits"].as_array();
+            return match top_hit_property(name, prop, hits.ok_or_else(no_agg)?)? {
+                Value::Null => Ok(None),
+                v => v.as_f64().map(|_| Some(v.clone())).ok_or_else(not_number),
+            };
+        }
         m => match m.split_once('.') {
             Some((a, k)) => (a, Some(k)),
             None => (m, None),
@@ -155,5 +170,32 @@ fn bucket_value(bucket: &Value, path: &str) -> Result<Option<Value>, QueryError>
         Value::Null => Ok(None),
         k @ Value::String(_) if last == "_key" => Ok(Some(k.clone())),
         v => v.as_f64().map(|_| Some(v.clone())).ok_or_else(not_number),
+    }
+}
+
+/// The `_sort`, `_score` or `_source.<path>` of the single hit of the top_hits aggregation
+/// `name`, like ES's InternalTopHits.getProperty.
+fn top_hit_property<'a>(
+    name: &str,
+    prop: &str,
+    hits: &'a [Value],
+) -> Result<&'a Value, QueryError> {
+    let [hit] = hits else {
+        return Err(QueryError::illegal(format!(
+            "property paths for top_hits [{name}] require configuring it with size to 1"
+        )));
+    };
+    let unsupported = || QueryError::illegal(format!("path not supported for [{name}]: [{prop}]"));
+    match prop {
+        "_sort" => hit["sort"].get(0).ok_or_else(unsupported),
+        "_score" => Ok(&hit["_score"]),
+        _ => {
+            let path = prop.strip_prefix("_source.").ok_or_else(unsupported)?;
+            let mut at = hit.get("_source").ok_or_else(unsupported)?;
+            for key in path.split('.') {
+                at = at.get(key).ok_or_else(unsupported)?;
+            }
+            Ok(at)
+        }
     }
 }
