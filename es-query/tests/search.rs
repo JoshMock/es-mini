@@ -857,3 +857,87 @@ fn match_phrase_scores_an_opened_index_like_memory() {
     assert_eq!(scores(&opened), scores(&memory));
     assert_eq!(count(&opened, &req.query), 2);
 }
+
+/// Scores are Elasticsearch 9.5.5's for `index()`'s documents and a fifth, in one segment.
+#[test]
+fn match_phrase_prefix_expands_the_last_term_to_indexed_terms() {
+    let mut idx = index();
+    idx.put("5", json!({"title": "quick brawny bear"}));
+    let run = |q: Value| {
+        let req = SearchRequest::parse(&json!({"query": {"match_phrase_prefix": q}}))?;
+        es_query::search_many(&[("", &idx, None)], &req).map(|r| {
+            (r.hits.iter())
+                .map(|h| (h.id.to_owned(), h.score.unwrap()))
+                .collect::<Vec<_>>()
+        })
+    };
+    let close = |p: Value, want: &[(&str, f32)]| {
+        let got = run(json!({"title": p})).unwrap();
+        assert_eq!(got.len(), want.len(), "{got:?}");
+        for ((id, s), (wid, ws)) in got.iter().zip(want) {
+            assert_eq!(id, wid, "{got:?}");
+            assert!((s - ws).abs() < 1e-5, "{got:?} vs {want:?}");
+        }
+    };
+    close(json!("quick b"), &[("5", 4.187054), ("1", 3.684608)]);
+    close(json!({"query": "quick b", "max_expansions": 1}), &[]);
+    close(
+        json!({"query": "quick b", "max_expansions": 2}),
+        &[("5", 3.3115852)],
+    );
+    // one position: any of the expansions, as term queries
+    close(
+        json!("qu"),
+        &[("2", 0.7411202), ("5", 0.53899646), ("1", 0.47431695)],
+    );
+    close(
+        json!("B"),
+        &[("5", 2.7725885), ("4", 0.87546873), ("1", 0.77041256)],
+    );
+    close(json!("brown d"), &[]);
+    close(
+        json!({"query": "brown d", "slop": 101}),
+        &[("4", 0.03152275)],
+    );
+    close(json!({"query": "fox b", "slop": 3}), &[("1", 2.0137405)]);
+    close(json!("the quick"), &[("1", 1.6942561)]);
+    close(json!("x"), &[]);
+    close(json!("!!"), &[]);
+    let err = |q: Value| run(q).unwrap_err().to_string();
+    assert_eq!(
+        err(json!({"tag": "ani"})),
+        "Can only use phrase prefix queries on text fields - not on [tag] which is of type [keyword]"
+    );
+    assert_eq!(
+        err(json!({"title": {"query": "x", "operator": "and"}})),
+        "[match_phrase_prefix] query does not support [operator]"
+    );
+    assert_eq!(
+        err(json!({"title": {"query": "x", "max_expansions": -1}})),
+        "No negative maxExpansions allowed."
+    );
+}
+
+#[test]
+fn match_phrase_prefix_expands_from_an_opened_index() {
+    let dir = std::env::temp_dir().join(format!("esq-phrase-prefix-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    // mapped, so its terms are in the segment's term dictionary
+    let mut idx = index();
+    (idx.mappings.properties).insert("title".into(), FieldMapping::Text { store: false });
+    es_index::disk::save(&dir, &es_index::Indices::from([("idx".into(), idx)])).unwrap();
+    let mut opened = es_index::disk::open(&dir).unwrap().remove("idx").unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(opened.prefixed_terms("title", "title", "b", 50), ["brown"]);
+    opened.put("5", json!({"title": "quick brawny bear"}));
+    let q = json!({"query": {"match_phrase_prefix": {"title": "quick b"}}});
+    let req = SearchRequest::parse(&q).unwrap();
+    let hits: Vec<_> = (search(&opened, &req).hits.iter())
+        .map(|h| (h.id.to_owned(), h.score.unwrap()))
+        .collect();
+    assert_eq!(hits.len(), 2, "{hits:?}");
+    assert_eq!(hits[0].0, "5");
+    assert!((hits[0].1 - 4.187054).abs() < 1e-5, "{hits:?}");
+    assert!((hits[1].1 - 3.684608).abs() < 1e-5, "{hits:?}");
+    assert_eq!(count(&opened, &req.query), 2);
+}

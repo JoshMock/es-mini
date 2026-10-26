@@ -18,6 +18,15 @@ pub enum Query {
         query: String,
         slop: u32,
     },
+    /// A phrase whose last term is any of the first `max_expansions` indexed terms it prefixes:
+    /// `expansions`, filled in for each index searched (see `resolve_dates`).
+    MatchPhrasePrefix {
+        field: String,
+        query: String,
+        slop: u32,
+        max_expansions: usize,
+        expansions: Vec<String>,
+    },
     Term {
         field: String,
         value: Value,
@@ -215,35 +224,54 @@ fn parse_kind(kind: &str, body: &Value) -> Result<Query, QueryError> {
                 and,
             })
         }
-        "match_phrase" => {
+        "match_phrase" | "match_phrase_prefix" => {
             let (field, p) = single_field(kind, body)?;
-            let (query, slop) = match p {
+            let prefix = kind == "match_phrase_prefix";
+            let (query, slop, max_expansions) = match p {
                 Value::Object(o) => {
-                    check_keys(
-                        "match_phrase",
-                        o,
-                        &[
-                            "query",
-                            "slop",
-                            "analyzer",
-                            "zero_terms_query",
-                            "boost",
-                            "_name",
-                        ],
-                    )?;
+                    let mut known = vec![
+                        "query",
+                        "slop",
+                        "analyzer",
+                        "zero_terms_query",
+                        "boost",
+                        "_name",
+                    ];
+                    known.extend(prefix.then_some("max_expansions"));
+                    check_keys(kind, o, &known)?;
                     let slop = match o.get("slop") {
                         None => 0,
                         Some(s) => (s.as_u64().and_then(|s| u32::try_from(s).ok()))
-                            .ok_or("[match_phrase] slop must be a non-negative integer")?,
+                            .ok_or(format!("[{kind}] slop must be a non-negative integer"))?,
                     };
-                    (o.get("query").ok_or("[match_phrase] requires query")?, slop)
+                    let max = match o.get("max_expansions").map(Value::as_i64) {
+                        None => 50,
+                        Some(Some(n)) if n >= 0 => n as usize,
+                        Some(Some(_)) => {
+                            return Err(QueryError::illegal("No negative maxExpansions allowed."));
+                        }
+                        Some(None) => {
+                            return Err(
+                                "[match_phrase_prefix] max_expansions must be an integer".into()
+                            );
+                        }
+                    };
+                    let query = o.get("query");
+                    (query.ok_or(format!("[{kind}] requires query"))?, slop, max)
                 }
-                q => (q, 0),
+                q => (q, 0, 50),
             };
-            Ok(Query::MatchPhrase {
-                field: field.clone(),
-                query: text(query),
-                slop,
+            let (field, query) = (field.clone(), text(query));
+            Ok(match prefix {
+                false => Query::MatchPhrase { field, query, slop },
+                true => Query::MatchPhrasePrefix {
+                    field,
+                    query,
+                    slop,
+                    // Lucene's rewrite always takes one term
+                    max_expansions: max_expansions.max(1),
+                    expansions: vec![],
+                },
             })
         }
         "term" => {

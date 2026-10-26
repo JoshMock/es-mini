@@ -258,10 +258,12 @@ impl<'a> Searcher<'a> {
     /// Precomputes BM25 statistics for every scored (field, term) in the query.
     fn gather(&mut self, q: &Query) {
         let (field, wanted) = match q {
-            Query::Match { field, query, .. } | Query::MatchPhrase { field, query, .. } => {
-                let (kind, _) = self.kind(field);
-                let t = query_terms(kind, query);
-                (field, t)
+            Query::Match { field, query, .. } => (field, query_terms(self.kind(field).0, query)),
+            Query::MatchPhrase { .. } | Query::MatchPhrasePrefix { .. } => {
+                let Some((field, terms, _)) = self.phrase(q) else {
+                    return;
+                };
+                (field, terms.concat())
             }
             Query::Term { field, value } => (field, vec![text(value)]),
             Query::Bool { must, should, .. } => {
@@ -346,9 +348,12 @@ impl<'a> Searcher<'a> {
                 let (kind, _) = self.kind(field);
                 self.term_docs(field, &query_terms(kind, query), *and, exact)
             }
-            // documents with every term, whatever their positions
-            Query::MatchPhrase { field, query, .. } if !exact => {
-                self.term_docs(field, &query_terms(self.kind(field).0, query), true, false)
+            // documents with a term of each position, whatever their positions
+            Query::MatchPhrase { .. } | Query::MatchPhrasePrefix { .. } if !exact => {
+                let (field, terms, _) = self.phrase(q)?;
+                (terms.iter())
+                    .filter_map(|t| self.term_docs(field, t, false, false))
+                    .reduce(|a, b| &a & &b)
             }
             Query::Named { query, .. } => self.candidates(query, exact),
             Query::Bool {
@@ -412,8 +417,11 @@ impl<'a> Searcher<'a> {
             Query::Match { field, query, and } => {
                 lookup(field, &query_terms(self.kind(field).0, query), *and)
             }
-            Query::MatchPhrase { field, query, .. } => {
-                lookup(field, &query_terms(self.kind(field).0, query), true)
+            Query::MatchPhrase { .. } | Query::MatchPhrasePrefix { .. } => {
+                let (field, terms, _) = self.phrase(q)?;
+                (terms.iter())
+                    .filter_map(|t| lookup(field, t, false))
+                    .reduce(|a, b| &a & &b)
             }
             Query::Named { query, .. } => self.memory_candidates(query),
             Query::Bool {
@@ -663,25 +671,37 @@ impl<'a> Searcher<'a> {
             }
             Query::Term { field, value } if field == "_id" => (text(value) == id).then_some(1.0),
             Query::Term { field, value } => self.score_terms(field, &[text(value)], true, id, d),
-            Query::MatchPhrase { field, query, slop } => {
+            Query::MatchPhrase { .. } | Query::MatchPhrasePrefix { .. } => {
+                let (field, terms, slop) = self.phrase(q)?;
                 let (kind, path) = self.kind(field);
-                let wanted = query_terms(kind, query);
-                // Lucene rewrites a one-term phrase to a term query
-                if wanted.len() < 2 || kind != Kind::Text {
-                    return self.score_terms(field, &wanted, true, id, d);
+                let wanted = terms.concat();
+                // Lucene rewrites a one-position phrase to term queries, any of which match
+                if terms.len() < 2 || kind != Kind::Text {
+                    return self.score_terms(field, &wanted, false, id, d);
                 }
                 let (lists, len) = es_index::postings::positions(&values(&d.source, path), &wanted);
+                // a position's terms' positions merged, as MultiPhraseQuery's UnionPostingsEnum
+                let mut lists = lists.into_iter();
+                let lists: Vec<Vec<u32>> = (terms.iter())
+                    .map(|t| {
+                        let mut p: Vec<u32> = lists.by_ref().take(t.len()).flatten().collect();
+                        p.sort_unstable();
+                        p
+                    })
+                    .collect();
                 let freq = match slop {
                     _ if lists.iter().any(Vec::is_empty) => return None,
                     0 => exact_phrase_freq(&lists),
-                    _ => sloppy_phrase_freq(&lists, *slop),
+                    _ => sloppy_phrase_freq(&lists, slop),
                 };
                 if freq == 0.0 {
                     return None;
                 }
-                // PhraseWeight: one BM25 score with the terms' idfs summed
+                // PhraseWeight: one BM25 score with the idfs of the terms in the index summed
                 let idf: f64 = (wanted.iter())
-                    .map(|w| self.bm25_parts(field, w, freq, len as f64)[4])
+                    .map(|w| self.bm25_parts(field, w, freq, len as f64))
+                    .filter(|p| p[0] > 0.0)
+                    .map(|p| p[4])
                     .sum();
                 let [.., tf] = self.bm25_parts(field, &wanted[0], freq, len as f64);
                 Some(idf * (1.0 + K1) * tf)
@@ -812,7 +832,7 @@ impl<'a> Searcher<'a> {
                 terms(field, &query_terms(self.kind(field).0, query), *and)
             }
             // ponytail: postings positions are not read; scores come from the source
-            Query::MatchPhrase { .. } => None,
+            Query::MatchPhrase { .. } | Query::MatchPhrasePrefix { .. } => None,
             Query::Named { query, .. } => self.postings_score(query, id, matched),
             // Unless the document is known to match, its filters would need checking.
             Query::Bool {
@@ -843,6 +863,29 @@ impl<'a> Searcher<'a> {
             _ if matched => Some(Some(1.0)),
             _ => None,
         }
+    }
+
+    /// A phrase query's field, its terms at each position (those a prefix expands to, last),
+    /// and its slop.
+    fn phrase<'q>(&self, q: &'q Query) -> Option<(&'q String, Vec<Vec<String>>, u32)> {
+        let (field, query, slop, expansions) = match q {
+            Query::MatchPhrase { field, query, slop } => (field, query, slop, None),
+            Query::MatchPhrasePrefix {
+                field,
+                query,
+                slop,
+                expansions,
+                ..
+            } => (field, query, slop, Some(expansions)),
+            _ => return None,
+        };
+        let mut terms: Vec<Vec<String>> = (query_terms(self.kind(field).0, query).into_iter())
+            .map(|t| vec![t])
+            .collect();
+        if let (Some(last), Some(e)) = (terms.last_mut(), expansions) {
+            last.clone_from(e);
+        }
+        Some((field, terms, *slop))
     }
 
     fn score_terms(
@@ -1143,7 +1186,8 @@ fn now_millis() -> i64 {
 /// `q` with the bounds of ranges on date fields of `index` resolved to inclusive epoch millis,
 /// like ES's DateFieldType.dateRangeQuery: read with the query's `format` (epoch_millis if a
 /// bound is a number), else the field's, in the query's `time_zone`, with date math from `now`;
-/// `gt` and `lte` round up. Terms and matches on date fields become such ranges.
+/// `gt` and `lte` round up. Terms and matches on date fields become such ranges. Phrase
+/// prefixes also get the terms their last term expands to.
 fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, QueryError> {
     let all = |qs: Vec<Query>| -> Result<Vec<Query>, QueryError> {
         qs.into_iter()
@@ -1175,6 +1219,38 @@ fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, QueryError>
             if date(&field) =>
         {
             term(field, query.into())?
+        }
+        Query::MatchPhrasePrefix {
+            field,
+            query,
+            slop,
+            max_expansions,
+            ..
+        } => {
+            let (kind, path) = Searcher::unscored(index, &Query::MatchAll).kind(&field);
+            if kind != Kind::Text {
+                // ponytail: unmapped fields are named by the kind they resolve to
+                let name = match (index.mappings.field(&field), kind) {
+                    (Some(m), _) => m.type_name(),
+                    (None, Kind::Number) => "long",
+                    (None, Kind::Bool) => "boolean",
+                    (None, _) => "keyword",
+                };
+                return Err(QueryError::illegal(format!(
+                    "Can only use phrase prefix queries on text fields - not on [{field}] which is of type [{name}]"
+                )));
+            }
+            let last = query_terms(kind, &query).pop();
+            let expansions = last.map_or_else(Vec::new, |last| {
+                index.prefixed_terms(&field, path, &last, max_expansions)
+            });
+            Query::MatchPhrasePrefix {
+                field,
+                query,
+                slop,
+                max_expansions,
+                expansions,
+            }
         }
         Query::Bool {
             must,
@@ -1415,7 +1491,7 @@ fn sort_value(f: &SortField, mut values: Vec<&Value>) -> Value {
 /// The score of every document `q` matches, if it does not vary (see [`Searcher::score`]).
 fn constant_score(q: &Query) -> Option<f64> {
     match q {
-        Query::Match { .. } | Query::MatchPhrase { .. } => None,
+        Query::Match { .. } | Query::MatchPhrase { .. } | Query::MatchPhrasePrefix { .. } => None,
         Query::Term { field, .. } if field != "_id" => None,
         Query::Named { query, .. } => constant_score(query),
         Query::Bool { must, should, .. } if should.is_empty() => {

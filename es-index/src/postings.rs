@@ -370,6 +370,24 @@ impl crate::Index {
         Some(ids.cloned().collect())
     }
 
+    /// The first `max` terms of analyzed `field` (at source `path`) starting with `prefix`, in
+    /// byte order, from the term dictionaries on disk and in memory.
+    // ponytail: Lucene collects up to `max` per segment in segment order; this is its order
+    // for one segment
+    pub fn prefixed_terms(&self, field: &str, path: &str, prefix: &str, max: usize) -> Vec<String> {
+        let disk = (self.stats.iter().flat_map(|s| s.doc_freq.keys()))
+            .filter(|(f, t)| f == field && t.starts_with(prefix))
+            .map(|(_, t)| t.clone());
+        let mut all: Vec<String> = self.postings_for(path, true, |f| {
+            let memory = f.doc_freq.keys().filter(|t| t.starts_with(prefix));
+            disk.chain(memory.cloned()).collect()
+        });
+        all.sort_unstable();
+        all.dedup();
+        all.truncate(max);
+        all
+    }
+
     /// BM25 statistics of `field` (at source `path`) for `wanted` terms: those of the segments
     /// of an index opened from disk plus those of the documents in memory. `None` when the
     /// segments have no statistics for the field.
