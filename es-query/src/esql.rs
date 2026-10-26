@@ -1,6 +1,6 @@
 //! ES|QL subset: `FROM` (with `METADATA _id, _index, _version`), `ROW` and `SHOW INFO`, with
 //! `WHERE`, `EVAL`, `LIMIT`, `KEEP`, `DROP`, `RENAME`, `SORT`, and `STATS ... [BY ...]` over
-//! `COUNT`, `MIN`, `MAX`, `SUM`, `AVG`, `MEDIAN` and `PERCENTILE`.
+//! `COUNT`, `COUNT_DISTINCT`, `MIN`, `MAX`, `SUM`, `AVG`, `MEDIAN` and `PERCENTILE`.
 //!
 //! Expressions support comparisons (`== != < <= > >=`), `AND`/`OR`/`NOT`, parentheses,
 //! `IS [NOT] NULL`, arithmetic, and the functions in `CONVERSIONS` and `SCALAR_FNS` over field
@@ -1881,7 +1881,9 @@ fn aggregate(e: &Expr) -> Option<(String, Option<&Expr>, Option<&Expr>)> {
     let f = f.to_ascii_uppercase();
     match (f.as_str(), &args[..]) {
         ("COUNT", [Expr::Field(s, _)]) if s == "*" => Some((f, None, None)),
-        ("COUNT" | "MIN" | "MAX" | "SUM" | "AVG" | "MEDIAN", [arg]) => Some((f, Some(arg), None)),
+        ("COUNT" | "COUNT_DISTINCT" | "MIN" | "MAX" | "SUM" | "AVG" | "MEDIAN", [arg]) => {
+            Some((f, Some(arg), None))
+        }
         ("PERCENTILE", [arg, p]) => Some((f, Some(arg), Some(p))),
         _ => None,
     }
@@ -2044,8 +2046,8 @@ pub fn run(
             }
             Command::Limit(_) => Vec::new(),
             Command::Stats(aggs, by) => {
-                // ponytail: COUNT, MIN, MAX, SUM, AVG, MEDIAN and PERCENTILE are the only
-                // aggregates; the esql-stats goal adds the rest
+                // ponytail: `aggregate` lists the only supported aggregates; the esql-stats goal
+                // adds the rest
                 let mut bad = Vec::new();
                 let mut out = Vec::new();
                 for (name, e) in aggs {
@@ -2078,22 +2080,26 @@ pub fn run(
                         t == "null" || (NUMERIC.contains(&t.as_str()) && t != "unsigned_long");
                     let source = &query[span(e).1.clone()];
                     let expected = match f.as_str() {
-                        "SUM" | "AVG" => {
+                        "SUM" | "AVG" if !numeric => {
                             "argument of [{e}] must be [aggregate_metric_double, \
                                           exponential_histogram, tdigest or numeric except \
                                           unsigned_long or counter types]"
                         }
-                        "MEDIAN" => {
+                        "MEDIAN" if !numeric => {
                             "argument of [{e}] must be [exponential_histogram, tdigest or \
                                      numeric except unsigned_long or counter types]"
                         }
-                        "PERCENTILE" => {
+                        "PERCENTILE" if !numeric => {
                             "first argument of [{e}] must be [exponential_histogram, \
                                          tdigest or numeric except unsigned_long]"
                         }
+                        "COUNT_DISTINCT" if t == "unsigned_long" => {
+                            "argument of [{e}] must be [any exact type except unsigned_long, \
+                             _source, or counter types]"
+                        }
                         _ => "",
                     };
-                    if !expected.is_empty() && !numeric {
+                    if !expected.is_empty() {
                         let found = &query[span(arg).1.clone()];
                         let msg = expected.replace("{e}", source);
                         bad.push((
@@ -2126,7 +2132,7 @@ pub fn run(
                         }
                     }
                     let t = match f.as_str() {
-                        "COUNT" => "long".into(),
+                        "COUNT" | "COUNT_DISTINCT" => "long".into(),
                         "AVG" | "MEDIAN" | "PERCENTILE" => "double".into(),
                         "SUM" if t == "integer" => "long".into(),
                         _ => t,
@@ -2256,6 +2262,25 @@ pub fn run(
                     let doubles = all.iter().filter_map(Value::as_f64);
                     match f.as_str() {
                         "COUNT" => all.len().into(),
+                        "COUNT_DISTINCT" => {
+                            // Hashed like ES's HllStates, with its default precision threshold.
+                            // ponytail: dates, IPs and versions hash their text where ES hashes
+                            // their long or binary form; the same count up to the threshold
+                            use crate::hll::{self, Hll};
+                            let mut counter = Hll::new(hll::precision_from_threshold(3000));
+                            for v in &all {
+                                counter.collect(match v {
+                                    Value::Number(n) if n.is_f64() => {
+                                        hll::mix64(n.as_f64().unwrap_or_default().to_bits())
+                                    }
+                                    Value::Number(n) => {
+                                        hll::mix64(n.as_i64().unwrap_or_default() as u64)
+                                    }
+                                    v => hll::murmur3(es_index::postings::text(v).as_bytes()),
+                                });
+                            }
+                            counter.cardinality().into()
+                        }
                         "MIN" | "MAX" => {
                             mv_fn(&format!("MV_{f}"), &Value::Array(all)).unwrap_or(Value::Null)
                         }

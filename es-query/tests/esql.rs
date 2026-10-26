@@ -1546,3 +1546,18 @@ fn stats_median_percentile() {
         )
     ));
 }
+
+#[test]
+fn stats_count_distinct() {
+    let r = q("FROM people | STATS n = COUNT_DISTINCT(name), c = COUNT_DISTINCT(city)");
+    assert_eq!(r.columns[0].r#type, "long");
+    assert_eq!(r.values, [[json!(3), json!(2)]]);
+    // Multi-values count value by value, of every type.
+    let r = q(
+        "ROW i = [1, 2, 2, 3], d = [1.5, 1.5], b = [true, false, true] \
+               | STATS i = COUNT_DISTINCT(i), d = COUNT_DISTINCT(d), b = COUNT_DISTINCT(b)",
+    );
+    assert_eq!(r.values, [[json!(3), json!(1), json!(2)]]);
+    let r = q("FROM people | WHERE age > 99 | STATS d = COUNT_DISTINCT(age)");
+    assert_eq!(r.values, [[json!(0)]]);
+}
