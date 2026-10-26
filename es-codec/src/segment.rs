@@ -3,7 +3,7 @@
 use crate::{
     CompoundFile, Result, SegmentCommitInfo, doc_values, err,
     field_infos::{self, FieldInfo},
-    live_docs, norms, stored_fields, terms,
+    live_docs, norms, points, stored_fields, terms,
 };
 use std::path::{Path, PathBuf};
 
@@ -112,6 +112,19 @@ impl SegmentReader {
     /// Each doc's norm of `field` (0 for docs without one); `None` if the field omits norms.
     pub fn norms(&self, field: &str) -> Result<Option<Vec<i64>>> {
         norms::read_norms(self, field)
+    }
+
+    /// The docs with a point value of one-dimensional `field` that `place` puts in its range
+    /// (`Equal`), once per such value, in no particular order, read by walking the field's BKD
+    /// tree. `place` gets values as [`points::decode`] gives them and must be monotone (`Less`
+    /// below the range, `Greater` above); subtrees entirely below or above are not read. Errs
+    /// if the field has no such points.
+    pub fn point_docs(
+        &self,
+        field: &str,
+        place: impl Fn(i64) -> std::cmp::Ordering,
+    ) -> Result<Vec<u32>> {
+        points::read_point_docs(self, field, place)
     }
 
     /// A field's doc values, from the field's latest doc values generation.
