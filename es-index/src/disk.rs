@@ -39,11 +39,15 @@ pub fn open(data_dir: &Path) -> es_codec::Result<Indices> {
             index.mappings = Mappings::deserialize(&m["_doc"]).unwrap_or_default();
         }
         let dir = data_dir.join("indices").join(&meta.uuid).join("0/index");
-        // ponytail: indices in codecs we lack (e.g. Zstd stored fields) are left out, not fatal
-        if load_shard(&mut index, &dir).is_ok() {
-            replay_translog(&mut index, &dir.join("../translog"))?;
-            out.insert(meta.name, index);
+        // An index whose shard never started (e.g. a system index made just before shutdown)
+        // has no shard directory.
+        if !dir.exists() {
+            continue;
         }
+        load_shard(&mut index, &dir)
+            .map_err(|e| es_codec::Error(format!("index [{}]: {}", meta.name, e.0)))?;
+        replay_translog(&mut index, &dir.join("../translog"))?;
+        out.insert(meta.name, index);
     }
     Ok(out)
 }
