@@ -1,5 +1,3 @@
 # Known-failing YAML tests. Fix one, then delete its line.
-aggregations/top_hits.yml/highlight
-aggregations/top_hits.yml/highlight_query
 aggregations/top_hits.yml/runtime fields
 aggregations/typed_keys.yml/Test typed keys parameter for date_histogram aggregation and max_bucket pipeline aggregation

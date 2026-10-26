@@ -85,6 +85,8 @@ struct TopHits {
     /// The `fields` to fetch; `None` inherits the search's.
     fields: Option<Vec<String>>,
     stored_fields: Vec<String>,
+    /// The fields to highlight, each with the query to highlight it by (the search's if `None`).
+    highlight: Vec<(String, Option<Query>)>,
 }
 
 /// A document `top_hits` collected.
@@ -100,6 +102,8 @@ struct TopHit {
     matched_queries: Vec<String>,
     /// Its score's explanation, if asked for.
     explanation: Option<Value>,
+    /// The `highlight` fragments of each field that has some.
+    highlight: Map<String, Value>,
 }
 
 impl TopHits {
@@ -117,6 +121,7 @@ impl TopHits {
             docvalue_fields: vec![],
             fields: None,
             stored_fields: vec![],
+            highlight: vec![],
         };
         let mut stored_fields = None;
         // patterns of a string or an array of strings
@@ -145,6 +150,22 @@ impl TopHits {
                 "docvalue_fields" => t.docvalue_fields = field_names(v).ok_or_else(|| bad(k))?,
                 "fields" => t.fields = Some(field_names(v).ok_or_else(|| bad(k))?),
                 "stored_fields" => stored_fields = Some(patterns(k, v)?),
+                "highlight" => {
+                    // ponytail: only `fields` of plain names, each with a `highlight_query`
+                    let fields = v.get("fields").and_then(Value::as_object);
+                    let fields = fields.filter(|_| v.as_object().is_some_and(|o| o.len() == 1));
+                    for (name, params) in fields.ok_or_else(|| bad(k))? {
+                        let query = match params
+                            .as_object()
+                            .ok_or_else(|| bad(k))?
+                            .get("highlight_query")
+                        {
+                            Some(q) => Some(parse_query(q)?),
+                            None => None,
+                        };
+                        t.highlight.push((name.clone(), query));
+                    }
+                }
                 "_source" => {
                     t.source = match v {
                         Value::Bool(b) => b.then(String::new),
@@ -224,6 +245,9 @@ impl TopHits {
             }
             if let Some(e) = &h.explanation {
                 hit.insert("_explanation".into(), e.clone());
+            }
+            if !h.highlight.is_empty() {
+                hit.insert("highlight".into(), h.highlight.clone().into());
             }
             Value::from(hit)
         });
@@ -1393,6 +1417,20 @@ impl<'s, 'a> Collector<'s, 'a> {
                     sort: self.searcher.sort_values(&t.sort, score, doc),
                     matched_queries: self.searcher.matched_queries(id, doc),
                     explanation: t.explain.then(|| self.searcher.explain(id, doc)),
+                    highlight: (t.highlight.iter())
+                        .map(|(f, q)| {
+                            (
+                                f,
+                                self.searcher.highlight(
+                                    q.as_ref().unwrap_or(&self.searcher.query),
+                                    f,
+                                    doc,
+                                ),
+                            )
+                        })
+                        .filter(|(_, h)| !h.is_empty())
+                        .map(|(f, h)| (f.clone(), h.into()))
+                        .collect(),
                     doc: doc.clone(),
                     fields: {
                         let mut fields = hit_fields(self.searcher, &t.docvalue_fields, doc, false);
@@ -2244,9 +2282,30 @@ mod tests {
             "hits": [hit("3", 2, 101), hit("4", 3, 151)]}});
         assert_eq!(aggs["all"], all);
         assert!(aggs["none"]["hits"]["hits"][0].get("_source").is_none());
-        let body = json!({"aggs": {"t": {"top_hits": {"highlight": {}}}}});
+        let body = json!({"aggs": {"t": {"top_hits": {"collapse": {}}}}});
         let err = SearchRequest::parse(&body).unwrap_err();
-        assert_eq!(err.msg, "[top_hits] unknown field [highlight]");
+        assert_eq!(err.msg, "[top_hits] unknown field [collapse]");
+    }
+
+    #[test]
+    fn top_hits_highlight_the_query_terms_of_their_fields() {
+        let mut ix = index();
+        ix.put("6", json!({"t": "The cat; THE dog", "k": "the"}));
+        let hit = |query: Value| {
+            let body = json!({"query": {"match": {"t": "the"}}, "aggs": {"top": {"top_hits": {
+                "_source": false, "highlight": {"fields": {"t": query, "k": {}}}}}}});
+            aggs_of(&ix, body)["top"]["hits"]["hits"][0].clone()
+        };
+        let want = json!({"t": ["<em>The</em> cat; <em>THE</em> dog"]});
+        assert_eq!(hit(json!({}))["highlight"], want);
+        // the query given to a field replaces the search's, and a field needs terms to show
+        let own = hit(json!({"highlight_query": {"match": {"t": "cat"}}}));
+        assert_eq!(
+            own["highlight"],
+            json!({"t": ["The <em>cat</em>; THE dog"]})
+        );
+        let none = hit(json!({"highlight_query": {"match": {"t": "zzz"}}}));
+        assert!(none.get("highlight").is_none(), "{none}");
     }
 
     #[test]

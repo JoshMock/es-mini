@@ -822,6 +822,76 @@ impl<'a> Searcher<'a> {
             .collect()
     }
 
+    /// The terms of `q`'s clauses on `field` (but not its `must_not` ones) that a document
+    /// highlights.
+    // ponytail: only match, term and phrase terms; prefix, wildcard and range queries highlight nothing
+    fn highlight_terms(&self, q: &Query, field: &str, out: &mut Vec<String>) {
+        match q {
+            Query::Match {
+                field: f, query, ..
+            }
+            | Query::MatchPhrase {
+                field: f, query, ..
+            } if f == field => out.extend(self.match_terms(field, query)),
+            Query::Term { field: f, value } if f == field => out.push(text(value)),
+            Query::Bool {
+                must,
+                should,
+                filter,
+                ..
+            } => (must.iter().chain(should).chain(filter))
+                .for_each(|c| self.highlight_terms(c, field, out)),
+            Query::DisMax { queries, .. } => queries
+                .iter()
+                .for_each(|c| self.highlight_terms(c, field, out)),
+            Query::Named { query, .. } => self.highlight_terms(query, field, out),
+            _ => {}
+        }
+    }
+
+    /// The values of `field` in a document with the terms of `q` on it wrapped in `<em>`, like
+    /// ES's plain highlighter; none if no value has a term.
+    // ponytail: whole values, not 100-character fragments; no custom tags or encoders
+    fn highlight(&self, q: &Query, field: &str, d: &Document) -> Vec<String> {
+        let mut wanted = vec![];
+        self.highlight_terms(q, field, &mut wanted);
+        let (kind, path) = self.kind(field);
+        let mut out = vec![];
+        for value in values(&d.source, path)
+            .into_iter()
+            .filter_map(Value::as_str)
+        {
+            // each token's byte range, wrapped if it is a wanted term
+            let tokens = match kind {
+                Kind::Text => es_index::analysis::standard_tokenize(value)
+                    .into_iter()
+                    .map(|t| {
+                        let start = t.as_ptr() as usize - value.as_ptr() as usize;
+                        (
+                            start..start + t.len(),
+                            Analyzer::Standard.analyze(t).concat(),
+                        )
+                    })
+                    .collect(),
+                _ => vec![(0..value.len(), value.to_owned())],
+            };
+            let mut marked = String::new();
+            let mut done = 0;
+            for (range, _) in tokens.into_iter().filter(|(_, t)| wanted.contains(t)) {
+                marked += &format!(
+                    "{}<em>{}</em>",
+                    &value[done..range.start],
+                    &value[range.clone()]
+                );
+                done = range.end;
+            }
+            if done > 0 {
+                out.push(marked + &value[done..]);
+            }
+        }
+        out
+    }
+
     /// A document's frequency of `term` in `field` and the field's length, from postings
     /// (`Some(None)` if it does not hold the term); `None` without postings (see `gather`).
     fn posting(&self, field: &str, term: &str, id: &str) -> Option<Option<(u32, u32)>> {
