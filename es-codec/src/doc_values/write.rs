@@ -7,8 +7,8 @@ use crate::{
 };
 
 /// `IndexedDISI` of `docs` (ascending, among `max_doc`): block header, then a sorted list, a
-/// bitset (more than 4095 docs) or nothing (all 65536), plus the jump table Lucene adds when
-/// there are two or more blocks. No dense-rank table.
+/// bitset (more than 4095 docs) led by its rank table or nothing (all 65536), plus the jump table
+/// Lucene adds when there are two or more blocks.
 fn write_disi(data: &mut Output, docs: &[u32]) -> i16 {
     let origin = data.0.len();
     let mut jumps: Vec<(i32, i32)> = vec![];
@@ -27,6 +27,12 @@ fn write_disi(data: &mut Output, docs: &[u32]) -> i16 {
         } else if n < 1 << 16 {
             let mut bits = [0u64; 1024];
             lows.for_each(|d| bits[d as usize >> 6] |= 1 << (d & 63));
+            // Rank: docs set before every 2^DENSE_RANK_POWER-th bit, as big-endian u16s.
+            let mut set = 0u16;
+            for chunk in bits.chunks(1 << (DENSE_RANK_POWER - 6)) {
+                data.bytes(&set.to_be_bytes());
+                set += chunk.iter().map(|w| w.count_ones() as u16).sum::<u16>();
+            }
             bits.iter().for_each(|w| data.bytes(&w.to_le_bytes()));
         }
         i += n;
@@ -52,19 +58,20 @@ pub(crate) fn write_docs_with_field(
     docs: &[u32],
     max_doc: usize,
 ) {
-    let (offset, length, jumps) = if docs.is_empty() {
-        (-2, 0, -1)
+    let (offset, length, jumps, rank_power) = if docs.is_empty() {
+        (-2, 0, -1, 0xff)
     } else if docs.len() == max_doc {
-        (-1, 0, -1)
+        (-1, 0, -1, 0xff)
     } else {
         let start = data.0.len();
         let jumps = write_disi(data, docs);
-        (start as i64, (data.0.len() - start) as i64, jumps)
+        let length = (data.0.len() - start) as i64;
+        (start as i64, length, jumps, DENSE_RANK_POWER)
     };
     meta.long(offset);
     meta.long(length);
     meta.bytes(&jumps.to_le_bytes());
-    meta.byte(0xff);
+    meta.byte(rank_power);
 }
 
 /// `values` belong to `docs` (ascending), out of `max_doc` docs.

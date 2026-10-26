@@ -13,6 +13,8 @@ pub use write::{write_doc_values, write_doc_values_with};
 const VERSION_MAX: i32 = 2;
 /// Doc id block index of the IndexedDISI terminator block (`NO_MORE_DOCS >>> 16`).
 const DISI_END_BLOCK: u16 = 0x7fff;
+/// IndexedDISI `DEFAULT_DENSE_RANK_POWER`: a rank entry every 512 doc ids of a bitset block.
+const DENSE_RANK_POWER: u8 = 9;
 const TERMS_DICT_BLOCK_LZ4_SHIFT: u32 = 6;
 const TERMS_DICT_BLOCK_SIZE: usize = 1 << TERMS_DICT_BLOCK_LZ4_SHIFT;
 /// Block shift of the direct-monotonic tables the writer emits (Lucene90DocValuesFormat).
@@ -39,6 +41,7 @@ pub enum DocValues {
 mod tests {
     use super::read::decode;
     use super::*;
+    use crate::output::Output;
 
     #[test]
     fn write_then_read_numeric_round_trips() {
@@ -157,6 +160,30 @@ mod tests {
         assert_eq!(terms.len(), 150);
         let back: Vec<_> = ords.iter().map(|o| terms[o[0]].clone()).collect();
         assert_eq!(back, vals);
+    }
+
+    /// Field "half" of tests/data/stored-and-numeric (every other doc of 70000: a bitset block,
+    /// then a sorted list), whose IndexedDISI Lucene 10.5.1 wrote with rank and jump tables.
+    #[test]
+    fn writes_the_indexed_disi_lucene_writes() {
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/stored-and-numeric");
+        let seg = crate::SegmentInfos::read_latest(&dir)
+            .unwrap()
+            .segments
+            .remove(0);
+        let r = crate::SegmentReader::open(&dir, seg).unwrap();
+        let DocValues::Numbers(half) = r.doc_values("half").unwrap() else {
+            panic!("not numbers")
+        };
+        let docs: Vec<u32> = (0..half.len() as u32)
+            .filter(|d| !half[*d as usize].is_empty())
+            .collect();
+        let (mut meta, mut data) = (Output::default(), Output::default());
+        write_docs_with_field(&mut meta, &mut data, &docs, half.len());
+        assert_eq!(meta.0[meta.0.len() - 1], DENSE_RANK_POWER);
+        let lucene = r.cfs_file("_Lucene90_0.dvd").unwrap();
+        assert!(lucene.windows(data.0.len()).any(|w| w == data.0));
     }
 
     /// The ES 9.5.5 fixture's `tag` terms (animal, misc, pet) and ordinals, byte for byte.
