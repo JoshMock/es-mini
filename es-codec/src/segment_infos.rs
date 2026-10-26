@@ -34,6 +34,156 @@ pub struct SegmentInfo {
     pub diagnostics: BTreeMap<String, String>,
     pub files: BTreeSet<String>,
     pub attributes: BTreeMap<String, String>,
+    /// The index sort its documents are in; empty when unsorted.
+    pub index_sort: Vec<SortField>,
+}
+
+/// A field of an index sort, as Lucene's `SortFieldProvider`s serialize it. Sort types are
+/// `SortField.Type` names (`STRING`, `INT`, `LONG`, `FLOAT`, `DOUBLE`); selectors are
+/// `SortedNumericSelector`/`SortedSetSelector` ordinals.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SortField {
+    /// `SortField`: `missing` is the serialized value (for `STRING`, 1 = first and 0 = last;
+    /// floats and doubles as `NumericUtils` sortable bits).
+    Plain {
+        field: String,
+        sort_type: String,
+        reverse: bool,
+        missing: Option<i64>,
+    },
+    /// `SortedNumericSortField`: `missing` as for [`SortField::Plain`].
+    SortedNumeric {
+        field: String,
+        sort_type: String,
+        reverse: bool,
+        selector: i32,
+        missing: Option<i64>,
+    },
+    /// `SortedSetSortField`: `missing` is 0 (none), 1 (first) or 2 (last).
+    SortedSet {
+        field: String,
+        reverse: bool,
+        selector: i32,
+        missing: i32,
+    },
+}
+
+/// Whether a sort type's missing value is an int (else a long); errors for unserializable types.
+fn missing_is_int(sort_type: &str) -> Result<bool> {
+    match sort_type {
+        "STRING" | "INT" | "FLOAT" => Ok(true),
+        "LONG" | "DOUBLE" => Ok(false),
+        t => err(format!("cannot read an index sort of type {t}")),
+    }
+}
+
+fn read_sort_field(input: &mut DataInput) -> Result<SortField> {
+    let provider = input.read_string()?;
+    let field = input.read_string()?;
+    if provider == "SortedSetSortField" {
+        let reverse = input.read_int()? == 1;
+        let selector = read_selector(input, 4)?;
+        let missing = input.read_int()?;
+        return Ok(SortField::SortedSet {
+            field,
+            reverse,
+            selector,
+            missing,
+        });
+    }
+    let sort_type = input.read_string()?;
+    let int = missing_is_int(&sort_type)?;
+    let reverse = input.read_int()? == 1;
+    let selector = match provider.as_str() {
+        "SortField" => None,
+        "SortedNumericSortField" => Some(read_selector(input, 2)?),
+        p => return err(format!("unknown index sort provider {p}")),
+    };
+    let missing = match input.read_int()? {
+        1 if int => Some(input.read_int()?.into()),
+        1 => Some(input.read_long()?),
+        _ => None,
+    };
+    Ok(match selector {
+        None => SortField::Plain {
+            field,
+            sort_type,
+            reverse,
+            missing,
+        },
+        Some(selector) => SortField::SortedNumeric {
+            field,
+            sort_type,
+            reverse,
+            selector,
+            missing,
+        },
+    })
+}
+
+fn read_selector(input: &mut DataInput, count: i32) -> Result<i32> {
+    match input.read_int()? {
+        s if (0..count).contains(&s) => Ok(s),
+        s => err(format!("invalid index sort selector {s}")),
+    }
+}
+
+fn write_sort_field(out: &mut Output, sort: &SortField) -> Result<()> {
+    match sort {
+        SortField::SortedSet {
+            field,
+            reverse,
+            selector,
+            missing,
+        } => {
+            out.string("SortedSetSortField");
+            out.string(field);
+            out.int(*reverse as i32);
+            out.int(*selector);
+            out.int(*missing);
+        }
+        SortField::Plain {
+            field,
+            sort_type,
+            reverse,
+            missing,
+        }
+        | SortField::SortedNumeric {
+            field,
+            sort_type,
+            reverse,
+            missing,
+            ..
+        } => {
+            let int = missing_is_int(sort_type)?;
+            let selector = match sort {
+                SortField::SortedNumeric { selector, .. } => Some(*selector),
+                _ => None,
+            };
+            out.string(match selector {
+                None => "SortField",
+                Some(_) => "SortedNumericSortField",
+            });
+            out.string(field);
+            out.string(sort_type);
+            out.int(*reverse as i32);
+            if let Some(selector) = selector {
+                out.int(selector);
+            }
+            match *missing {
+                None => out.int(0),
+                Some(v) if int => {
+                    out.int(1);
+                    out.int(v as i32);
+                }
+                Some(v) => {
+                    out.int(1);
+                    out.long(v);
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -284,7 +434,10 @@ fn write_si(dir: &Path, name: &str, si: &SegmentInfo) -> Result<()> {
     out.map_of_strings(&si.diagnostics);
     out.set_of_strings(&si.files);
     out.map_of_strings(&si.attributes);
-    out.vint(0); // no index sort
+    out.vint(si.index_sort.len() as i32);
+    for sort in &si.index_sort {
+        write_sort_field(&mut out, sort)?;
+    }
     let path = dir.join(format!("{name}.si"));
     crate::write_file_new(&path, &out.finish())
 }
@@ -309,12 +462,13 @@ fn read_si(dir: &Path, name: &str, id: &[u8; ID_LEN]) -> Result<SegmentInfo> {
     let diagnostics = input.read_map_of_strings()?;
     let files = input.read_set_of_strings()?;
     let attributes = input.read_map_of_strings()?;
-    // ponytail: index sorting is unsupported; ES only sorts indices that configure index.sort.*
-    if input.read_vint()? != 0 {
-        return err(format!(
-            "segment {name} uses index sorting, which is unsupported"
-        ));
+    let sort_fields = input.read_vint()?;
+    if sort_fields < 0 {
+        return err(format!("invalid index sort field count {sort_fields}"));
     }
+    let index_sort = (0..sort_fields)
+        .map(|_| read_sort_field(input))
+        .collect::<Result<_>>()?;
     Ok(SegmentInfo {
         id: *id,
         version,
@@ -325,6 +479,7 @@ fn read_si(dir: &Path, name: &str, id: &[u8; ID_LEN]) -> Result<SegmentInfo> {
         diagnostics,
         files,
         attributes,
+        index_sort,
     })
 }
 
@@ -356,6 +511,7 @@ mod tests {
             diagnostics: [("source".to_string(), "flush".to_string())].into(),
             files: ["_0.fnm".to_string()].into(),
             attributes: BTreeMap::new(),
+            index_sort: vec![],
         };
         let seg = SegmentCommitInfo {
             name: "_0".into(),

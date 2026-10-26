@@ -115,6 +115,7 @@ pub fn write_segment(dir: &Path, s: &NewSegment) -> Result<SegmentCommitInfo> {
                 "Lucene90StoredFieldsFormat.mode".into(),
                 "BEST_SPEED".into(),
             )]),
+            index_sort: vec![],
         },
         del_gen: -1,
         del_count: 0,
