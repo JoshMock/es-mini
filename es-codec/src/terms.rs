@@ -1,7 +1,7 @@
 //! Terms dictionary and postings (Lucene103 block tree + Lucene104 postings).
 //!
-//! Terms are enumerated by walking blocks from the root, so the `.tip` trie is only consulted
-//! for the root block's file pointer. Impacts and skip data are skipped.
+//! Reading every term walks the blocks from the root; looking up one term seeks through the
+//! `.tip` trie to the only block that can hold it. Impacts and skip data are skipped.
 
 pub use crate::postings::Position;
 use crate::{
@@ -9,7 +9,7 @@ use crate::{
     field_infos::{FieldInfo, IndexOptions},
     input::{DataInput, zigzag},
     lz4, postings,
-    trie::{self, TrieOutput},
+    trie::{self, Node, NodeOutput, TrieOutput, TrieReader},
 };
 
 /// Deepest nesting of sub-blocks accepted before a `.tim` is called corrupt.
@@ -161,12 +161,10 @@ fn decode_terms(
         if number != info.number {
             continue;
         }
-        let root_block = trie_root_output_fp(
-            tip,
-            index_start as usize,
-            index_end as usize,
-            root_fp as usize,
-        )?;
+        let Some(trie) = tip.get(index_start as usize..index_end as usize) else {
+            return err("trie extends past the index");
+        };
+        let trie = TrieReader(trie);
         let mut walker = Walker {
             tim,
             doc,
@@ -178,7 +176,15 @@ fn decode_terms(
             total_term_freq: 0,
             out: Vec::new(),
         };
-        walker.block(root_block as usize, &[], 0)?;
+        let mut root = trie.load(root_fp as usize)?;
+        let Some(root_out) = root.output.take() else {
+            return err("trie root has no output");
+        };
+        if let Some(target) = want {
+            walker.seek(&trie, root, root_out, target)?;
+            return Ok(walker.out);
+        }
+        walker.block(root_out.fp as usize, &[], 0)?;
         if walker.terms != num_terms || walker.total_term_freq != sum_total_term_freq as u64 {
             return err(format!(
                 "terms of {field} do not match the committed statistics"
@@ -560,59 +566,6 @@ pub fn write_terms(
 
 const FOOTER_LEN: i64 = 16;
 
-/// `TrieReader.load` for the root node: the file pointer of the root block in `.tim`.
-fn trie_root_output_fp(tip: &[u8], start: usize, end: usize, root: usize) -> Result<u64> {
-    let Some(node) = start.checked_add(root) else {
-        return err("trie root extends past the index");
-    };
-    let long_at = |pos: usize| -> Result<u64> {
-        // Like Lucene, read 8 bytes at a node near the end of the index: they run into what follows.
-        match tip.get(pos..pos + 8).filter(|_| pos <= end) {
-            Some(b) => Ok(u64::from_le_bytes(b.try_into().unwrap())),
-            None => err("trie node extends past the index"),
-        }
-    };
-    let mask = |bytes_minus_1: u64| match bytes_minus_1 {
-        7 => !0,
-        n => (1u64 << (8 * (n + 1))) - 1,
-    };
-    let first = long_at(node)?;
-    let flags = first as u32 as u64;
-    match flags & 3 {
-        // SIGN_NO_CHILDREN: leaf
-        0 => {
-            let n = (flags >> 2) & 7;
-            Ok(if n <= 6 {
-                (first >> 8) & mask(n)
-            } else {
-                long_at(node + 1)?
-            })
-        }
-        // SIGN_SINGLE_CHILD_WITH_OUTPUT
-        1 => {
-            let child_delta_bytes_minus_1 = (flags >> 2) & 7;
-            let n = (flags >> 5) & 7;
-            let at = node + child_delta_bytes_minus_1 as usize + 3;
-            Ok((long_at(at)? & mask(n)) >> 2)
-        }
-        // SIGN_SINGLE_CHILD_WITHOUT_OUTPUT
-        2 => err("trie root has no output"),
-        // SIGN_MULTI_CHILDREN
-        _ => {
-            if flags & 0x20 == 0 {
-                return err("trie root has no output");
-            }
-            let n = (flags >> 6) & 7;
-            let l = if n <= 4 {
-                first >> 24
-            } else {
-                long_at(node + 3)?
-            };
-            Ok((l & mask(n)) >> 2)
-        }
-    }
-}
-
 struct Walker<'a> {
     tim: &'a [u8],
     doc: &'a [u8],
@@ -620,7 +573,6 @@ struct Walker<'a> {
     pay: &'a [u8],
     info: &'a FieldInfo,
     /// The only term to decode postings for, without positions; `None` decodes every term.
-    // ponytail: still walks every block; seek through the `.tip` trie if lookups get slow
     want: Option<&'a [u8]>,
     /// Terms walked and their summed total term freq, checked against the field's statistics.
     terms: i64,
@@ -641,91 +593,137 @@ struct TermState {
 }
 
 impl Walker<'_> {
+    /// `SegmentTermsEnum.seekExact`: follows `target` down the trie to the deepest block whose
+    /// prefix it starts with, picks that block's floor block for the next byte, and scans it.
+    fn seek(
+        &mut self,
+        trie: &TrieReader,
+        mut node: Node,
+        mut out: NodeOutput,
+        target: &[u8],
+    ) -> Result<()> {
+        let mut prefix_len = 0;
+        for (i, &label) in target.iter().enumerate() {
+            let Some(mut child) = trie.child(&node, label)? else {
+                break;
+            };
+            if let Some(o) = child.output.take() {
+                (out, prefix_len) = (o, i + 1);
+            }
+            node = child;
+        }
+        let (mut fp, mut has_terms) = (out.fp, out.has_terms);
+        if let (Some(floor), Some(&label)) = (out.floor, target.get(prefix_len)) {
+            let input = &mut DataInput::new(trie.0);
+            input.pos = floor;
+            for _ in 0..input.read_vint()? {
+                if label < input.read_byte()? {
+                    break;
+                }
+                let code = input.read_vlong()? as u64;
+                (fp, has_terms) = (out.fp + (code >> 1), code & 1 != 0);
+            }
+        }
+        if has_terms {
+            self.one_block(fp as usize, &target[..prefix_len], 0)?;
+        }
+        Ok(())
+    }
+
     /// Decodes the block at `fp` and its floor blocks, recursing into sub-blocks in term order.
     fn block(&mut self, mut fp: usize, prefix: &[u8], depth: usize) -> Result<()> {
-        if depth > MAX_BLOCK_DEPTH {
-            return err("terms blocks nest too deeply");
-        }
         loop {
-            let input = &mut DataInput::new(self.tim);
-            input.pos = fp;
-            let code = input.read_vint()?;
-            let (entries, is_last) = ((code >> 1) as usize, code & 1 != 0);
-            let code = input.read_vlong()?;
-            let (is_leaf, len, algorithm) = (code & 4 != 0, (code >> 3) as usize, code & 3);
-            let suffixes = match algorithm {
-                0 => input.read_bytes(len)?.to_vec(),
-                1 => lowercase_ascii(input, len)?,
-                2 => {
-                    let mut out = Vec::new();
-                    lz4::decompress(input, len, &mut out)?;
-                    out
-                }
-                a => return err(format!("unknown suffix compression {a}")),
-            };
-            let n = input.read_vint()?;
-            let n_len_bytes = (n >> 1) as usize;
-            let length_bytes = if n & 1 != 0 {
-                vec![input.read_byte()?; n_len_bytes]
-            } else {
-                input.read_bytes(n_len_bytes)?.to_vec()
-            };
-            let stats_len = input.read_len()?;
-            let stats = &mut DataInput::new(input.read_bytes(stats_len)?);
-            let meta_len = input.read_len()?;
-            let metas = &mut DataInput::new(input.read_bytes(meta_len)?);
-            let block_end = input.pos;
-
-            let (lengths, suffixes) = (
-                &mut DataInput::new(&length_bytes),
-                &mut DataInput::new(&suffixes),
-            );
-            let mut state = TermState::default();
-            let mut first_term = true;
-            for _ in 0..entries {
-                let (suffix_len, sub) = if is_leaf {
-                    (lengths.read_len()?, None)
-                } else {
-                    let c = lengths.read_vint()?;
-                    let sub = (c & 1 != 0).then(|| lengths.read_vlong()).transpose()?;
-                    ((c >> 1) as usize, sub)
-                };
-                let mut term = prefix.to_vec();
-                term.extend_from_slice(suffixes.read_bytes(suffix_len)?);
-                if let Some(sub_code) = sub {
-                    // Sub-blocks are written before their parent, so the delta is positive.
-                    let sub_fp = usize::try_from(fp as i64 - sub_code)
-                        .ok()
-                        .filter(|_| sub_code > 0)
-                        .ok_or_else(|| crate::Error("corrupt sub-block pointer".into()))?;
-                    self.block(sub_fp, &term, depth + 1)?;
-                    continue;
-                }
-                self.decode_stats(stats, &mut state)?;
-                self.decode_postings(metas, &mut state, first_term)?;
-                first_term = false;
-                self.terms += 1;
-                self.total_term_freq += state.total_term_freq;
-                if self.want.is_some_and(|w| w != term) {
-                    continue;
-                }
-                let docs = self.docs(&state)?;
-                let positions = match self.want {
-                    None => self.positions(&state, &docs)?,
-                    Some(_) => vec![],
-                };
-                self.out.push(TermPostings {
-                    term,
-                    total_term_freq: state.total_term_freq,
-                    positions,
-                    docs,
-                });
-            }
+            let (end, is_last) = self.one_block(fp, prefix, depth)?;
             if is_last {
                 return Ok(());
             }
-            fp = block_end;
+            fp = end;
         }
+    }
+
+    /// Decodes the one block at `fp`, returning where it ends and whether it is the last of its
+    /// floor blocks. Sub-blocks are decoded only when reading every term.
+    fn one_block(&mut self, fp: usize, prefix: &[u8], depth: usize) -> Result<(usize, bool)> {
+        if depth > MAX_BLOCK_DEPTH {
+            return err("terms blocks nest too deeply");
+        }
+        let input = &mut DataInput::new(self.tim);
+        input.pos = fp;
+        let code = input.read_vint()?;
+        let (entries, is_last) = ((code >> 1) as usize, code & 1 != 0);
+        let code = input.read_vlong()?;
+        let (is_leaf, len, algorithm) = (code & 4 != 0, (code >> 3) as usize, code & 3);
+        let suffixes = match algorithm {
+            0 => input.read_bytes(len)?.to_vec(),
+            1 => lowercase_ascii(input, len)?,
+            2 => {
+                let mut out = Vec::new();
+                lz4::decompress(input, len, &mut out)?;
+                out
+            }
+            a => return err(format!("unknown suffix compression {a}")),
+        };
+        let n = input.read_vint()?;
+        let n_len_bytes = (n >> 1) as usize;
+        let length_bytes = if n & 1 != 0 {
+            vec![input.read_byte()?; n_len_bytes]
+        } else {
+            input.read_bytes(n_len_bytes)?.to_vec()
+        };
+        let stats_len = input.read_len()?;
+        let stats = &mut DataInput::new(input.read_bytes(stats_len)?);
+        let meta_len = input.read_len()?;
+        let metas = &mut DataInput::new(input.read_bytes(meta_len)?);
+        let block_end = input.pos;
+
+        let (lengths, suffixes) = (
+            &mut DataInput::new(&length_bytes),
+            &mut DataInput::new(&suffixes),
+        );
+        let mut state = TermState::default();
+        let mut first_term = true;
+        for _ in 0..entries {
+            let (suffix_len, sub) = if is_leaf {
+                (lengths.read_len()?, None)
+            } else {
+                let c = lengths.read_vint()?;
+                let sub = (c & 1 != 0).then(|| lengths.read_vlong()).transpose()?;
+                ((c >> 1) as usize, sub)
+            };
+            let mut term = prefix.to_vec();
+            term.extend_from_slice(suffixes.read_bytes(suffix_len)?);
+            if let Some(sub_code) = sub {
+                // Sub-blocks are written before their parent, so the delta is positive.
+                let sub_fp = usize::try_from(fp as i64 - sub_code)
+                    .ok()
+                    .filter(|_| sub_code > 0)
+                    .ok_or_else(|| crate::Error("corrupt sub-block pointer".into()))?;
+                if self.want.is_none() {
+                    self.block(sub_fp, &term, depth + 1)?;
+                }
+                continue;
+            }
+            self.decode_stats(stats, &mut state)?;
+            self.decode_postings(metas, &mut state, first_term)?;
+            first_term = false;
+            self.terms += 1;
+            self.total_term_freq += state.total_term_freq;
+            if self.want.is_some_and(|w| w != term) {
+                continue;
+            }
+            let docs = self.docs(&state)?;
+            let positions = match self.want {
+                None => self.positions(&state, &docs)?,
+                Some(_) => vec![],
+            };
+            self.out.push(TermPostings {
+                term,
+                total_term_freq: state.total_term_freq,
+                positions,
+                docs,
+            });
+        }
+        Ok((block_end, is_last))
     }
 
     /// Stats stream: doc freq and total term freq, with runs of singleton terms collapsed.
@@ -911,6 +909,31 @@ mod tests {
         let fields = [info.clone()];
         let read = decode_terms(&files, &id, "Lucene104_0", &fields, &info, None).unwrap();
         assert_eq!(read, terms);
+    }
+
+    #[test]
+    fn looks_up_a_term_by_seeking_through_the_trie() {
+        let terms: Vec<_> = (0..1000u32)
+            .map(|i| TermPostings::new(format!("t{i:04}").into(), vec![(i, 1)]))
+            .collect();
+        let info = field("f", 0, IndexOptions::Docs);
+        let (id, suffix) = ([9u8; 16], "Lucene104_0");
+        let mut files = write_terms(&[(&info, &terms)], &id, suffix, &[]).unwrap();
+        // Empty the first block (t0000..t0029, right after the header): a walk over every block
+        // would now miss terms, but a lookup elsewhere never reads it.
+        let input = &mut DataInput::new(&files.tim);
+        codec_util::check_index_header(input, "BlockTreeTermsDict", 0, 0, &id, suffix).unwrap();
+        let mut tim = files.tim[..files.tim.len() - FOOTER_LEN as usize].to_vec();
+        tim[input.pos] = 1; // no entries, last block
+        files.tim = crate::output::Output(tim).finish();
+        let fields = [info.clone()];
+        let get = |t: &str| decode_terms(&files, &id, suffix, &fields, &info, Some(t.as_bytes()));
+        for i in [30, 99, 100, 512, 999] {
+            assert_eq!(get(&format!("t{i:04}")).unwrap(), [terms[i].clone()]);
+        }
+        for absent in ["", "t", "t1", "t0999x", "u"] {
+            assert_eq!(get(absent).unwrap(), [], "{absent}");
+        }
     }
 
     #[test]
