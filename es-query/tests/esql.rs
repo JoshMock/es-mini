@@ -1561,3 +1561,21 @@ fn stats_count_distinct() {
     let r = q("FROM people | WHERE age > 99 | STATS d = COUNT_DISTINCT(age)");
     assert_eq!(r.values, [[json!(0)]]);
 }
+
+#[test]
+fn stats_values() {
+    let r = q("FROM people | STATS v = VALUES(name), a = VALUES(age)");
+    let types: Vec<&str> = r.columns.iter().map(|c| c.r#type.as_str()).collect();
+    assert_eq!(types, ["keyword", "long"]);
+    assert_eq!(
+        r.values,
+        [[json!(["ann", "bob", "cid"]), json!([30, 25, 41])]]
+    );
+    // Distinct values in the order they come; one value is not a list, none is null.
+    let r = q("ROW a = [3, 1, 3] | STATS v = VALUES(a)");
+    assert_eq!(r.values, [[json!([3, 1])]]);
+    let r = q("FROM people | WHERE name == \"bob\" | STATS v = VALUES(name)");
+    assert_eq!(r.values, [[json!("bob")]]);
+    let r = q("FROM people | WHERE age > 99 | STATS v = VALUES(name)");
+    assert_eq!(r.values, [[Value::Null]]);
+}

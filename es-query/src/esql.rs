@@ -1,6 +1,6 @@
 //! ES|QL subset: `FROM` (with `METADATA _id, _index, _version`), `ROW` and `SHOW INFO`, with
 //! `WHERE`, `EVAL`, `LIMIT`, `KEEP`, `DROP`, `RENAME`, `SORT`, and `STATS ... [BY ...]` over
-//! `COUNT`, `COUNT_DISTINCT`, `MIN`, `MAX`, `SUM`, `AVG`, `MEDIAN` and `PERCENTILE`.
+//! `COUNT`, `COUNT_DISTINCT`, `MIN`, `MAX`, `SUM`, `AVG`, `MEDIAN`, `PERCENTILE` and `VALUES`.
 //!
 //! Expressions support comparisons (`== != < <= > >=`), `AND`/`OR`/`NOT`, parentheses,
 //! `IS [NOT] NULL`, arithmetic, and the functions in `CONVERSIONS` and `SCALAR_FNS` over field
@@ -1881,9 +1881,10 @@ fn aggregate(e: &Expr) -> Option<(String, Option<&Expr>, Option<&Expr>)> {
     let f = f.to_ascii_uppercase();
     match (f.as_str(), &args[..]) {
         ("COUNT", [Expr::Field(s, _)]) if s == "*" => Some((f, None, None)),
-        ("COUNT" | "COUNT_DISTINCT" | "MIN" | "MAX" | "SUM" | "AVG" | "MEDIAN", [arg]) => {
-            Some((f, Some(arg), None))
-        }
+        (
+            "COUNT" | "COUNT_DISTINCT" | "MIN" | "MAX" | "SUM" | "AVG" | "MEDIAN" | "VALUES",
+            [arg],
+        ) => Some((f, Some(arg), None)),
         ("PERCENTILE", [arg, p]) => Some((f, Some(arg), Some(p))),
         _ => None,
     }
@@ -2135,6 +2136,7 @@ pub fn run(
                         "COUNT" | "COUNT_DISTINCT" => "long".into(),
                         "AVG" | "MEDIAN" | "PERCENTILE" => "double".into(),
                         "SUM" if t == "integer" => "long".into(),
+                        "VALUES" if t == "text" => "keyword".into(),
                         _ => t,
                     };
                     out.push((name.clone(), t));
@@ -2285,6 +2287,19 @@ pub fn run(
                             mv_fn(&format!("MV_{f}"), &Value::Array(all)).unwrap_or(Value::Null)
                         }
                         _ if all.is_empty() => Value::Null,
+                        "VALUES" => {
+                            // Distinct values in the order they come, like ES's BytesRefHash.
+                            let mut distinct = Vec::new();
+                            all.into_iter().for_each(|v| {
+                                if !distinct.contains(&v) {
+                                    distinct.push(v);
+                                }
+                            });
+                            match distinct.len() {
+                                1 => distinct.remove(0),
+                                _ => Value::Array(distinct),
+                            }
+                        }
                         // ponytail: an overflowing long sum is null, where ES fails the query
                         "SUM" if types[name] == "long" => all
                             .iter()
