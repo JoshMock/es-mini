@@ -1264,6 +1264,20 @@ fn stats_count_sum_avg() {
 }
 
 #[test]
+fn stats_by_multi_value_joins_a_group_per_value() {
+    let r = q("ROW a = [1, 2, 1], b = [\"x\", \"y\"] | STATS c = COUNT(*) BY a, b | SORT a, b");
+    assert_eq!(
+        r.values,
+        [
+            [json!(1), json!(1), json!("x")],
+            [json!(1), json!(1), json!("y")],
+            [json!(1), json!(2), json!("x")],
+            [json!(1), json!(2), json!("y")]
+        ]
+    );
+}
+
+#[test]
 fn unary_minus_negates_expressions() {
     let r = q(
         "FROM people | EVAL neg = -age, n2 = -(age + 1), d = -TO_DOUBLE(age), p = +age | KEEP neg, n2, d, p | SORT neg",

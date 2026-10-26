@@ -2167,17 +2167,34 @@ pub fn run(
                 }
             }
             Command::Stats(aggs, by) => {
-                // ponytail: linear group lookup, O(rows × groups), and a multi-valued key is one
-                // group rather than one per value; hash and expand keys when that matters
+                // ponytail: linear group lookup, O(rows × groups); hash keys when that matters
                 let mut buckets: Vec<(Vec<Value>, Vec<&Row>)> = Vec::new();
                 for r in &rows {
-                    let key: Vec<Value> = by
-                        .iter()
-                        .map(|(_, e)| eval(e, r).unwrap_or(Value::Null))
-                        .collect();
-                    match buckets.iter_mut().find(|(k, _)| *k == key) {
-                        Some(b) => b.1.push(r),
-                        None => buckets.push((key, vec![r])),
+                    // A row joins the group of every combination of its distinct key values.
+                    let mut keys: Vec<Vec<Value>> = vec![Vec::new()];
+                    for (_, e) in by {
+                        let mut vs = Vec::new();
+                        match eval(e, r) {
+                            Some(Value::Array(a)) => a.into_iter().for_each(|v| {
+                                if !vs.contains(&v) {
+                                    vs.push(v);
+                                }
+                            }),
+                            v => vs.push(v.unwrap_or(Value::Null)),
+                        }
+                        keys = keys
+                            .into_iter()
+                            .flat_map(|k| {
+                                vs.iter()
+                                    .map(move |v| [&k[..], std::slice::from_ref(v)].concat())
+                            })
+                            .collect();
+                    }
+                    for key in keys {
+                        match buckets.iter_mut().find(|(k, _)| *k == key) {
+                            Some(b) => b.1.push(r),
+                            None => buckets.push((key, vec![r])),
+                        }
                     }
                 }
                 if by.is_empty() && buckets.is_empty() {
