@@ -181,6 +181,31 @@ impl Shard {
         Some(out)
     }
 
+    /// Per doc holding `term` in `field`: its frequency, and the field's length as the norm
+    /// stands for it (1 for a field without norms). `None` if a segment has no postings or norms
+    /// for the field the codec can read (e.g. one that does not index it). Some docs may no longer be live.
+    // ponytail: reads the field's norms once per term; cache them per query if that shows up
+    pub(crate) fn term_freqs(
+        &self,
+        field: &str,
+        term: &str,
+    ) -> Option<HashMap<DiskPos, (u32, u32)>> {
+        let mut out = HashMap::new();
+        for (s, seg) in self.segments.iter().enumerate() {
+            let Some(t) = seg.term(field, term.as_bytes()).ok()? else {
+                continue;
+            };
+            let norms = seg.norms(field).ok()?;
+            for (doc, freq) in t.docs {
+                let norm = norms
+                    .as_ref()
+                    .map_or(Some(1), |n| n.get(doc as usize).copied())?;
+                out.insert((s, doc as usize), (freq, norm_len(norm as i8)));
+            }
+        }
+        Some(out)
+    }
+
     /// The docs with a value of numeric `field` that `keep` accepts, from doc values, and every
     /// doc of a segment without readable doc values for the field, or `None` there if `exact`.
     /// Some may no longer be live.

@@ -511,6 +511,11 @@ impl Index {
         (on_disk, self.docs.keys().map(String::as_str).collect())
     }
 
+    /// Where a live document on disk is; `None` for one in memory or missing.
+    pub fn disk_pos(&self, id: &str) -> Option<disk::DiskPos> {
+        self.disk.as_ref()?.pos(id)
+    }
+
     /// Every live document on disk, without reading it: its position, id and sequence number.
     pub fn disk_live(&self) -> impl Iterator<Item = (disk::DiskPos, (&str, u64))> {
         self.disk.iter().flat_map(disk::Shard::positions)
@@ -1413,6 +1418,55 @@ mod tests {
         // text has no doc values; a document written since opening is in memory
         assert_eq!(read("t", "1"), None);
         assert_eq!(read("n", "3"), None);
+    }
+
+    #[test]
+    fn term_freqs_come_from_postings_and_norms() {
+        let dir = std::env::temp_dir().join(format!("esm-term-freqs-{}", std::process::id()));
+        let mut ix = Index::default();
+        let props = &mut ix.mappings.properties;
+        props.insert("t".into(), FieldMapping::Text { store: false });
+        props.insert("k".into(), FieldMapping::Keyword { ignore_above: None });
+        let long = vec!["fox"; 100].join(" ");
+        ix.put("1", json!({"t": "fox fox dog", "k": ["a", "a", "b"]}));
+        ix.put("2", json!({"t": ["fox", "a b c"]}));
+        ix.put("3", json!({"t": long}));
+        ix.put("4", json!({"t": "dog"}));
+        // per document: (freq, field length as its norm stands for it)
+        let fox = |ix: &Index, id: &str| {
+            let f = ix.term_freqs("t", "t", true, "fox").unwrap();
+            f.memory
+                .get(id)
+                .or_else(|| f.disk.get(&ix.disk_pos(id)?))
+                .copied()
+        };
+        let a = |ix: &Index, id: &str| {
+            let f = ix.term_freqs("k", "k", false, "a").unwrap();
+            f.memory
+                .get(id)
+                .or_else(|| f.disk.get(&ix.disk_pos(id)?))
+                .copied()
+        };
+        let all = |ix: &Index| {
+            let ids = ["1", "2", "3", "4"];
+            (ids.map(|id| fox(ix, id)), a(ix, "1"))
+        };
+        let expected = (
+            [Some((2, 3)), Some((1, 4)), Some((100, 96)), None],
+            // keywords index docs only and omit norms, like Elasticsearch's
+            Some((1, 1)),
+        );
+        assert_eq!(all(&ix), expected);
+        disk::save(&dir, &Indices::from([("i".to_owned(), ix)])).unwrap();
+        let mut opened = disk::open(&dir).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let ix = opened.get_mut("i").unwrap();
+        assert_eq!(all(ix), expected);
+        assert!(ix.disk_pos("1").is_some());
+        // a write replaces the document on disk
+        ix.put("1", json!({"t": "fox"}));
+        assert_eq!(ix.disk_pos("1"), None);
+        assert_eq!(fox(ix, "1"), Some((1, 1)));
     }
 
     #[test]

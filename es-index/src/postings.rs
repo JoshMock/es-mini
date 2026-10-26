@@ -76,12 +76,22 @@ pub struct FieldStats {
     pub doc_freq: HashMap<String, f64>,
 }
 
+/// A term's frequency in each live document holding it, with the document's field length as
+/// its norm stands for it (see [`Index::term_freqs`](crate::Index::term_freqs)).
+#[derive(Debug, Default)]
+pub struct TermFreqs {
+    /// On-disk documents by position.
+    pub disk: HashMap<crate::disk::DiskPos, (u32, u32)>,
+    /// In-memory documents by id.
+    pub memory: HashMap<String, (u32, u32)>,
+}
+
 #[derive(Debug, Default)]
 struct Field {
-    /// Term → ids of live documents containing it.
-    docs: HashMap<String, HashSet<String>>,
-    /// Live document id → its distinct terms.
-    live: HashMap<String, HashSet<String>>,
+    /// Term → live documents containing it, with its frequency there.
+    docs: HashMap<String, HashMap<String, u32>>,
+    /// Live document id → its distinct terms and its number of terms.
+    live: HashMap<String, (HashSet<String>, u32)>,
     /// Statistics over live and superseded documents.
     doc_count: f64,
     total_terms: f64,
@@ -95,23 +105,25 @@ impl Field {
             return;
         }
         let count = terms.len();
-        let distinct: HashSet<String> = terms.into_iter().collect();
+        let mut freqs: HashMap<String, u32> = HashMap::new();
+        terms
+            .into_iter()
+            .for_each(|t| *freqs.entry(t).or_default() += 1);
         let counted = if counted { 1.0 } else { 0.0 };
-        for t in &distinct {
-            self.docs
-                .entry(t.clone())
-                .or_default()
-                .insert(id.to_owned());
+        for (t, freq) in &freqs {
+            let docs = self.docs.entry(t.clone()).or_default();
+            docs.insert(id.to_owned(), *freq);
             *self.doc_freq.entry(t.clone()).or_default() += counted;
         }
         self.doc_count += counted;
         self.total_terms += counted * count as f64;
-        self.live.insert(id.to_owned(), distinct);
+        let distinct = freqs.into_keys().collect();
+        self.live.insert(id.to_owned(), (distinct, count as u32));
     }
 
     /// Unlinks a replaced or deleted document; its statistics stay.
     fn remove(&mut self, id: &str) {
-        for t in self.live.remove(id).into_iter().flatten() {
+        for t in self.live.remove(id).into_iter().flat_map(|l| l.0) {
             if let Some(ids) = self.docs.get_mut(&t) {
                 ids.remove(id);
                 if ids.is_empty() {
@@ -262,11 +274,43 @@ impl crate::Index {
         all: bool,
     ) -> Option<HashSet<String>> {
         self.postings_for(path, analyzed, |f| {
-            let set = |t: &String| f.docs.get(t).cloned().unwrap_or_default();
+            let set =
+                |t: &String| (f.docs.get(t).into_iter().flat_map(|d| d.keys().cloned())).collect();
             let mut sets = terms.iter().map(set);
             let first = sets.next().unwrap_or_default();
             Some(sets.fold(first, |a, b| if all { &a & &b } else { &a | &b }))
         })
+    }
+
+    /// The frequency of `term` in each live document holding it in `field` (at source `path`),
+    /// with the document's field length as its norm stands for it: from postings and norms on
+    /// disk, and from the in-memory postings. As in Elasticsearch, a term that is not analyzed
+    /// counts once per document and has no norms (length 1). `None` if a segment has no postings
+    /// or norms for the field the codec can read.
+    pub fn term_freqs(
+        &self,
+        field: &str,
+        path: &str,
+        analyzed: bool,
+        term: &str,
+    ) -> Option<TermFreqs> {
+        let disk = match &self.disk {
+            Some(d) => d.term_freqs(field, term)?,
+            None => HashMap::new(),
+        };
+        let memory = self.postings_for(path, analyzed, |f| {
+            let docs = f.docs.get(term).into_iter().flatten();
+            (docs.map(|(id, freq)| {
+                let len = f.live.get(id).map_or(0, |l| l.1);
+                let at = match analyzed {
+                    true => (*freq, crate::disk::norm_len(crate::disk::norm_byte(len))),
+                    false => (1, 1),
+                };
+                (id.clone(), at)
+            }))
+            .collect()
+        });
+        Some(TermFreqs { disk, memory })
     }
 
     /// The in-memory documents with a value of numeric or date `field` (at source `path`)
