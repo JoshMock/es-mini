@@ -114,24 +114,31 @@ impl Settings {
 
     /// Like [`Settings::to_json`], keeping only keys for which `keep` is true.
     pub fn to_json_where(&self, keep: impl Fn(&str) -> bool) -> Value {
-        let mut out = Value::Object(Default::default());
+        let mut out = serde_json::Map::new();
         for (key, value) in self.0.iter().filter(|(k, _)| keep(k)) {
-            let mut node = &mut out;
-            for part in key.split('.') {
-                // ponytail: a leaf that is also a branch (`a` and `a.b`) loses the leaf; ES rejects this
-                if !node.is_object() {
-                    *node = Value::Object(Default::default());
-                }
-                let Value::Object(map) = node else {
-                    unreachable!()
-                };
-                node = map
-                    .entry(part)
-                    .or_insert_with(|| Value::Object(Default::default()));
-            }
-            *node = Value::String(value.clone());
+            insert_setting(&mut out, "", key, Value::String(value.clone()));
         }
-        out
+        Value::Object(out)
+    }
+}
+
+/// Settings.processSetting: nests a dotted key, keeping the rest of a key whose prefix is
+/// already a leaf in dot notation beside it (`a` and `a.b` render as `{"a": .., "a.b": ..}`).
+// ponytail: keys arrive sorted, so a leaf never follows its own branch (ES flattens that case)
+fn insert_setting(map: &mut serde_json::Map<String, Value>, prefix: &str, key: &str, value: Value) {
+    let Some((head, rest)) = key.split_once('.') else {
+        map.insert(format!("{prefix}{key}"), value);
+        return;
+    };
+    let head = format!("{prefix}{head}");
+    match map.get_mut(&head) {
+        Some(Value::Object(inner)) => insert_setting(inner, "", rest, value),
+        Some(_) => insert_setting(map, &format!("{head}."), rest, value),
+        None => {
+            let mut inner = serde_json::Map::new();
+            insert_setting(&mut inner, "", rest, value);
+            map.insert(head, Value::Object(inner));
+        }
     }
 }
 
@@ -1342,7 +1349,8 @@ mod tests {
     fn leaf_and_branch_on_same_key_does_not_panic() {
         let mut s = Settings::default();
         s.merge(&json!({"a": "x", "a.b": "y"}));
-        assert_eq!(s.to_json()["index"]["a"]["b"], "y");
+        assert_eq!(s.to_json()["index"]["a"], "x");
+        assert_eq!(s.to_json()["index"]["a.b"], "y");
     }
 
     fn w(result: DocResult, version: u64, seq_no: u64) -> WriteResult {

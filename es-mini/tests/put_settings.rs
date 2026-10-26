@@ -290,3 +290,22 @@ async fn include_defaults_lists_every_modelled_default_not_set() {
         json!({"index": {"translog": {"durability": "REQUEST", "sync_interval": "5s", "flush_threshold_size": "10gb"}}})
     );
 }
+
+/// Elasticsearch accepts a setting that is both a leaf and a branch, and renders the branch's
+/// keys in dot notation beside the leaf (Settings.getAsStructuredMap).
+#[tokio::test]
+async fn leaf_that_is_also_a_branch_renders_in_dot_notation() {
+    let app = es_mini::app();
+    call(
+        &app,
+        "PUT",
+        "/t",
+        json!({"settings": {"index.routing.allocation.include._name": "a", "index.routing.allocation.include._name.x": "b"}}),
+    )
+    .await;
+    let (_, b) = call(&app, "GET", "/t/_settings", json!({})).await;
+    assert_eq!(
+        b["t"]["settings"]["index"]["routing"]["allocation"]["include"],
+        json!({"_name": "a", "_name.x": "b"})
+    );
+}
