@@ -2411,6 +2411,30 @@ mod tests {
     }
 
     #[test]
+    fn bucket_sort_skips_buckets_missing_its_values_and_sorts_by_any_key() {
+        let aggs = |bucket_sort: Value| {
+            let body = json!({"aggs": {"f": {
+                "filters": {"keyed": false, "filters": {
+                    "a": {"term": {"k": "a"}},
+                    "none": {"term": {"k": "none"}},
+                    "c": {"match_all": {}},
+                }},
+                "aggs": {"m": {"max": {"field": "i"}}, "s": {"bucket_sort": bucket_sort}},
+            }}});
+            let aggs = aggs_of(&index(), body);
+            let keys = aggs["f"]["buckets"].as_array().unwrap().iter();
+            keys.map(|b| b["key"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        // Like ES's default `skip` gap policy: a bucket with no value for any sort is dropped.
+        assert_eq!(aggs(json!({"sort": [{"m": "desc"}]})), ["c", "a"]);
+        assert_eq!(
+            aggs(json!({"sort": [{"_key": "desc"}]})),
+            ["none", "c", "a"]
+        );
+    }
+
+    #[test]
     fn range_buckets_values_in_sorted_ranges() {
         let body = json!({"aggs": {
             "i": {"range": {"field": "i", "missing": 1000, "ranges": [

@@ -3,6 +3,7 @@
 
 use crate::{QueryError, int};
 use serde_json::Value;
+use std::cmp::Ordering;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct BucketSort {
@@ -55,7 +56,8 @@ impl BucketSort {
         Ok(BucketSort { sort, from, size })
     }
 
-    /// Sorts (stably; a missing value is NaN, the greatest) and then pages `buckets`.
+    /// Sorts (stably) and then pages `buckets`, like ES's `skip` gap policy: a bucket missing
+    /// every sort value is dropped, and a missing value sorts last.
     pub(super) fn apply(&self, buckets: &mut Vec<Value>) -> Result<(), QueryError> {
         if !self.sort.is_empty() {
             let mut keyed = vec![];
@@ -63,22 +65,33 @@ impl BucketSort {
                 let values = (self.sort.iter())
                     .map(|(path, _)| bucket_value(&b, path))
                     .collect::<Result<Vec<_>, _>>()?;
-                keyed.push((values, b));
+                if values.iter().any(Option::is_some) {
+                    keyed.push((values, b));
+                }
             }
             keyed.sort_by(|(x, _), (y, _)| {
                 let by = x.iter().zip(y).zip(&self.sort);
-                (by.map(|((a, b), (_, asc))| match asc {
-                    true => a.total_cmp(b),
-                    false => b.total_cmp(a),
+                (by.map(|((a, b), (_, asc))| match (a, b) {
+                    (Some(a), Some(b)) if *asc => compare(a, b),
+                    (Some(a), Some(b)) => compare(b, a),
+                    (a, b) => a.is_none().cmp(&b.is_none()),
                 }))
                 .find(|o| o.is_ne())
-                .unwrap_or(std::cmp::Ordering::Equal)
+                .unwrap_or(Ordering::Equal)
             });
             buckets.extend(keyed.into_iter().map(|(_, b)| b));
         }
         buckets.drain(..self.from.min(buckets.len()));
         buckets.truncate(self.size.unwrap_or(usize::MAX));
         Ok(())
+    }
+}
+
+/// Orders two sort values: numbers, or `_key` strings.
+fn compare(a: &Value, b: &Value) -> Ordering {
+    match (a, b) {
+        (Value::String(a), Value::String(b)) => a.cmp(b),
+        _ => (a.as_f64().unwrap_or(f64::NAN)).total_cmp(&b.as_f64().unwrap_or(f64::NAN)),
     }
 }
 
@@ -106,8 +119,9 @@ fn sort_entry(v: &Value) -> Option<Vec<(String, bool)>> {
     }
 }
 
-/// The number at a bucket path (`_count`, `_key`, or `agg>agg.metric`) of a rendered bucket.
-fn bucket_value(bucket: &Value, path: &str) -> Result<f64, QueryError> {
+/// The value at a bucket path (`_count`, `_key`, or `agg>agg.metric`) of a rendered bucket:
+/// `None` when missing, a number, or a `_key` string.
+fn bucket_value(bucket: &Value, path: &str) -> Result<Option<Value>, QueryError> {
     let no_agg = || QueryError::illegal(format!("No aggregation found for path [{path}]"));
     let not_number = || {
         QueryError::illegal(format!(
@@ -138,7 +152,8 @@ fn bucket_value(bucket: &Value, path: &str) -> Result<f64, QueryError> {
         }
     };
     match v.ok_or_else(no_agg)? {
-        Value::Null => Ok(f64::NAN),
-        v => v.as_f64().ok_or_else(not_number),
+        Value::Null => Ok(None),
+        k @ Value::String(_) if last == "_key" => Ok(Some(k.clone())),
+        v => v.as_f64().map(|_| Some(v.clone())).ok_or_else(not_number),
     }
 }
