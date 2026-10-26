@@ -22,5 +22,9 @@ mini POST '/f/_bulk?refresh=true' '{"index":{"_id":"1"}}
 {"index":{"_id":"4"}}
 {"fl":-3.5,"db":7,"kw":["c","c"]}
 '
+# Writes only reach the translog, which Elasticsearch would replay and index itself; creating an
+# index changes the metadata, which makes es-mini commit them as segments.
+mini PUT /commit '{"settings":{"number_of_shards":1,"number_of_replicas":0}}'
+ls "$DATA"/indices/*/0/index/*.cfs >/dev/null
 kill $PID; wait $PID 2>/dev/null || true
 EXTRA_CHECKS="$ROOT/scripts/cross_engine_fields_checks.sh" "$ROOT/scripts/cross_engine.sh" "$DATA"
