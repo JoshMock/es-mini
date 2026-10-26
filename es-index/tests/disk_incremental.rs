@@ -119,6 +119,48 @@ fn many_segments_are_rewritten_as_one() {
     assert_eq!(disk::open(&dir).unwrap()["idx"].docs().count(), 12);
 }
 
+/// Like Lucene's TieredMergePolicy, merges pick a few similar-size segments: small flushes merge
+/// together, dropping their deleted docs, while a much larger segment is left as it is.
+#[test]
+fn merges_rewrite_only_small_segments() {
+    use std::os::unix::fs::MetadataExt;
+    let dir = scratch("tiered");
+    let mut indices = Indices::new();
+    let ix = indices.entry("idx".into()).or_default();
+    for i in 0..5000 {
+        ix.put(
+            &format!("big{i}"),
+            json!({"title": format!("doc number {i}")}),
+        );
+    }
+    disk::save(&dir, &indices).unwrap();
+    let big = commit(&dir).segments[0].name.clone();
+    let cfs = || std::fs::metadata(shard(&dir).join(format!("{big}.cfs"))).unwrap();
+    let ino = cfs().ino();
+    for i in 0..30 {
+        let ix = indices.get_mut("idx").unwrap();
+        ix.put(&format!("n{i}"), json!({"n": i}));
+        ix.put("upd", json!({"n": i}));
+        disk::save(&dir, &indices).unwrap();
+        let infos = commit(&dir);
+        assert!(
+            infos.segments.len() <= 8,
+            "{} segments",
+            infos.segments.len()
+        );
+        assert_eq!(infos.segments[0].name, big);
+        assert_eq!(cfs().ino(), ino, "the large segment was rewritten");
+    }
+    let infos = commit(&dir);
+    // 60 small writes, 29 of them overwritten: merges dropped most deleted docs.
+    let small: i32 = infos.segments[1..].iter().map(|s| s.info.max_doc).sum();
+    assert!(small < 40, "{small} docs in small segments");
+    let back = disk::open(&dir).unwrap();
+    assert_eq!(back["idx"].docs().count(), 5031);
+    assert_eq!(back["idx"].get("upd").unwrap().source, json!({"n": 29}));
+    assert_eq!(back["idx"].get("n0").unwrap().source, json!({"n": 0}));
+}
+
 #[test]
 fn an_elasticsearch_written_index_is_rewritten_whole() {
     let es_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/es-9.5.5/data");
