@@ -2,34 +2,57 @@
 
 use crate::{Result, err};
 
+/// LSB-first bit reader over a 64-bit buffer.
 struct Bits<'a> {
     data: &'a [u8],
     pos: usize,
-    bit: u32,
+    buf: u64,
+    cnt: u32,
 }
 
 impl Bits<'_> {
-    fn read(&mut self, n: u32) -> Result<u32> {
-        let mut v = 0;
-        for i in 0..n {
+    /// The next `n` (at most 32) bits, zero-padded past the end of the input.
+    fn peek(&mut self, n: u32) -> u32 {
+        while self.cnt <= 56 {
             let Some(&b) = self.data.get(self.pos) else {
-                return err("truncated deflate stream");
+                break;
             };
-            v |= (u32::from(b >> self.bit) & 1) << i;
-            self.bit += 1;
-            if self.bit == 8 {
-                self.bit = 0;
-                self.pos += 1;
-            }
+            self.buf |= u64::from(b) << self.cnt;
+            self.cnt += 8;
+            self.pos += 1;
         }
+        (self.buf & ((1u64 << n) - 1)) as u32
+    }
+
+    fn consume(&mut self, n: u32) -> Result<()> {
+        if n > self.cnt {
+            return err("truncated deflate stream");
+        }
+        self.buf >>= n;
+        self.cnt -= n;
+        Ok(())
+    }
+
+    fn read(&mut self, n: u32) -> Result<u32> {
+        let v = self.peek(n);
+        self.consume(n)?;
         Ok(v)
+    }
+
+    /// Drops bits up to the next byte boundary and returns its offset in `data`.
+    fn align(&mut self) -> usize {
+        let pos = self.pos - (self.cnt / 8) as usize;
+        (self.pos, self.buf, self.cnt) = (pos, 0, 0);
+        pos
     }
 }
 
-/// Canonical Huffman code: symbol counts per length, and symbols sorted by code.
+/// Canonical Huffman code as a single-level lookup table indexed by the next `bits` input bits;
+/// each entry is `symbol << 4 | code length`, and 0 marks an unused code.
+// ponytail: one table of 2^maxlen entries (up to 32K); use two-level tables if building them shows up in profiles.
 struct Huffman {
-    counts: [u16; 16],
-    symbols: Vec<u16>,
+    table: Vec<u32>,
+    bits: u32,
 }
 
 impl Huffman {
@@ -50,33 +73,30 @@ impl Huffman {
         if left > 0 && counts[1..].iter().sum::<u16>() > 1 {
             return err("incomplete huffman code");
         }
-        let mut symbols = Vec::new();
-        for len in 1..16u8 {
-            for (s, &l) in lengths.iter().enumerate() {
-                if l == len {
-                    symbols.push(s as u16);
-                }
+        let bits = counts.iter().rposition(|&c| c > 0).unwrap_or(0) as u32;
+        let mut next = [0u32; 16];
+        for len in 1..16 {
+            next[len] = (next[len - 1] + u32::from(counts[len - 1])) << 1;
+        }
+        let mut table = vec![0u32; 1 << bits];
+        for (sym, &l) in lengths.iter().enumerate().filter(|(_, l)| **l > 0) {
+            let code = next[usize::from(l)];
+            next[usize::from(l)] += 1;
+            let rev = (code.reverse_bits() >> (32 - u32::from(l))) as usize;
+            for e in table.iter_mut().skip(rev).step_by(1 << l) {
+                *e = (sym as u32) << 4 | u32::from(l);
             }
         }
-        Ok(Self { counts, symbols })
+        Ok(Self { table, bits })
     }
 
     fn decode(&self, bits: &mut Bits) -> Result<usize> {
-        let (mut code, mut first, mut index) = (0i32, 0i32, 0i32);
-        for len in 1..16 {
-            code |= bits.read(1)? as i32;
-            let count = i32::from(self.counts[len]);
-            if code - count < first {
-                let Some(&sym) = self.symbols.get((index + code - first) as usize) else {
-                    return err("bad huffman code");
-                };
-                return Ok(usize::from(sym));
-            }
-            index += count;
-            first = (first + count) << 1;
-            code <<= 1;
+        let e = self.table[bits.peek(self.bits) as usize];
+        if e == 0 {
+            return err("bad huffman code");
         }
-        err("bad huffman code")
+        bits.consume(e & 15)?;
+        Ok((e >> 4) as usize)
     }
 }
 
@@ -125,34 +145,31 @@ fn codes(bits: &mut Bits, out: &mut Vec<u8>, lit: &Huffman, dist: &Huffman) -> R
     }
 }
 
-// ponytail: bit-by-bit reads and canonical decode; buffer bits and use lookup tables if inflate shows up in profiles.
 pub fn inflate(data: &[u8]) -> Result<Vec<u8>> {
     let mut bits = Bits {
         data,
         pos: 0,
-        bit: 0,
+        buf: 0,
+        cnt: 0,
     };
     let mut out = Vec::new();
     loop {
         let last = bits.read(1)?;
         match bits.read(2)? {
             0 => {
-                if bits.bit != 0 {
-                    bits.bit = 0;
-                    bits.pos += 1;
-                }
-                let Some(h) = data.get(bits.pos..bits.pos + 4) else {
+                let pos = bits.align();
+                let Some(h) = data.get(pos..pos + 4) else {
                     return err("truncated deflate stored block");
                 };
                 let len = usize::from(u16::from_le_bytes([h[0], h[1]]));
                 if u16::from_le_bytes([h[2], h[3]]) != !(len as u16) {
                     return err("deflate stored block length mismatch");
                 }
-                let Some(body) = data.get(bits.pos + 4..bits.pos + 4 + len) else {
+                let Some(body) = data.get(pos + 4..pos + 4 + len) else {
                     return err("truncated deflate stored block");
                 };
                 out.extend_from_slice(body);
-                bits.pos += 4 + len;
+                bits.pos = pos + 4 + len;
             }
             1 => {
                 let mut l = [8u8; 288];
@@ -342,6 +359,33 @@ mod frame_tests {
                 .collect();
             let _ = inflate(&d);
         }
+    }
+
+    #[test]
+    fn decodes_zlib_fixed_and_dynamic_blocks() {
+        // Python: zlib.compressobj(9, zlib.DEFLATED, -15) output.
+        let fixed = [
+            75, 76, 132, 129, 36, 16, 72, 78, 78, 78, 73, 73, 213, 81, 72, 76, 74, 78, 73, 85, 84,
+            72, 164, 153, 44, 0,
+        ];
+        assert_eq!(
+            inflate(&fixed).unwrap(),
+            b"aaaaaaaaaabbbbbcccdde, abcde! ".repeat(4)
+        );
+        let dynamic = [
+            61, 79, 137, 17, 4, 49, 8, 106, 133, 214, 0, 237, 191, 133, 3, 179, 115, 102, 242, 41,
+            2, 146, 226, 206, 154, 92, 218, 28, 49, 137, 132, 179, 192, 217, 254, 146, 116, 211,
+            130, 65, 105, 225, 7, 150, 56, 32, 97, 109, 18, 10, 6, 215, 10, 169, 45, 200, 55, 72,
+            5, 176, 114, 218, 167, 213, 71, 63, 165, 99, 25, 114, 148, 116, 180, 155, 167, 195, 82,
+            161, 10, 222, 158, 136, 97, 202, 116, 21, 126, 93, 254, 88, 10, 84, 145, 49, 36, 212,
+            196, 195, 28, 184, 190, 190, 144, 98, 74, 213, 172, 202, 77, 119, 87, 43, 250, 79, 237,
+            55, 57, 207, 168, 157, 81, 191, 66, 252, 69, 255, 7,
+        ];
+        assert_eq!(dynamic[0] >> 1 & 3, 2);
+        let out = inflate(&dynamic).unwrap();
+        assert_eq!(out.len(), 300);
+        assert!(out.starts_with(b"aabaedecaaeaccadbaabaaaacaca adeab"));
+        assert!(out.ends_with(b"abaaabbdcbc"));
     }
 
     #[test]
