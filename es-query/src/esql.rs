@@ -11,6 +11,7 @@ use es_index::{
 use serde::Serialize;
 use serde_json::Value;
 use std::{
+    cell::OnceCell,
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
     ops::Range,
@@ -167,7 +168,8 @@ fn lex(src: &str) -> Result<(Vec<Token>, Pos), EsqlError> {
         } else {
             let rest = &src[i..];
             let sym = [
-                "==", "!=", "<=", ">=", "<", ">", "=", "-", "|", "(", ")", ",", "[", "]",
+                "==", "!=", "<=", ">=", "<", ">", "=", "+", "-", "/", "%", "|", "(", ")", ",", "[",
+                "]",
             ]
             .into_iter()
             .find(|s| rest.starts_with(s))
@@ -226,6 +228,14 @@ enum Expr {
     Or(Box<Expr>, Box<Expr>, Span),
     Not(Box<Expr>, Span),
     IsNull(Box<Expr>, bool, Span),
+    /// `+ - * / %`, with the numeric type `resolve` gives it, which `eval` computes in.
+    Arith(
+        &'static str,
+        Box<Expr>,
+        Box<Expr>,
+        OnceCell<&'static str>,
+        Span,
+    ),
 }
 
 /// Where an expression starts, and its text's byte range in the query.
@@ -562,7 +572,7 @@ impl Parser<'_> {
 
     fn cmp(&mut self) -> Result<Expr, EsqlError> {
         let start = self.pos;
-        let left = self.primary()?;
+        let left = self.add()?;
         if self.keyword("is") {
             let negated = self.keyword("not");
             if !self.keyword("null") {
@@ -578,7 +588,7 @@ impl Parser<'_> {
             Some(Tok::Sym(op @ ("==" | "!=" | "<" | "<=" | ">" | ">="))) => {
                 let op = *op;
                 self.pos += 1;
-                let right = self.primary()?;
+                let right = self.add()?;
                 Ok(Expr::Cmp(
                     op,
                     Box::new(left),
@@ -587,6 +597,44 @@ impl Parser<'_> {
                 ))
             }
             _ => Ok(left),
+        }
+    }
+
+    fn add(&mut self) -> Result<Expr, EsqlError> {
+        self.arith(&["+", "-"], Self::mul)
+    }
+
+    fn mul(&mut self) -> Result<Expr, EsqlError> {
+        self.arith(&["*", "/", "%"], Self::primary)
+    }
+
+    /// A left-associative chain of `operand`s joined by any of `ops`.
+    fn arith(
+        &mut self,
+        ops: &[&'static str],
+        operand: fn(&mut Self) -> Result<Expr, EsqlError>,
+    ) -> Result<Expr, EsqlError> {
+        let start = self.pos;
+        let mut e = operand(self)?;
+        loop {
+            // ponytail: `*` lexes as a pattern word, so `a*2` without spaces is not a product
+            let op = match self.peek() {
+                Some(Tok::Sym(s)) => *s,
+                Some(Tok::Word(w)) if w == "*" => "*",
+                _ => return Ok(e),
+            };
+            let Some(&op) = ops.iter().find(|o| **o == op) else {
+                return Ok(e);
+            };
+            self.pos += 1;
+            let right = operand(self)?;
+            e = Expr::Arith(
+                op,
+                Box::new(e),
+                Box::new(right),
+                OnceCell::new(),
+                self.span(start),
+            );
         }
     }
 
@@ -804,6 +852,7 @@ fn eval(e: &Expr, row: &Row) -> Option<Value> {
             (Some(false), Some(false)) => Some(false.into()),
             _ => None,
         },
+        Expr::Arith(op, a, b, t, _) => arith(op, t.get().copied()?, &eval(a, row)?, &eval(b, row)?),
         Expr::Cmp(op, a, b, _) => {
             // ponytail: multi-valued fields compare as null, like ES (which also warns)
             let ord = compare(&eval(a, row)?, &eval(b, row)?)?;
@@ -820,12 +869,58 @@ fn eval(e: &Expr, row: &Row) -> Option<Value> {
     }
 }
 
+/// `a op b` computed in type `t`, like Elasticsearch's evaluators: null on overflow, division by
+/// zero, a non-finite double, or a multi-valued operand.
+fn arith(op: &str, t: &str, a: &Value, b: &Value) -> Option<Value> {
+    if t == "double" {
+        let (a, b) = (a.as_f64()?, b.as_f64()?);
+        let r = match op {
+            "+" => a + b,
+            "-" => a - b,
+            "*" => a * b,
+            _ if b == 0.0 => return None,
+            "/" => a / b,
+            _ => a % b,
+        };
+        return r.is_finite().then(|| r.into());
+    }
+    if t == "unsigned_long" {
+        let (a, b) = (a.as_u64()?, b.as_u64()?);
+        let r = match op {
+            "+" => a.checked_add(b),
+            "-" => a.checked_sub(b),
+            "*" => a.checked_mul(b),
+            "/" => a.checked_div(b),
+            _ => a.checked_rem(b),
+        };
+        return r.map(Value::from);
+    }
+    let (a, b) = (a.as_i64()?, b.as_i64()?);
+    // Java's `/` and `%` wrap on MIN / -1 rather than fail.
+    let r = match op {
+        "+" => a.checked_add(b),
+        "-" => a.checked_sub(b),
+        "*" => a.checked_mul(b),
+        _ if b == 0 => None,
+        "/" => Some(a.wrapping_div(b)),
+        _ => Some(a.wrapping_rem(b)),
+    };
+    match (t, op) {
+        ("integer", "/" | "%") => r.map(|r| Value::from(r as i32)),
+        ("integer", _) => r.and_then(|r| i32::try_from(r).ok()).map(Value::from),
+        _ => r.map(Value::from),
+    }
+}
+
 fn fields(e: &Expr, out: &mut Vec<Name>) {
     match e {
         Expr::Field(f, (at, _)) => out.push((f.clone(), *at)),
         Expr::Lit(..) => {}
         Expr::Not(x, _) | Expr::IsNull(x, ..) => fields(x, out),
-        Expr::Cmp(_, a, b, _) | Expr::And(a, b, _) | Expr::Or(a, b, _) => {
+        Expr::Cmp(_, a, b, _)
+        | Expr::And(a, b, _)
+        | Expr::Or(a, b, _)
+        | Expr::Arith(_, a, b, ..) => {
             fields(a, out);
             fields(b, out);
         }
@@ -841,7 +936,7 @@ fn names(e: &Expr) -> Vec<String> {
 fn span(e: &Expr) -> &Span {
     match e {
         Expr::Field(_, s) | Expr::Lit(_, s) | Expr::Not(_, s) | Expr::IsNull(.., s) => s,
-        Expr::Cmp(.., s) | Expr::And(.., s) | Expr::Or(.., s) => s,
+        Expr::Cmp(.., s) | Expr::And(.., s) | Expr::Or(.., s) | Expr::Arith(.., s) => s,
     }
 }
 
@@ -855,6 +950,8 @@ fn number_type(n: &Value, negative: bool) -> &'static str {
         _ => "double",
     }
 }
+
+const NUMERIC: [&str; 4] = ["integer", "long", "unsigned_long", "double"];
 
 /// The ES|QL type of a supported `METADATA` field.
 fn metadata_type(field: &str) -> Option<&'static str> {
@@ -893,6 +990,50 @@ fn resolve(
     let problem = match e {
         Expr::Field(f, _) => return Some(types[f].clone()),
         Expr::Lit(v, _) => return Some(literal_type(v).into()),
+        Expr::Arith(op, a, b, t, _) => {
+            let (ta, tb) = (resolve(a, src, types, bad), resolve(b, src, types, bad));
+            let (ta, tb) = (ta?, tb?);
+            let numeric = |t: &str| NUMERIC.contains(&t);
+            let date = |t: &str| t == "datetime" || t == "date_nanos";
+            // ponytail: no date math (it needs time span literals) or dense_vector operands
+            let accepted = match *op {
+                "+" | "-" => "date_nanos, datetime, numeric or dense_vector",
+                "*" | "/" => "numeric or dense_vector",
+                _ => "numeric",
+            };
+            let input = |x: &Expr, t: &str| {
+                let ok = numeric(t) || t == "null" || accepted.contains(',') && date(t);
+                (!ok).then(|| format!("[{accepted}], found value [{}] type [{t}]", text(x)))
+            };
+            let incompatible = match (ta.as_str(), tb.as_str()) {
+                ("null", _) | (_, "null") => false,
+                (x, y) if date(x) || date(y) => true,
+                (x, y) => (x == "unsigned_long") != (y == "unsigned_long"),
+            };
+            let problem = match (input(a, &ta), input(b, &tb)) {
+                (Some(found), _) => format!("first argument of [{}] must be {found}", text(e)),
+                (_, Some(found)) => format!("second argument of [{}] must be {found}", text(e)),
+                _ if incompatible => {
+                    format!("[{op}] has arguments with incompatible types [{ta}] and [{tb}]")
+                }
+                _ => {
+                    // Elasticsearch's `commonType` for the types that get this far.
+                    let common = match (ta.as_str(), tb.as_str()) {
+                        ("null", y) => y,
+                        (x, y) if x == y || y == "null" => x,
+                        ("double", _) | (_, "double") => "double",
+                        ("long", _) | (_, "long") => "long",
+                        (x, _) => x,
+                    };
+                    if let Some(&n) = NUMERIC.iter().find(|n| **n == common) {
+                        let _ = t.set(n);
+                    }
+                    return Some(common.to_owned());
+                }
+            };
+            bad.push((span(e).0, problem));
+            return None;
+        }
         Expr::IsNull(x, ..) => {
             resolve(x, src, types, bad)?;
             None
@@ -1415,7 +1556,13 @@ fn conjuncts<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
 /// Whether Lucene can run the filter: anything but a comparison of two fields.
 fn pushable(e: &Expr) -> bool {
     match e {
-        Expr::Cmp(_, a, b, _) => !matches!((&**a, &**b), (Expr::Field(..), Expr::Field(..))),
+        Expr::Cmp(_, a, b, _) => {
+            !matches!((&**a, &**b), (Expr::Field(..), Expr::Field(..)))
+                && pushable(a)
+                && pushable(b)
+        }
+        // ponytail: ES may rewrite `age + 1 > 30` into a pushable `age > 29`; this does not
+        Expr::Arith(..) => names(e).is_empty(),
         Expr::Not(x, _) | Expr::IsNull(x, ..) => pushable(x),
         Expr::And(a, b, _) | Expr::Or(a, b, _) => pushable(a) && pushable(b),
         Expr::Field(..) | Expr::Lit(..) => true,

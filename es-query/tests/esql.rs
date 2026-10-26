@@ -778,3 +778,55 @@ fn from_metadata_adds_id_index_and_version_columns() {
         other => panic!("{other:?}"),
     }
 }
+
+#[test]
+fn arithmetic_widens_like_elasticsearch_and_overflow_is_null() {
+    let r = q(
+        "ROW a = 1 + 1.5, b = 1 + 3000000000, c = 7 - 2 * 3, d = (7 - 2) * 3, e = 7 / 2, \
+               f = -7 % 3, g = 5 / 0, h = 2147483647 + 1, i = 1 + null, j = 7.0 / 0",
+    );
+    let types: Vec<&str> = r.columns.iter().map(|c| c.r#type.as_str()).collect();
+    assert_eq!(
+        types,
+        [
+            "double", "long", "integer", "integer", "integer", "integer", "integer", "integer",
+            "integer", "double"
+        ]
+    );
+    assert_eq!(
+        r.values,
+        [[
+            json!(2.5),
+            json!(3000000001u64),
+            json!(1),
+            json!(15),
+            json!(3),
+            json!(-1),
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null
+        ]]
+    );
+    let r = q("FROM people | WHERE age * 2 > 60 | KEEP name");
+    assert_eq!(r.values, [[json!("cid")]]);
+    for (query, problem) in [
+        (
+            r#"ROW a = "x" + 1"#,
+            r#"line 1:9: first argument of ["x" + 1] must be [date_nanos, datetime, numeric or dense_vector], found value ["x"] type [keyword]"#,
+        ),
+        (
+            "ROW a = 1 * true",
+            "line 1:9: second argument of [1 * true] must be [numeric or dense_vector], found value [true] type [boolean]",
+        ),
+        (
+            "ROW a = 1 % true",
+            "line 1:9: second argument of [1 % true] must be [numeric], found value [true] type [boolean]",
+        ),
+    ] {
+        match run(&indices(), query) {
+            Err(EsqlError::Verification(m)) => assert_eq!(m, format!("Found 1 problem\n{problem}")),
+            other => panic!("{query}: {other:?}"),
+        }
+    }
+}
