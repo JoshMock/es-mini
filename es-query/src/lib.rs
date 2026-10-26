@@ -17,6 +17,7 @@ mod parse;
 mod tdigest;
 
 pub use es_index::date_millis;
+use es_index::json_num as num;
 pub use parse::{Query, parse_query, parse_query_string};
 
 use es_index::postings::{TermFreqs, text, values};
@@ -97,10 +98,6 @@ fn resolve(index: &Index, field: &str, sample: impl Fn(&str) -> Option<Value>) -
 /// Indexed terms of a field in one document (see [`es_index::postings::terms`]).
 fn terms(kind: Kind, vals: &[&Value]) -> Vec<String> {
     es_index::postings::terms(kind == Kind::Text, vals)
-}
-
-fn num(v: &Value) -> Option<f64> {
-    v.as_f64().or_else(|| v.as_str()?.parse().ok())
 }
 
 /// Whether a value of a date field with `format` surely cannot be read: every format is an

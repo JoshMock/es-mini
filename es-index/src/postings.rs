@@ -157,7 +157,7 @@ impl Key {
     /// `v` as a number, ordered like `f64::total_cmp` (Lucene's `doubleToSortableLong`).
     fn read(&self, v: &Value) -> Option<i64> {
         let x = match self {
-            Key::Number => v.as_f64().or_else(|| v.as_str()?.parse().ok())?,
+            Key::Number => crate::json_num(v)?,
             Key::Date(format, locale) => {
                 crate::date_millis(format.as_deref(), locale.as_deref(), v)? as f64
             }

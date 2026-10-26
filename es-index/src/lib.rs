@@ -1026,7 +1026,8 @@ pub fn date_millis(format: Option<&str>, locale: Option<&str>, v: &Value) -> Opt
         .or_else(|| parse_dated(v, locale.unwrap_or("en")))
 }
 
-fn json_num(v: &Value) -> Option<f64> {
+/// A JSON number, or a string holding one, as `f64`.
+pub fn json_num(v: &Value) -> Option<f64> {
     v.as_f64().or_else(|| v.as_str()?.parse().ok())
 }
 
