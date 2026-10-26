@@ -9,6 +9,7 @@ use crate::{
     field_infos::{FieldInfo, IndexOptions},
     input::{DataInput, zigzag},
     lz4, postings,
+    trie::{self, TrieOutput},
 };
 
 /// Deepest nesting of sub-blocks accepted before a `.tim` is called corrupt.
@@ -196,7 +197,6 @@ fn write_field(
     files: &mut FieldOutputs,
     max: &mut postings::ImpactMax,
 ) -> crate::Result<()> {
-    use crate::output::Output;
     let FieldOutputs { tim, tip, tmd, doc } = files;
     let options = info.index_options;
     if terms.is_empty() || !matches!(options, IndexOptions::Docs | IndexOptions::DocsAndFreqs) {
@@ -206,48 +206,41 @@ fn write_field(
         ));
     }
     let has_freqs = options != IndexOptions::Docs;
-    let (mut suffixes, mut lengths, mut stats, mut metas) = (
-        Output::default(),
-        Output::default(),
-        Output::default(),
-        Output::default(),
-    );
-    let (mut last_fp, mut sum_df, mut docs_seen) = (0u64, 0u64, std::collections::BTreeSet::new());
+    let (mut sum_df, mut docs_seen) = (0u64, std::collections::BTreeSet::new());
+    let mut metas = Vec::with_capacity(terms.len());
     for t in terms {
-        suffixes.bytes(&t.term);
-        lengths.vint(t.term.len() as i32);
         let df = t.docs.len() as u64;
         sum_df += df;
         docs_seen.extend(t.docs.iter().map(|d| d.0));
-        stats.vint((df << 1) as i32);
-        if has_freqs {
-            stats.vlong((t.total_term_freq - df) as i64);
-        }
-        if df == 1 {
-            metas.vlong(0);
-            metas.vint(t.docs[0].0 as i32);
-        } else {
-            let fp = doc.0.len() as u64;
-            metas.vlong(((fp - last_fp) << 1) as i64);
-            last_fp = fp;
+        metas.push(TermMeta {
+            doc_freq: df,
+            total_term_freq: t.total_term_freq,
+            doc_fp: doc.0.len() as u64,
+            singleton: (df == 1).then(|| t.docs[0].0),
+        });
+        if df > 1 {
             postings::write_docs(doc, &t.docs, has_freqs, field_norms, max);
         }
     }
-    let block_fp = tim.0.len() as i64;
-    tim.vint(((terms.len() << 1) | 1) as i32);
-    tim.vlong(((suffixes.0.len() << 3) | 4) as i64); // leaf, uncompressed
-    tim.bytes(&suffixes.0);
-    tim.vint((lengths.0.len() << 1) as i32);
-    tim.bytes(&lengths.0);
-    for part in [&stats, &metas] {
-        tim.vint(part.0.len() as i32);
-        tim.bytes(&part.0);
+    let mut tree = BlockTree {
+        terms,
+        metas: &metas,
+        has_freqs,
+        tim,
+        pending: vec![],
+        prefix_starts: vec![],
+        last_term: vec![],
+    };
+    for (i, t) in terms.iter().enumerate() {
+        tree.push_term(&t.term);
+        tree.pending.push(Pending::Term(i));
     }
-    let index_start = tip.0.len() as i64;
-    let fp_bytes = (8 - (block_fp as u64).leading_zeros() as usize / 8).max(1);
-    tip.byte((((fp_bytes - 1) << 2) | 0x20) as u8); // leaf node with terms
-    tip.bytes(&(block_fp as u64).to_le_bytes()[..fp_bytes]);
-    tip.bytes(&[0; 8]); // Lucene's TrieReader reads a long at the node, possibly past its end
+    // An empty term closes every open prefix; then the root block takes what is left.
+    tree.push_term(&[]);
+    tree.write_blocks(0, tree.pending.len());
+    let Some(Pending::Block(root)) = tree.pending.pop() else {
+        unreachable!("write_blocks leaves one block");
+    };
     tmd.vint(info.number);
     tmd.vlong(terms.len() as i64);
     tmd.vlong(terms.iter().map(|t| t.total_term_freq).sum::<u64>() as i64);
@@ -259,10 +252,239 @@ fn write_field(
         tmd.vint(t.term.len() as i32);
         tmd.bytes(&t.term);
     }
-    tmd.vlong(index_start);
-    tmd.vlong(0);
+    tmd.vlong(tip.0.len() as i64);
+    tmd.vlong(trie::save(&root.index, tip) as i64);
+    tip.long(0); // Lucene's TrieReader reads a long at a node, possibly past the trie's end
     tmd.vlong(tip.0.len() as i64);
     Ok(())
+}
+
+/// Lucene's `minItemsInBlock` and `maxItemsInBlock`: a prefix gets its own block once this
+/// many terms and sub-blocks share it, and blocks over the maximum split into floor blocks.
+const MIN_ITEMS_IN_BLOCK: usize = 25;
+const MAX_ITEMS_IN_BLOCK: usize = 48;
+
+/// Where one term's postings are (`IntBlockTermState`).
+struct TermMeta {
+    doc_freq: u64,
+    total_term_freq: u64,
+    doc_fp: u64,
+    singleton: Option<u32>,
+}
+
+enum Pending {
+    /// An index into the field's terms.
+    Term(usize),
+    Block(PendingBlock),
+}
+
+/// A written block: its prefix, where it starts, and the trie entries of it and its sub-blocks.
+struct PendingBlock {
+    prefix: Vec<u8>,
+    fp: u64,
+    index: Vec<(Vec<u8>, TrieOutput)>,
+}
+
+/// `Lucene103BlockTreeTermsWriter.TermsWriter`: a stack of pending terms and blocks; once enough
+/// entries share a prefix that the next term leaves, they are written as a block and replaced
+/// on the stack by that block.
+struct BlockTree<'a> {
+    terms: &'a [TermPostings],
+    metas: &'a [TermMeta],
+    has_freqs: bool,
+    tim: &'a mut crate::output::Output,
+    pending: Vec<Pending>,
+    /// Where in `pending` the entries sharing the last term's first `i + 1` bytes start.
+    prefix_starts: Vec<usize>,
+    last_term: Vec<u8>,
+}
+
+impl BlockTree<'_> {
+    /// `pushTerm`: closes the prefixes of the last term that `text` does not share.
+    fn push_term(&mut self, text: &[u8]) {
+        let common = self
+            .last_term
+            .iter()
+            .zip(text)
+            .take_while(|(a, b)| a == b)
+            .count();
+        for i in (common..self.last_term.len()).rev() {
+            let top = self.pending.len() - self.prefix_starts[i];
+            if top >= MIN_ITEMS_IN_BLOCK {
+                // Lucene also adjusts prefixStarts[i] here, but nothing reads it before the
+                // reset below.
+                self.write_blocks(i + 1, top);
+            }
+        }
+        self.prefix_starts
+            .resize(self.prefix_starts.len().max(text.len()), 0);
+        for start in &mut self.prefix_starts[common..text.len()] {
+            *start = self.pending.len();
+        }
+        self.last_term = text.to_vec();
+    }
+
+    /// The first byte after `prefix_len` of a pending entry, or `None` for a term equal to the
+    /// prefix.
+    fn lead_label(&self, entry: &Pending, prefix_len: usize) -> Option<u8> {
+        match entry {
+            Pending::Term(t) => self.terms[*t].term.get(prefix_len).copied(),
+            Pending::Block(b) => Some(b.prefix[prefix_len]),
+        }
+    }
+
+    /// `writeBlocks`: writes the top `count` pending entries, which share the last term's first
+    /// `prefix_len` bytes, as one block or as floor blocks of at least `MIN_ITEMS_IN_BLOCK`.
+    fn write_blocks(&mut self, prefix_len: usize, count: usize) {
+        let (start, end) = (self.pending.len() - count, self.pending.len());
+        // (lead label, fp, has terms, trie entries of its sub-blocks) per block
+        let mut blocks: Vec<(Option<u8>, u64, bool, Vec<_>)> = vec![];
+        let (mut last_lead, mut next_lead) = (None, None);
+        let (mut next_start, mut has_terms, mut has_sub_blocks) = (start, false, false);
+        for i in start..end {
+            let lead = self.lead_label(&self.pending[i], prefix_len);
+            if lead != last_lead {
+                if i - next_start >= MIN_ITEMS_IN_BLOCK && end - next_start > MAX_ITEMS_IN_BLOCK {
+                    let (fp, sub) = self.write_block(prefix_len, next_start, i, has_sub_blocks);
+                    blocks.push((next_lead, fp, has_terms, sub));
+                    (has_terms, has_sub_blocks) = (false, false);
+                    (next_lead, next_start) = (lead, i);
+                }
+                last_lead = lead;
+            }
+            match self.pending[i] {
+                Pending::Term(_) => has_terms = true,
+                Pending::Block(_) => has_sub_blocks = true,
+            }
+        }
+        let (fp, sub) = self.write_block(prefix_len, next_start, end, has_sub_blocks);
+        blocks.push((next_lead, fp, has_terms, sub));
+
+        // `PendingBlock.compileIndex`: floor blocks are reached through the first block's output.
+        let (first_fp, first_has_terms) = (blocks[0].1, blocks[0].2);
+        let floor = (blocks.len() > 1).then(|| {
+            let mut out = crate::output::Output::default();
+            out.vint(blocks.len() as i32 - 1);
+            for (lead, fp, has_terms, _) in &blocks[1..] {
+                out.byte(lead.expect("only the first floor block has an empty suffix"));
+                out.vlong((((fp - first_fp) << 1) | u64::from(*has_terms)) as i64);
+            }
+            out.0
+        });
+        let prefix = self.last_term[..prefix_len].to_vec();
+        let output = TrieOutput {
+            fp: first_fp,
+            has_terms: first_has_terms,
+            floor,
+        };
+        let mut index = vec![(prefix.clone(), output)];
+        for (.., sub) in blocks {
+            index.extend(sub);
+        }
+        self.pending.truncate(start);
+        self.pending.push(Pending::Block(PendingBlock {
+            prefix,
+            fp: first_fp,
+            index,
+        }));
+    }
+
+    /// `writeBlock`: writes `pending[start..end]` as one block, returning its file pointer and
+    /// the trie entries of the sub-blocks in it.
+    ///
+    /// ponytail: suffixes are stored uncompressed (Lucene tries LZ4 and lowercase-ASCII).
+    fn write_block(
+        &mut self,
+        prefix_len: usize,
+        start: usize,
+        end: usize,
+        has_sub_blocks: bool,
+    ) -> (u64, Vec<(Vec<u8>, TrieOutput)>) {
+        use crate::output::Output;
+        let fp = self.tim.0.len() as u64;
+        let (mut suffixes, mut lengths, mut stats, mut metas) = (
+            Output::default(),
+            Output::default(),
+            Output::default(),
+            Output::default(),
+        );
+        let (mut singletons, mut last, mut sub_index) = (0, None, vec![]);
+        for entry in &mut self.pending[start..end] {
+            match entry {
+                Pending::Term(t) => {
+                    let suffix = &self.terms[*t].term[prefix_len..];
+                    let shift = u32::from(has_sub_blocks);
+                    lengths.vint((suffix.len() << shift) as i32);
+                    suffixes.bytes(suffix);
+                    let m = &self.metas[*t];
+                    // `StatsWriter`: runs of singleton terms collapse into one token.
+                    if m.doc_freq == 1 && (!self.has_freqs || m.total_term_freq == 1) {
+                        singletons += 1;
+                    } else {
+                        flush_singletons(&mut stats, &mut singletons);
+                        stats.vint((m.doc_freq << 1) as i32);
+                        if self.has_freqs {
+                            stats.vlong((m.total_term_freq - m.doc_freq) as i64);
+                        }
+                    }
+                    encode_term(&mut metas, m, last);
+                    last = Some(m);
+                }
+                Pending::Block(b) => {
+                    let suffix = &b.prefix[prefix_len..];
+                    lengths.vint(((suffix.len() << 1) | 1) as i32);
+                    suffixes.bytes(suffix);
+                    lengths.vlong((fp - b.fp) as i64);
+                    sub_index.append(&mut b.index);
+                }
+            }
+        }
+        flush_singletons(&mut stats, &mut singletons);
+        let tim = &mut *self.tim;
+        tim.vint((((end - start) << 1) | usize::from(end == self.pending.len())) as i32);
+        let leaf = if has_sub_blocks { 0 } else { 4 };
+        tim.vlong(((suffixes.0.len() << 3) | leaf) as i64);
+        tim.bytes(&suffixes.0);
+        let lengths = lengths.0;
+        if lengths[1..].iter().all(|&b| b == lengths[0]) {
+            // Terms of the same length, like ids, often give one repeated byte.
+            tim.vint(((lengths.len() << 1) | 1) as i32);
+            tim.byte(lengths[0]);
+        } else {
+            tim.vint((lengths.len() << 1) as i32);
+            tim.bytes(&lengths);
+        }
+        for part in [&stats, &metas] {
+            tim.vint(part.0.len() as i32);
+            tim.bytes(&part.0);
+        }
+        (fp, sub_index)
+    }
+}
+
+fn flush_singletons(stats: &mut crate::output::Output, singletons: &mut u32) {
+    if *singletons > 0 {
+        stats.vint((((*singletons - 1) << 1) | 1) as i32);
+        *singletons = 0;
+    }
+}
+
+/// `Lucene104PostingsWriter.encodeTerm`: pointers relative to the previous term in the block
+/// (`last`), and a run of singletons as doc id deltas.
+fn encode_term(out: &mut crate::output::Output, m: &TermMeta, last: Option<&TermMeta>) {
+    let last_fp = last.map_or(0, |l| l.doc_fp);
+    match (last.and_then(|l| l.singleton), m.singleton) {
+        (Some(prev), Some(doc)) if m.doc_fp == last_fp => {
+            let delta = i64::from(doc) - i64::from(prev);
+            out.vlong((((delta << 1) ^ (delta >> 63)) << 1) | 1);
+        }
+        _ => {
+            out.vlong(((m.doc_fp - last_fp) << 1) as i64);
+            if let Some(doc) = m.singleton {
+                out.vint(doc as i32);
+            }
+        }
+    }
 }
 
 /// The shared `.tim`, `.tip`, `.tmd` and `.doc` outputs.
@@ -273,12 +495,12 @@ struct FieldOutputs {
     doc: crate::output::Output,
 }
 
-/// Writes the terms dictionary and docs-only/freqs postings of `fields` (no positions): one leaf block per field. Lucene's writer caps
-/// leaf blocks at 48 terms for lookup speed; its reader accepts any count.
+/// Writes the terms dictionary and docs-only/freqs postings of `fields` (no positions), in
+/// blocks of 25 to 48 entries like Lucene's `Lucene103BlockTreeTermsWriter`.
 ///
 /// `norms` are the fields' norms per doc, for the competitive impacts of freq fields.
 ///
-/// ponytail: no floor blocks, prefix sharing, suffix compression, singleton runs, or `.pos`/`.pay`.
+/// ponytail: no suffix compression or `.pos`/`.pay`.
 pub fn write_terms(
     fields: &[(&FieldInfo, &[TermPostings])],
     id: &[u8; codec_util::ID_LEN],
@@ -632,6 +854,63 @@ mod tests {
             index_options,
             ..FieldInfo::new(name, number)
         }
+    }
+
+    /// Field "q" of tests/data/many-terms (written by Lucene 10.5.1): q000..q099, one doc each.
+    /// It sorts before "t", so its blocks and trie open Lucene's `.tim` and `.tip`.
+    #[test]
+    fn writes_the_blocks_and_trie_lucene_writes() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/many-terms");
+        let seg = crate::SegmentInfos::read_latest(&dir)
+            .unwrap()
+            .segments
+            .remove(0);
+        let r = SegmentReader::open(&dir, seg).unwrap();
+        let info = r.field("q").unwrap();
+        let base = r.max_doc() as u32 - 100;
+        let terms: Vec<_> = (0..100)
+            .map(|i| TermPostings::new(format!("q{i:03}").into(), vec![(base + i, 1)]))
+            .collect();
+        let suffix = format!(
+            "Lucene104_{}",
+            info.attributes["PerFieldPostingsFormat.suffix"]
+        );
+        let ours = write_terms(&[(info, &terms)], &r.seg.info.id, &suffix, &[]).unwrap();
+        for (ext, ours) in [("tim", &ours.tim), ("tip", &ours.tip)] {
+            let lucene = r.cfs_file(&format!("_{suffix}.{ext}")).unwrap();
+            let body = &ours[..ours.len() - FOOTER_LEN as usize];
+            assert_eq!(&lucene[..body.len()], body, ".{ext}");
+        }
+    }
+
+    #[test]
+    fn round_trips_floor_blocks_and_nested_sub_blocks() {
+        // The empty term, terms that prefix others, 1000 terms under one prefix (floor blocks
+        // holding sub-blocks), runs of singletons and terms with several docs and freqs.
+        let mut names = vec![String::new(), "a".into(), "ab".into()];
+        names.extend((0..1000).map(|i| format!("id{i}")));
+        names.extend((0..300).map(|i| format!("z{}", i * 7919 % 1000)));
+        names.sort();
+        names.dedup();
+        let terms: Vec<_> = names
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let i = i as u32;
+                let docs = match i % 5 {
+                    0 => vec![(i, 1), (i + 5000, 3)],
+                    1 => vec![(i, 4)],
+                    _ => vec![(i, 1)],
+                };
+                TermPostings::new(t.clone().into_bytes(), docs)
+            })
+            .collect();
+        let info = field("f", 0, IndexOptions::DocsAndFreqs);
+        let id = [7u8; 16];
+        let files = write_terms(&[(&info, &terms)], &id, "Lucene104_0", &[]).unwrap();
+        let fields = [info.clone()];
+        let read = decode_terms(&files, &id, "Lucene104_0", &fields, &info, None).unwrap();
+        assert_eq!(read, terms);
     }
 
     #[test]

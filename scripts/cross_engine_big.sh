@@ -2,7 +2,8 @@
 # Task: es-mini writes a 20000-doc index (full postings blocks, level-1 skip data) and
 # Elasticsearch 9.5.5 (Docker, 1 CPU, 1 GB, docker exec, container always removed) must return
 # the right _count for term, match, range and bool queries on every field, and for ranges over
-# a 100000-doc index (multi-leaf BKD trees, 21-bit doc ids).
+# a 100000-doc index (multi-leaf BKD trees, 21-bit doc ids), and for _id lookups through the
+# terms index (floor blocks and sub-blocks).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DATA="$(mktemp -d)"; PORT=${ES_MINI_PORT:-9392}
@@ -80,6 +81,10 @@ check 1000 '{"range":{"n":{"gte":5000,"lt":6000}}}'
 check 5000 '{"bool":{"must":[{"term":{"kw":"even"}},{"match":{"body":"common"}}],"filter":{"range":{"n":{"lt":10000}}}}}'
 check 667 '{"bool":{"must":[{"term":{"flag":true}},{"match":{"body":"mid"}}],"must_not":{"term":{"kw":"odd"}}}}'
 check 4 '{"bool":{"must":[{"match":{"body":"rare"}},{"term":{"flag":true}},{"term":{"kw":"even"}}]}}'
+# _id lookups seek through the terms index (trie and floor blocks) es-mini wrote.
+check 1 '{"term":{"_id":"12345"}}'
+check 3 '{"ids":{"values":["0","9999","19999","20000"]}}'
+check 1 '{"term":{"_id":"99999"}}' range
 check 100000 '{"match_all":{}}' range
 check 50000 '{"range":{"n":{"gte":0}}}' range
 check 285 '{"range":{"n":{"gte":-1000,"lt":1000}}}' range

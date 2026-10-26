@@ -29,6 +29,7 @@ pub mod state_file;
 pub mod stored_fields;
 pub mod terms;
 pub mod translog;
+mod trie;
 pub mod uid;
 
 pub use compound::CompoundFile;
