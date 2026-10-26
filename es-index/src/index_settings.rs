@@ -51,12 +51,23 @@ const fn s(
     }
 }
 
+pub const NUMBER_OF_SHARDS: &str = "index.number_of_shards";
+pub const NUMBER_OF_REPLICAS: &str = "index.number_of_replicas";
+pub const REFRESH_INTERVAL: &str = "index.refresh_interval";
+pub const GC_DELETES: &str = "index.gc_deletes";
+pub const UUID: &str = "index.uuid";
+pub const CREATION_DATE: &str = "index.creation_date";
+pub const VERSION_CREATED: &str = "index.version.created";
+pub const TRANSLOG_DURABILITY: &str = "index.translog.durability";
+pub const TRANSLOG_SYNC_INTERVAL: &str = "index.translog.sync_interval";
+pub const TRANSLOG_FLUSH_THRESHOLD_SIZE: &str = "index.translog.flush_threshold_size";
+
 const INT: i64 = i32::MAX as i64;
 
 pub const SETTINGS: &[Setting] = &[
     s("index.codec", Update::Static, Some("default"), Kind::Codec),
     s(
-        "index.number_of_shards",
+        NUMBER_OF_SHARDS,
         Update::Final,
         Some("1"),
         Kind::Int(1, 1024),
@@ -74,13 +85,13 @@ pub const SETTINGS: &[Setting] = &[
         Kind::Int(1, INT),
     ),
     s(
-        "index.number_of_replicas",
+        NUMBER_OF_REPLICAS,
         Update::Dynamic,
         Some("1"),
         Kind::Int(0, INT),
     ),
     s(
-        "index.refresh_interval",
+        REFRESH_INTERVAL,
         Update::Dynamic,
         Some("1s"),
         Kind::Time(-1, "-1"),
@@ -93,7 +104,7 @@ pub const SETTINGS: &[Setting] = &[
         Kind::Int(1, INT),
     ),
     s(
-        "index.gc_deletes",
+        GC_DELETES,
         Update::Dynamic,
         Some("60s"),
         Kind::Time(-1, "-1"),
@@ -117,7 +128,7 @@ pub const SETTINGS: &[Setting] = &[
         Kind::Bool,
     ),
     s(
-        "index.translog.durability",
+        TRANSLOG_DURABILITY,
         Update::Dynamic,
         Some("REQUEST"),
         Kind::Enum(
@@ -126,13 +137,13 @@ pub const SETTINGS: &[Setting] = &[
         ),
     ),
     s(
-        "index.translog.sync_interval",
+        TRANSLOG_SYNC_INTERVAL,
         Update::Dynamic,
         Some("5s"),
         Kind::Time(100, "100ms"),
     ),
     s(
-        "index.translog.flush_threshold_size",
+        TRANSLOG_FLUSH_THRESHOLD_SIZE,
         Update::Dynamic,
         Some("10gb"),
         Kind::Any,
@@ -259,7 +270,7 @@ pub const SETTINGS: &[Setting] = &[
         None,
         Kind::Any,
     ),
-    s("index.version.created", Update::Private, None, Kind::Any),
+    s(VERSION_CREATED, Update::Private, None, Kind::Any),
 ];
 
 /// The registered setting with this full key (`index.` included), or the group setting covering it.

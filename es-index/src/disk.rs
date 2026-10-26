@@ -769,7 +769,7 @@ static SAVING: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// once a shard's translog outgrows it, bounding how much a restart replays.
 fn flush_threshold(ix: &Index) -> u64 {
     ix.settings
-        .get("index.translog.flush_threshold_size")
+        .get(crate::index_settings::TRANSLOG_FLUSH_THRESHOLD_SIZE)
         .and_then(crate::parse_bytes)
         .unwrap_or(512 << 20)
 }
@@ -832,7 +832,7 @@ pub fn sync_interval(indices: &crate::aliases::Map<impl std::borrow::Borrow<Inde
     let default = Duration::from_secs(5);
     let every = |ix: &Index| {
         ix.settings
-            .get("index.translog.sync_interval")
+            .get(crate::index_settings::TRANSLOG_SYNC_INTERVAL)
             .and_then(crate::parse_time)
             .unwrap_or(default)
     };
@@ -872,7 +872,8 @@ fn log(data_dir: &Path, indices: &mut Indices, all: bool) -> es_codec::Result<Pe
     }
     if !flush {
         for ((dir, cp), ix) in logs.into_iter().zip(indices.values_mut()) {
-            let deferred = ix.settings.get("index.translog.durability") == Some("async");
+            let deferred =
+                ix.settings.get(crate::index_settings::TRANSLOG_DURABILITY) == Some("async");
             let ops = if all || !deferred {
                 ix.take_unlogged()
             } else {
@@ -1333,12 +1334,12 @@ fn metas(indices: &Indices) -> Vec<es_codec::cluster_state::IndexMetadata> {
                 })
                 .collect();
             let uuid = settings
-                .entry("index.uuid".into())
+                .entry(crate::index_settings::UUID.into())
                 .or_insert_with(|| uuid(name))
                 .clone();
             // Elasticsearch refuses to load index metadata without the creation version.
             settings
-                .entry("index.version.created".into())
+                .entry(crate::index_settings::VERSION_CREATED.into())
                 .or_insert_with(|| crate::VERSION_CREATED.to_string());
             es_codec::cluster_state::IndexMetadata {
                 name: name.clone(),

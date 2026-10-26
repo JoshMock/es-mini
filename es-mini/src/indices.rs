@@ -256,7 +256,7 @@ pub async fn get(
             if params.get("human").is_some_and(|v| v == "true") {
                 let created = i
                     .settings
-                    .get("index.creation_date")
+                    .get(es_index::index_settings::CREATION_DATE)
                     .and_then(|d| d.parse().ok());
                 settings["index"]["creation_date_string"] =
                     json!(es_index::iso_date(created.unwrap_or(0)));
@@ -539,7 +539,10 @@ fn put_settings_on(
             .map(|n| {
                 format!(
                     "[{n}/{}]",
-                    indices[*n].settings.get("index.uuid").unwrap_or("")
+                    indices[*n]
+                        .settings
+                        .get(es_index::index_settings::UUID)
+                        .unwrap_or("")
                 )
             })
             .collect();

@@ -79,7 +79,7 @@ fn write<T>(
 fn apply<T>(index: &mut Index, name: String, f: impl FnOnce(&mut Index) -> T) -> (T, u64, String) {
     let replicas = index
         .settings
-        .get("index.number_of_replicas")
+        .get(es_index::index_settings::NUMBER_OF_REPLICAS)
         .and_then(|r| r.parse().ok())
         .unwrap_or(0);
     (f(index), 1 + replicas, name)

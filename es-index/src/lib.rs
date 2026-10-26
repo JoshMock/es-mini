@@ -29,8 +29,8 @@ use std::{
 pub struct Settings(BTreeMap<String, Value>);
 
 const DEFAULT_SETTINGS: [(&str, &str); 2] = [
-    ("index.number_of_shards", "1"),
-    ("index.number_of_replicas", "1"),
+    (index_settings::NUMBER_OF_SHARDS, "1"),
+    (index_settings::NUMBER_OF_REPLICAS, "1"),
 ];
 
 impl Default for Settings {
@@ -80,9 +80,9 @@ impl Settings {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
         for (key, value) in [
-            ("index.uuid", random_uuid()),
-            ("index.creation_date", now.as_millis().to_string()),
-            ("index.version.created", VERSION_CREATED.to_string()),
+            (index_settings::UUID, random_uuid()),
+            (index_settings::CREATION_DATE, now.as_millis().to_string()),
+            (index_settings::VERSION_CREATED, VERSION_CREATED.to_string()),
             ("index.provided_name", name.to_owned()),
         ] {
             self.0.entry(key.to_owned()).or_insert(value.into());
@@ -321,7 +321,7 @@ impl Index {
     fn prune_tombstones(&mut self) {
         let ttl = self
             .settings
-            .get("index.gc_deletes")
+            .get(index_settings::GC_DELETES)
             .and_then(parse_time)
             .unwrap_or(Duration::from_secs(60));
         let now = Instant::now();
@@ -528,10 +528,10 @@ impl Index {
     // ponytail: no refresh_interval set means searchable at once, as a search of an idle
     // Elasticsearch shard waits for its refresh; `-1` never refreshes on its own
     fn refresh_due(&self) -> bool {
-        let Some(interval) = self.settings.get("index.refresh_interval") else {
+        let Some(interval) = self.settings.get(index_settings::REFRESH_INTERVAL) else {
             return true;
         };
-        match index_settings::time_millis(interval, "index.refresh_interval") {
+        match index_settings::time_millis(interval, index_settings::REFRESH_INTERVAL) {
             Ok(ms) if ms >= 0 => self
                 .refreshed_at
                 .is_none_or(|at| at.elapsed() >= Duration::from_millis(ms as u64)),
