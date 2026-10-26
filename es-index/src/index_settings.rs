@@ -149,12 +149,124 @@ pub const SETTINGS: &[Setting] = &[
         Some("true"),
         Kind::Bool,
     ),
+    s(
+        "index.mapping.total_fields.limit",
+        Update::Dynamic,
+        Some("1000"),
+        Kind::Int(0, i64::MAX),
+    ),
+    s(
+        "index.mapping.total_fields.ignore_dynamic_beyond_limit",
+        Update::Dynamic,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.mapping.depth.limit",
+        Update::Dynamic,
+        Some("20"),
+        Kind::Int(1, i64::MAX),
+    ),
+    s(
+        "index.mapping.nested_fields.limit",
+        Update::Dynamic,
+        Some("100"),
+        Kind::Int(0, i64::MAX),
+    ),
+    s(
+        "index.mapping.nested_parents.limit",
+        Update::Dynamic,
+        Some("50"),
+        Kind::Int(0, i64::MAX),
+    ),
+    s(
+        "index.mapping.nested_objects.limit",
+        Update::Dynamic,
+        Some("10000"),
+        Kind::Int(0, i64::MAX),
+    ),
+    s(
+        "index.mapping.field_name_length.limit",
+        Update::Dynamic,
+        Some("9223372036854775807"),
+        Kind::Int(1, i64::MAX),
+    ),
+    s(
+        "index.mapping.field_name_length.ignore_dynamic_beyond_limit",
+        Update::Dynamic,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.mapping.dimension_fields.limit",
+        Update::Dynamic,
+        Some("32768"),
+        Kind::Int(0, i64::MAX),
+    ),
+    s(
+        "index.blocks.read_only",
+        Update::Dynamic,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.blocks.read",
+        Update::Dynamic,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.blocks.write",
+        Update::Dynamic,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.blocks.metadata",
+        Update::Dynamic,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.blocks.read_only_allow_delete",
+        Update::Dynamic,
+        Some("false"),
+        Kind::Bool,
+    ),
+    // ponytail: list settings without their defaults or element parsers (IndexSortConfig)
+    s("index.sort.field", Update::Final, None, Kind::Any),
+    s("index.sort.order", Update::Final, None, Kind::Any),
+    s("index.sort.mode", Update::Final, None, Kind::Any),
+    s("index.sort.missing", Update::Final, None, Kind::Any),
+    // Group and affix settings: a key ending in `.` covers every key under it.
+    s("index.analysis.", Update::Static, None, Kind::Any),
+    s("index.similarity.", Update::Static, None, Kind::Any),
+    s(
+        "index.routing.allocation.include.",
+        Update::Dynamic,
+        None,
+        Kind::Any,
+    ),
+    s(
+        "index.routing.allocation.exclude.",
+        Update::Dynamic,
+        None,
+        Kind::Any,
+    ),
+    s(
+        "index.routing.allocation.require.",
+        Update::Dynamic,
+        None,
+        Kind::Any,
+    ),
     s("index.version.created", Update::Private, None, Kind::Any),
 ];
 
-/// The registered setting with this full key (`index.` included).
+/// The registered setting with this full key (`index.` included), or the group setting covering it.
 pub fn get(key: &str) -> Option<&'static Setting> {
-    SETTINGS.iter().find(|s| s.key == key)
+    SETTINGS
+        .iter()
+        .find(|s| s.key == key || (s.key.ends_with('.') && key.starts_with(s.key)))
 }
 
 impl Setting {

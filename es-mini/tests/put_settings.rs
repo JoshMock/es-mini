@@ -192,6 +192,53 @@ async fn nested_static_setting_is_rejected_on_open_index() {
 }
 
 #[tokio::test]
+async fn unknown_nested_setting_is_rejected() {
+    assert_eq!(
+        rejected(json!({"index": {"mapping": {"unknown_nested_thing": 1}}})).await,
+        "unknown setting [index.mapping.unknown_nested_thing] please check that any required plugins are installed, or check the breaking changes documentation for removed settings"
+    );
+}
+
+#[tokio::test]
+async fn nested_settings_are_validated() {
+    assert_eq!(
+        rejected(json!({"index.blocks.write": "yes"})).await,
+        "Failed to parse value [yes] as only [true] or [false] are allowed."
+    );
+    assert_eq!(
+        rejected(json!({"index.mapping.depth.limit": 0})).await,
+        "Failed to parse value [0] for setting [index.mapping.depth.limit] must be >= 1"
+    );
+}
+
+#[tokio::test]
+async fn group_settings_take_their_scope() {
+    // index.analysis.* is a static group setting.
+    assert!(
+        rejected(json!({"index.analysis.analyzer.a.type": "standard"}))
+            .await
+            .starts_with("Can't update non dynamic setting(s) [[index.analysis.analyzer.a.type]]")
+    );
+    // index.sort.* settings are final.
+    assert!(
+        rejected(json!({"index.sort.field": "f"}))
+            .await
+            .contains("The setting(s) [[index.sort.field]] cannot be modified")
+    );
+    // index.routing.allocation.include.* is a dynamic affix setting.
+    let app = es_mini::app();
+    index(&app).await;
+    let (s, b) = call(
+        &app,
+        "PUT",
+        "/t/_settings",
+        json!({"index.routing.allocation.include._name": "node-1", "index.mapping.total_fields.limit": 5}),
+    )
+    .await;
+    assert_eq!(s, 200, "{b}");
+}
+
+#[tokio::test]
 async fn valid_values_are_accepted() {
     let app = es_mini::app();
     index(&app).await;

@@ -474,7 +474,7 @@ fn put_settings_on(
     let mut skipped = Vec::new();
     // Registered settings the request sets, with their new values.
     let mut values = Vec::new();
-    // ponytail: only rejects unknown top-level index.* names; nested groups (index.mapping.*) pass
+    // ponytail: the registry models a subset of IndexScopedSettings; others fail as unknown
     for (key, value) in es_index::flatten_settings(settings) {
         let short = key.strip_prefix("index.").unwrap_or(&key);
         let key = format!("index.{short}");
@@ -490,7 +490,6 @@ fn put_settings_on(
                 }
                 s.update
             }
-            None if short.contains('.') => Update::Dynamic,
             None => {
                 return Err(AppError::IllegalArgument(format!(
                     "unknown setting [{key}] please check that any required plugins are installed, or check the breaking changes documentation for removed settings"
