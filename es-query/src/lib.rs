@@ -1,7 +1,8 @@
 //! JSON query DSL and ES|QL parsing/execution.
 //!
 //! Term, match and bool queries on an index opened from disk read only the on-disk documents
-//! their postings name; the rest scan every document.
+//! their postings name; the rest scan every document. `_count` reads no documents where postings
+//! and doc values answer its query exactly (see [`count_many`]).
 //!
 //! ponytail: matched documents are still scored from their sources; score from postings and
 //! norms if loading the hits shows up.
@@ -245,7 +246,16 @@ const B: f64 = 0.75;
 
 impl<'a> Searcher<'a> {
     fn new(index: &'a Index, q: &Query) -> Self {
-        let mut s = Searcher {
+        let mut s = Self::unscored(index, q);
+        s.gather(q);
+        s.on_disk = s.candidates(q, false);
+        s.in_memory = s.memory_candidates(q);
+        s
+    }
+
+    /// A searcher without BM25 statistics or candidates, for queries that only match.
+    fn unscored(index: &'a Index, q: &Query) -> Self {
+        Searcher {
             index,
             field_stats: HashMap::new(),
             doc_freq: HashMap::new(),
@@ -254,11 +264,7 @@ impl<'a> Searcher<'a> {
             in_memory: None,
             named: named_queries(q),
             query: q.clone(),
-        };
-        s.gather(q);
-        s.on_disk = s.candidates(q);
-        s.in_memory = s.memory_candidates(q);
-        s
+        }
     }
 
     fn kind<'f>(&self, field: &'f str) -> (Kind, &'f str) {
@@ -354,24 +360,26 @@ impl<'a> Searcher<'a> {
     }
 
     /// The on-disk documents `q` can match, from postings; `None` if it cannot narrow them.
-    fn candidates(&self, q: &Query) -> Option<BTreeSet<DiskPos>> {
+    /// With `exact`, for a leaf query, only those it matches, or `None` if postings and doc
+    /// values cannot tell.
+    fn candidates(&self, q: &Query, exact: bool) -> Option<BTreeSet<DiskPos>> {
         match q {
             Query::Term { field, value } if self.kind(field).0 == Kind::Number => {
-                self.number_docs(field, [None, Some(value), None, Some(value)])
+                self.number_docs(field, [None, Some(value), None, Some(value)], exact)
             }
-            Query::Term { field, value } => Some(self.term_docs(field, &[text(value)], true)),
+            Query::Term { field, value } => self.term_docs(field, &[text(value)], true, exact),
             Query::Range {
                 field,
                 gt,
                 gte,
                 lt,
                 lte,
-            } => self.number_docs(field, [gt, gte, lt, lte].map(Option::as_ref)),
+            } => self.number_docs(field, [gt, gte, lt, lte].map(Option::as_ref), exact),
             Query::Match { field, query, and } => {
                 let (kind, _) = self.kind(field);
-                Some(self.term_docs(field, &query_terms(kind, query), *and))
+                self.term_docs(field, &query_terms(kind, query), *and, exact)
             }
-            Query::Named { query, .. } => self.candidates(query),
+            Query::Named { query, .. } => self.candidates(query, exact),
             Query::Bool {
                 must,
                 should,
@@ -382,13 +390,13 @@ impl<'a> Searcher<'a> {
                 let required = must
                     .iter()
                     .chain(filter)
-                    .filter_map(|c| self.candidates(c))
+                    .filter_map(|c| self.candidates(c, exact))
                     .reduce(|a, b| &a & &b);
                 let any = match min_should {
                     0 => None,
                     _ => should
                         .iter()
-                        .map(|c| self.candidates(c))
+                        .map(|c| self.candidates(c, exact))
                         .collect::<Option<Vec<_>>>()
                         .map(|s| s.into_iter().flatten().collect()),
                 };
@@ -448,8 +456,15 @@ impl<'a> Searcher<'a> {
         }
     }
 
-    /// The on-disk documents indexing all (or any) of `terms` in `field`.
-    fn term_docs(&self, field: &str, terms: &[String], all: bool) -> BTreeSet<DiskPos> {
+    /// The on-disk documents indexing all (or any) of `terms` in `field` (see
+    /// [`Index::disk_term`]).
+    fn term_docs(
+        &self,
+        field: &str,
+        terms: &[String],
+        all: bool,
+        exact: bool,
+    ) -> Option<BTreeSet<DiskPos>> {
         let (kind, _) = self.kind(field);
         let mut sets = terms.iter().map(|t| {
             // Booleans index as `T` and `F`.
@@ -458,25 +473,34 @@ impl<'a> Searcher<'a> {
                 (Kind::Bool, "false") => "F",
                 (_, t) => t,
             };
-            self.index.disk_term(field, t)
+            self.index.disk_term(field, t, exact)
         });
-        let first = sets.next().unwrap_or_default();
-        sets.fold(first, |a, b| if all { &a & &b } else { &a | &b })
+        let first = sets.next().unwrap_or(Some(BTreeSet::new()))?;
+        sets.try_fold(first, |a, b| Some(if all { &a & &b? } else { &a | &b? }))
     }
 
     /// The on-disk documents whose doc values of numeric or date `field` are within `bounds`
-    /// (see [`in_range`]); `None` for other fields.
-    fn number_docs(&self, field: &str, bounds: [Option<&Value>; 4]) -> Option<BTreeSet<DiskPos>> {
+    /// (see [`in_range`] and [`Index::disk_numbers`]).
+    fn number_docs(
+        &self,
+        field: &str,
+        bounds: [Option<&Value>; 4],
+        exact: bool,
+    ) -> Option<BTreeSet<DiskPos>> {
         let instant = self.instant(field);
-        self.index.disk_numbers(field, |v| {
-            in_range(bounds, |b| match &instant {
-                None => scalar_cmp(v, b),
-                // as scoring does, a bound that is not a date is above every value
-                Some(instant) => {
-                    (v.as_i64().zip(instant(b))).map_or(Ordering::Less, |(x, y)| x.cmp(&y))
-                }
-            })
-        })
+        self.index.disk_numbers(
+            field,
+            |v| {
+                in_range(bounds, |b| match &instant {
+                    None => scalar_cmp(v, b),
+                    // as scoring does, a bound that is not a date is above every value
+                    Some(instant) => {
+                        (v.as_i64().zip(instant(b))).map_or(Ordering::Less, |(x, y)| x.cmp(&y))
+                    }
+                })
+            },
+            exact,
+        )
     }
 
     /// For a date field, how it reads a value as epoch millis.
@@ -1159,17 +1183,87 @@ pub fn count(index: &Index, q: &Query) -> usize {
     count_many(&[("", index, None)], q).expect("no alias filter to parse")
 }
 
+/// Counts from postings and doc values where they answer the query exactly, on disk and in
+/// memory separately; the documents of the other are read and matched.
 pub fn count_many(targets: &[Target], q: &Query) -> Result<usize, QueryError> {
     let mut n = 0;
     for (_, index, filter) in targets {
         let q = with_filter(q, *filter)?;
-        let s = Searcher::new(index, &q);
-        n += s
-            .docs()
+        let mut s = Searcher::unscored(index, &q);
+        let (disk, memory) = index.live();
+        let on_disk = exact(&q, &disk, &|c| match c {
+            Query::Term { .. } | Query::Match { .. } | Query::Range { .. } => {
+                Some(s.candidates(c, true)?.into_iter().collect())
+            }
+            _ => None,
+        });
+        let in_memory = exact(&q, &memory, &|c| match c {
+            Query::Term { .. } | Query::Match { .. } => {
+                let ids = s.memory_candidates(c)?;
+                Some(
+                    ids.iter()
+                        .filter_map(|id| memory.get(id.as_str()).copied())
+                        .collect(),
+                )
+            }
+            _ => None,
+        });
+        n += on_disk.as_ref().map_or(0, HashSet::len) + in_memory.as_ref().map_or(0, HashSet::len);
+        if on_disk.is_some() && in_memory.is_some() {
+            continue;
+        }
+        s.on_disk = match on_disk {
+            Some(_) => Some(BTreeSet::new()),
+            None => s.candidates(&q, false),
+        };
+        s.in_memory = match in_memory {
+            Some(_) => Some(HashSet::new()),
+            None => s.memory_candidates(&q),
+        };
+        n += (s.docs())
             .filter(|(id, d)| s.score(&q, id, d).is_some())
             .count();
     }
     Ok(n)
+}
+
+/// The documents of `all` that `q` matches, from the exact matches `leaf` gives for leaf
+/// queries; `None` if it gives none for one.
+fn exact<K: Copy + Eq + std::hash::Hash>(
+    q: &Query,
+    all: &HashSet<K>,
+    leaf: &dyn Fn(&Query) -> Option<HashSet<K>>,
+) -> Option<HashSet<K>> {
+    match q {
+        Query::MatchAll => Some(all.clone()),
+        Query::Named { query, .. } => exact(query, all, leaf),
+        Query::Bool {
+            must,
+            should,
+            must_not,
+            filter,
+            min_should,
+        } => {
+            let mut out = all.clone();
+            for c in must.iter().chain(filter) {
+                out = &out & &exact(c, all, leaf)?;
+            }
+            for c in must_not {
+                out = &out - &exact(c, all, leaf)?;
+            }
+            if *min_should > 0 {
+                let mut hits = HashMap::new();
+                for c in should {
+                    (exact(c, all, leaf)?)
+                        .into_iter()
+                        .for_each(|k| *hits.entry(k).or_insert(0) += 1);
+                }
+                out.retain(|k| hits.get(k).is_some_and(|n| n >= min_should));
+            }
+            Some(out)
+        }
+        q => Some(&leaf(q)? & all),
+    }
 }
 
 /// Terms a match query looks up: analyzed for text fields, verbatim otherwise.
@@ -1207,7 +1301,9 @@ mod tests {
         let ix = &opened["i"];
         let read = |q: Value| {
             let q = parse_query(&q).unwrap();
-            let on_disk = Searcher::new(ix, &q).candidates(&q).expect("narrowed");
+            let on_disk = Searcher::new(ix, &q)
+                .candidates(&q, false)
+                .expect("narrowed");
             let mut ids: Vec<_> = ix.docs_at(None, Some(&on_disk)).map(|(id, _)| id).collect();
             ids.sort_by_key(|id| id.parse::<u32>().unwrap());
             ids.join(",")
@@ -1248,7 +1344,9 @@ mod tests {
         let ix = &opened["i"];
         let read = |q: Value| {
             let q = parse_query(&q).unwrap();
-            let on_disk = Searcher::new(ix, &q).candidates(&q).expect("narrowed");
+            let on_disk = Searcher::new(ix, &q)
+                .candidates(&q, false)
+                .expect("narrowed");
             let mut ids: Vec<_> = ix.docs_at(None, Some(&on_disk)).map(|(id, _)| id).collect();
             ids.sort_by_key(|id| id.parse::<u32>().unwrap());
             ids.join(",")
@@ -1275,5 +1373,89 @@ mod tests {
         // number terms score 1.0: no BM25 statistics, which would read every source
         let q = parse_query(&json!({"match": {"n": 7}})).unwrap();
         assert!(Searcher::new(ix, &q).field_stats.is_empty());
+    }
+
+    /// Zeroes the stored fields (`.fdt`) in every segment of every shard under `dir`.
+    fn zero_stored_fields(dir: &std::path::Path) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                zero_stored_fields(&path);
+                continue;
+            }
+            if !path
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("segments_")
+            {
+                continue;
+            }
+            for seg in es_codec::SegmentInfos::read_latest(dir).unwrap().segments {
+                let seg = es_codec::SegmentReader::open(dir, seg).unwrap();
+                let fdt = seg.cfs.file(".fdt").unwrap().unwrap();
+                let cfs = dir.join(format!("{}.cfs", seg.seg.name));
+                let mut bytes = std::fs::read(&cfs).unwrap();
+                let at = (bytes.windows(fdt.len()).position(|w| w == fdt)).unwrap();
+                bytes[at..at + fdt.len()].fill(0);
+                std::fs::write(&cfs, bytes).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn count_reads_no_sources() {
+        let dir = std::env::temp_dir().join(format!("esm-count-{}", std::process::id()));
+        let mut ix = Index::default();
+        let props = &mut ix.mappings.properties;
+        props.insert("title".into(), FieldMapping::Text { store: false });
+        props.insert("tag".into(), FieldMapping::Keyword { ignore_above: None });
+        props.insert("n".into(), FieldMapping::Long);
+        props.insert("ok".into(), FieldMapping::Boolean);
+        for i in 0..30 {
+            let tag = if i % 3 == 0 { "three" } else { "other" };
+            let doc = json!({"title": format!("doc {i}"), "tag": tag, "n": i, "ok": i % 2 == 0});
+            ix.put(&i.to_string(), doc);
+        }
+        disk::save(&dir, &Indices::from([("i".to_owned(), ix)])).unwrap();
+        let mut opened = disk::open(&dir).unwrap();
+        zero_stored_fields(&dir);
+        let ix = opened.get_mut("i").unwrap();
+        assert!(ix.get("3").is_none(), "on-disk sources are unreadable");
+        // writes after opening stay in memory
+        ix.delete("0");
+        ix.put(
+            "6",
+            json!({"title": "doc six", "tag": "other", "n": 6, "ok": true}),
+        );
+        ix.put(
+            "30",
+            json!({"title": "doc 30", "tag": "three", "n": 30, "ok": true}),
+        );
+        let ix = &*ix;
+        let n = |q: Value| count(ix, &parse_query(&q).unwrap());
+        assert_eq!(n(json!({"match_all": {}})), 30);
+        assert_eq!(n(json!({"term": {"tag": "three"}})), 9);
+        assert_eq!(n(json!({"match": {"title": "doc"}})), 30);
+        assert_eq!(n(json!({"match": {"title": "six 7"}})), 2);
+        assert_eq!(n(json!({"term": {"ok": false}})), 15);
+        assert_eq!(n(json!({"term": {"_id": "4"}})), 1);
+        assert_eq!(n(json!({"terms": {"tag": ["three", "none"]}})), 9);
+        let filtered = json!({"bool": {
+            "filter": [{"term": {"tag": "three"}}],
+            "must_not": [{"term": {"ok": true}}],
+        }});
+        assert_eq!(n(filtered), 5);
+        let should = json!({"bool": {
+            "should": [{"term": {"tag": "three"}}, {"term": {"ok": true}}],
+            "minimum_should_match": 2,
+        }});
+        assert_eq!(n(should), 4);
+        let constant = json!({"constant_score": {"filter": {"term": {"tag": "other"}}}});
+        assert_eq!(n(constant), 21);
+        // on disk from doc values; the documents in memory are scanned
+        assert_eq!(n(json!({"range": {"n": {"gte": 5, "lt": 10}}})), 5);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

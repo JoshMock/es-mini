@@ -158,26 +158,39 @@ impl Shard {
     }
 
     /// The docs that may hold `term` in `field`: those whose postings do, and every doc of a
-    /// segment without readable postings for the field. Some may no longer be live.
-    pub(crate) fn term_docs(&self, field: &str, term: &str) -> BTreeSet<DiskPos> {
+    /// segment without readable postings for the field, or `None` there if `exact`. Some may no
+    /// longer be live.
+    pub(crate) fn term_docs(
+        &self,
+        field: &str,
+        term: &str,
+        exact: bool,
+    ) -> Option<BTreeSet<DiskPos>> {
         if field == "_id" {
-            return self.pos(term).into_iter().collect();
+            return Some(self.pos(term).into_iter().collect());
         }
         let mut out = BTreeSet::new();
         for (s, seg) in self.segments.iter().enumerate() {
             match seg.term(field, term.as_bytes()) {
                 Ok(t) => out.extend(t.iter().flat_map(|t| &t.docs).map(|d| (s, d.0 as usize))),
                 // e.g. a field this segment does not index, or a postings format we lack
+                Err(_) if exact => return None,
                 Err(_) => out.extend((0..seg.max_doc()).map(|d| (s, d))),
             }
         }
-        out
+        Some(out)
     }
 
     /// The docs with a value of numeric `field` that `keep` accepts, from doc values, and every
-    /// doc of a segment without readable doc values for the field. Some may no longer be live.
+    /// doc of a segment without readable doc values for the field, or `None` there if `exact`.
+    /// Some may no longer be live.
     // ponytail: decodes the whole doc values column; walk the points tree if that shows up
-    pub(crate) fn number_docs(&self, field: &str, keep: impl Fn(i64) -> bool) -> BTreeSet<DiskPos> {
+    pub(crate) fn number_docs(
+        &self,
+        field: &str,
+        keep: impl Fn(i64) -> bool,
+        exact: bool,
+    ) -> Option<BTreeSet<DiskPos>> {
         let mut out = BTreeSet::new();
         for (s, seg) in self.segments.iter().enumerate() {
             match seg.doc_values(field) {
@@ -186,10 +199,16 @@ impl Shard {
                         .filter(|(_, v)| v.iter().any(|v| keep(*v)))
                         .map(|(d, _)| (s, d)),
                 ),
+                _ if exact => return None,
                 _ => out.extend((0..seg.max_doc()).map(|d| (s, d))),
             }
         }
-        out
+        Some(out)
+    }
+
+    /// Where every live document is.
+    pub(crate) fn positions(&self) -> impl Iterator<Item = DiskPos> + '_ {
+        self.ids.values().map(|d| (d.segment, d.doc))
     }
 
     /// The live documents at a position `keep` accepts, segment by segment, read a chunk at a

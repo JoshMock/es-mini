@@ -14,7 +14,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::{
     borrow::Cow,
-    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     time::{Duration, Instant},
 };
 
@@ -506,21 +506,36 @@ impl Index {
             )
     }
 
+    /// Every live document, without reading it: its position on disk or its id in memory.
+    pub fn live(&self) -> (HashSet<disk::DiskPos>, HashSet<&str>) {
+        let on_disk = self.disk.iter().flat_map(disk::Shard::positions).collect();
+        (on_disk, self.docs.keys().map(String::as_str).collect())
+    }
+
     /// The on-disk documents that may index `term` in `field`, from its postings (see
-    /// [`docs_at`](Self::docs_at)); `_id` is looked up directly.
-    pub fn disk_term(&self, field: &str, term: &str) -> BTreeSet<disk::DiskPos> {
-        self.disk
-            .as_ref()
-            .map_or_else(BTreeSet::new, |d| d.term_docs(field, term))
+    /// [`docs_at`](Self::docs_at)); `_id` is looked up directly. With `exact`, only those that
+    /// do, or `None` if some segment has no postings for the field to read.
+    pub fn disk_term(
+        &self,
+        field: &str,
+        term: &str,
+        exact: bool,
+    ) -> Option<BTreeSet<disk::DiskPos>> {
+        self.disk.as_ref().map_or_else(
+            || Some(BTreeSet::new()),
+            |d| d.term_docs(field, term, exact),
+        )
     }
 
     /// The on-disk documents with a value of numeric or date `field` that `keep` accepts, from
-    /// doc values (dates as epoch millis); `None` for other fields.
+    /// doc values (dates as epoch millis); `None` for other fields. With `exact`, only those
+    /// that have one, or `None` if some segment has no doc values for the field to read.
     // ponytail: floats are skipped, since their f32 values compare differently from the source
     pub fn disk_numbers(
         &self,
         field: &str,
         keep: impl Fn(&Value) -> bool,
+        exact: bool,
     ) -> Option<BTreeSet<disk::DiskPos>> {
         use FieldMapping as M;
         let decode = match self.mappings.properties.get(field)? {
@@ -528,9 +543,10 @@ impl Index {
             M::Double => |v| Value::from(sortable_double(v)),
             _ => return None,
         };
-        Some(self.disk.as_ref().map_or_else(BTreeSet::new, |d| {
-            d.number_docs(field, |v| keep(&decode(v)))
-        }))
+        self.disk.as_ref().map_or_else(
+            || Some(BTreeSet::new()),
+            |d| d.number_docs(field, |v| keep(&decode(v)), exact),
+        )
     }
 
     /// Reads the doc values of `field` for live on-disk documents by id: numbers (dates as
