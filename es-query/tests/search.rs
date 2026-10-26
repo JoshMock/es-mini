@@ -176,6 +176,108 @@ fn count_matches_total() {
     assert_eq!(count(&idx, &q), 2);
 }
 
+/// The documents and expected hits are Elasticsearch 9.5.5's.
+fn dates() -> Index {
+    let mut idx = Index::default();
+    let date = |format: Option<&str>| FieldMapping::Date {
+        format: format.map(Into::into),
+        locale: None,
+        fields: Default::default(),
+    };
+    let props = &mut idx.mappings.properties;
+    props.insert("date".into(), date(None));
+    props.insert("f".into(), date(Some("yyyy/MM/dd HH:mm||epoch_second")));
+    idx.put(
+        "1",
+        json!({"date": "2022-01-01T12:12:12.123Z", "f": "2022/01/01 10:00"}),
+    );
+    idx.put(
+        "2",
+        json!({"date": "2022-01-02T00:30:00Z", "f": 1_641_081_600}),
+    );
+    idx.put(
+        "3",
+        json!({"date": 1_641_000_000_000_i64, "f": "2021/12/31 23:00"}),
+    );
+    idx.put("4", json!({"date": "2022"}));
+    idx
+}
+
+fn date_hits(q: Value) -> Result<Vec<String>, es_query::QueryError> {
+    let idx = dates();
+    let req = SearchRequest::parse(&json!({"query": q}))?;
+    let r = es_query::search_many(&[("d", &idx, None)], &req)?;
+    Ok(sorted(r.hits.iter().map(|h| h.id.to_owned()).collect()))
+}
+
+#[test]
+fn date_ranges_read_formats_time_zones_and_date_math() {
+    let range = |r: Value| date_hits(json!({"range": {"date": r}})).unwrap();
+    let tz = |r: Value, tz: &str| {
+        let mut r = r;
+        r["time_zone"] = tz.into();
+        range(r)
+    };
+    let day = json!({"gte": "2022-01-01", "lte": "2022-01-01"});
+    assert_eq!(range(day.clone()), ["1", "3", "4"]);
+    assert_eq!(tz(day, "+01:00"), ["1", "3", "4"]);
+    let next = json!({"gte": "2022-01-01T00:00:00||+1d"});
+    assert_eq!(tz(next, "Europe/Berlin"), ["2"]);
+    assert_eq!(range(json!({"gt": "2022-01-01||/d", "lte": "now"})), ["2"]);
+    assert_eq!(
+        range(json!({"lt": "2022-01-01T12:12:12", "gte": "2022"})),
+        ["3", "4"]
+    );
+    assert_eq!(
+        range(json!({"lte": "2022-01-01T12:12:12"})),
+        ["1", "3", "4"]
+    );
+    assert_eq!(
+        range(json!({"gt": "2022-01-01", "lt": "2022-01-03"})),
+        ["2"]
+    );
+    let month = json!({"gte": "2022-01-01||/M", "lte": "2022-01-01||+1d/d"});
+    assert_eq!(range(month), ["1", "2", "3", "4"]);
+    // a number is epoch millis unless the query gives a format
+    assert_eq!(range(json!({"gte": 2022})), ["1", "2", "3", "4"]);
+    let formatted = json!({"gte": "01/01/2022", "format": "dd/MM/yyyy"});
+    assert_eq!(range(formatted), ["1", "2", "3", "4"]);
+    let secs = |k: &str| range(json!({k: "1641000000", "format": "epoch_second"}));
+    assert_eq!(secs("gte"), ["1", "2", "3"]);
+    assert_eq!(secs("lte"), ["3", "4"]);
+    let offset = json!({"gte": "2022-01-01T12:12:12+01:00"});
+    assert_eq!(tz(offset, "-05:00"), ["1", "2"]);
+    // a mapping's format reads the bounds
+    let f = json!({"range": {"f": {"gte": "2022/01/01 00:00", "lt": "1641081600"}}});
+    assert_eq!(date_hits(f).unwrap(), ["1"]);
+    let q = parse_query(
+        &json!({"range": {"date": {"gte": "2021-12-31T19:00:00", "time_zone": "America/New_York"}}}),
+    )
+    .unwrap();
+    assert_eq!(es_query::count_many(&[("d", &dates(), None)], &q), Ok(4));
+}
+
+#[test]
+fn bad_date_range_bounds_are_errors() {
+    use es_query::ErrorKind::{IllegalArgument, Parse};
+    let err = |q: Value| date_hits(q).unwrap_err();
+    let e = err(json!({"range": {"date": {"gte": "bogus"}}}));
+    let f = "strict_date_optional_time||epoch_millis";
+    let reason = format!("failed to parse date field [bogus] with format [{f}]");
+    assert_eq!((e.kind, e.msg), (Parse, format!("{reason}: [{reason}]")));
+    let e = err(json!({"range": {"date": {"gte": "now+1x"}}}));
+    assert_eq!(
+        (e.kind, e.msg.as_str()),
+        (Parse, "unit [x] not supported for date math [+1x]")
+    );
+    // a number forces epoch_millis for both bounds
+    let e = err(json!({"range": {"f": {"gte": "2022/01/01 10:00", "lt": 1_641_081_600}}}));
+    assert!(e.msg.contains("with format [epoch_millis]"), "{e}");
+    let e = err(json!({"range": {"date": {"gte": "2022", "time_zone": "Mars/Base"}}}));
+    let reason = "java.time.zone.ZoneRulesException: Unknown time-zone ID: Mars/Base";
+    assert_eq!((e.kind, e.msg.as_str()), (IllegalArgument, reason));
+}
+
 #[test]
 fn bad_queries_are_errors() {
     for q in [

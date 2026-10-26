@@ -1,6 +1,7 @@
 //! Query DSL parsing.
 
 use crate::{QueryError, text};
+use es_index::tz::TimeZone;
 use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -33,6 +34,10 @@ pub enum Query {
         gte: Option<Value>,
         lt: Option<Value>,
         lte: Option<Value>,
+        /// The date format the bounds are in, instead of the field's.
+        format: Option<String>,
+        /// The time zone of date bounds without an offset.
+        time_zone: Option<TimeZone>,
     },
     Bool {
         must: Vec<Query>,
@@ -305,26 +310,18 @@ fn parse_kind(kind: &str, body: &Value) -> Result<Query, QueryError> {
                     "format",
                     "boost",
                     "_name",
-                    // ponytail: accepted but ignored; dates compare without a time zone
                     "time_zone",
                     "relation",
                 ],
             )?;
-            // ponytail: `uuuu` bounds become ISO strings (compared lexicographically); upper bounds
-            // round up to the end of Jan 1 as ES does. Real date parsing would replace this.
-            let year = p.get("format").and_then(Value::as_str) == Some("uuuu");
-            let get = |k: &str| {
-                let v = p.get(k)?;
-                let Some(y) = v.as_i64().filter(|_| year) else {
-                    return Some(v.clone());
-                };
-                let end = matches!(k, "gt" | "lte");
-                let t = if end {
-                    "23:59:59.999999999Z"
-                } else {
-                    "00:00:00"
-                };
-                Some(Value::String(format!("{y:04}-01-01T{t}")))
+            let get = |k: &str| p.get(k).cloned();
+            let time_zone = match p.get("time_zone").and_then(Value::as_str) {
+                None => None,
+                Some(id) => Some(TimeZone::parse(id).ok_or_else(|| {
+                    QueryError::illegal(format!(
+                        "java.time.zone.ZoneRulesException: Unknown time-zone ID: {id}"
+                    ))
+                })?),
             };
             if p.get("format").and_then(Value::as_str) == Some("date_optional_time") {
                 // ponytail: only bare-number years are checked; ES's max year is 292278993
@@ -346,6 +343,8 @@ fn parse_kind(kind: &str, body: &Value) -> Result<Query, QueryError> {
                 gte: get("gte"),
                 lt: get("lte").map_or_else(|| get("lt"), |_| None),
                 lte: get("lte"),
+                format: p.get("format").and_then(Value::as_str).map(Into::into),
+                time_zone,
             })
         }
         "bool" => {

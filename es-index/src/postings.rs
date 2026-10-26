@@ -324,7 +324,12 @@ impl crate::Index {
         bounds: [Option<&Value>; 4],
     ) -> Option<HashSet<String>> {
         let key = Key::of(self.mappings.field(field)?)?;
-        let read = |b: Option<&Value>| b.map_or(Some(None), |b| key.read(b).map(Some));
+        // a date range's bounds are epoch millis once resolved (es-query's `resolve_dates`)
+        let read_bound = |b: &Value| match (&key, b.as_i64()) {
+            (Key::Date(..), Some(t)) => Key::Number.read(&t.into()),
+            _ => key.read(b),
+        };
+        let read = |b: Option<&Value>| b.map_or(Some(None), |b| read_bound(b).map(Some));
         let [gt, gte, lt, lte] = bounds.map(read);
         // Inclusive bounds narrow to a superset; scoring checks each candidate.
         let lo = gt?.max(gte?).unwrap_or(i64::MIN);

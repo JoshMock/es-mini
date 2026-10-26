@@ -73,6 +73,17 @@ impl TimeZone {
         out
     }
 
+    /// The instant of local time `local`, like java.time's `ZonedDateTime.ofLocal`: in an overlap
+    /// the one at offset `prefer` if valid, else the earlier; in a gap, later by the gap's length.
+    pub fn at_local(&self, local: i64, prefer: i64) -> i64 {
+        let instants = self.instants(local);
+        match instants.iter().find(|&&t| local - t == prefer) {
+            Some(&t) => t,
+            None => (instants.first().copied())
+                .unwrap_or_else(|| local - self.offset(self.gap_start(local) - 1)),
+        }
+    }
+
     /// The transition that skips local time `local` (which [`TimeZone::instants`] has none of).
     pub fn gap_start(&self, local: i64) -> i64 {
         let i = self.transitions.partition_point(|&(at, o)| at + o <= local);

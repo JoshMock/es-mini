@@ -75,7 +75,7 @@ fn resolve(index: &Index, field: &str, sample: impl Fn(&str) -> Option<Value>) -
         Some(FieldMapping::Text { .. } | FieldMapping::TextKeyword { .. }) => Kind::Text,
         Some(FieldMapping::Keyword { .. }) => Kind::Keyword,
         Some(FieldMapping::Boolean) => Kind::Bool,
-        // ponytail: dates match and sort as their JSON values (only range parses instants); no date math
+        // ponytail: dates match and sort as their JSON values; only ranges read instants
         Some(FieldMapping::Date { .. } | FieldMapping::DateNanos { .. }) => Kind::Keyword,
         // ponytail: ips match as their JSON strings; no CIDR or address normalization in queries
         Some(FieldMapping::Ip) => Kind::Keyword,
@@ -339,6 +339,7 @@ impl<'a> Searcher<'a> {
                 gte,
                 lt,
                 lte,
+                ..
             } => self.number_docs(field, [gt, gte, lt, lte].map(Option::as_ref), exact),
             Query::Match { field, query, and } => {
                 let (kind, _) = self.kind(field);
@@ -401,6 +402,7 @@ impl<'a> Searcher<'a> {
                 gte,
                 lt,
                 lte,
+                ..
             } => numbers(field, [gt, gte, lt, lte].map(Option::as_ref)),
             Query::Match { field, query, and } => {
                 lookup(field, &query_terms(self.kind(field).0, query), *and)
@@ -482,7 +484,8 @@ impl<'a> Searcher<'a> {
                     None => scalar_cmp(v, b),
                     // as scoring does, a bound that is not a date is above every value
                     Some(instant) => {
-                        (v.as_i64().zip(instant(b))).map_or(Ordering::Less, |(x, y)| x.cmp(&y))
+                        let bound = b.as_i64().or_else(|| instant(b));
+                        (v.as_i64().zip(bound)).map_or(Ordering::Less, |(x, y)| x.cmp(&y))
                     }
                 })
             },
@@ -685,12 +688,14 @@ impl<'a> Searcher<'a> {
                 gte,
                 lt,
                 lte,
+                ..
             } => {
                 let (_, path) = self.kind(field);
                 let instant = self.instant(field);
                 let cmp = |a: &Value, b: &Value| match &instant {
                     None => scalar_cmp(a, b),
-                    Some(instant) => match (instant(a), instant(b)) {
+                    // date bounds are epoch millis once resolved (see `resolve_dates`)
+                    Some(instant) => match (instant(a), b.as_i64().or_else(|| instant(b))) {
                         (Some(x), Some(y)) => x.cmp(&y),
                         _ => Ordering::Less,
                     },
@@ -887,6 +892,8 @@ pub enum ErrorKind {
     XContentParse,
     /// `too_many_buckets_exception`, past `search.max_buckets`
     TooManyBuckets,
+    /// `parse_exception`, such as a date that does not parse
+    Parse,
 }
 
 /// ES's `search.max_buckets`: a search fails rather than render more aggregation buckets.
@@ -1075,8 +1082,13 @@ pub struct SearchResult<'a> {
 pub type Target<'a> = (&'a str, &'a Index, Option<&'a Value>);
 
 /// The request query, narrowed by an alias filter.
-fn with_filter(q: &Query, filter: Option<&Value>) -> Result<Query, QueryError> {
-    Ok(match filter {
+fn with_filter(
+    index: &Index,
+    q: &Query,
+    filter: Option<&Value>,
+    now: i64,
+) -> Result<Query, QueryError> {
+    let q = match filter {
         None => q.clone(),
         Some(f) => Query::Bool {
             must: vec![q.clone()],
@@ -1085,6 +1097,106 @@ fn with_filter(q: &Query, filter: Option<&Value>) -> Result<Query, QueryError> {
             filter: vec![parse_query(f)?],
             min_should: 0,
         },
+    };
+    resolve_dates(index, q, now)
+}
+
+/// The current time in epoch millis, for date math's `now`.
+fn now_millis() -> i64 {
+    let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
+    since.map_or(0, |d| d.as_millis() as i64)
+}
+
+/// `q` with the bounds of ranges on date fields of `index` resolved to inclusive epoch millis,
+/// like ES's DateFieldType.dateRangeQuery: read with the query's `format` (epoch_millis if a
+/// bound is a number), else the field's, in the query's `time_zone`, with date math from `now`;
+/// `gt` and `lte` round up.
+// ponytail: filter aggregations' queries are not resolved, so their date ranges skip date math
+fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, QueryError> {
+    let all = |qs: Vec<Query>| -> Result<Vec<Query>, QueryError> {
+        qs.into_iter()
+            .map(|c| resolve_dates(index, c, now))
+            .collect()
+    };
+    Ok(match q {
+        Query::Bool {
+            must,
+            should,
+            must_not,
+            filter,
+            min_should,
+        } => Query::Bool {
+            must: all(must)?,
+            should: all(should)?,
+            must_not: all(must_not)?,
+            filter: all(filter)?,
+            min_should,
+        },
+        Query::Named { name, query } => Query::Named {
+            name,
+            query: Box::new(resolve_dates(index, *query, now)?),
+        },
+        Query::Range {
+            field,
+            gt,
+            gte,
+            lt,
+            lte,
+            format,
+            time_zone,
+        } => {
+            let (Some(FieldMapping::Date {
+                format: f, locale, ..
+            })
+            | Some(FieldMapping::DateNanos { format: f, locale })) = index.mappings.field(&field)
+            else {
+                return Ok(Query::Range {
+                    field,
+                    gt,
+                    gte,
+                    lt,
+                    lte,
+                    format,
+                    time_zone,
+                });
+            };
+            let number = [&gt, &gte, &lt, &lte]
+                .iter()
+                .any(|b| b.as_ref().is_some_and(Value::is_number));
+            let format = (format.as_deref())
+                .or(number.then_some("epoch_millis"))
+                .or(f.as_deref());
+            let tz = time_zone.unwrap_or(es_index::tz::TimeZone::UTC);
+            let millis = |b: Option<Value>, round_up| {
+                let parse = |b: Value| {
+                    es_index::date_math::parse(
+                        &text(&b),
+                        format,
+                        locale.as_deref(),
+                        &tz,
+                        round_up,
+                        now,
+                    )
+                };
+                b.map(parse).transpose().map_err(|msg| QueryError {
+                    kind: ErrorKind::Parse,
+                    msg,
+                })
+            };
+            // parse_query keeps one of `gt` and `gte`, and of `lt` and `lte`
+            let lo = millis(gte, false)?.or(millis(gt, true)?.map(|t| t.saturating_add(1)));
+            let hi = millis(lte, true)?.or(millis(lt, false)?.map(|t| t.saturating_sub(1)));
+            Query::Range {
+                field,
+                gt: None,
+                gte: lo.map(Value::from),
+                lt: None,
+                lte: hi.map(Value::from),
+                format: None,
+                time_zone: None,
+            }
+        }
+        q => q,
     })
 }
 
@@ -1288,6 +1400,7 @@ pub fn search_many<'a>(
     targets: &[Target<'a>],
     req: &SearchRequest,
 ) -> Result<SearchResult<'a>, QueryError> {
+    let now = now_millis();
     let by_score = req.sort.is_empty() || req.sort.iter().any(|f| f.field == "_score");
     let mut hits = Vec::new();
     let mut searchers = HashMap::new();
@@ -1295,7 +1408,7 @@ pub fn search_many<'a>(
     let mut profile = req.profile.then(Vec::new);
     let mut failures = Vec::new();
     for (pos, (name, index, filter)) in targets.iter().enumerate() {
-        let query = with_filter(&req.query, *filter)?;
+        let query = with_filter(index, &req.query, *filter, now)?;
         let mut s = Searcher::unscored(index, &query);
         if by_score || !req.aggs.is_empty() {
             s.gather(&query);
@@ -1390,9 +1503,10 @@ pub fn count(index: &Index, q: &Query) -> usize {
 /// Counts from postings and doc values where they answer the query exactly, on disk and in
 /// memory separately; the documents of the other are read and matched.
 pub fn count_many(targets: &[Target], q: &Query) -> Result<usize, QueryError> {
+    let now = now_millis();
     let mut n = 0;
     for (_, index, filter) in targets {
-        let q = with_filter(q, *filter)?;
+        let q = with_filter(index, q, *filter, now)?;
         let mut s = Searcher::unscored(index, &q);
         let (disk, memory) = index.live();
         let on_disk = exact(&q, &disk, &|c| s.disk_leaf(c));
@@ -1588,8 +1702,14 @@ mod tests {
         disk::save(&dir, &Indices::from([("i".to_owned(), ix)])).unwrap();
         let opened = disk::open(&dir).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
-        let q = json!({"range": {"d": {"gte": 1_704_067_200, "lte": 1_704_067_200}}});
-        assert_eq!(count(&opened["i"], &parse_query(&q).unwrap()), 1);
+        let n = |b: Value| {
+            let q = json!({"range": {"d": {"gte": b, "lte": b}}});
+            count(&opened["i"], &parse_query(&q).unwrap())
+        };
+        assert_eq!(n(json!("1704067200")), 1);
+        // as in Elasticsearch, number bounds are epoch millis whatever the mapping's format
+        assert_eq!(n(json!(1_704_067_200)), 0);
+        assert_eq!(n(json!(1_704_067_200_000_i64)), 1);
     }
 
     #[test]

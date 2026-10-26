@@ -2,6 +2,7 @@
 
 pub mod aliases;
 pub mod analysis;
+pub mod date_math;
 pub mod disk;
 pub mod filter_path;
 pub mod mapping;
@@ -801,15 +802,15 @@ pub fn iso_date(millis: i64) -> String {
     format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{sec:02}.{milli:03}Z")
 }
 
-/// A Java DateTimeFormatter pattern as runs of a field letter (`y`, `M`, `d`, `H`, `m`, `s`,
-/// `S`) and its width, or of literal text (width 0); `None` for other letters.
+/// A Java DateTimeFormatter pattern as runs of a field letter (`y`, `u`, `M`, `d`, `H`, `m`,
+/// `s`, `S`) and its width, or of literal text (width 0); `None` for other letters.
 // ponytail: numeric fields only; no month or day names, zones, or optional sections
 fn pattern_runs(pattern: &str) -> Option<Vec<(char, usize, String)>> {
     let mut runs: Vec<(char, usize, String)> = vec![];
     let mut chars = pattern.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
-            'y' | 'M' | 'd' | 'H' | 'm' | 's' | 'S' => match runs.last_mut() {
+            'y' | 'u' | 'M' | 'd' | 'H' | 'm' | 's' | 'S' => match runs.last_mut() {
                 Some((l, n, _)) if *l == c => *n += 1,
                 _ => runs.push((c, 1, String::new())),
             },
@@ -825,8 +826,18 @@ fn pattern_runs(pattern: &str) -> Option<Vec<(char, usize, String)>> {
 }
 
 /// Epoch milliseconds (UTC) of `s` in a Java date pattern of numeric fields (see `pattern_runs`).
-pub fn parse_pattern(pattern: &str, mut s: &str) -> Option<i64> {
-    let [mut y, mut mo, mut d, mut h, mut mi, mut sec, mut ms] = [1970, 1, 1, 0, 0, 0, 0];
+pub fn parse_pattern(pattern: &str, s: &str) -> Option<i64> {
+    parse_pattern_local(pattern, s, false)
+}
+
+/// [`parse_pattern`]'s local epoch millis; with `round_up`, missing time fields default to
+/// 23:59:59.999 like ES's round-up parser.
+fn parse_pattern_local(pattern: &str, mut s: &str, round_up: bool) -> Option<i64> {
+    let [mut y, mut mo, mut d] = [1970, 1, 1];
+    let [mut h, mut mi, mut sec, mut ms] = match round_up {
+        true => [23, 59, 59, 999],
+        false => [0; 4],
+    };
     for (c, n, text) in pattern_runs(pattern)? {
         if n == 0 {
             s = s.strip_prefix(text.as_str())?;
@@ -839,7 +850,7 @@ pub fn parse_pattern(pattern: &str, mut s: &str) -> Option<i64> {
         s = rest;
         let v: i64 = digits.parse().ok()?;
         match c {
-            'y' => y = v,
+            'y' | 'u' => y = v,
             'M' => mo = v,
             'd' => d = v,
             'H' => h = v,
@@ -860,8 +871,8 @@ pub fn format_pattern(pattern: &str, t: i64) -> Option<String> {
     let mut out = String::new();
     for (c, n, text) in pattern_runs(pattern)? {
         let v = match c {
-            'y' if n == 2 => y.rem_euclid(100),
-            'y' => y,
+            'y' | 'u' if n == 2 => y.rem_euclid(100),
+            'y' | 'u' => y,
             'M' => mo,
             'd' => d,
             'H' => ms / 3_600_000,
@@ -911,6 +922,17 @@ pub fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 /// string `yyyy[-MM[-dd[THH[:mm[:ss[.S+]]][Z|+HH[:mm]|-HH[:mm]]]]]`.
 // ponytail: the mapping's `format` is ignored; numeric strings are not read as epoch_millis
 pub fn parse_date_millis(v: &serde_json::Value) -> Option<i64> {
+    let Some(s) = v.as_str() else {
+        return v.as_i64();
+    };
+    let (local, offset) = parse_iso(s, false)?;
+    Some(local - offset.unwrap_or(0))
+}
+
+/// The local epoch millis of a `strict_date_optional_time` string and the offset it gives, if
+/// any. Missing fields default to the start of the year, or with `round_up` to 23:59:59.999 of
+/// its first day, like ES's round-up parser.
+fn parse_iso(mut s: &str, round_up: bool) -> Option<(i64, Option<i64>)> {
     fn num(s: &mut &str, n: usize) -> Option<i64> {
         let (d, rest) = s.split_at_checked(n)?;
         if !d.bytes().all(|b| b.is_ascii_digit()) {
@@ -922,19 +944,13 @@ pub fn parse_date_millis(v: &serde_json::Value) -> Option<i64> {
     fn eat(s: &mut &str, c: char) -> bool {
         s.strip_prefix(c).inspect(|r| *s = r).is_some()
     }
-    let Some(mut s) = v.as_str() else {
-        return v.as_i64();
-    };
     let y = num(&mut s, 4)?;
-    let [
-        mut m,
-        mut day,
-        mut h,
-        mut min,
-        mut sec,
-        mut milli,
-        mut offset,
-    ] = [1, 1, 0, 0, 0, 0, 0];
+    let [mut m, mut day] = [1, 1];
+    let [mut h, mut min, mut sec, mut milli] = match round_up {
+        true => [23, 59, 59, 999],
+        false => [0; 4],
+    };
+    let mut offset = None;
     if eat(&mut s, '-') {
         m = num(&mut s, 2)?;
         if eat(&mut s, '-') {
@@ -963,11 +979,11 @@ pub fn parse_date_millis(v: &serde_json::Value) -> Option<i64> {
                     0
                 };
                 if sign == 0 {
-                    eat(&mut s, 'Z');
+                    offset = eat(&mut s, 'Z').then_some(0);
                 } else {
                     let oh = num(&mut s, 2)?;
                     let om = if eat(&mut s, ':') { num(&mut s, 2)? } else { 0 };
-                    offset = sign * (oh * 60 + om);
+                    offset = Some(sign * (oh * 60 + om) * 60_000);
                 }
             }
         }
@@ -976,7 +992,10 @@ pub fn parse_date_millis(v: &serde_json::Value) -> Option<i64> {
         return None;
     }
     let days = days_from_civil(y, m, day);
-    Some(((days * 24 + h) * 60 + min - offset) * 60_000 + sec * 1000 + milli)
+    Some((
+        ((days * 24 + h) * 60 + min) * 60_000 + sec * 1000 + milli,
+        offset,
+    ))
 }
 
 const MONTHS: [(&str, [&str; 12]); 2] = [
@@ -1014,16 +1033,34 @@ fn parse_dated(v: &Value, locale: &str) -> Option<i64> {
 
 /// Epoch millis of a value of a date field with `format` and `locale`.
 pub fn date_millis(format: Option<&str>, locale: Option<&str>, v: &Value) -> Option<i64> {
+    date_millis_in(format, locale, v, &tz::TimeZone::UTC, false)
+}
+
+/// [`date_millis`] of a value without an offset of its own in time zone `tz`, missing fields
+/// rounded up with `round_up` (see [`parse_iso`]).
+pub(crate) fn date_millis_in(
+    format: Option<&str>,
+    locale: Option<&str>,
+    v: &Value,
+    tz: &tz::TimeZone,
+    round_up: bool,
+) -> Option<i64> {
+    let local = |l: i64| tz.at_local(l, 0);
+    let iso = |s: &str| parse_iso(s, round_up).map(|(l, o)| o.map_or_else(|| local(l), |o| l - o));
     let Some(format) = format else {
-        return parse_date_millis(v);
+        // strict_date_optional_time||epoch_millis
+        return v
+            .as_str()
+            .map_or_else(|| v.as_i64(), |s| iso(s).or_else(|| s.parse().ok()));
     };
     (format.split("||"))
         .find_map(|f| match f {
             "epoch_millis" => json_num(v).map(|x| x as i64),
-            "epoch_second" => json_num(v).map(|x| (x * 1000.0) as i64),
+            "epoch_second" => json_num(v)
+                .map(|x| (x * 1000.0) as i64 + if round_up && x.fract() == 0.0 { 999 } else { 0 }),
             // ponytail: other named formats (`strict_date_time`, ...) parse as the default format
-            _ if format_pattern(f, 0).is_none() => v.as_str().and_then(|_| parse_date_millis(v)),
-            _ => parse_pattern(f, v.as_str()?),
+            _ if format_pattern(f, 0).is_none() => iso(v.as_str()?),
+            _ => parse_pattern_local(f, v.as_str()?, round_up).map(local),
         })
         .or_else(|| parse_dated(v, locale.unwrap_or("en")))
 }
