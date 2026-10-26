@@ -1,6 +1,6 @@
 //! ES|QL subset: `FROM` (with `METADATA _id, _index, _version`), `ROW` and `SHOW INFO`, with
 //! `WHERE`, `EVAL`, `LIMIT`, `KEEP`, `DROP`, `RENAME`, `SORT`, and `STATS ... [BY ...]` over
-//! `COUNT(*)`, `MIN` and `MAX`.
+//! `COUNT`, `MIN`, `MAX`, `SUM` and `AVG`.
 //!
 //! Expressions support comparisons (`== != < <= > >=`), `AND`/`OR`/`NOT`, parentheses,
 //! `IS [NOT] NULL`, arithmetic, and the functions in `CONVERSIONS` and `SCALAR_FNS` over field
@@ -286,7 +286,7 @@ enum Command {
     /// `old AS new` (or `new = old`) pairs, each with its text.
     Rename(Vec<(Name, String, String)>),
     Sort(Vec<SortKey>),
-    /// Aggregates (`COUNT(*)`, `MIN` or `MAX`), then the named grouping expressions.
+    /// Aggregates (`COUNT`, `MIN`, `MAX`, `SUM` or `AVG`), then the named grouping expressions.
     Stats(Vec<(String, Expr)>, Vec<(String, Expr)>),
 }
 
@@ -1872,20 +1872,15 @@ fn resolve(
     }
 }
 
-/// Whether `e` is `COUNT(*)`.
-fn count_star(e: &Expr) -> bool {
-    matches!(e, Expr::Call(f, args, ..)
-        if f.eq_ignore_ascii_case("count") && matches!(&args[..], [Expr::Field(s, _)] if s == "*"))
-}
-
-/// For `MIN(x)` or `MAX(x)`, the multi-value function it applies per group, and `x`.
-fn min_max(e: &Expr) -> Option<(&'static str, &Expr)> {
-    match e {
-        Expr::Call(f, args, ..) if args.len() == 1 => match f.to_ascii_uppercase().as_str() {
-            "MIN" => Some(("MV_MIN", &args[0])),
-            "MAX" => Some(("MV_MAX", &args[0])),
-            _ => None,
-        },
+/// A STATS aggregate's function, upper case, and its argument (`None` for `COUNT(*)`).
+fn aggregate(e: &Expr) -> Option<(String, Option<&Expr>)> {
+    let Expr::Call(f, args, ..) = e else {
+        return None;
+    };
+    let f = f.to_ascii_uppercase();
+    match (f.as_str(), &args[..]) {
+        ("COUNT", [Expr::Field(s, _)]) if s == "*" => Some((f, None)),
+        ("COUNT" | "MIN" | "MAX" | "SUM" | "AVG", [arg]) => Some((f, Some(arg))),
         _ => None,
     }
 }
@@ -2047,21 +2042,21 @@ pub fn run(
             }
             Command::Limit(_) => Vec::new(),
             Command::Stats(aggs, by) => {
-                // ponytail: COUNT(*), MIN and MAX are the only aggregates; the esql-stats goal
-                // adds the rest
+                // ponytail: COUNT, MIN, MAX, SUM and AVG are the only aggregates; the esql-stats
+                // goal adds the rest
                 let mut bad = Vec::new();
                 let mut out = Vec::new();
                 for (name, e) in aggs {
-                    if count_star(e) {
-                        out.push((name.clone(), "long".to_owned()));
-                        continue;
-                    }
-                    let Some((_, arg)) = min_max(e) else {
+                    let Some((f, arg)) = aggregate(e) else {
                         let msg = format!(
                             "[{}] is not supported by es-mini in STATS",
                             &query[span(e).1.clone()]
                         );
                         bad.push((span(e).0, msg));
+                        continue;
+                    };
+                    let Some(arg) = arg else {
+                        out.push((name.clone(), "long".to_owned()));
                         continue;
                     };
                     let mut refs = Vec::new();
@@ -2070,11 +2065,34 @@ pub fn run(
                         refs.into_iter()
                             .filter_map(|(f, at)| Some((at, check(&cols, &conflicts, &f)?))),
                     );
-                    if bad.is_empty()
-                        && let Some(t) = resolve(arg, query, &types, &mut bad)
-                    {
-                        out.push((name.clone(), t));
+                    if !bad.is_empty() {
+                        continue;
                     }
+                    let Some(t) = resolve(arg, query, &types, &mut bad) else {
+                        continue;
+                    };
+                    let numeric =
+                        t == "null" || (NUMERIC.contains(&t.as_str()) && t != "unsigned_long");
+                    if (f == "SUM" || f == "AVG") && !numeric {
+                        bad.push((
+                            span(e).0,
+                            format!(
+                                "argument of [{}] must be [aggregate_metric_double, \
+                                 exponential_histogram, tdigest or numeric except unsigned_long \
+                                 or counter types], found value [{}] type [{t}]",
+                                &query[span(e).1.clone()],
+                                &query[span(arg).1.clone()]
+                            ),
+                        ));
+                        continue;
+                    }
+                    let t = match f.as_str() {
+                        "COUNT" => "long".into(),
+                        "AVG" => "double".into(),
+                        "SUM" if t == "integer" => "long".into(),
+                        _ => t,
+                    };
+                    out.push((name.clone(), t));
                 }
                 for (name, e) in by {
                     let mut refs = Vec::new();
@@ -2165,24 +2183,43 @@ pub fn run(
                 if by.is_empty() && buckets.is_empty() {
                     buckets.push((Vec::new(), Vec::new()));
                 }
-                let agg = |e: &Expr, group: &[&Row]| match min_max(e) {
-                    // MIN and MAX are MV_MIN and MV_MAX over every value in the group.
-                    Some((f, arg)) => {
-                        let all = group.iter().filter_map(|r| eval(arg, r));
-                        let all = all.flat_map(|v| match v {
+                let agg = |name: &str, e: &Expr, group: &[&Row]| {
+                    let (f, arg) = aggregate(e).expect("STATS was verified");
+                    let Some(arg) = arg else {
+                        return group.len().into();
+                    };
+                    // Every value in the group: multi-values count value by value.
+                    let all = group.iter().filter_map(|r| eval(arg, r));
+                    let all: Vec<Value> = all
+                        .flat_map(|v| match v {
                             Value::Array(a) => a,
                             v => vec![v],
-                        });
-                        mv_fn(f, &Value::Array(all.collect())).unwrap_or(Value::Null)
+                        })
+                        .filter(|v| !v.is_null())
+                        .collect();
+                    let doubles = all.iter().filter_map(Value::as_f64);
+                    match f.as_str() {
+                        "COUNT" => all.len().into(),
+                        "MIN" | "MAX" => {
+                            mv_fn(&format!("MV_{f}"), &Value::Array(all)).unwrap_or(Value::Null)
+                        }
+                        _ if all.is_empty() => Value::Null,
+                        // ponytail: an overflowing long sum is null, where ES fails the query
+                        "SUM" if types[name] == "long" => all
+                            .iter()
+                            .try_fold(0i64, |s, v| s.checked_add(v.as_i64()?))
+                            .map_or(Value::Null, Value::from),
+                        // Doubles sum with Kahan compensation, like ES's CompensatedSum.
+                        "SUM" => crate::aggs::compensated_sum(doubles).into(),
+                        _ => (crate::aggs::compensated_sum(doubles) / all.len() as f64).into(),
                     }
-                    None => group.len().into(),
                 };
                 rows = buckets
                     .into_iter()
                     .map(|(key, group)| {
                         let mut r: Row = aggs
                             .iter()
-                            .map(|(a, e)| (a.clone(), agg(e, &group)))
+                            .map(|(a, e)| (a.clone(), agg(a, e, &group)))
                             .collect();
                         r.extend(by.iter().map(|(b, _)| b.clone()).zip(key));
                         Cow::Owned(r)

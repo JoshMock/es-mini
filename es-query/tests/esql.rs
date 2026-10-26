@@ -1237,6 +1237,33 @@ fn stats_min_max_by_groups() {
 }
 
 #[test]
+fn stats_count_sum_avg() {
+    let r = q("FROM people | STATS c = COUNT(city), s = SUM(age), a = AVG(age)");
+    let types: Vec<&str> = r.columns.iter().map(|c| c.r#type.as_str()).collect();
+    assert_eq!(types, ["long", "long", "double"]);
+    assert_eq!(r.values, [[json!(2), json!(96), json!(32.0)]]);
+    let r = q("FROM people | STATS a = AVG(age) BY has_city = city IS NOT NULL | SORT has_city");
+    assert_eq!(
+        r.values,
+        [[json!(25.0), json!(false)], [json!(35.5), json!(true)]]
+    );
+    // Multi-values count value by value; doubles sum to a double.
+    let r = q("ROW a = [1.5, 2.5] | STATS s = SUM(a), c = COUNT(a), m = AVG(a)");
+    assert_eq!(r.columns[0].r#type, "double");
+    assert_eq!(r.values, [[json!(4.0), json!(2), json!(2.0)]]);
+    let r = q("FROM people | WHERE age > 99 | STATS c = COUNT(age), s = SUM(age), a = AVG(age)");
+    assert_eq!(r.values, [[json!(0), Value::Null, Value::Null]]);
+    assert!(matches!(
+        run(&indices(), "FROM people | STATS s = SUM(name)"),
+        Err(EsqlError::Verification(m)) if m.contains(
+            "argument of [SUM(name)] must be [aggregate_metric_double, exponential_histogram, \
+             tdigest or numeric except unsigned_long or counter types], found value [name] type \
+             [keyword]"
+        )
+    ));
+}
+
+#[test]
 fn unary_minus_negates_expressions() {
     let r = q(
         "FROM people | EVAL neg = -age, n2 = -(age + 1), d = -TO_DOUBLE(age), p = +age | KEEP neg, n2, d, p | SORT neg",

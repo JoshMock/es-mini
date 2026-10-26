@@ -940,6 +940,13 @@ fn kahan(sum: &mut f64, delta: &mut f64, x: f64) {
     }
 }
 
+/// The Kahan-compensated sum of `xs`.
+pub(crate) fn compensated_sum(xs: impl IntoIterator<Item = f64>) -> f64 {
+    let (mut sum, mut delta) = (0.0, 0.0);
+    xs.into_iter().for_each(|x| kahan(&mut sum, &mut delta, x));
+    sum
+}
+
 impl Stats {
     fn add(&mut self, x: f64) {
         kahan(&mut self.sum, &mut self.delta, x);
