@@ -63,7 +63,7 @@ pub fn field_terms(source: &Value, path: &str, analyzed: bool) -> Vec<String> {
     terms(analyzed, &values(source, path))
 }
 
-/// BM25 statistics of one field, counting superseded documents like Lucene's unmerged segments.
+/// BM25 statistics of one field, counting superseded documents like Elasticsearch's soft deletes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FieldStats {
     /// Documents with at least one term.
@@ -77,8 +77,8 @@ pub struct FieldStats {
 struct Field {
     /// Term → ids of live documents containing it.
     docs: HashMap<String, HashSet<String>>,
-    /// Live document id → its distinct terms and term count.
-    live: HashMap<String, (HashSet<String>, usize)>,
+    /// Live document id → its distinct terms.
+    live: HashMap<String, HashSet<String>>,
     /// Statistics over live and superseded documents.
     doc_count: f64,
     total_terms: f64,
@@ -103,12 +103,12 @@ impl Field {
         }
         self.doc_count += counted;
         self.total_terms += counted * count as f64;
-        self.live.insert(id.to_owned(), (distinct, count));
+        self.live.insert(id.to_owned(), distinct);
     }
 
-    /// Unlinks a replaced or deleted document; its statistics stay until [`Field::merge`].
+    /// Unlinks a replaced or deleted document; its statistics stay.
     fn remove(&mut self, id: &str) {
-        for t in self.live.remove(id).map(|l| l.0).into_iter().flatten() {
+        for t in self.live.remove(id).into_iter().flatten() {
             if let Some(ids) = self.docs.get_mut(&t) {
                 ids.remove(id);
                 if ids.is_empty() {
@@ -116,17 +116,6 @@ impl Field {
                 }
             }
         }
-    }
-
-    /// Statistics of live documents only, after superseded ones are dropped.
-    fn merge(&mut self) {
-        self.doc_count = self.live.len() as f64;
-        self.total_terms = self.live.values().map(|l| l.1 as f64).sum();
-        self.doc_freq = self
-            .docs
-            .iter()
-            .map(|(t, ids)| (t.clone(), ids.len() as f64))
-            .collect();
     }
 }
 
@@ -137,8 +126,6 @@ pub struct Postings(HashMap<(String, bool), Field>);
 impl Postings {
     /// The postings of `path`, built from `live` documents and `superseded` sources if new.
     /// Live documents with ids in `uncounted` are left out of the statistics.
-    // ponytail: `uncounted` (a snapshot's documents from disk) is not kept out by a later
-    // Field::merge, since snapshots take no writes
     fn field<'d>(
         &mut self,
         path: &str,
@@ -173,10 +160,6 @@ impl Postings {
 
     pub(crate) fn remove(&mut self, id: &str) {
         self.0.values_mut().for_each(|f| f.remove(id));
-    }
-
-    pub(crate) fn merge(&mut self) {
-        self.0.values_mut().for_each(Field::merge);
     }
 }
 
@@ -297,22 +280,31 @@ mod tests {
         assert!(ids(i.memory_docs("t", true, &["lazy".into()], false)).is_empty());
     }
 
-    /// Like Lucene's unmerged segments: replaced and deleted docs still count until merged.
+    /// Like Elasticsearch's soft deletes, replaced and deleted docs still count: merges keep
+    /// them while they are above the last commit's checkpoint. The numbers are Elasticsearch
+    /// 9.5.5's (`explain` of a match query, writes with `refresh=true`).
     #[test]
-    fn stats_count_superseded_docs_until_merged() {
+    fn stats_count_superseded_docs_like_soft_deletes() {
+        let stats = |i: &Index| {
+            let s = i.field_stats("t", "t", true, &["fox".into()]).unwrap();
+            (s.docs, s.total_terms, s.doc_freq["fox"])
+        };
         let mut i = Index::default();
-        for n in 0..6 {
+        i.put("1", json!({"t": "fox"}));
+        i.put("2", json!({"t": "fox dog"}));
+        i.delete("1");
+        assert_eq!(stats(&i), (2.0, 3.0, 2.0));
+        i.put("2", json!({"t": "fox cat"}));
+        assert_eq!(stats(&i), (3.0, 5.0, 3.0));
+
+        let mut i = Index::default();
+        for n in 1..=12 {
             i.put(&n.to_string(), json!({"t": "fox fox"}));
         }
-        i.put("0", json!({"t": "cat"}));
-        let s = i
-            .field_stats("t", "t", true, &["fox".into(), "cat".into()])
-            .unwrap();
-        assert_eq!((s.docs, s.total_terms), (7.0, 13.0));
-        assert_eq!((s.doc_freq["fox"], s.doc_freq["cat"]), (6.0, 1.0));
-        i.delete("1");
-        i.delete("2"); // 3 superseded of 7 physical docs: past a third, so merged away
-        let s = i.field_stats("t", "t", true, &["fox".into()]).unwrap();
-        assert_eq!((s.docs, s.total_terms, s.doc_freq["fox"]), (4.0, 7.0, 3.0));
+        for n in 1..=10 {
+            i.put(&n.to_string(), json!({"t": "fox"}));
+        }
+        // 10 superseded of 22 physical docs, all still counted.
+        assert_eq!(stats(&i), (22.0, 34.0, 22.0));
     }
 }

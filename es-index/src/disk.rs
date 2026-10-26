@@ -132,10 +132,6 @@ fn document(d: &DiskDoc, source: Option<Vec<u8>>) -> es_codec::Result<Document> 
 }
 
 impl Shard {
-    pub(crate) fn len(&self) -> usize {
-        self.ids.len()
-    }
-
     pub(crate) fn ids(&self) -> impl Iterator<Item = &str> {
         self.ids.keys().map(String::as_str)
     }

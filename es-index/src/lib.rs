@@ -200,9 +200,10 @@ pub struct Index {
     /// The segments of an index opened from disk, serving the documents not written since.
     disk: Option<disk::Shard>,
     /// Sources of updated/deleted docs that were in memory, kept for BM25 statistics like
-    /// Lucene's unmerged segments (`stats` counts those on disk).
-    // ponytail: a "merge" drops them all once they pass a third of all physical docs, roughly
-    // ES's default merge policy; real merges are per segment and less predictable
+    /// Elasticsearch's soft deletes, which merges keep above the last commit's checkpoint
+    /// (`stats` counts those on disk).
+    // ponytail: never dropped in an index without a data directory, which never commits;
+    // Elasticsearch drops them once a flush and a retention lease renewal let a merge do so
     superseded: Vec<Value>,
     /// Version and deletion time of deleted docs, kept for `index.gc_deletes` (default 60s) so
     /// a re-created doc continues the version count, as in ES.
@@ -255,11 +256,6 @@ impl Index {
             return Some(Some(d.source));
         }
         self.disk.as_mut()?.remove(id).map(|_| None)
-    }
-
-    /// Number of live documents.
-    fn len(&self) -> usize {
-        self.docs.len() + self.disk.as_ref().map_or(0, disk::Shard::len)
     }
 
     fn next_seq_no(&mut self) -> u64 {
@@ -331,7 +327,7 @@ impl Index {
         );
         match old {
             Some(old) => {
-                self.supersede(old);
+                self.superseded.extend(old);
                 DocResult::Updated
             }
             None => DocResult::Created,
@@ -590,19 +586,6 @@ impl Index {
         }
     }
 
-    fn supersede(&mut self, old: Option<Value>) {
-        let Some(old) = old else { return };
-        self.superseded.push(old);
-        // superseded / (live + superseded) > 1/3
-        if self.superseded.len() * 2 > self.len() {
-            self.superseded.clear();
-            self.postings
-                .get_mut()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .merge();
-        }
-    }
-
     /// Sources of in-memory documents that were updated or deleted (see `superseded`).
     pub fn superseded(&self) -> &[Value] {
         &self.superseded
@@ -634,7 +617,7 @@ impl Index {
         self.tombstone_order.push_back((id.to_owned(), now));
         match self.take(id) {
             Some(old) => {
-                self.supersede(old);
+                self.superseded.extend(old);
                 DocResult::Deleted
             }
             None => DocResult::NotFound,
@@ -1170,20 +1153,6 @@ mod tests {
         assert_eq!(idx.delete("1"), w(DocResult::Deleted, 3, 2));
         assert!(idx.get("1").is_none());
         assert_eq!(idx.delete("1"), w(DocResult::NotFound, 4, 3));
-    }
-
-    #[test]
-    fn superseded_docs_are_dropped_past_a_third_of_all_docs() {
-        let mut idx = Index::default();
-        for id in ["a", "b", "c"] {
-            idx.put(id, json!({}));
-        }
-        idx.put("a", json!({"v": 2}));
-        // 1 superseded of 4 physical docs: kept, like an unmerged segment.
-        assert_eq!(idx.superseded().len(), 1);
-        idx.delete("b");
-        // 2 of 4 exceeds a third: "merged" away.
-        assert_eq!(idx.superseded().len(), 0);
     }
 
     #[test]
