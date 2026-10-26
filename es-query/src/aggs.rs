@@ -504,14 +504,14 @@ pub struct Agg {
 }
 
 /// `aggs` with the queries of their filter aggregations resolved for `index` (see
-/// [`crate::resolve_dates`]).
+/// [`crate::dates::resolve_dates`]).
 pub(crate) fn resolve_dates(
     aggs: &[Agg],
     index: &es_index::Index,
     now: i64,
 ) -> Result<Vec<Agg>, QueryError> {
     let resolve = |q: &mut Query| -> Result<(), QueryError> {
-        *q = crate::resolve_dates(index, q.clone(), now)?;
+        *q = crate::dates::resolve_dates(index, q.clone(), now)?;
         Ok(())
     };
     (aggs.iter())
