@@ -5,6 +5,7 @@
 //! Values come from what the field's doc values hold: read from disk for documents in
 //! segments, and converted the same way from the source for documents in memory.
 
+mod bucket_sort;
 pub(crate) mod histogram;
 mod terms;
 
@@ -14,6 +15,7 @@ use crate::{
     MAX_BUCKETS, Query, QueryError, Searcher, SortField, fielddata_disabled, int, num, parse_query,
     source_path,
 };
+use bucket_sort::BucketSort;
 use es_index::{Document, FieldMapping, iso_date, postings::values};
 use histogram::Histogram;
 use serde_json::{Map, Value};
@@ -501,6 +503,8 @@ pub struct Agg {
     missing: Option<Value>,
     /// Sub-aggregations, computed per bucket.
     subs: Vec<Agg>,
+    /// A `bucket_sort` sub-aggregation, which orders and pages this aggregation's buckets.
+    bucket_sort: Option<BucketSort>,
 }
 
 /// `aggs` with the queries of their filter aggregations resolved for `index` (see
@@ -528,6 +532,22 @@ pub(crate) fn resolve_dates(
         .collect()
 }
 
+/// Parses the sub-aggregations of an aggregation: `bucket_sort` is kept apart from the rest, as
+/// it computes nothing per bucket.
+fn parse_subs(v: &Value) -> Result<(Vec<Agg>, Option<BucketSort>), QueryError> {
+    let (mut sort, mut rest) = (None, Map::new());
+    for (name, body) in v
+        .as_object()
+        .ok_or("Expected [START_OBJECT] under [aggregations]")?
+    {
+        match body.get("bucket_sort") {
+            Some(params) => sort = Some(BucketSort::parse(params)?),
+            None => drop(rest.insert(name.clone(), body.clone())),
+        }
+    }
+    Ok((parse(&rest.into())?, sort))
+}
+
 /// Parses the object under `aggs`/`aggregations`.
 pub(crate) fn parse(v: &Value) -> Result<Vec<Agg>, QueryError> {
     let aggs = v
@@ -546,6 +566,7 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
         .as_object()
         .ok_or_else(|| format!("Expected [START_OBJECT] under [{name}]"))?;
     let (mut meta, mut kind, mut subs) = (None, None, vec![]);
+    let mut bucket_sort = None;
     for (k, v) in body {
         match k.as_str() {
             "meta" if !v.is_object() => {
@@ -562,7 +583,7 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
                 .into());
             }
             "meta" => meta = Some(v.clone()),
-            "aggs" | "aggregations" => subs = parse(v)?,
+            "aggs" | "aggregations" => (subs, bucket_sort) = parse_subs(v)?,
             t => match kind {
                 Some((prev, _)) => {
                     return Err(format!(
@@ -617,7 +638,7 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
         "top_hits" => Metric::TopHits(Box::new(TopHits::parse(object()?)?)),
         _ => return Err(format!("Unknown aggregation type [{t}]").into()),
     };
-    if !subs.is_empty() && !metric.buckets() {
+    if (!subs.is_empty() || bucket_sort.is_some()) && !metric.buckets() {
         return Err(QueryError::illegal(format!(
             "Aggregator [{name}] of type [{t}] cannot accept sub-aggregations"
         )));
@@ -630,6 +651,7 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
             field: String::new(),
             missing: None,
             subs,
+            bucket_sort,
         });
     }
     let params = object()?;
@@ -792,6 +814,7 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
         field: field.to_owned(),
         missing: params.get("missing").cloned(),
         subs,
+        bucket_sort,
     })
 }
 
@@ -1921,6 +1944,11 @@ fn render_counted(
                 }
             }
         }
+        if let (Some(sort), Some(Value::Array(buckets))) =
+            (&agg.bucket_sort, body.get_mut("buckets"))
+        {
+            sort.apply(buckets)?;
+        }
         if let Metric::ExtendedStats { sigma } = agg.metric {
             extended_stats(&mut body, st, sigma);
         }
@@ -2352,6 +2380,34 @@ mod tests {
             let err = SearchRequest::parse(&body).unwrap_err();
             assert_eq!(err.msg, "[filters] cannot be empty.");
         }
+    }
+
+    #[test]
+    fn bucket_sort_orders_and_pages_the_buckets_of_its_parent() {
+        let aggs = |bucket_sort: Value| {
+            let body = json!({"aggs": {"f": {
+                "filters": {"keyed": false, "filters": {
+                    "a": {"term": {"k": "a"}},
+                    "b": {"term": {"k": "b"}},
+                    "c": {"match_all": {}},
+                }},
+                "aggs": {"m": {"max": {"field": "i"}}, "s": {"bucket_sort": bucket_sort}},
+            }}});
+            let aggs = aggs_of(&index(), body);
+            let keys = aggs["f"]["buckets"].as_array().unwrap().iter();
+            keys.map(|b| b["key"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(aggs(json!({"sort": [{"m": "desc"}]})), ["c", "b", "a"]);
+        assert_eq!(
+            aggs(json!({"sort": [{"m": {"order": "asc"}}]})),
+            ["a", "b", "c"]
+        );
+        assert_eq!(aggs(json!({"sort": "_count", "from": 1})), ["b", "c"]);
+        assert_eq!(
+            aggs(json!({"sort": {"_count": "desc"}, "size": 2})),
+            ["c", "b"]
+        );
     }
 
     #[test]
