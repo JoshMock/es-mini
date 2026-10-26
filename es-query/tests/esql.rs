@@ -1101,6 +1101,41 @@ fn to_datetime_and_now_match_elasticsearch() {
 }
 
 #[test]
+fn date_extract_and_date_format_match_elasticsearch() {
+    let r = q(
+        r#"ROW t = TO_DATETIME("2024-02-29T08:15:42.123Z") | EVAL y = DATE_EXTRACT("year", t), m = DATE_EXTRACT("MONTH_OF_YEAR", t), dw = DATE_EXTRACT("day_of_week", t), dy = DATE_EXTRACT("day_of_year", t), ms = DATE_EXTRACT("milli_of_second", t), f = DATE_FORMAT("yyyy/MM/dd HH:mm", t), d = DATE_FORMAT(t), n = DATE_EXTRACT("year", null) | DROP t"#,
+    );
+    let types: Vec<&str> = r.columns.iter().map(|c| c.r#type.as_str()).collect();
+    assert_eq!(
+        types,
+        [
+            "long", "long", "long", "long", "long", "keyword", "keyword", "long"
+        ]
+    );
+    assert_eq!(
+        r.values,
+        [[
+            json!(2024),
+            json!(2),
+            json!(4),
+            json!(60),
+            json!(123),
+            json!("2024/02/29 08:15"),
+            json!("2024-02-29T08:15:42.123Z"),
+            Value::Null
+        ]]
+    );
+    match run(&indices(), r#"ROW x = DATE_EXTRACT("year", 1)"#) {
+        Err(EsqlError::Verification(m)) => assert_eq!(
+            m,
+            "Found 1 problem\nline 1:9: second argument of [DATE_EXTRACT(\"year\", 1)] must be \
+             [datetime or date_nanos], found value [1] type [integer]"
+        ),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
 fn stats_count_star_by_groups() {
     let r = q("FROM people METADATA _index | STATS c = COUNT(*) BY _index");
     assert_eq!(col_names(&r), ["c", "_index"]);

@@ -1064,6 +1064,7 @@ fn eval(e: &Expr, row: &Row) -> Option<Value> {
                     "SUBSTRING" | "TRIM" | "CONCAT" | "LENGTH" | "TO_LOWER" | "TO_UPPER"
                     | "STARTS_WITH" | "ENDS_WITH" => string_fn(f, &args),
                     "MV_COUNT" | "MV_MIN" | "MV_MAX" => mv_fn(f, &args[0]),
+                    "DATE_EXTRACT" | "DATE_FORMAT" => date_fn(f, &args),
                     // ponytail: read per row; ES fixes `now` once per query
                     "NOW" => Some(es_index::iso_date(crate::dates::now_millis()).into()),
                     _ => math_fn(f, t, &args),
@@ -1154,8 +1155,10 @@ const CONVERSIONS: [(&str, &str); 6] = [
 ];
 
 /// The scalar functions and how many arguments they take.
-const SCALAR_FNS: [(&str, RangeInclusive<usize>); 19] = [
+const SCALAR_FNS: [(&str, RangeInclusive<usize>); 21] = [
     ("NOW", 0..=0),
+    ("DATE_EXTRACT", 2..=2),
+    ("DATE_FORMAT", 1..=2),
     ("CASE", 2..=usize::MAX),
     ("COALESCE", 1..=usize::MAX),
     ("CONCAT", 2..=usize::MAX),
@@ -1185,6 +1188,8 @@ fn accepts(f: &str, i: usize, t: &str) -> (&'static str, bool) {
             ("string", t == "keyword" || t == "text")
         }
         ("SUBSTRING", _) => ("integer", t == "integer"),
+        ("DATE_EXTRACT" | "DATE_FORMAT", 0) => ("string", t == "keyword" || t == "text"),
+        ("DATE_EXTRACT" | "DATE_FORMAT", _) => ("datetime or date_nanos", t == "date"),
         // ponytail: spatial types are not refused
         ("MV_COUNT" | "MV_MIN" | "MV_MAX", _) => ("any", true),
         ("ROUND", 1) => (
@@ -1334,6 +1339,43 @@ fn mv_fn(f: &str, v: &Value) -> Option<Value> {
     };
     vs.reduce(|a, b| if compare(b, a) == Some(pick) { b } else { a })
         .cloned()
+}
+
+/// `DATE_EXTRACT(part, date)` or `DATE_FORMAT([pattern,] date)` in UTC, like Elasticsearch's
+/// evaluators: `None` for a multi-valued argument (where ES warns).
+// ponytail: an unknown part or a pattern es_index::format_pattern lacks (names, zones) is null,
+// where ES fails the query or formats them
+fn date_fn(f: &str, args: &[Value]) -> Option<Value> {
+    const DAY: i64 = 86_400_000;
+    let t = es_index::parse_date_millis(args.last()?)?;
+    if f == "DATE_FORMAT" {
+        return match args {
+            [pattern, _] => es_index::format_pattern(pattern.as_str()?, t),
+            _ => Some(es_index::iso_date(t)),
+        }
+        .map(Value::from);
+    }
+    let (days, ms) = (t.div_euclid(DAY), t.rem_euclid(DAY));
+    let (y, m, d) = es_index::civil_from_days(days);
+    // Java's `ChronoField` names, matched ignoring case.
+    let v = match args[0].as_str()?.to_ascii_uppercase().as_str() {
+        "YEAR" => y,
+        "MONTH_OF_YEAR" => m,
+        "DAY_OF_MONTH" => d,
+        // ISO: Monday is 1, and 1970-01-01 was a Thursday.
+        "DAY_OF_WEEK" => (days + 3).rem_euclid(7) + 1,
+        "DAY_OF_YEAR" => days - es_index::days_from_civil(y, 1, 1) + 1,
+        "EPOCH_DAY" => days,
+        "HOUR_OF_DAY" => ms / 3_600_000,
+        "MINUTE_OF_DAY" => ms / 60_000,
+        "MINUTE_OF_HOUR" => ms / 60_000 % 60,
+        "SECOND_OF_DAY" => ms / 1000,
+        "SECOND_OF_MINUTE" => ms / 1000 % 60,
+        "MILLI_OF_DAY" => ms,
+        "MILLI_OF_SECOND" => ms % 1000,
+        _ => return None,
+    };
+    Some(v.into())
 }
 
 /// Java's `Character.isWhitespace`.
@@ -1599,7 +1641,9 @@ fn resolve(
                         Err(found) => Some(found),
                     },
                     _ => ts.iter().enumerate().find_map(|(i, ta)| {
-                        let (accepted, ok) = accepts(name, i, ta);
+                        // `DATE_FORMAT(date)` leaves out the format.
+                        let at = i + usize::from(*name == "DATE_FORMAT" && ts.len() == 1);
+                        let (accepted, ok) = accepts(name, at, ta);
                         (!ok).then(|| (i, accepted.to_owned()))
                     }),
                 };
@@ -1623,7 +1667,8 @@ fn resolve(
                 }
                 // The result type: a string, an integer, a double, or the first argument's.
                 let out = match *name {
-                    "SUBSTRING" | "CONCAT" | "TO_LOWER" | "TO_UPPER" => "keyword",
+                    "SUBSTRING" | "CONCAT" | "TO_LOWER" | "TO_UPPER" | "DATE_FORMAT" => "keyword",
+                    "DATE_EXTRACT" => "long",
                     "LENGTH" => "integer",
                     "STARTS_WITH" | "ENDS_WITH" => "boolean",
                     "TRIM" if ts[0] != "null" => "keyword",
