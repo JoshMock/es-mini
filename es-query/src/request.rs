@@ -28,6 +28,8 @@ pub struct SearchRequest {
     pub profile: bool,
     /// Body `fields`: the mapped fields each hit fetches.
     pub fields: Vec<String>,
+    /// Body `runtime_mappings`: names of the fields that emit the hit's `_source` as a string.
+    pub runtime_source: Vec<String>,
 }
 
 /// Which Elasticsearch error type a query failure maps to.
@@ -109,6 +111,7 @@ impl SearchRequest {
                     "aggregations",
                     "profile",
                     "fields",
+                    "runtime_mappings",
                 ]
                 .contains(&k.as_str())
             })
@@ -144,7 +147,11 @@ impl SearchRequest {
             Some(v) => crate::aggs::field_names(v).ok_or("[fields] must be field names")?,
         };
         crate::aggs::inherit_fields(&mut aggs, &fields);
+        let runtime_source = body
+            .get("runtime_mappings")
+            .map_or(Ok(vec![]), parse_runtime_mappings)?;
         Ok(Self {
+            runtime_source,
             fields,
             aggs,
             typed_keys: false,
@@ -156,6 +163,27 @@ impl SearchRequest {
             sort,
         })
     }
+}
+
+/// The names of the runtime fields in `runtime_mappings`.
+// ponytail: there is no Painless; only `emit(params['_source'].toString())` is understood
+fn parse_runtime_mappings(v: &Value) -> Result<Vec<String>, QueryError> {
+    const SOURCE: &str = "emit(params['_source'].toString())";
+    let fields = v
+        .as_object()
+        .ok_or("[runtime_mappings] must be an object")?;
+    (fields.iter())
+        .map(|(name, def)| {
+            let script = def.get("script");
+            let source = script.and_then(|s| s.get("source").or(Some(s)));
+            match (def.get("type").and_then(Value::as_str), source) {
+                (Some("keyword"), Some(Value::String(s))) if s == SOURCE => Ok(name.clone()),
+                _ => Err(QueryError::illegal(format!(
+                    "unsupported runtime field [{name}]"
+                ))),
+            }
+        })
+        .collect()
 }
 
 /// A `sort`: one sort field or an array of them.

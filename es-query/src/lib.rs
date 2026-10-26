@@ -206,6 +206,8 @@ struct Searcher<'a> {
     named: Vec<(String, Query)>,
     /// The query, for `explain`.
     query: Query,
+    /// Runtime fields that emit the document's `_source` as a string.
+    runtime_source: Vec<String>,
 }
 
 const K1: f64 = 1.2;
@@ -232,6 +234,7 @@ impl<'a> Searcher<'a> {
             in_memory: None,
             named: named_queries(q),
             query: q.clone(),
+            runtime_source: Vec::new(),
         }
     }
 
@@ -1324,6 +1327,7 @@ pub fn search_many<'a>(
     for (pos, (name, index, filter)) in targets.iter().enumerate() {
         let query = with_filter(index, &req.query, *filter, now)?;
         let mut s = Searcher::unscored(index, &query);
+        s.runtime_source = req.runtime_source.clone();
         if by_score || !req.aggs.is_empty() {
             s.gather(&query);
         }

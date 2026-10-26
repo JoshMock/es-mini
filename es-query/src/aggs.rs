@@ -1131,6 +1131,12 @@ pub(crate) fn hit_fields(
 ) -> Map<String, Value> {
     (fields.iter())
         .filter_map(|f| {
+            if fetch && s.runtime_source.contains(f) {
+                return Some((
+                    f.clone(),
+                    vec![Value::from(java_string(&doc.source))].into(),
+                ));
+            }
             let m = s.index.mappings.field(f)?;
             let v = match fetch {
                 false => doc_values(s, f, m, doc),
@@ -1152,6 +1158,24 @@ pub(crate) fn hit_fields(
             (!v.is_empty()).then(|| (f.clone(), v.into()))
         })
         .collect()
+}
+
+/// A JSON value as Java's `toString` renders the parsed `Map`/`List`/scalar.
+fn java_string(v: &Value) -> String {
+    let join = |parts: Vec<String>| parts.join(", ");
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Array(a) => format!("[{}]", join(a.iter().map(java_string).collect())),
+        Value::Object(o) => format!(
+            "{{{}}}",
+            join(
+                o.iter()
+                    .map(|(k, v)| format!("{k}={}", java_string(v)))
+                    .collect()
+            )
+        ),
+        v => v.to_string(),
+    }
 }
 
 /// A source value as the field's doc values hold it; `None` if they cannot.

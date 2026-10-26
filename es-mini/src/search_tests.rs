@@ -464,6 +464,17 @@ async fn hits_fetch_the_requested_fields() {
 }
 
 #[tokio::test]
+async fn runtime_fields_stringify_the_source_like_java() {
+    let app = seeded().await;
+    let body = json!({"size": 1, "sort": ["n"], "fields": ["rt"], "runtime_mappings": {"rt": {
+        "type": "keyword", "script": {"source": "emit(params['_source'].toString())"}}}});
+    let (s, r) = call(&app, Method::POST, "/idx/_search", Some(body)).await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    let rt = &r["hits"]["hits"][0]["fields"]["rt"][0];
+    assert!(rt.as_str().unwrap().starts_with("{n=1, "), "{rt}");
+}
+
+#[tokio::test]
 async fn size_zero_has_no_max_score() {
     let app = seeded().await;
     let body = json!({"size": 0, "query": {"match": {"t": "apple"}}});
