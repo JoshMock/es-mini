@@ -189,3 +189,45 @@ fn a_term_in_256_docs_saves_every_document() {
         json!({"tag": "same", "ok": true})
     );
 }
+
+/// Text fields carry positions like Elasticsearch's: one per token, and a gap of 100
+/// (`position_increment_gap`) after each value of an array, empty ones included.
+#[test]
+fn text_fields_save_positions() {
+    use es_codec::{SegmentInfos, SegmentReader, field_infos::IndexOptions};
+    use es_index::{FieldMapping, Index};
+    let mut idx = Index::default();
+    idx.mappings
+        .properties
+        .insert("t".into(), FieldMapping::Text { store: false });
+    idx.put("1", json!({"t": ["Quick fox fox", "", "lazy fox"]}));
+    let dir = scratch("positions").join("data");
+    disk::save(&dir, &Indices::from([("idx".to_owned(), idx)])).unwrap();
+    let uuid = &es_codec::cluster_state::read_indices(&dir).unwrap()[0].uuid;
+    let shard = dir.join("indices").join(uuid).join("0/index");
+    let seg = SegmentInfos::read_latest(&shard)
+        .unwrap()
+        .segments
+        .remove(0);
+    let r = SegmentReader::open(&shard, seg).unwrap();
+    assert_eq!(
+        r.field("t").unwrap().index_options,
+        IndexOptions::DocsAndFreqsAndPositions
+    );
+    let got: Vec<(String, Vec<u32>)> = r
+        .terms("t")
+        .unwrap()
+        .into_iter()
+        .map(|t| {
+            let ps = t.positions.concat().iter().map(|p| p.position).collect();
+            (String::from_utf8(t.term).unwrap(), ps)
+        })
+        .collect();
+    let want = [
+        ("fox", vec![1, 2, 204]),
+        ("lazy", vec![203]),
+        ("quick", vec![0]),
+    ];
+    let want: Vec<_> = want.map(|(t, p)| (t.to_owned(), p)).into();
+    assert_eq!(got, want);
+}

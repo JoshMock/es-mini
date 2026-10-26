@@ -23,4 +23,10 @@ count 1 '{"term":{"kw":"c"}}'
 count 3 '{"exists":{"field":"kw"}}'
 count 1 '{"match":{"t":"quick"}}'
 count 2 '{"exists":{"field":"t"}}'
+count 1 '{"match_phrase":{"t":"quick fox"}}'
+count 0 '{"match_phrase":{"t":"fox quick"}}'
+count 1 '{"match_phrase":{"t":{"query":"fox quick","slop":2}}}'
+# Values of an array are 100 positions apart (position_increment_gap).
+count 0 '{"match_phrase":{"m":{"query":"cat red","slop":99}}}'
+count 1 '{"match_phrase":{"m":{"query":"cat red","slop":100}}}'
 exit $fail

@@ -441,8 +441,8 @@ pub fn norm_len(norm: i8) -> u32 {
 /// arrays of scalars. Field numbers start at 6, after the metadata fields.
 // ponytail: fields the writer cannot encode yet are left out of the segment, which only
 // Elasticsearch notices (es-mini rebuilds every field from `_source` on open): values of the
-// wrong type or nested objects, custom date formats, `date_nanos`, multi-fields, positions, and
-// any field with a term in 256+ docs.
+// wrong type or nested objects, custom date formats, `date_nanos`, multi-fields, and any field
+// with a term in 256+ docs.
 #[derive(Default)]
 struct UserFields {
     fields: Vec<es_codec::field_infos::FieldInfo>,
@@ -514,27 +514,52 @@ fn user_fields(
                 let Some(texts) = typed(&values, &|v| v.as_str().map(str::to_owned)) else {
                     continue;
                 };
-                let toks: Vec<Vec<Vec<u8>>> = texts
-                    .iter()
-                    .map(|ts| {
-                        ts.iter()
-                            .flat_map(|t| Analyzer::Standard.analyze(t))
-                            .map(String::into_bytes)
-                            .collect()
-                    })
-                    .collect();
-                let terms = postings(toks.clone());
-                if terms.is_empty() {
+                // Like Lucene's IndexingChain: positions run on across a doc's values, with ES's
+                // default position_increment_gap of 100 after each value.
+                let mut m = BTreeMap::<Vec<u8>, Vec<(u32, Vec<u32>)>>::new();
+                let mut lens = vec![];
+                for (doc, ts) in (0u32..).zip(&texts) {
+                    let (mut position, mut len) = (-1i64, 0);
+                    for t in ts {
+                        for tok in Analyzer::Standard.analyze(t) {
+                            (position, len) = (position + 1, len + 1);
+                            let docs = m.entry(tok.into_bytes()).or_default();
+                            match docs.last_mut() {
+                                Some((d, ps)) if *d == doc => ps.push(position as u32),
+                                _ => docs.push((doc, vec![position as u32])),
+                            }
+                        }
+                        position += 100;
+                    }
+                    lens.push(len);
+                }
+                if m.is_empty() {
                     continue;
                 }
                 out.norms.push((
                     number,
-                    toks.iter()
-                        .map(|t| (!t.is_empty()).then(|| norm_byte(t.len() as u32)))
+                    lens.iter()
+                        .map(|&l| (l > 0).then(|| norm_byte(l)))
                         .collect(),
                 ));
-                out.terms.push((number, terms));
-                (IndexOptions::DocsAndFreqs, DocValuesType::None, false)
+                let at = |&position: &u32| es_codec::terms::Position {
+                    position,
+                    offsets: None,
+                    payload: vec![],
+                };
+                let terms = m.into_iter().map(|(term, docs)| TermPostings {
+                    positions: docs.iter().map(|d| d.1.iter().map(at).collect()).collect(),
+                    ..TermPostings::new(
+                        term,
+                        docs.iter().map(|d| (d.0, d.1.len() as u32)).collect(),
+                    )
+                });
+                out.terms.push((number, terms.collect()));
+                (
+                    IndexOptions::DocsAndFreqsAndPositions,
+                    DocValuesType::None,
+                    false,
+                )
             }
             M::Keyword { .. } => {
                 let Some(keys) = typed(&values, &|v| v.as_str().map(|s| s.as_bytes().to_vec()))
@@ -946,9 +971,10 @@ fn commit(data_dir: &Path, indices: &Indices) -> es_codec::Result<()> {
 }
 
 /// Marks the segments es-mini writes, the only ones a later save reuses: Elasticsearch indexes
-/// some fields differently (`_seq_no` points, text positions) and Lucene rejects a field with
-/// two schemas, so an Elasticsearch-written index is rewritten whole on its first save.
-const WRITER: (&str, &str) = ("es-mini.writer", "1");
+/// some fields differently (`_seq_no` points) and Lucene rejects a field with two schemas, so an
+/// Elasticsearch-written index is rewritten whole on its first save. Version 2 added text
+/// positions, so version 1 segments are rewritten too.
+const WRITER: (&str, &str) = ("es-mini.writer", "2");
 
 // Elasticsearch 9.5.5's merge policy defaults (MergePolicyConfig) for TieredMergePolicy.
 const FLOOR_SEGMENT: u64 = 16 << 20;
