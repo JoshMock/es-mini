@@ -26,7 +26,7 @@ pub enum EsqlError {
     Parse(String),
     /// Rendered by ES as `verification_exception`.
     Verification(String),
-    /// A source names a closed index (`index_closed_exception`).
+    /// A source names a closed index (`cluster_block_exception`).
     IndexClosed(String),
     /// A source names a missing index while others match (`index_not_found_exception`).
     IndexNotFound(String),

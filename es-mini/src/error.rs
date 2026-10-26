@@ -13,6 +13,8 @@ pub enum AppError {
     RequireAlias(String),
     IndexExists(String),
     IndexClosed(String),
+    /// An ES|QL source names a closed index (Elasticsearch's `IndexClosedBlock`).
+    IndexClosedBlock(String),
     /// Removing or reading aliases that do not exist.
     AliasesNotFound(Vec<String>),
     InvalidAliasName {
@@ -92,6 +94,12 @@ impl AppError {
                 "index_closed_exception",
                 "closed".into(),
                 Some(i),
+            ),
+            Self::IndexClosedBlock(i) => (
+                StatusCode::FORBIDDEN,
+                "cluster_block_exception",
+                format!("index [{i}] blocked by: [FORBIDDEN/4/index closed];"),
+                None,
             ),
             Self::AliasesNotFound(a) => (
                 StatusCode::NOT_FOUND,

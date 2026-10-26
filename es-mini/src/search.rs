@@ -543,7 +543,7 @@ pub async fn esql(
     let r = esql::run(&state.read().expect("lock poisoned"), query).map_err(|e| match e {
         EsqlError::Parse(m) => AppError::ParsingException(m),
         EsqlError::Verification(m) => AppError::Verification(m),
-        EsqlError::IndexClosed(i) => AppError::IndexClosed(i),
+        EsqlError::IndexClosed(i) => AppError::IndexClosedBlock(i),
         EsqlError::IndexNotFound(i) => AppError::IndexNotFound(i),
     })?;
     Ok(Json(json!({

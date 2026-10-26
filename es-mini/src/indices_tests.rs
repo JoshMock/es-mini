@@ -312,9 +312,14 @@ async fn closed_indices_reject_data_operations_but_keep_metadata() {
         Some(json!({"query": "FROM idx"})),
     )
     .await;
+    // ES|QL reports the closed index as a cluster block, as Elasticsearch 9.5.5 does.
     assert_eq!(
-        (s, &r["error"]["type"]),
-        (StatusCode::BAD_REQUEST, &json!("index_closed_exception"))
+        (s, &r["error"]["type"], &r["error"]["reason"]),
+        (
+            StatusCode::FORBIDDEN,
+            &json!("cluster_block_exception"),
+            &json!("index [idx] blocked by: [FORBIDDEN/4/index closed];")
+        )
     );
 
     // Wildcards skip closed indices.
