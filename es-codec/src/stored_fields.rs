@@ -1,4 +1,5 @@
-//! Stored fields (`.fdt`, Lucene90StoredFieldsFormat BEST_SPEED: LZ4 with preset dictionary).
+//! Stored fields (`.fdt`): Lucene90StoredFieldsFormat BEST_SPEED (LZ4 with preset dictionary),
+//! and Elasticsearch's Zstd814StoredFieldsFormat (index.codec: best_compression) for reading.
 use crate::{
     Result, SegmentReader, codec_util,
     direct_monotonic::{read_direct_monotonic, write_direct_monotonic},
@@ -6,6 +7,7 @@ use crate::{
     input::{DataInput, zigzag},
     lz4,
     output::Output,
+    zstd,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -24,7 +26,7 @@ const TYPE_BITS: u32 = 3;
 ///
 /// Chunks of only empty docs are compressed too (to an empty dictionary), so this reads a
 /// header even when `len` is 0.
-fn decompress(inp: &mut DataInput, len: usize) -> Result<Vec<u8>> {
+fn decompress_lz4(inp: &mut DataInput, len: usize) -> Result<Vec<u8>> {
     let dict_len = inp.read_len()?;
     let block_len = inp.read_len()?;
     inp.read_vint()?; // compressed length of the dictionary
@@ -48,6 +50,26 @@ fn decompress(inp: &mut DataInput, len: usize) -> Result<Vec<u8>> {
     out.truncate(len);
     Ok(out)
 }
+
+/// `ZstdDecompressor.decompress`: nothing for an empty piece, else its compressed length and one
+/// Zstandard frame.
+fn decompress_zstd(inp: &mut DataInput, len: usize) -> Result<Vec<u8>> {
+    if len == 0 {
+        return Ok(vec![]);
+    }
+    let n = inp.read_len()?;
+    let out = zstd::decompress(inp.read_bytes(n)?)?;
+    if out.len() != len {
+        return err(format!(
+            "expected {len} decompressed bytes, got {}",
+            out.len()
+        ));
+    }
+    Ok(out)
+}
+
+/// Decompresses one `len`-byte piece of a chunk.
+type Decompress = fn(&mut DataInput, usize) -> Result<Vec<u8>>;
 
 /// `StoredFieldsInts.readInts`.
 fn read_ints(inp: &mut DataInput, count: usize) -> Result<Vec<u64>> {
@@ -205,7 +227,12 @@ impl FieldsIndex {
     }
 
     /// Decodes one chunk's bytes, which must start with `doc_base`.
-    pub(crate) fn read_chunk(&self, chunk: &[u8], doc_base: usize) -> Result<Vec<Doc>> {
+    pub(crate) fn read_chunk(
+        &self,
+        chunk: &[u8],
+        doc_base: usize,
+        decompress: Decompress,
+    ) -> Result<Vec<Doc>> {
         let inp = &mut DataInput::new(chunk);
         let base = inp.read_len()?;
         let token = inp.read_len()?;
@@ -255,19 +282,19 @@ pub(crate) fn read_documents<'a>(
     let id = &r.seg.info.id;
     let index = read_fields_index(&r.cfs_file(".fdm")?, &r.cfs_file(".fdx")?, id, r.max_doc())?;
     let header = r.cfs_slice(".fdt", 0, index.pointers[0] as u64)?;
-    codec_util::check_index_header(
-        &mut DataInput::new(&header),
-        "Lucene90StoredFieldsFastData",
-        1,
-        1,
-        id,
-        "",
-    )?;
+    // The codec that wrote the segment names its stored fields format in an attribute.
+    let (codec, decompress): (_, Decompress) =
+        if (r.seg.info.attributes).contains_key("Zstd814StoredFieldsFormat.mode") {
+            ("ZstdStoredFields814", decompress_zstd)
+        } else {
+            ("Lucene90StoredFieldsFastData", decompress_lz4)
+        };
+    codec_util::check_index_header(&mut DataInput::new(&header), codec, 1, 1, id, "")?;
     let chunks: Vec<_> = index.chunks(&keep).collect();
     Ok(chunks.into_iter().flat_map(move |(base, offset, len)| {
         let docs = r
             .cfs_slice(".fdt", offset, len)
-            .and_then(|c| index.read_chunk(&c, base));
+            .and_then(|c| index.read_chunk(&c, base, decompress));
         match docs {
             Ok(docs) => (base..)
                 .zip(docs)
@@ -453,7 +480,7 @@ mod tests {
                 .iter()
                 .flat_map(|&(base, at, len)| {
                     let chunk = &fdt[at as usize..(at + len) as usize];
-                    index.read_chunk(chunk, base).unwrap()
+                    index.read_chunk(chunk, base, decompress_lz4).unwrap()
                 })
                 .collect();
             (chunks.len(), docs)

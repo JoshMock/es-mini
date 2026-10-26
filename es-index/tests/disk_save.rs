@@ -83,17 +83,23 @@ fn resaving_an_elasticsearch_directory_keeps_its_index_identity() {
     let es_meta = es_codec::cluster_state::read_indices(&es_dir).unwrap();
     let dir = scratch("identity").join("data");
     disk::save(&dir, &disk::open(&es_dir).unwrap()).unwrap();
-    let meta = es_codec::cluster_state::read_indices(&dir).unwrap();
+    let fixture = |m: Vec<es_codec::cluster_state::IndexMetadata>| {
+        m.into_iter().find(|m| m.name == "fixture").unwrap()
+    };
+    let (meta, es_meta) = (
+        fixture(es_codec::cluster_state::read_indices(&dir).unwrap()),
+        fixture(es_meta),
+    );
     assert_eq!(
-        meta[0].uuid,
+        meta.uuid,
         fs::read_to_string(fixtures.join("expected/index_uuid"))
             .unwrap()
             .trim()
     );
-    assert_eq!(meta[0].settings["index.uuid"], meta[0].uuid);
+    assert_eq!(meta.settings["index.uuid"], meta.uuid);
     assert_eq!(
-        meta[0].settings["index.version.created"],
-        es_meta[0].settings["index.version.created"]
+        meta.settings["index.version.created"],
+        es_meta.settings["index.version.created"]
     );
 }
 
