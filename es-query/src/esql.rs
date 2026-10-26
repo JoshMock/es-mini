@@ -12,6 +12,7 @@ use es_index::{
 use serde::Serialize;
 use serde_json::Value;
 use std::{
+    borrow::{Borrow, Cow},
     cell::OnceCell,
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
@@ -269,6 +270,8 @@ enum Source {
 #[derive(Debug, Clone, PartialEq)]
 enum Command {
     Where(Expr),
+    /// Named expressions, each a column added (or moved last) in order.
+    Eval(Vec<(String, Expr)>),
     Limit(usize),
     Keep(Vec<Name>),
     Drop(Vec<Name>),
@@ -428,27 +431,7 @@ impl Parser<'_> {
             ]));
         }
         if self.keyword("row") {
-            let mut fields = Vec::new();
-            loop {
-                let named = matches!(
-                    (self.peek(), self.toks.get(self.pos + 1)),
-                    (Some(Tok::Word(_)), Some((Tok::Sym("="), ..)))
-                );
-                let name = match named {
-                    true => {
-                        self.pos += 2;
-                        Some(self.toks[self.pos - 2].2.clone())
-                    }
-                    false => None,
-                };
-                let e = self.or()?;
-                let name = name.unwrap_or_else(|| span(&e).1.clone());
-                fields.push((self.src[name].to_owned(), e));
-                if !self.sym(",") {
-                    break;
-                }
-            }
-            return Ok(Source::Row(fields));
+            return Ok(Source::Row(self.assignments()?));
         }
         if !self.keyword("from") {
             return self.unsupported(SOURCE_COMMANDS);
@@ -471,6 +454,30 @@ impl Parser<'_> {
         Ok(Source::From(sources, metadata))
     }
 
+    /// `name = expression, ...`, where an unnamed expression is named by its text.
+    fn assignments(&mut self) -> Result<Vec<(String, Expr)>, EsqlError> {
+        let mut fields = Vec::new();
+        loop {
+            let named = matches!(
+                (self.peek(), self.toks.get(self.pos + 1)),
+                (Some(Tok::Word(_)), Some((Tok::Sym("="), ..)))
+            );
+            let name = match named {
+                true => {
+                    self.pos += 2;
+                    Some(self.toks[self.pos - 2].2.clone())
+                }
+                false => None,
+            };
+            let e = self.or()?;
+            let name = name.unwrap_or_else(|| span(&e).1.clone());
+            fields.push((self.src[name].to_owned(), e));
+            if !self.sym(",") {
+                return Ok(fields);
+            }
+        }
+    }
+
     fn query(&mut self) -> Result<(Source, Vec<Command>), EsqlError> {
         let sources = self.source()?;
         let mut cmds = Vec::new();
@@ -479,12 +486,13 @@ impl Parser<'_> {
                 Some(Tok::Word(w)) => w.to_ascii_lowercase(),
                 _ => String::new(),
             };
-            if !["where", "limit", "keep", "drop", "sort"].contains(&command.as_str()) {
+            if !["where", "eval", "limit", "keep", "drop", "sort"].contains(&command.as_str()) {
                 return self.unsupported(PROCESSING_COMMANDS);
             }
             self.pos += 1;
             let cmd = match command.as_str() {
                 "where" => Command::Where(self.or()?),
+                "eval" => Command::Eval(self.assignments()?),
                 "limit" => self.limit()?,
                 "keep" | "drop" => {
                     let names = self.ident_list(ID_PATTERN)?;
@@ -1266,16 +1274,28 @@ pub fn run(
         follow: "<EOF>",
     }
     .query()?;
+    let (source, cmds) = match source {
+        // A row is an EVAL over one empty row.
+        Source::Row(fields) => (None, [vec![Command::Eval(fields)], cmds].concat()),
+        Source::From(sources, metadata) => (Some((sources, metadata)), cmds),
+    };
     let Table {
-        types,
+        mut types,
         conflicts,
         groups,
         mut cols,
         empty,
         counted,
     } = match source {
-        Source::From(sources, metadata) => table_from(indices, &sources, &metadata)?,
-        Source::Row(fields) => table_row(fields, query)?,
+        Some((sources, metadata)) => table_from(indices, &sources, &metadata)?,
+        None => Table {
+            types: BTreeMap::new(),
+            conflicts: BTreeMap::new(),
+            groups: vec![vec![Row::new()]],
+            cols: Vec::new(),
+            empty: false,
+            counted: false,
+        },
     };
     // A referenced column must exist and have one type.
     let check = |cols: &[String], f: &str| match conflicts.get(f) {
@@ -1283,7 +1303,7 @@ pub fn run(
         Some(m) => Some(conflict_error(f, m)),
         None => None,
     };
-    let mut rows: Vec<&Row> = groups.iter().flatten().collect();
+    let mut rows: Vec<Cow<Row>> = groups.iter().flatten().map(Cow::Borrowed).collect();
     let mut explicit_limit = false;
 
     for cmd in &cmds {
@@ -1308,6 +1328,28 @@ pub fn run(
                 }
                 bad
             }
+            Command::Eval(named) => {
+                // Each expression sees the columns the ones before it added.
+                let mut bad = Vec::new();
+                for (name, e) in named {
+                    let mut refs = Vec::new();
+                    fields(e, &mut refs);
+                    bad.extend(
+                        refs.into_iter()
+                            .filter_map(|(f, at)| Some((at, check(&cols, &f)?))),
+                    );
+                    if !bad.is_empty() {
+                        break;
+                    }
+                    let Some(t) = resolve(e, query, &types, &mut bad) else {
+                        break;
+                    };
+                    cols.retain(|c| c != name);
+                    cols.push(name.clone());
+                    types.insert(name.clone(), t);
+                }
+                bad
+            }
             Command::Keep(patterns) | Command::Drop(patterns) => patterns
                 .iter()
                 .filter(|(p, _)| !cols.iter().any(|c| aliases::glob(p, c)))
@@ -1328,6 +1370,15 @@ pub fn run(
         match cmd {
             Command::Where(e) => {
                 rows.retain(|r| eval(e, r) == Some(Value::Bool(true)));
+            }
+            Command::Eval(named) => {
+                for r in &mut rows {
+                    let r = r.to_mut();
+                    for (name, e) in named {
+                        let v = eval(e, r).unwrap_or(Value::Null);
+                        r.insert(name.clone(), v);
+                    }
+                }
             }
             &Command::Limit(n) => {
                 rows.truncate(n.min(MAX_LIMIT));
@@ -1420,35 +1471,6 @@ struct Table {
     empty: bool,
     /// Whether the rows came from documents, for `documents_found` and `values_loaded`.
     counted: bool,
-}
-
-/// The table of one `ROW` (or `SHOW INFO`): a later field with the same name replaces an earlier.
-fn table_row(named: Vec<(String, Expr)>, query: &str) -> Result<Table, EsqlError> {
-    let (mut types, mut cols, mut row) = (BTreeMap::new(), Vec::new(), Row::new());
-    for (name, e) in named {
-        let mut bad = Vec::new();
-        fields(&e, &mut bad);
-        let bad: Vec<_> = bad.into_iter().map(|(f, at)| (at, unknown(&f))).collect();
-        if !bad.is_empty() {
-            return Err(problems(bad));
-        }
-        let mut bad = Vec::new();
-        let Some(t) = resolve(&e, query, &types, &mut bad) else {
-            return Err(problems(bad));
-        };
-        cols.retain(|c| *c != name);
-        cols.push(name.clone());
-        types.insert(name.clone(), t);
-        row.insert(name, eval(&e, &Row::new()).unwrap_or(Value::Null));
-    }
-    Ok(Table {
-        types,
-        conflicts: BTreeMap::new(),
-        groups: vec![vec![row]],
-        cols,
-        empty: false,
-        counted: false,
-    })
 }
 
 /// The table of `FROM sources`: every document of the indices they resolve to.
@@ -1575,8 +1597,9 @@ fn table_from(
     })
 }
 
-fn sort_rows(rows: &mut [&Row], keys: &[SortKey]) {
+fn sort_rows<R: Borrow<Row>>(rows: &mut [R], keys: &[SortKey]) {
     rows.sort_by(|a, b| {
+        let (a, b) = (a.borrow(), b.borrow());
         keys.iter().fold(Ordering::Equal, |acc, k| {
             acc.then_with(|| {
                 let (x, y) = (&a[k.field.as_str()], &b[k.field.as_str()]);
@@ -1617,9 +1640,10 @@ fn load_counts(
     out: &[String],
     types: &BTreeMap<String, String>,
 ) -> (usize, usize) {
+    // ponytail: the plan is cut at an EVAL as if at a LIMIT, though ES pushes a LIMIT through it
     let (head, tail) = cmds.split_at(
         cmds.iter()
-            .position(|c| matches!(c, Command::Limit(_)))
+            .position(|c| matches!(c, Command::Limit(_) | Command::Eval(_)))
             .unwrap_or(cmds.len()),
     );
     let limit = match tail.first() {
@@ -1642,6 +1666,7 @@ fn load_counts(
     for c in tail {
         match c {
             Command::Where(e) => later.extend(names(e)),
+            Command::Eval(named) => later.extend(named.iter().flat_map(|(_, e)| names(e))),
             Command::Sort(keys) => later.extend(keys.iter().map(|k| k.field.clone())),
             _ => {}
         }

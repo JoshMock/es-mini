@@ -898,3 +898,23 @@ fn conversion_functions_match_elasticsearch() {
         other => panic!("{other:?}"),
     }
 }
+
+#[test]
+fn eval_adds_or_replaces_columns_in_order() {
+    let r = q(
+        "FROM people | EVAL older = age + 1, twice = older * 2, name = 1 | KEEP name, older, twice | SORT older",
+    );
+    assert_eq!(col_names(&r), ["name", "older", "twice"]);
+    let types: Vec<&str> = r.columns.iter().map(|c| c.r#type.as_str()).collect();
+    assert_eq!(types, ["integer", "long", "long"]);
+    assert_eq!(r.values[0], [json!(1), json!(26), json!(52)]);
+    let r = q("ROW a = 7 | EVAL a + 1, a = 2");
+    assert_eq!(col_names(&r), ["a + 1", "a"]);
+    assert_eq!(r.values, [[json!(8), json!(2)]]);
+    match run(&indices(), "FROM people | EVAL x = nope + 1") {
+        Err(EsqlError::Verification(m)) => {
+            assert_eq!(m, "Found 1 problem\nline 1:24: Unknown column [nope]")
+        }
+        other => panic!("{other:?}"),
+    }
+}

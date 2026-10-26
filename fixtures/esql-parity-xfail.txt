@@ -11,16 +11,12 @@ FROM emp | WHERE name RLIKE "[A-C].*" | KEEP name | SORT name
 FROM emp | WHERE name IN ("Alice", "Dave", "Zed") | KEEP name | SORT name
 FROM emp | WHERE age IN (28, 51) | KEEP name, age | SORT name
 FROM emp | WHERE hired > "2020-01-01" | KEEP name, hired | SORT hired
-FROM emp | EVAL monthly = salary / 12, bonus = salary * 0.1 | KEEP name, monthly, bonus | SORT name
-FROM emp | EVAL x = age + 1, y = age - 1, z = age * 2, w = age / 3, m = age % 5 | KEEP name, x, y, z, w, m | SORT name
 FROM emp | EVAL neg = -age | KEEP neg | SORT neg
-FROM emp | EVAL x = salary / age | KEEP name, x | SORT name
 FROM emp | RENAME name AS who | KEEP who, age | SORT who
 FROM emp | RENAME name AS who, age AS years | KEEP who, years | SORT who
 FROM emp | DROP bio, tags, scores | SORT name | LIMIT 2
 FROM emp | DROP h* | SORT name | LIMIT 2
 FROM emp | LIMIT 2 | STATS c = COUNT(*)
-ROW a = 7, b = 2 | EVAL s = a + b, d = a - b, p = a * b, q = a / b, r = a % b, f = a / 2.0
 FROM emp | EVAL level = CASE(age >= 45, "senior", age >= 30, "mid", "junior") | KEEP name, level | SORT name
 FROM emp | EVAL a = COALESCE(age, 0), s = COALESCE(salary, -1) | KEEP name, a, s | SORT name
 FROM emp | EVAL full = CONCAT(name, "-", TO_STRING(age)) | KEEP full | SORT full
@@ -60,6 +56,4 @@ FROM emp | STATS max_age = MAX(age) BY active | EVAL older = max_age > 40 | SORT
 FROM emp | WHERE active | STATS total = SUM(salary)
 FROM emp* | STATS c = COUNT(*) BY dept | SORT dept
 ROW a = 1 | STATS c = COUNT(*)
-FROM emp | EVAL x = name + 1
 FROM emp | STATS AVG(name)
-FROM emp | EVAL x = UNKNOWN_FN(age)
