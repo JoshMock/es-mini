@@ -358,21 +358,10 @@ fn settings_response(
     let include_defaults = params.get("include_defaults").is_some_and(|v| v == "true");
     let flat = params.get("flat_settings").is_some_and(|v| v == "true");
     let render = |i: &Index| {
-        let mut out = json!({"settings": i.settings.to_json_where(|k| filter.split(',').any(|f| es_index::aliases::glob(f, k)))});
+        let keep = |k: &str| filter.split(',').any(|f| es_index::aliases::glob(f, k));
+        let mut out = json!({"settings": i.settings.to_json_where(keep)});
         if include_defaults {
-            // ponytail: only defaults for settings we model; add more as tests need them
-            let mut defaults = json!({});
-            if i.settings
-                .get("index.mapping.dynamic_strings.auto_text")
-                .is_none()
-            {
-                defaults =
-                    json!({"index": {"mapping": {"dynamic_strings": {"auto_text": "true"}}}});
-            }
-            if i.settings.get("index.refresh_interval").is_none() {
-                defaults["index"]["refresh_interval"] = json!("1s");
-            }
-            out["defaults"] = defaults;
+            out["defaults"] = i.settings.defaults().to_json_where(keep);
         }
         if flat {
             for v in out.as_object_mut().expect("object").values_mut() {

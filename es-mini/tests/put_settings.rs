@@ -204,3 +204,42 @@ async fn valid_values_are_accepted() {
     .await;
     assert_eq!(s, 200, "{b}");
 }
+
+#[tokio::test]
+async fn include_defaults_lists_every_modelled_default_not_set() {
+    let app = es_mini::app();
+    call(
+        &app,
+        "PUT",
+        "/t",
+        json!({"settings": {"refresh_interval": "5s"}}),
+    )
+    .await;
+    let (_, b) = call(
+        &app,
+        "GET",
+        "/t/_settings?include_defaults=true&flat_settings=true",
+        json!({}),
+    )
+    .await;
+    let defaults = &b["t"]["defaults"];
+    assert_eq!(defaults["index.codec"], "default");
+    assert_eq!(defaults["index.translog.durability"], "REQUEST");
+    assert_eq!(defaults["index.max_result_window"], "10000");
+    assert_eq!(defaults["index.mapping.dynamic_strings.auto_text"], "true");
+    // Set settings are not defaults.
+    assert!(defaults.get("index.refresh_interval").is_none());
+    assert!(defaults.get("index.number_of_shards").is_none());
+    // Name filters apply to defaults too.
+    let (_, b) = call(
+        &app,
+        "GET",
+        "/t/_settings/index.translog.*?include_defaults=true",
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        b["t"]["defaults"],
+        json!({"index": {"translog": {"durability": "REQUEST", "sync_interval": "5s", "flush_threshold_size": "10gb"}}})
+    );
+}

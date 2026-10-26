@@ -91,6 +91,17 @@ impl Settings {
         self.0.get(key).map(String::as_str)
     }
 
+    /// The defaults of the registered settings ([`index_settings`]) this does not set.
+    pub fn defaults(&self) -> Settings {
+        Settings(
+            index_settings::SETTINGS
+                .iter()
+                .filter(|s| !self.0.contains_key(s.key))
+                .filter_map(|s| Some((s.key.to_owned(), s.default?.to_owned())))
+                .collect(),
+        )
+    }
+
     /// The flat `index.*` keys and string values.
     pub fn flat(&self) -> &BTreeMap<String, String> {
         &self.0
