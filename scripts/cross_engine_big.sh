@@ -2,8 +2,9 @@
 # Task: es-mini writes a 20000-doc index (full postings blocks, level-1 skip data) and
 # Elasticsearch 9.5.5 (Docker, 1 CPU, 1 GB, docker exec, container always removed) must return
 # the right _count for term, match, range and bool queries on every field, and for ranges over
-# a 100000-doc index (multi-leaf BKD trees, 21-bit doc ids), and for _id lookups through the
-# terms index (floor blocks and sub-blocks).
+# a 100000-doc index (multi-leaf BKD trees, 21-bit doc ids), for _id lookups through the
+# terms index (floor blocks and sub-blocks), and for keyword terms in LZ4 and lowercase-ASCII
+# compressed blocks.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DATA="$(mktemp -d)"; PORT=${ES_MINI_PORT:-9392}
@@ -17,16 +18,26 @@ cleanup() { kill $PID 2>/dev/null || true; docker rm -f "$NAME" >/dev/null 2>&1 
 trap cleanup EXIT
 for _ in $(seq 50); do curl -s "localhost:$PORT/" >/dev/null && break; sleep 0.2; done
 curl -sf -X PUT "localhost:$PORT/big" -H 'content-type: application/json' --data-binary \
-  '{"settings":{"number_of_shards":1,"number_of_replicas":0},"mappings":{"properties":{"kw":{"type":"keyword"},"flag":{"type":"boolean"},"body":{"type":"text"},"n":{"type":"long"}}}}' >/dev/null
+  '{"settings":{"number_of_shards":1,"number_of_replicas":0},"mappings":{"properties":{"kw":{"type":"keyword"},"tag":{"type":"keyword"},"flag":{"type":"boolean"},"body":{"type":"text"},"n":{"type":"long"}}}}' >/dev/null
 # kw: "even"/"odd"; flag: i%3==0; body: "common" everywhere, "rare" every 997th doc, "mid" every 5th,
-# "freq" repeated i%9+1 times; n: i.
-python3 - <<'PY' > "$DATA.bulk"
-for i in range(20000):
+# "freq" repeated i%9+1 times; n: i; tag: tag(i) below (repetitive suffixes for even i, random
+# lowercase ones for odd i).
+export TAG='def tag(i):
+    h = i * 2654435761 % 2**32
+    return "lz4-%05d-abcdefabcdef" % i if i % 2 == 0 else "low-%s-%d" % ("".join(chr(97 + h // 26**k % 26) for k in range(7)), i)'
+tag() { python3 -c 'import os, sys; exec(os.environ["TAG"]); print(tag(int(sys.argv[1])))' "$1"; }
+# in 10000-doc requests: es-mini takes bodies up to 2 MB
+for start in 0 10000; do
+  python3 - $start <<'PY' > "$DATA.bulk"
+import os, sys; exec(os.environ["TAG"])
+for i in range(int(sys.argv[1]), int(sys.argv[1]) + 10000):
     words = ["common"] + ["freq"] * (i % 9 + 1) + (["mid"] if i % 5 == 0 else []) + (["rare"] if i % 997 == 0 else [])
     print('{"index":{"_id":"%d"}}' % i)
-    print('{"kw":"%s","flag":%s,"body":"%s","n":%d}' % ("even" if i % 2 == 0 else "odd", "true" if i % 3 == 0 else "false", " ".join(words), i))
+    print('{"kw":"%s","flag":%s,"body":"%s","n":%d,"tag":"%s"}' % ("even" if i % 2 == 0 else "odd", "true" if i % 3 == 0 else "false", " ".join(words), i, tag(i)))
 PY
-curl -sf -X POST "localhost:$PORT/big/_bulk?refresh=true" -H 'content-type: application/x-ndjson' --data-binary @"$DATA.bulk" >/dev/null
+  curl -sf -X POST "localhost:$PORT/big/_bulk" -H 'content-type: application/x-ndjson' --data-binary @"$DATA.bulk" >/dev/null
+done
+curl -sf -X POST "localhost:$PORT/big/_refresh" >/dev/null
 # range: n = i*7 - 350000 (distinct, negative to positive); dup = i % 100 (low cardinality)
 curl -sf -X PUT "localhost:$PORT/range" -H 'content-type: application/json' --data-binary \
   '{"settings":{"number_of_shards":1,"number_of_replicas":0},"mappings":{"properties":{"n":{"type":"long"},"dup":{"type":"integer"}}}}' >/dev/null
@@ -84,6 +95,10 @@ check 4 '{"bool":{"must":[{"match":{"body":"rare"}},{"term":{"flag":true}},{"ter
 # _id lookups seek through the terms index (trie and floor blocks) es-mini wrote.
 check 1 '{"term":{"_id":"12345"}}'
 check 3 '{"ids":{"values":["0","9999","19999","20000"]}}'
+# tag terms sit in compressed blocks; prefix queries read every block under the prefix.
+for i in 0 4242 12345 19999; do check 1 "{\"term\":{\"tag\":\"$(tag $i)\"}}"; done
+check 5000 '{"prefix":{"tag":"lz4-0"}}'
+check 10000 '{"prefix":{"tag":"low-"}}'
 check 1 '{"term":{"_id":"99999"}}' range
 check 100000 '{"match_all":{}}' range
 check 50000 '{"range":{"n":{"gte":0}}}' range

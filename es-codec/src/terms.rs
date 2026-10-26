@@ -234,6 +234,7 @@ fn write_field(
         has_freqs,
         tim,
         pending: vec![],
+        lz4: None,
         prefix_starts: vec![],
         last_term: vec![],
     };
@@ -300,6 +301,8 @@ struct BlockTree<'a> {
     has_freqs: bool,
     tim: &'a mut crate::output::Output,
     pending: Vec<Pending>,
+    /// Lucene keeps one LZ4 table per field, made on first use.
+    lz4: Option<lz4::HcTable>,
     /// Where in `pending` the entries sharing the last term's first `i + 1` bytes start.
     prefix_starts: Vec<usize>,
     last_term: Vec<u8>,
@@ -398,7 +401,6 @@ impl BlockTree<'_> {
     /// `writeBlock`: writes `pending[start..end]` as one block, returning its file pointer and
     /// the trie entries of the sub-blocks in it.
     ///
-    /// ponytail: suffixes are stored uncompressed (Lucene tries LZ4 and lowercase-ASCII).
     fn write_block(
         &mut self,
         prefix_len: usize,
@@ -449,8 +451,26 @@ impl BlockTree<'_> {
         let tim = &mut *self.tim;
         tim.vint((((end - start) << 1) | usize::from(end == self.pending.len())) as i32);
         let leaf = if has_sub_blocks { 0 } else { 4 };
-        tim.vlong(((suffixes.0.len() << 3) | leaf) as i64);
-        tim.bytes(&suffixes.0);
+        let (suffixes, n) = (suffixes.0, end - start);
+        // Lucene compresses only blocks with long suffixes behind a prefix over 2 bytes: LZ4
+        // if it saves over 25%, else lowercase ASCII if it applies.
+        let mut compressed = None;
+        if suffixes.len() > 2 * n && prefix_len > 2 {
+            if suffixes.len() > 6 * n {
+                let mut out = Output::default();
+                let ht = self.lz4.get_or_insert_with(Default::default);
+                lz4::compress(&suffixes, &mut out, ht);
+                if out.0.len() < suffixes.len() - (suffixes.len() >> 2) {
+                    compressed = Some((2, out.0));
+                }
+            }
+            if compressed.is_none() {
+                compressed = compress_lowercase_ascii(&suffixes).map(|c| (1, c));
+            }
+        }
+        let (algorithm, bytes) = compressed.as_ref().map_or((0, &suffixes), |(a, c)| (*a, c));
+        tim.vlong(((suffixes.len() << 3) | leaf | algorithm) as i64);
+        tim.bytes(bytes);
         let lengths = lengths.0;
         if lengths[1..].iter().all(|&b| b == lengths[0]) {
             // Terms of the same length, like ids, often give one repeated byte.
@@ -506,7 +526,7 @@ struct FieldOutputs {
 ///
 /// `norms` are the fields' norms per doc, for the competitive impacts of freq fields.
 ///
-/// ponytail: no suffix compression or `.pos`/`.pay`.
+/// ponytail: no `.pos`/`.pay`.
 pub fn write_terms(
     fields: &[(&FieldInfo, &[TermPostings])],
     id: &[u8; codec_util::ID_LEN],
@@ -818,6 +838,53 @@ impl Walker<'_> {
     }
 }
 
+/// `LowercaseAsciiCompression.compress`: packs 4 bytes in 3, or `None` if under 8 bytes or more
+/// than 1 in 32 bytes (counting a filler every 255 bytes between them) fall outside the 64
+/// characters around lowercase letters.
+fn compress_lowercase_ascii(input: &[u8]) -> Option<Vec<u8>> {
+    let len = input.len();
+    if len < 8 {
+        return None;
+    }
+    let mut exceptions = vec![];
+    let mut prev = 0;
+    for (i, &b) in input.iter().enumerate() {
+        if !matches!((u32::from(b) + 1) & !0x1f, 0x20 | 0x60) {
+            while i - prev > 0xff {
+                prev += 0xff;
+                exceptions.push((0xff, input[prev]));
+            }
+            exceptions.push(((i - prev) as u8, b));
+            prev = i;
+            if exceptions.len() > len >> 5 {
+                return None;
+            }
+        }
+    }
+    let compressed = len - (len >> 2);
+    let mut tmp: Vec<u8> = input
+        .iter()
+        .map(|&b| {
+            let b = u32::from(b) + 1;
+            ((b & 0x1f) | ((b & 0x40) >> 1)) as u8
+        })
+        .collect();
+    let mut o = 0;
+    for (mask, shift) in [(0x30, 2), (0x0c, 4), (0x03, 6)] {
+        for i in compressed..len {
+            tmp[o] |= (tmp[i] & mask) << shift;
+            o += 1;
+        }
+    }
+    let mut out = crate::output::Output(tmp[..compressed].to_vec());
+    out.vint(exceptions.len() as i32);
+    for (delta, b) in exceptions {
+        out.byte(delta);
+        out.byte(b);
+    }
+    Some(out.0)
+}
+
 /// `LowercaseAsciiCompression.decompress`.
 fn lowercase_ascii(input: &mut DataInput, len: usize) -> Result<Vec<u8>> {
     let saved = len >> 2;
@@ -854,8 +921,9 @@ mod tests {
         }
     }
 
-    /// Field "q" of tests/data/many-terms (written by Lucene 10.5.1): q000..q099, one doc each.
-    /// It sorts before "t", so its blocks and trie open Lucene's `.tim` and `.tip`.
+    /// Fields "q" (q000..q099, one doc each) and "t" (LZ4 and lowercase-ASCII compressed
+    /// blocks) of tests/data/many-terms, written by Lucene 10.5.1. many_terms.rs checks that the
+    /// reader returns the terms Lucene was given.
     #[test]
     fn writes_the_blocks_and_trie_lucene_writes() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/many-terms");
@@ -873,12 +941,27 @@ mod tests {
             "Lucene104_{}",
             info.attributes["PerFieldPostingsFormat.suffix"]
         );
-        let ours = write_terms(&[(info, &terms)], &r.seg.info.id, &suffix, &[]).unwrap();
+        let t = r.terms("t").unwrap();
+        let fields = [(info, &terms[..]), (r.field("t").unwrap(), &t[..])];
+        let ours = write_terms(&fields, &r.seg.info.id, &suffix, &[]).unwrap();
         for (ext, ours) in [("tim", &ours.tim), ("tip", &ours.tip)] {
             let lucene = r.cfs_file(&format!("_{suffix}.{ext}")).unwrap();
-            let body = &ours[..ours.len() - FOOTER_LEN as usize];
-            assert_eq!(&lucene[..body.len()], body, ".{ext}");
+            assert_eq!(lucene, &ours[..], ".{ext}");
         }
+    }
+
+    #[test]
+    fn lowercase_ascii_round_trips_exceptions() {
+        // Upper-case exceptions 600 bytes apart need filler exceptions between them.
+        let mut input: Vec<u8> = (0..1300).map(|i| b"abc-xyz_09"[i % 10]).collect();
+        input[3] = b'Q';
+        input[603] = 0xff;
+        let c = compress_lowercase_ascii(&input).unwrap();
+        assert!(c.len() < input.len());
+        let back = lowercase_ascii(&mut DataInput::new(&c), input.len()).unwrap();
+        assert_eq!(back, input);
+        assert_eq!(compress_lowercase_ascii(b"short"), None);
+        assert_eq!(compress_lowercase_ascii(b"MOSTLY UPPER CASE"), None);
     }
 
     #[test]
