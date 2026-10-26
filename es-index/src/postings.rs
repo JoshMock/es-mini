@@ -65,7 +65,7 @@ pub fn field_terms(source: &Value, path: &str, analyzed: bool) -> Vec<String> {
 
 /// BM25 statistics of one field, counting superseded documents like Lucene's unmerged segments.
 #[derive(Debug, Clone, PartialEq)]
-pub struct MemoryStats {
+pub struct FieldStats {
     /// Documents with at least one term.
     pub docs: f64,
     pub total_terms: f64,
@@ -86,21 +86,23 @@ struct Field {
 }
 
 impl Field {
-    fn add(&mut self, id: &str, terms: Vec<String>) {
+    /// Links a document, and adds it to the statistics if `counted`.
+    fn add(&mut self, id: &str, terms: Vec<String>, counted: bool) {
         if terms.is_empty() {
             return;
         }
         let count = terms.len();
         let distinct: HashSet<String> = terms.into_iter().collect();
+        let counted = if counted { 1.0 } else { 0.0 };
         for t in &distinct {
             self.docs
                 .entry(t.clone())
                 .or_default()
                 .insert(id.to_owned());
-            *self.doc_freq.entry(t.clone()).or_default() += 1.0;
+            *self.doc_freq.entry(t.clone()).or_default() += counted;
         }
-        self.doc_count += 1.0;
-        self.total_terms += count as f64;
+        self.doc_count += counted;
+        self.total_terms += counted * count as f64;
         self.live.insert(id.to_owned(), (distinct, count));
     }
 
@@ -134,24 +136,29 @@ pub struct Postings(HashMap<(String, bool), Field>);
 
 impl Postings {
     /// The postings of `path`, built from `live` documents and `superseded` sources if new.
+    /// Live documents with ids in `uncounted` are left out of the statistics.
+    // ponytail: `uncounted` (a snapshot's documents from disk) is not kept out by a later
+    // Field::merge, since snapshots take no writes
     fn field<'d>(
         &mut self,
         path: &str,
         analyzed: bool,
         live: impl Iterator<Item = (&'d str, &'d Value)>,
         superseded: &[Value],
+        uncounted: &HashSet<String>,
     ) -> &Field {
         self.0
             .entry((path.to_owned(), analyzed))
             .or_insert_with(|| {
                 let mut f = Field::default();
                 for (id, source) in live {
-                    f.add(id, field_terms(source, path, analyzed));
+                    let counted = !uncounted.contains(id);
+                    f.add(id, field_terms(source, path, analyzed), counted);
                 }
                 for (n, source) in superseded.iter().enumerate() {
                     // Counted in the statistics, then unlinked like any superseded document.
                     let id = format!("\0superseded{n}");
-                    f.add(&id, field_terms(source, path, analyzed));
+                    f.add(&id, field_terms(source, path, analyzed), true);
                     f.remove(&id);
                 }
                 f
@@ -160,7 +167,7 @@ impl Postings {
 
     pub(crate) fn add(&mut self, id: &str, source: &Value) {
         for ((path, analyzed), f) in &mut self.0 {
-            f.add(id, field_terms(source, path, *analyzed));
+            f.add(id, field_terms(source, path, *analyzed), true);
         }
     }
 
@@ -180,7 +187,7 @@ impl crate::Index {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let live = self.docs.iter().map(|(id, d)| (id.as_str(), &d.source));
-        read(postings.field(path, analyzed, live, &self.superseded))
+        read(postings.field(path, analyzed, live, &self.superseded, &self.from_disk))
     }
 
     /// The in-memory documents indexing all (or any) of `terms` at `path`. Documents on disk
@@ -200,24 +207,35 @@ impl crate::Index {
         })
     }
 
-    /// BM25 statistics of `path` for `wanted` terms; `None` for an index opened from disk,
-    /// whose statistics cover its segments too.
-    pub fn memory_stats(
+    /// BM25 statistics of `field` (at source `path`) for `wanted` terms: those of the segments
+    /// of an index opened from disk plus those of the documents in memory. `None` when the
+    /// segments have no statistics for the field.
+    pub fn field_stats(
         &self,
+        field: &str,
         path: &str,
         analyzed: bool,
         wanted: &[String],
-    ) -> Option<MemoryStats> {
-        if self.disk.is_some() {
-            return None;
-        }
+    ) -> Option<FieldStats> {
+        let disk = match &self.stats {
+            Some(s) => Some((s.fields.get(field)?, s)),
+            None => None,
+        };
+        let (docs, total_terms) = disk.map_or((0.0, 0.0), |d| *d.0);
+        let disk_freq = |w: &String| {
+            let df = disk.and_then(|d| d.1.doc_freq.get(&(field.to_owned(), w.clone())));
+            df.copied().unwrap_or(0.0)
+        };
         self.postings_for(path, analyzed, |f| {
-            Some(MemoryStats {
-                docs: f.doc_count,
-                total_terms: f.total_terms,
+            Some(FieldStats {
+                docs: docs + f.doc_count,
+                total_terms: total_terms + f.total_terms,
                 doc_freq: wanted
                     .iter()
-                    .map(|w| (w.clone(), f.doc_freq.get(w).copied().unwrap_or(0.0)))
+                    .map(|w| {
+                        let df = f.doc_freq.get(w).copied().unwrap_or(0.0);
+                        (w.clone(), disk_freq(w) + df)
+                    })
                     .collect(),
             })
         })
@@ -288,13 +306,13 @@ mod tests {
         }
         i.put("0", json!({"t": "cat"}));
         let s = i
-            .memory_stats("t", true, &["fox".into(), "cat".into()])
+            .field_stats("t", "t", true, &["fox".into(), "cat".into()])
             .unwrap();
         assert_eq!((s.docs, s.total_terms), (7.0, 13.0));
         assert_eq!((s.doc_freq["fox"], s.doc_freq["cat"]), (6.0, 1.0));
         i.delete("1");
         i.delete("2"); // 3 superseded of 7 physical docs: past a third, so merged away
-        let s = i.memory_stats("t", true, &["fox".into()]).unwrap();
+        let s = i.field_stats("t", "t", true, &["fox".into()]).unwrap();
         assert_eq!((s.docs, s.total_terms, s.doc_freq["fox"]), (4.0, 7.0, 3.0));
     }
 }

@@ -310,20 +310,7 @@ impl<'a> Searcher<'a> {
         if matches!(kind, Kind::Number | Kind::Bool) {
             return;
         }
-        if let Some((docs, ttf)) = self.index.stats.as_ref().and_then(|s| s.fields.get(field)) {
-            self.field_stats.insert(field.clone(), (*docs, ttf / docs));
-            for w in wanted {
-                let df = self
-                    .index
-                    .stats
-                    .as_ref()
-                    .and_then(|s| s.doc_freq.get(&(field.clone(), w.clone())));
-                self.doc_freq
-                    .insert((field.clone(), w), df.copied().unwrap_or(0.0));
-            }
-            return;
-        }
-        if let Some(m) = self.index.memory_stats(path, kind == Kind::Text, &wanted) {
+        if let Some(m) = (self.index).field_stats(field, path, kind == Kind::Text, &wanted) {
             let avg = if m.docs > 0.0 {
                 m.total_terms / m.docs
             } else {

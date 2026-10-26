@@ -181,7 +181,8 @@ pub struct TermStats {
 
 #[derive(Debug, Default)]
 pub struct Index {
-    /// Set for indices opened from disk; scoring uses it instead of counting live documents.
+    /// Statistics of the segments of an index opened from disk, deleted documents included;
+    /// scoring adds those of the documents in memory.
     pub stats: Option<TermStats>,
     pub settings: Settings,
     pub mappings: Mappings,
@@ -194,9 +195,12 @@ pub struct Index {
     docs: HashMap<String, Document>,
     /// Postings over `docs`, built per field as queries need them (see [`postings`]).
     postings: std::sync::Mutex<postings::Postings>,
+    /// Ids of a snapshot's documents copied from disk, which `stats` already counts.
+    from_disk: std::collections::HashSet<String>,
     /// The segments of an index opened from disk, serving the documents not written since.
     disk: Option<disk::Shard>,
-    /// Sources of updated/deleted docs, kept for BM25 statistics like Lucene's unmerged segments.
+    /// Sources of updated/deleted docs that were in memory, kept for BM25 statistics like
+    /// Lucene's unmerged segments (`stats` counts those on disk).
     // ponytail: a "merge" drops them all once they pass a third of all physical docs, roughly
     // ES's default merge policy; real merges are per segment and less predictable
     superseded: Vec<Value>,
@@ -240,19 +244,17 @@ impl Index {
         }
     }
 
-    /// Removes a live document, returning its source.
-    fn take(&mut self, id: &str) -> Option<Value> {
+    /// Removes a live document, returning its source if it was in memory: one on disk stays
+    /// counted in its segment's statistics, as a deleted document does in Lucene.
+    fn take(&mut self, id: &str) -> Option<Option<Value>> {
         if let Some(d) = self.docs.remove(id) {
             self.postings
                 .get_mut()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .remove(id);
-            return Some(d.source);
+            return Some(Some(d.source));
         }
-        let disk = self.disk.as_mut()?;
-        let d = disk.remove(id)?;
-        // ponytail: an unreadable superseded source is left out of the BM25 statistics
-        Some(disk.load(&d).map_or(Value::Null, |d| d.source))
+        self.disk.as_mut()?.remove(id).map(|_| None)
     }
 
     /// Number of live documents.
@@ -384,6 +386,10 @@ impl Index {
                 .map(|(id, d)| (id.to_owned(), d.into_owned()))
                 .collect(),
             superseded: self.superseded.clone(),
+            from_disk: (self.disk.iter().flat_map(disk::Shard::ids))
+                .chain(self.from_disk.iter().map(String::as_str))
+                .map(str::to_owned)
+                .collect(),
             next_seq_no: self.next_seq_no,
             refreshed_seq_no: self.refreshed_seq_no,
             ..Index::default()
@@ -584,7 +590,8 @@ impl Index {
         }
     }
 
-    fn supersede(&mut self, old: Value) {
+    fn supersede(&mut self, old: Option<Value>) {
+        let Some(old) = old else { return };
         self.superseded.push(old);
         // superseded / (live + superseded) > 1/3
         if self.superseded.len() * 2 > self.len() {
@@ -596,7 +603,7 @@ impl Index {
         }
     }
 
-    /// Sources of documents that were updated or deleted (see `superseded`).
+    /// Sources of in-memory documents that were updated or deleted (see `superseded`).
     pub fn superseded(&self) -> &[Value] {
         &self.superseded
     }

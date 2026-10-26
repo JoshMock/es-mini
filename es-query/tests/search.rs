@@ -558,6 +558,45 @@ fn postings_narrowed_queries_track_writes() {
     );
 }
 
+/// Like Lucene: the statistics sum the segments (with their replaced and deleted docs) and the
+/// documents written since the index was opened.
+#[test]
+fn statistics_of_an_opened_index_count_later_writes() {
+    let mapped = || {
+        let mut i = Index::default();
+        (i.mappings.properties).insert("title".into(), FieldMapping::Text { store: false });
+        i
+    };
+    let (mut memory, mut saved) = (mapped(), mapped());
+    for (id, title) in [
+        ("1", "quick fox"),
+        ("2", "lazy dog"),
+        ("3", "brown fox jumps"),
+    ] {
+        memory.put(id, json!({"title": title}));
+        saved.put(id, json!({"title": title}));
+    }
+    let dir = std::env::temp_dir().join(format!("esq-stats-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    es_index::disk::save(&dir, &es_index::Indices::from([("idx".into(), saved)])).unwrap();
+    let mut opened = es_index::disk::open(&dir).unwrap().remove("idx").unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    for idx in [&mut memory, &mut opened] {
+        idx.put("4", json!({"title": "fox"}));
+        idx.put("2", json!({"title": "lazy fox"}));
+    }
+    let scores = |idx: &Index| {
+        let req = SearchRequest::parse(&json!({"query": {"match": {"title": "fox"}}})).unwrap();
+        let mut v: Vec<_> = (search(idx, &req).hits.iter())
+            .map(|h| (h.id.to_owned(), h.score))
+            .collect();
+        v.sort_by(|a, b| a.0.cmp(&b.0));
+        v
+    };
+    assert_eq!(scores(&opened), scores(&memory));
+    assert_eq!(scores(&opened.snapshot()), scores(&memory));
+}
+
 #[test]
 fn simple_query_string_matches_each_whitespace_term_across_fields() {
     let q = |p: Value| sorted(ids(json!({"query": {"simple_query_string": p}})));

@@ -136,6 +136,10 @@ impl Shard {
         self.ids.len()
     }
 
+    pub(crate) fn ids(&self) -> impl Iterator<Item = &str> {
+        self.ids.keys().map(String::as_str)
+    }
+
     pub(crate) fn meta(&self, id: &str) -> Option<DiskDoc> {
         self.ids.get(id).copied()
     }
