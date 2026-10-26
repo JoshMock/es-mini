@@ -132,10 +132,6 @@ fn document(d: &DiskDoc, source: Option<Vec<u8>>) -> es_codec::Result<Document> 
 }
 
 impl Shard {
-    pub(crate) fn ids(&self) -> impl Iterator<Item = &str> {
-        self.ids.keys().map(String::as_str)
-    }
-
     pub(crate) fn meta(&self, id: &str) -> Option<DiskDoc> {
         self.ids.get(id).copied()
     }
@@ -235,6 +231,48 @@ fn longs(seg: &SegmentReader, field: &str) -> Vec<Option<i64>> {
     }
 }
 
+/// Adds the term statistics of `seg`, deleted documents included, to `stats`.
+fn add_stats(stats: &mut TermStats, seg: &SegmentReader) {
+    for f in seg
+        .fields
+        .iter()
+        .filter(|f| f.index_options != IndexOptions::None && f.name != "_id")
+    {
+        // ponytail: fields in formats the codec lacks (e.g. ES812Postings `_id`) get no stats
+        let Ok(terms) = seg.terms(&f.name) else {
+            continue;
+        };
+        let mut docs = HashSet::new();
+        let entry = stats.fields.entry(f.name.clone()).or_default();
+        for t in terms {
+            entry.1 += t.total_term_freq as f64;
+            docs.extend(t.docs.iter().map(|d| d.0));
+            *stats
+                .doc_freq
+                .entry((
+                    f.name.clone(),
+                    String::from_utf8_lossy(&t.term).into_owned(),
+                ))
+                .or_default() += t.docs.len() as f64;
+        }
+        entry.0 += docs.len() as f64;
+    }
+}
+
+/// The term statistics of the latest commit in the shard directory `dir`; `None` if it has no
+/// segments.
+fn commit_stats(dir: &Path) -> es_codec::Result<Option<TermStats>> {
+    let segments = SegmentInfos::read_latest(dir)?.segments;
+    if segments.is_empty() {
+        return Ok(None);
+    }
+    let mut stats = TermStats::default();
+    for seg in segments {
+        add_stats(&mut stats, &SegmentReader::open(dir, seg)?);
+    }
+    Ok(Some(stats))
+}
+
 fn load_shard(index: &mut Index, dir: &Path) -> es_codec::Result<()> {
     let mut stats = TermStats::default();
     let infos = SegmentInfos::read_latest(dir)?;
@@ -253,30 +291,7 @@ fn load_shard(index: &mut Index, dir: &Path) -> es_codec::Result<()> {
     };
     for seg in infos.segments {
         let seg = SegmentReader::open(dir, seg)?;
-        for f in seg
-            .fields
-            .iter()
-            .filter(|f| f.index_options != IndexOptions::None && f.name != "_id")
-        {
-            // ponytail: fields in formats the codec lacks (e.g. ES812Postings `_id`) get no stats
-            let Ok(terms) = seg.terms(&f.name) else {
-                continue;
-            };
-            let mut docs = HashSet::new();
-            let entry = stats.fields.entry(f.name.clone()).or_default();
-            for t in terms {
-                entry.1 += t.total_term_freq as f64;
-                docs.extend(t.docs.iter().map(|d| d.0));
-                *stats
-                    .doc_freq
-                    .entry((
-                        f.name.clone(),
-                        String::from_utf8_lossy(&t.term).into_owned(),
-                    ))
-                    .or_default() += t.docs.len() as f64;
-            }
-            entry.0 += docs.len() as f64;
-        }
+        add_stats(&mut stats, &seg);
         let (versions, seq_nos) = (longs(&seg, "_version"), longs(&seg, "_seq_no"));
         let live = seg.live_docs()?;
         let segment = shard.segments.len();
@@ -315,6 +330,7 @@ fn load_shard(index: &mut Index, dir: &Path) -> es_codec::Result<()> {
     }
     index.stats = Some(stats);
     index.disk = Some(shard);
+    index.persisted = index.next_seq_no;
     Ok(())
 }
 
@@ -797,7 +813,11 @@ fn log(data_dir: &Path, indices: &mut Indices, all: bool) -> es_codec::Result<Pe
     }
     if flush {
         commit(data_dir, indices)?;
-        indices.values_mut().for_each(|ix| drop(ix.take_unlogged()));
+        // ponytail: rereads every term of every index; cache per segment if commits get slow
+        for (meta, ix) in metas.iter().zip(indices.values_mut()) {
+            drop(ix.take_unlogged());
+            ix.committed(commit_stats(&shard_dir(data_dir, &meta.uuid))?);
+        }
         pending.appends.clear();
     }
     Ok(pending)

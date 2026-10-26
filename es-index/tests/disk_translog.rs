@@ -2,7 +2,7 @@
 //! format, and commits segments only on a flush; disk::open replays the logged operations.
 
 use es_codec::{SegmentInfos, cluster_state::read_indices, translog};
-use es_index::{Index, Indices, disk};
+use es_index::{FieldMapping, Index, Indices, disk};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
@@ -196,4 +196,46 @@ fn begun_persists_log_only_the_writes_taken() {
     assert!(back["idx"].get("3").is_none());
     disk::persist(&dir, &mut indices).unwrap();
     assert!(disk::open(&dir).unwrap()["idx"].get("3").is_some());
+}
+
+/// A flush commits every write, so statistics then come from the committed segments (deleted
+/// documents included until a merge drops them), as reopening the directory reads them.
+#[test]
+fn flushed_statistics_match_the_committed_segments() {
+    let dir = scratch("stats");
+    let mut ix = Index::default();
+    ix.settings.record_creation("idx");
+    ix.settings
+        .merge(&json!({"index.translog.flush_threshold_size": "1b"}));
+    ix.mappings
+        .properties
+        .insert("t".into(), FieldMapping::Text { store: false });
+    let mut indices = Indices::from([("idx".to_owned(), ix)]);
+    let stats = |ix: &Index| {
+        let s = ix.field_stats("t", "t", true, &["fox".into()]).unwrap();
+        (s.docs, s.total_terms, s.doc_freq["fox"])
+    };
+    // Committing the empty index leaves in-memory postings, not empty segment statistics.
+    disk::persist(&dir, &mut indices).unwrap();
+    indices
+        .get_mut("idx")
+        .unwrap()
+        .put("new", json!({"t": "fox"}));
+    assert_eq!(stats(&indices["idx"]), (1.0, 1.0, 1.0));
+    for round in 0..12 {
+        let ix = indices.get_mut("idx").unwrap();
+        ix.put(&round.to_string(), json!({"t": "fox fox"}));
+        // Replaced both before and after a commit.
+        ix.put("u", json!({"t": "fox"}));
+        ix.put("u", json!({"t": "fox cat"}));
+        disk::persist(&dir, &mut indices).unwrap();
+        let reopened = disk::open(&dir).unwrap();
+        assert_eq!(stats(&indices["idx"]), stats(&reopened["idx"]), "{round}");
+    }
+    // 24 docs were committed, 11 of them deleted later: merges dropped some.
+    assert!(
+        stats(&indices["idx"]).0 < 24.0,
+        "{:?}",
+        stats(&indices["idx"])
+    );
 }

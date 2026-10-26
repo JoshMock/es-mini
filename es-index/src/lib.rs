@@ -181,8 +181,8 @@ pub struct TermStats {
 
 #[derive(Debug, Default)]
 pub struct Index {
-    /// Statistics of the segments of an index opened from disk, deleted documents included;
-    /// scoring adds those of the documents in memory.
+    /// Statistics of the segments of an index opened from disk or last committed, deleted
+    /// documents included; scoring adds those of the documents in memory not yet committed.
     pub stats: Option<TermStats>,
     pub settings: Settings,
     pub mappings: Mappings,
@@ -195,15 +195,18 @@ pub struct Index {
     docs: HashMap<String, Document>,
     /// Postings over `docs`, built per field as queries need them (see [`postings`]).
     postings: std::sync::Mutex<postings::Postings>,
-    /// Ids of a snapshot's documents copied from disk, which `stats` already counts.
-    from_disk: std::collections::HashSet<String>,
+    /// Documents in memory with lower sequence numbers are in the segments, which `stats`
+    /// already counts: a snapshot's copies of those on disk, or those of the last commit.
+    persisted: u64,
     /// The segments of an index opened from disk, serving the documents not written since.
     disk: Option<disk::Shard>,
     /// Sources of updated/deleted docs that were in memory, kept for BM25 statistics like
     /// Elasticsearch's soft deletes, which merges keep above the last commit's checkpoint
-    /// (`stats` counts those on disk).
+    /// (`stats` counts those on disk). A commit hands them to its segments' statistics, from
+    /// which merges drop them.
     // ponytail: never dropped in an index without a data directory, which never commits;
-    // Elasticsearch drops them once a flush and a retention lease renewal let a merge do so
+    // Elasticsearch drops them once a flush and a retention lease renewal let a merge do so.
+    // A commit drops those superseded since the previous one, which no segment holds.
     superseded: Vec<Value>,
     /// Version and deletion time of deleted docs, kept for `index.gc_deletes` (default 60s) so
     /// a re-created doc continues the version count, as in ES.
@@ -382,10 +385,7 @@ impl Index {
                 .map(|(id, d)| (id.to_owned(), d.into_owned()))
                 .collect(),
             superseded: self.superseded.clone(),
-            from_disk: (self.disk.iter().flat_map(disk::Shard::ids))
-                .chain(self.from_disk.iter().map(String::as_str))
-                .map(str::to_owned)
-                .collect(),
+            persisted: self.persisted,
             next_seq_no: self.next_seq_no,
             refreshed_seq_no: self.refreshed_seq_no,
             ..Index::default()
@@ -584,6 +584,19 @@ impl Index {
                 _ => None,
             }
         }
+    }
+
+    /// Takes the statistics of `segments`, just committed with every write so far (`None`
+    /// without segments, so scoring keeps using the postings of new documents alone).
+    pub(crate) fn committed(&mut self, segments: Option<TermStats>) {
+        self.stats = segments;
+        self.superseded.clear();
+        self.persisted = self.next_seq_no;
+        // Rebuilt as queries need them, now counting no document committed.
+        *self
+            .postings
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Default::default();
     }
 
     /// Sources of in-memory documents that were updated or deleted (see `superseded`).

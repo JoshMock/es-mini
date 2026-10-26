@@ -125,22 +125,22 @@ pub struct Postings(HashMap<(String, bool), Field>);
 
 impl Postings {
     /// The postings of `path`, built from `live` documents and `superseded` sources if new.
-    /// Live documents with ids in `uncounted` are left out of the statistics.
+    /// Live documents with sequence numbers below `persisted` are left out of the statistics.
     fn field<'d>(
         &mut self,
         path: &str,
         analyzed: bool,
-        live: impl Iterator<Item = (&'d str, &'d Value)>,
+        live: impl Iterator<Item = (&'d str, &'d crate::Document)>,
         superseded: &[Value],
-        uncounted: &HashSet<String>,
+        persisted: u64,
     ) -> &Field {
         self.0
             .entry((path.to_owned(), analyzed))
             .or_insert_with(|| {
                 let mut f = Field::default();
-                for (id, source) in live {
-                    let counted = !uncounted.contains(id);
-                    f.add(id, field_terms(source, path, analyzed), counted);
+                for (id, d) in live {
+                    let counted = d.seq_no >= persisted;
+                    f.add(id, field_terms(&d.source, path, analyzed), counted);
                 }
                 for (n, source) in superseded.iter().enumerate() {
                     // Counted in the statistics, then unlinked like any superseded document.
@@ -169,8 +169,8 @@ impl crate::Index {
             .postings
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let live = self.docs.iter().map(|(id, d)| (id.as_str(), &d.source));
-        read(postings.field(path, analyzed, live, &self.superseded, &self.from_disk))
+        let live = self.docs.iter().map(|(id, d)| (id.as_str(), d));
+        read(postings.field(path, analyzed, live, &self.superseded, self.persisted))
     }
 
     /// The in-memory documents indexing all (or any) of `terms` at `path`. Documents on disk
