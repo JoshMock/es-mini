@@ -891,6 +891,35 @@ fn cell(source: &Value, column: &str, mappings: &Mappings) -> Value {
     }
 }
 
+/// A source value as ES|QL reads it from doc values: dates as ISO strings, multi-values sorted,
+/// keywords deduplicated. Text has no doc values and keeps source order.
+fn doc_value(v: Value, ty: &str, m: Option<&FieldMapping>) -> Value {
+    let mut vals = match v {
+        Value::Array(a) => a,
+        Value::Null => return v,
+        v => vec![v],
+    };
+    if let Some(FieldMapping::Date { format, locale, .. }) = m {
+        vals = vals
+            .iter()
+            .filter_map(|v| es_index::date_millis(format.as_deref(), locale.as_deref(), v))
+            .map(|ms| es_index::iso_date(ms).into())
+            .collect();
+    }
+    if ty != "text" {
+        // ponytail: ISO dates sort as strings, right for years 0000-9999
+        vals.sort_by(|a, b| compare(a, b).unwrap_or(Ordering::Equal));
+    }
+    if ty == "keyword" {
+        vals.dedup();
+    }
+    match vals.len() {
+        0 => Value::Null,
+        1 => vals.remove(0),
+        _ => Value::Array(vals),
+    }
+}
+
 fn collect(v: &Value, path: &str, out: &mut Vec<Value>) {
     match v {
         Value::Array(a) => a.iter().for_each(|x| collect(x, path, out)),
@@ -2083,7 +2112,11 @@ fn table_from(
                         .map(|c| {
                             let v = match conflicts.contains_key(c) {
                                 true => Value::Null,
-                                false => cell(&d.source, c, mappings),
+                                false => doc_value(
+                                    cell(&d.source, c, mappings),
+                                    &types[c],
+                                    mappings.field(c),
+                                ),
                             };
                             (c.clone(), v)
                         })

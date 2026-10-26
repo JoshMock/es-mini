@@ -1,17 +1,12 @@
 # ES|QL queries (lines of esql-queries.txt) whose responses es-mini does not match yet.
 # Fix one, then delete its line. Run the esql_parity test with PARITY_VERBOSE=1 to see the
 # differences. This list may only shrink.
-FROM emp | SORT name | LIMIT 3
-FROM emp | KEEP name, bio, age, salary, height, active, hired, tags, scores | SORT name
 FROM emp | WHERE name LIKE "*a*" | KEEP name | SORT name
 FROM emp | WHERE name LIKE "?ob" | KEEP name
 FROM emp | WHERE bio LIKE "*chess*" | KEEP name
 FROM emp | WHERE name RLIKE "[A-C].*" | KEEP name | SORT name
 FROM emp | WHERE name IN ("Alice", "Dave", "Zed") | KEEP name | SORT name
 FROM emp | WHERE age IN (28, 51) | KEEP name, age | SORT name
-FROM emp | WHERE hired > "2020-01-01" | KEEP name, hired | SORT hired
-FROM emp | DROP bio, tags, scores | SORT name | LIMIT 2
-FROM emp | DROP h* | SORT name | LIMIT 2
 FROM emp | EVAL y = DATE_EXTRACT("year", hired), m = DATE_EXTRACT("month_of_year", hired) | KEEP name, y, m | SORT name
 FROM emp | EVAL d = DATE_FORMAT("yyyy-MM-dd", hired) | KEEP name, d | SORT name
 FROM emp | EVAL d = DATE_FORMAT(hired) | KEEP d | SORT d | LIMIT 2

@@ -1291,3 +1291,34 @@ fn case_and_coalesce_match_elasticsearch() {
         }
     }
 }
+
+#[test]
+fn from_reads_fields_like_doc_values() {
+    let mut i = Index::default();
+    let p = &mut i.mappings.properties;
+    p.insert(
+        "d".into(),
+        FieldMapping::Date {
+            format: None,
+            locale: None,
+            fields: BTreeMap::new(),
+        },
+    );
+    p.insert("n".into(), FieldMapping::Long);
+    p.insert("k".into(), FieldMapping::Keyword { ignore_above: None });
+    i.put(
+        "1",
+        json!({"d": "2019-03-15T09:30:00Z", "n": [9, 1, 9], "k": ["b", "a", "b"], "t": ["y", "x"]}),
+    );
+    let all = BTreeMap::from([("x".to_owned(), i)]);
+    let r = run(&all, "FROM x | KEEP d, n, k, t").unwrap();
+    assert_eq!(
+        r.values,
+        [[
+            json!("2019-03-15T09:30:00.000Z"),
+            json!([1, 9, 9]),
+            json!(["a", "b"]),
+            json!(["y", "x"])
+        ]]
+    );
+}
