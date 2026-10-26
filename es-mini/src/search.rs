@@ -538,7 +538,8 @@ pub async fn esql(
     let body = parse_body(&body)?;
     let query = body["query"]
         .as_str()
-        .ok_or_else(|| AppError::ParsingException("[query] is required".into()))?;
+        .filter(|q| !q.is_empty())
+        .ok_or_else(|| AppError::ActionRequestValidation("[query] is required".into()))?;
     let r = esql::run(&state.read().expect("lock poisoned"), query).map_err(|e| match e {
         EsqlError::Parse(m) => AppError::ParsingException(m),
         EsqlError::Verification(m) => AppError::Verification(m),

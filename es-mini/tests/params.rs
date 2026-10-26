@@ -335,3 +335,25 @@ async fn q_syntax_errors_are_bad_requests() {
         assert_eq!(body["error"]["type"], "parse_exception", "{uri}: {body}");
     }
 }
+
+#[tokio::test]
+async fn esql_query_without_query_text_fails_validation() {
+    // Elasticsearch 9.5.5 answers `{}` and `{"query": ""}` the same way.
+    for body in ["{}", r#"{"query": ""}"#] {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/_query")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let res = es_mini::app().oneshot(req).await.unwrap();
+        assert_eq!(res.status().as_u16(), 400, "{body}");
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["type"], "action_request_validation_exception");
+        assert_eq!(
+            body["error"]["reason"],
+            "Validation Failed: 1: [query] is required;"
+        );
+    }
+}
