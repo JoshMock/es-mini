@@ -456,14 +456,30 @@ pub async fn put_all_settings(
     put_settings_on(state, "_all".into(), uri, params, body)
 }
 
-const TOP_LEVEL_SETTINGS: [&str; 6] = [
-    "codec",
-    "number_of_shards",
-    "number_of_replicas",
-    "refresh_interval",
-    "hidden",
-    "max_result_window",
+/// How Elasticsearch lets a setting change after index creation.
+#[derive(Clone, Copy, PartialEq)]
+enum Update {
+    Dynamic,
+    /// Only on closed indices (or with `reopen=true`).
+    Static,
+    /// Never.
+    Final,
+}
+
+/// Top-level `index.*` settings PUT _settings accepts, from IndexScopedSettings.
+const TOP_LEVEL_SETTINGS: [(&str, Update); 8] = [
+    ("codec", Update::Static),
+    ("number_of_shards", Update::Final),
+    ("number_of_routing_shards", Update::Final),
+    ("routing_partition_size", Update::Final),
+    ("number_of_replicas", Update::Dynamic),
+    ("refresh_interval", Update::Dynamic),
+    ("hidden", Update::Dynamic),
+    ("max_result_window", Update::Dynamic),
 ];
+
+const REINDEX_DOCS: &str =
+    "See https://www.elastic.co/docs/api/doc/elasticsearch/operation/operation-reindex";
 
 fn put_settings_on(
     state: AppState,
@@ -484,25 +500,90 @@ fn put_settings_on(
         ],
     )?;
     let body = parse_body(&body)?;
-    // ponytail: index.codec is the only static setting checked; ES also rejects e.g. number_of_shards
     let settings = body.get("settings").unwrap_or(&body);
+    // Non-dynamic keys in the request, with their new values and whether they are final.
+    let mut skipped = Vec::new();
     // ponytail: only rejects unknown top-level index.* names; nested groups (index.mapping.*) pass
-    for (key, _) in es_index::flatten_settings(settings) {
-        let key = key.strip_prefix("index.").unwrap_or(&key);
-        if !key.contains('.') && !TOP_LEVEL_SETTINGS.contains(&key) {
-            return Err(AppError::IllegalArgument(format!(
-                "unknown setting [index.{key}] please check that any required plugins are installed, or check the breaking changes documentation for removed settings"
-            )));
-        }
-        // ponytail: codec is the only static setting modelled; it needs reopen=true
-        if key == "codec" && params.get("reopen").map(String::as_str) != Some("true") {
-            return Err(AppError::IllegalArgument(format!(
-                "Can't update non dynamic settings [[index.{key}]] for open indices [{name}]"
-            )));
+    for (key, value) in es_index::flatten_settings(settings) {
+        let short = key.strip_prefix("index.").unwrap_or(&key);
+        let update = match TOP_LEVEL_SETTINGS.iter().find(|(k, _)| *k == short) {
+            Some((_, u)) => *u,
+            None if short.contains('.') => Update::Dynamic,
+            None => {
+                return Err(AppError::IllegalArgument(format!(
+                    "unknown setting [index.{short}] please check that any required plugins are installed, or check the breaking changes documentation for removed settings"
+                )));
+            }
+        };
+        if update != Update::Dynamic {
+            let value = match value {
+                Value::Null => None,
+                Value::String(v) => Some(v.clone()),
+                v => Some(v.to_string()),
+            };
+            skipped.push((format!("index.{short}"), value, update == Update::Final));
         }
     }
+    let reopen = params.get("reopen").map(String::as_str) == Some("true");
     let mut indices = state.write().expect("lock poisoned");
-    for n in read_indices(&indices, &name, &params)? {
+    let names = read_indices(&indices, &name, &params)?;
+    // Indices that take the non-dynamic settings: closed ones, and open ones `reopen` closes
+    // because a value changes; open indices keep the rest unchanged.
+    let mut as_closed = Vec::new();
+    let mut open = Vec::new();
+    for n in &names {
+        let index = &indices[n];
+        let changes = skipped
+            .iter()
+            .any(|(k, v, _)| v.as_deref() != index.settings.get(k));
+        if index.closed || (reopen && changes) {
+            as_closed.push(n);
+        } else {
+            open.push(n);
+        }
+    }
+    if !skipped.is_empty() && !open.is_empty() && !reopen {
+        let list = |final_only: bool| {
+            let keys: Vec<&str> = skipped
+                .iter()
+                .filter(|(_, _, f)| *f || !final_only)
+                .map(|(k, _, _)| k.as_str())
+                .collect();
+            format!("[{}]", keys.join(", "))
+        };
+        let open: Vec<String> = open
+            .iter()
+            .map(|n| {
+                format!(
+                    "[{n}/{}]",
+                    indices[*n].settings.get("index.uuid").unwrap_or("")
+                )
+            })
+            .collect();
+        let path = if skipped.iter().any(|(_, _, f)| *f) {
+            format!(
+                "The setting(s) [{}] cannot be modified on an index once it is created. You will need to create a new index with the desired setting(s) and reindex your data. {REINDEX_DOCS}",
+                list(true)
+            )
+        } else {
+            format!(
+                "You can either resubmit the update with `?reopen=true`, or create a new index with the desired setting(s) and reindex your data. {REINDEX_DOCS}"
+            )
+        };
+        return Err(AppError::IllegalArgument(format!(
+            "Can't update non dynamic setting(s) [{}] for open indices [{}]. {path}",
+            list(false),
+            open.join(", ")
+        )));
+    }
+    if let Some(n) = as_closed.first()
+        && let Some((k, _, _)) = skipped.iter().find(|(_, _, f)| *f)
+    {
+        return Err(AppError::IllegalArgument(format!(
+            "final {n} setting [{k}], not updateable"
+        )));
+    }
+    for n in names {
         indices
             .get_mut(&n)
             .expect("resolved index exists")
