@@ -1166,6 +1166,28 @@ fn date_trunc_rounds_down_to_time_spans() {
 }
 
 #[test]
+fn rlike_matches_lucene_regular_expressions() {
+    let names =
+        |query: &str| -> Vec<Value> { q(query).values.into_iter().map(|r| r[0].clone()).collect() };
+    assert_eq!(
+        names(r#"FROM people | WHERE name RLIKE "[a-b].*" | KEEP name | SORT name"#),
+        [json!("ann"), json!("bob")]
+    );
+    assert_eq!(
+        names(r#"FROM people | WHERE name NOT RLIKE "(an+|c[^a]d)" | KEEP name"#),
+        [json!("bob")]
+    );
+    assert_eq!(
+        names(r#"FROM people | WHERE city RLIKE "R.{2}e|@x" | KEEP name"#),
+        [json!("cid")]
+    );
+    assert!(matches!(
+        run(&indices(), r#"FROM people | WHERE name RLIKE "(a""#),
+        Err(EsqlError::Verification(_))
+    ));
+}
+
+#[test]
 fn stats_count_star_by_groups() {
     let r = q("FROM people METADATA _index | STATS c = COUNT(*) BY _index");
     assert_eq!(col_names(&r), ["c", "_index"]);

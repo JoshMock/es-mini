@@ -232,8 +232,8 @@ enum Expr {
     Or(Box<Expr>, Box<Expr>, Span),
     Not(Box<Expr>, Span),
     IsNull(Box<Expr>, bool, Span),
-    /// `x LIKE "pattern"`.
-    Like(Box<Expr>, String, Span),
+    /// `x LIKE "pattern"`, or `x RLIKE "pattern"` when the flag is set.
+    Like(Box<Expr>, String, bool, Span),
     /// `+ - * / %`, with the numeric type `resolve` gives it, which `eval` computes in.
     Arith(
         &'static str,
@@ -642,14 +642,15 @@ impl Parser<'_> {
         }
         let is = |i: usize, kw: &str| matches!(self.toks.get(self.pos + i), Some((Tok::Word(w), ..)) if w.eq_ignore_ascii_case(kw));
         let negated = is(0, "not");
-        if is(negated as usize, "like") {
+        let rlike = is(negated as usize, "rlike");
+        if rlike || is(negated as usize, "like") {
             self.pos += 1 + negated as usize;
             let Some(Tok::Str(p)) = self.peek().cloned() else {
                 return self.mismatched("QUOTED_STRING");
             };
             self.pos += 1;
             self.follow = AFTER_LITERAL;
-            let e = Expr::Like(Box::new(left), p, self.span(start));
+            let e = Expr::Like(Box::new(left), p, rlike, self.span(start));
             return Ok(match negated {
                 true => Expr::Not(Box::new(e), self.span(start)),
                 false => e,
@@ -1019,7 +1020,9 @@ fn eval(e: &Expr, row: &Row) -> Option<Value> {
         Expr::Field(f, _) => row.get(f.as_str()).cloned().filter(|v| !v.is_null()),
         Expr::IsNull(x, negated, _) => Some(Value::Bool(eval(x, row).is_none() != *negated)),
         // A multi-value is null, like ES (which warns).
-        Expr::Like(x, p, _) => match eval(x, row)? {
+        Expr::Like(x, p, rlike, _) => match eval(x, row)? {
+            // ponytail: parsed again per row; `resolve` checked that it parses
+            Value::String(s) if *rlike => Some(crate::regexp::parse(p)?.matches(&s).into()),
             Value::String(s) => {
                 let (p, s): (Vec<char>, Vec<char>) = (p.chars().collect(), s.chars().collect());
                 Some(crate::wildcard_match(&p, &s).into())
@@ -1806,8 +1809,13 @@ fn resolve(
             resolve(x, src, types, bad)?;
             None
         }
-        Expr::Like(x, ..) => {
+        Expr::Like(x, p, rlike, _) => {
             let t = resolve(x, src, types, bad)?;
+            // ponytail: not Elasticsearch's message, which names what is wrong
+            if *rlike && crate::regexp::parse(p).is_none() {
+                bad.push((span(e).0, format!("Invalid regex pattern for RLIKE [{p}]")));
+                return None;
+            }
             (!matches!(t.as_str(), "keyword" | "text" | "null")).then(|| {
                 format!(
                     "argument of [{}] must be [string], found value [{}] type [{t}]",

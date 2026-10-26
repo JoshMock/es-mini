@@ -16,6 +16,7 @@ mod hll;
 mod hll_tables;
 mod parse;
 mod query_string;
+mod regexp;
 mod request;
 mod tdigest;
 
