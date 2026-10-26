@@ -4,7 +4,7 @@
 //! `IS [NOT] NULL` over field names and literals. Anything else is a parse error.
 
 use es_index::{
-    FieldMapping, Index,
+    FieldMapping, Index, Mappings,
     aliases::{self, ResolveError},
 };
 use serde::Serialize;
@@ -341,23 +341,22 @@ fn columns(index: &Index) -> BTreeMap<String, (String, String)> {
         .map(|(c, t)| (c, (t.clone(), t)))
         .collect();
     for (name, m) in &index.mappings.properties {
-        let es_type = serde_json::to_value(m)
-            .ok()
-            .and_then(|v| Some(v["type"].as_str()?.to_owned()));
-        let t = m.type_name().to_owned();
-        cols.insert(name.clone(), (es_type.unwrap_or_else(|| t.clone()), t));
+        cols.insert(name.clone(), types_of(m));
         cols.remove(&format!("{name}.keyword"));
-        // ponytail: dynamic strings only ever get a keyword multi-field
-        if let FieldMapping::TextKeyword { fields } = m {
-            for sub in fields.keys() {
-                cols.insert(
-                    format!("{name}.{sub}"),
-                    ("keyword".into(), "keyword".into()),
-                );
-            }
+        for (sub, sm) in m.fields().into_iter().flatten() {
+            cols.insert(format!("{name}.{sub}"), types_of(sm));
         }
     }
     cols
+}
+
+/// `(mapping type, ES|QL type)` of a mapped field.
+fn types_of(m: &FieldMapping) -> (String, String) {
+    let t = m.type_name().to_owned();
+    let es_type = serde_json::to_value(m)
+        .ok()
+        .and_then(|v| Some(v["type"].as_str()?.to_owned()));
+    (es_type.unwrap_or_else(|| t.clone()), t)
 }
 
 /// ES's message for a field whose types disagree across indices (`TypeConflictedField`).
@@ -412,12 +411,16 @@ fn flatten_types(prefix: &str, v: &Value, cols: &mut BTreeMap<String, String>) {
         .or_insert_with(|| t.to_owned());
 }
 
-/// The value of a (possibly `.keyword`) column in one document; multi-values become arrays.
-fn cell(source: &Value, column: &str) -> Value {
+/// The value of a column in one document; multi-values become arrays. A multi-field (or the
+/// `.keyword` of an unmapped string) reads its parent's source value.
+fn cell(source: &Value, column: &str, mappings: &Mappings) -> Value {
     let mut vals = Vec::new();
     collect(source, column, &mut vals);
+    let multi_field = column.ends_with(".keyword")
+        || !mappings.properties.contains_key(column) && mappings.field(column).is_some();
     if vals.is_empty()
-        && let Some(base) = column.strip_suffix(".keyword")
+        && multi_field
+        && let Some((base, _)) = column.rsplit_once('.')
     {
         collect(source, base, &mut vals);
     }
@@ -593,7 +596,9 @@ pub fn run(indices: &BTreeMap<String, Index>, query: &str) -> Result<Response, E
     // One group of rows per index, for counting what Elasticsearch's per-shard plan loads.
     let groups: Vec<Vec<Row>> = docs
         .iter()
-        .map(|g| {
+        .zip(&targets)
+        .map(|(g, t)| {
+            let mappings = &indices[&t.index].mappings;
             g.iter()
                 .map(|d| {
                     types
@@ -601,7 +606,7 @@ pub fn run(indices: &BTreeMap<String, Index>, query: &str) -> Result<Response, E
                         .map(|c| {
                             let v = match conflicts.contains_key(c) {
                                 true => Value::Null,
-                                false => cell(&d.source, c),
+                                false => cell(&d.source, c, mappings),
                             };
                             (c.as_str(), v)
                         })

@@ -180,6 +180,24 @@ fn text_with_keyword_subfield_keeps_both_columns() {
 }
 
 #[test]
+fn every_declared_multi_field_is_a_column_of_its_own_type() {
+    let mut i = Index::default();
+    i.mappings.properties.insert(
+        "d".into(),
+        FieldMapping::Date {
+            format: None,
+            locale: None,
+            fields: BTreeMap::from([("n".into(), FieldMapping::Long)]),
+        },
+    );
+    i.put("1", json!({"d": 5}));
+    let all = BTreeMap::from([("idx".to_owned(), i)]);
+    let r = run(&all, "FROM idx | KEEP d.n").unwrap();
+    assert_eq!(r.columns[0].r#type, "long");
+    assert_eq!(r.values, vec![vec![json!(5)]]);
+}
+
+#[test]
 fn reports_documents_found_and_values_loaded() {
     let r = q("FROM people | KEEP name | LIMIT 2");
     assert_eq!(r.documents_found, 2);
