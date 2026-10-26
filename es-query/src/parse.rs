@@ -604,40 +604,35 @@ fn parse_kind(kind: &str, body: &Value) -> Result<Query, QueryError> {
                 filter: vec![],
             })
         }
+        "query_string" => {
+            let o = body.as_object().ok_or("[query_string] query malformed")?;
+            check_keys(
+                kind,
+                o,
+                &[
+                    "query",
+                    "default_field",
+                    "default_operator",
+                    "lenient",
+                    "boost",
+                    "_name",
+                ],
+            )?;
+            let query = o.get("query").and_then(Value::as_str);
+            let and = match o.get("default_operator").and_then(Value::as_str) {
+                None => false,
+                Some(op) if op.eq_ignore_ascii_case("and") => true,
+                Some(op) if op.eq_ignore_ascii_case("or") => false,
+                Some(op) => return Err(format!("operator [{op}] is not allowed").into()),
+            };
+            // ES defaults to index.query.default_field, `*`
+            let df = o.get("default_field").and_then(Value::as_str);
+            crate::parse_query_string(
+                query.ok_or("[query_string] must be provided with a [query]")?,
+                df.unwrap_or("*"),
+                and,
+            )
+        }
         other => Err(format!("unknown query [{other}]").into()),
-    }
-}
-
-/// `q=` URI search: whitespace-separated `[field:]term` clauses, `term*` is a prefix.
-// ponytail: no quoting, ranges, boolean operators or escapes
-pub fn parse_query_string(q: &str, df: &str, and: bool) -> Query {
-    let clauses: Vec<Query> = q
-        .split_whitespace()
-        .map(|t| {
-            let (field, t) = t.split_once(':').unwrap_or((df, t));
-            match t.strip_suffix('*') {
-                Some(p) => Query::Prefix {
-                    field: field.to_owned(),
-                    prefix: p.to_lowercase(),
-                },
-                None => Query::Match {
-                    field: field.to_owned(),
-                    query: t.to_owned(),
-                    and: false,
-                },
-            }
-        })
-        .collect();
-    let (must, should) = if and {
-        (clauses, vec![])
-    } else {
-        (vec![], clauses)
-    };
-    Query::Bool {
-        min_should: usize::from(must.is_empty()),
-        must,
-        should,
-        must_not: vec![],
-        filter: vec![],
     }
 }

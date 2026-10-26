@@ -1058,3 +1058,143 @@ fn multi_match_scores_an_opened_index_like_memory() {
     assert_eq!(scores(&opened), scores(&idx));
     assert_eq!(count(&opened, &req.query), 3);
 }
+
+/// Hits and scores are Elasticsearch 9.5.5's for the same documents, in one segment, with
+/// `default_field: title`.
+#[test]
+fn query_string_parses_lucene_syntax() {
+    let mut idx = Index::default();
+    let props = &mut idx.mappings.properties;
+    props.insert("tag".into(), FieldMapping::Keyword { ignore_above: None });
+    props.insert("n".into(), FieldMapping::Integer);
+    idx.put("1", json!({"title": "quick brown fox", "tag": "a", "n": 1}));
+    idx.put("2", json!({"title": "lazy brown dog", "tag": "b", "n": 5}));
+    idx.put(
+        "3",
+        json!({"title": "quick fox jumps over the lazy dog", "tag": "c", "n": 10}),
+    );
+    idx.put("4", json!({"title": "foo-bar baz", "tag": "a:b", "n": 20}));
+    idx.put("5", json!({"title": "slow (turtle)", "n": 7}));
+    let run = |q: &str, op: &str| {
+        let body = json!({"query": {"query_string": {
+            "query": q, "default_field": "title", "default_operator": op}}});
+        let req = SearchRequest::parse(&body)?;
+        es_query::search_many(&[("", &idx, None)], &req).map(|r| {
+            (r.hits.iter())
+                .map(|h| (h.id.to_owned(), h.score.unwrap()))
+                .collect::<Vec<_>>()
+        })
+    };
+    let check = |q: &str, op: &str, want: &[(&str, f32)]| {
+        let got = run(q, op).unwrap_or_else(|e| panic!("{q}: {e:?}"));
+        let mut got_ids: Vec<_> = got.iter().map(|(id, _)| id.as_str()).collect();
+        let mut want_ids: Vec<_> = want.iter().map(|(id, _)| *id).collect();
+        got_ids.sort();
+        want_ids.sort();
+        assert_eq!(got_ids, want_ids, "{q}: {got:?}");
+        for (id, s) in &got {
+            let w = want.iter().find(|(w, _)| w == id).unwrap().1;
+            assert!((s - w).abs() < 1e-5, "{q}: {got:?} vs {want:?}");
+        }
+    };
+    let (q1, q3, d2) = (0.9395274, 0.6314857, 0.9395274);
+    let cases: &[(&str, &[(&str, f32)])] = &[
+        ("quick", &[("1", q1), ("3", q3)]),
+        ("quick AND fox", &[("1", 1.8790548), ("3", 1.2629714)]),
+        ("quick OR dog", &[("3", 1.2629714), ("1", q1), ("2", d2)]),
+        ("quick || dog", &[("3", 1.2629714), ("1", q1), ("2", d2)]),
+        ("quick -fox", &[]),
+        ("+quick fox", &[("1", 1.8790548), ("3", 1.2629714)]),
+        ("NOT fox", &[("2", 0.0), ("4", 0.0), ("5", 0.0)]),
+        ("(-fox)", &[("2", 0.0), ("4", 0.0), ("5", 0.0)]),
+        ("-fox -dog", &[("4", 0.0), ("5", 0.0)]),
+        ("quick && !jumps", &[("1", q1)]),
+        (
+            "(quick OR lazy) AND dog",
+            &[("3", 1.8944571), ("2", 1.8790548)],
+        ),
+        (
+            "quick AND fox OR dog",
+            &[("3", 1.8944571), ("1", 1.8790548)],
+        ),
+        ("quick dog -lazy", &[("1", q1)]),
+        ("quick +(lazy OR fox) -dog", &[("1", 1.8790548)]),
+        (
+            "title:(quick lazy)",
+            &[("3", 1.2629714), ("1", q1), ("2", d2)],
+        ),
+        ("title:(+quick -fox) OR tag:b", &[("2", 1.2039728)]),
+        ("\"brown fox\"", &[("1", 1.8790548)]),
+        ("\"quick \\\"brown\"", &[("1", 1.8790548)]),
+        ("\"fox quick\"~2", &[("3", 0.53874993)]),
+        ("\"fox quick\"~1", &[]),
+        ("n:[5 TO 10]", &[("2", 1.0), ("3", 1.0), ("5", 1.0)]),
+        ("n:{5 TO 10]", &[("3", 1.0), ("5", 1.0)]),
+        ("n:[* TO 5}", &[("1", 1.0)]),
+        (
+            "n:[5 TO *]",
+            &[("2", 1.0), ("3", 1.0), ("4", 1.0), ("5", 1.0)],
+        ),
+        ("n:>=7", &[("3", 1.0), ("4", 1.0), ("5", 1.0)]),
+        ("n:>7", &[("3", 1.0), ("4", 1.0)]),
+        ("n:<5", &[("1", 1.0)]),
+        ("n:<=5", &[("1", 1.0), ("2", 1.0)]),
+        ("n:[1 TO 5] OR n:20", &[("1", 1.0), ("2", 1.0), ("4", 1.0)]),
+        ("n:[1 TO 5] AND quick", &[("1", 1.9395274)]),
+        (
+            "title:\"brown dog\" OR n:>=20",
+            &[("2", 1.8790548), ("4", 1.0)],
+        ),
+        ("tag:[a TO b]", &[("1", 1.0), ("2", 1.0), ("4", 1.0)]),
+        ("tag:{a TO b}", &[("4", 1.0)]),
+        ("tag:a\\:b", &[("4", 1.2039728)]),
+        ("tag:\"a:b\"", &[("4", 1.2039728)]),
+        ("foo\\-bar", &[("4", 2.975461)]),
+        ("foo-bar", &[("4", 2.975461)]),
+        ("\\(turtle\\)", &[("5", 1.6943598)]),
+        ("quick\\ fox", &[("1", 1.8790548), ("3", 1.2629714)]),
+        ("qu*", &[("1", 1.0), ("3", 1.0)]),
+        ("QU*", &[("1", 1.0), ("3", 1.0)]),
+        ("qu?ck", &[("1", 1.0), ("3", 1.0)]),
+        ("tag:a*", &[("1", 1.0), ("4", 1.0)]),
+        (
+            "_exists_:tag",
+            &[("1", 1.0), ("2", 1.0), ("3", 1.0), ("4", 1.0)],
+        ),
+        ("!_exists_:tag", &[("5", 0.0)]),
+        (
+            "n:*",
+            &[("1", 1.0), ("2", 1.0), ("3", 1.0), ("4", 1.0), ("5", 1.0)],
+        ),
+        (
+            "*:*",
+            &[("1", 1.0), ("2", 1.0), ("3", 1.0), ("4", 1.0), ("5", 1.0)],
+        ),
+        ("", &[]),
+    ];
+    for (q, want) in cases {
+        check(q, "or", want);
+    }
+    let and_cases: &[(&str, &[(&str, f32)])] = &[
+        ("quick fox", &[("1", 1.8790548), ("3", 1.2629714)]),
+        ("quick OR fox", &[("1", 1.8790548), ("3", 1.2629714)]),
+        ("quick fox -lazy", &[("1", 1.8790548)]),
+        ("quick OR fox AND dog", &[("3", 1.8944571)]),
+    ];
+    for (q, want) in and_cases {
+        check(q, "and", want);
+    }
+    for q in [
+        "quick AND",
+        "\"unterminated",
+        "quick)",
+        "(quick",
+        "tag:a\\\\:b",
+    ] {
+        let e = run(q, "or").unwrap_err();
+        assert!(
+            e.msg.starts_with(&format!("Cannot parse '{q}'")),
+            "{q}: {e:?}"
+        );
+    }
+}

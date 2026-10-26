@@ -14,11 +14,13 @@ pub mod esql;
 mod hll;
 mod hll_tables;
 mod parse;
+mod query_string;
 mod tdigest;
 
 pub use es_index::date_millis;
 use es_index::json_num as num;
-pub use parse::{Query, parse_query, parse_query_string};
+pub use parse::{Query, parse_query};
+pub use query_string::parse_query_string;
 
 use es_index::postings::{TermFreqs, text, values};
 use es_index::{Document, FieldMapping, Index, analysis::Analyzer, disk::DiskPos};

@@ -326,3 +326,12 @@ async fn unknown_route_and_method_errors() {
     let (status, _) = call("DELETE", "/_search").await;
     assert_eq!(status, 405);
 }
+
+#[tokio::test]
+async fn q_syntax_errors_are_bad_requests() {
+    for uri in ["/_search?q=quick%20AND", "/_count?q=(quick"] {
+        let (status, body) = call("POST", uri).await;
+        assert_eq!(status, 400, "{uri}: {body}");
+        assert_eq!(body["error"]["type"], "parse_exception", "{uri}: {body}");
+    }
+}
