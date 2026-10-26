@@ -1,5 +1,5 @@
 //! ES|QL subset: `FROM` (with `METADATA _id, _index, _version`), `ROW` and `SHOW INFO`, with
-//! `WHERE`, `EVAL`, `LIMIT`, `KEEP`, `DROP`, `SORT`, and `STATS COUNT(*) [BY ...]`.
+//! `WHERE`, `EVAL`, `LIMIT`, `KEEP`, `DROP`, `RENAME`, `SORT`, and `STATS COUNT(*) [BY ...]`.
 //!
 //! Expressions support comparisons (`== != < <= > >=`), `AND`/`OR`/`NOT`, parentheses,
 //! `IS [NOT] NULL`, arithmetic, and the functions in `CONVERSIONS` and `SCALAR_FNS` over field
@@ -278,6 +278,8 @@ enum Command {
     Limit(usize),
     Keep(Vec<Name>),
     Drop(Vec<Name>),
+    /// `old AS new` (or `new = old`) pairs, each with its text.
+    Rename(Vec<(Name, String, String)>),
     Sort(Vec<SortKey>),
     /// Aggregates (only `COUNT(*)`), then the named grouping expressions.
     Stats(Vec<(String, Expr)>, Vec<(String, Expr)>),
@@ -488,8 +490,10 @@ impl Parser<'_> {
                 Some(Tok::Word(w)) => w.to_ascii_lowercase(),
                 _ => String::new(),
             };
-            if !["where", "eval", "limit", "keep", "drop", "sort", "stats"]
-                .contains(&command.as_str())
+            if ![
+                "where", "eval", "limit", "keep", "drop", "rename", "sort", "stats",
+            ]
+            .contains(&command.as_str())
             {
                 return self.unsupported(PROCESSING_COMMANDS);
             }
@@ -506,6 +510,26 @@ impl Parser<'_> {
                     Command::Stats(aggs, by)
                 }
                 "limit" => self.limit()?,
+                "rename" => {
+                    let mut pairs = Vec::new();
+                    loop {
+                        let start = self.pos;
+                        let a = self.ident(ID_PATTERN)?;
+                        // ponytail: not checked against Elasticsearch's expected-token sets
+                        let (old, new) = match () {
+                            _ if self.keyword("as") => (a, self.ident(ID_PATTERN)?.0),
+                            _ if self.sym("=") => (self.ident(ID_PATTERN)?, a.0),
+                            _ => return self.mismatched("{'=', 'as'}"),
+                        };
+                        let text = self.src[self.span(start).1].to_owned();
+                        pairs.push((old, new, text));
+                        if !self.sym(",") {
+                            break;
+                        }
+                    }
+                    self.follow = AFTER_ID_PATTERNS;
+                    Command::Rename(pairs)
+                }
                 "keep" | "drop" => {
                     let names = self.ident_list(ID_PATTERN)?;
                     self.follow = AFTER_ID_PATTERNS;
@@ -1653,6 +1677,37 @@ pub fn run(
                 .iter()
                 .filter_map(|k| Some((k.at, check(&cols, &conflicts, &k.field)?)))
                 .collect(),
+            Command::Rename(pairs) => {
+                // Like Elasticsearch's `projectionsForRename`: the new name replaces any column
+                // of that name, and the old name is gone for the renamings after it.
+                let mut bad = Vec::new();
+                let mut renamed: BTreeMap<&str, &str> = BTreeMap::new();
+                for ((old, at), new, text) in pairs.iter().filter(|(o, n, _)| o.0 != *n) {
+                    cols.retain(|c| c != new);
+                    let Some(i) = cols.iter().position(|c| c == old) else {
+                        bad.push((
+                            *at,
+                            match renamed.get(old.as_str()) {
+                                Some(to) => format!(
+                                    "Column [{old}] renamed to [{to}] and is no longer \
+                                     available [{text}]"
+                                ),
+                                None => unknown(old),
+                            },
+                        ));
+                        continue;
+                    };
+                    cols[i] = new.clone();
+                    // Old names keep their types: an earlier SORT may still use them.
+                    types.insert(new.clone(), types[old].clone());
+                    match conflicts.get(old).cloned() {
+                        Some(c) => conflicts.insert(new.clone(), c),
+                        None => conflicts.remove(new),
+                    };
+                    renamed.insert(old, new);
+                }
+                bad
+            }
             Command::Limit(_) => Vec::new(),
             Command::Stats(aggs, by) => {
                 // ponytail: COUNT(*) is the only aggregate; the esql-stats goal adds the rest
@@ -1731,6 +1786,15 @@ pub fn run(
             }
             Command::Sort(keys) => {
                 sort_rows(&mut rows, keys);
+            }
+            Command::Rename(pairs) => {
+                for r in &mut rows {
+                    let r = r.to_mut();
+                    for ((old, _), new, _) in pairs.iter().filter(|(o, n, _)| o.0 != *n) {
+                        let v = r.remove(old).unwrap_or(Value::Null);
+                        r.insert(new.clone(), v);
+                    }
+                }
             }
             Command::Stats(aggs, by) => {
                 // ponytail: linear group lookup, O(rows × groups), and a multi-valued key is one
@@ -1996,11 +2060,16 @@ fn load_counts(
     out: &[String],
     types: &BTreeMap<String, String>,
 ) -> (usize, usize) {
-    // ponytail: the plan is cut at an EVAL or STATS as if at a LIMIT, though ES pushes a LIMIT
-    // through an EVAL and a STATS reads every match rather than the first 1000
+    // ponytail: the plan is cut at an EVAL, RENAME or STATS as if at a LIMIT, though ES pushes a
+    // LIMIT through an EVAL or RENAME and a STATS reads every match rather than the first 1000
     let (head, tail) = cmds.split_at(
         cmds.iter()
-            .position(|c| matches!(c, Command::Limit(_) | Command::Eval(_) | Command::Stats(..)))
+            .position(|c| {
+                matches!(
+                    c,
+                    Command::Limit(_) | Command::Eval(_) | Command::Rename(_) | Command::Stats(..)
+                )
+            })
             .unwrap_or(cmds.len()),
     );
     let limit = match tail.first() {
@@ -2019,9 +2088,17 @@ fn load_counts(
     }
     let (pushed, residual): (Vec<&Expr>, Vec<&Expr>) =
         filters.into_iter().partition(|e| pushable(e));
-    let mut later: Vec<String> = out.to_vec();
-    for c in tail {
+    // The fields the tail uses, named as before it: walked backwards through renames.
+    let mut later: BTreeSet<String> = out.iter().cloned().collect();
+    for c in tail.iter().rev() {
         match c {
+            Command::Rename(pairs) => {
+                for ((old, _), new, _) in pairs.iter().rev() {
+                    if later.remove(new) {
+                        later.insert(old.clone());
+                    }
+                }
+            }
             Command::Where(e) => later.extend(names(e)),
             Command::Eval(named) => later.extend(named.iter().flat_map(|(_, e)| names(e))),
             Command::Sort(keys) => later.extend(keys.iter().map(|k| k.field.clone())),
@@ -2030,7 +2107,6 @@ fn load_counts(
         }
     }
     let keys: BTreeSet<String> = sort.iter().map(|k| k.field.clone()).collect();
-    let later: BTreeSet<String> = later.into_iter().collect();
     let passes = |r: &Row, es: &[&Expr]| es.iter().all(|e| eval(e, r) == Some(true.into()));
     let values = |rows: &[&Row], fields: &BTreeSet<String>| -> usize {
         let count = |v: &Value| match v {

@@ -375,6 +375,8 @@ fn documents_found_and_values_loaded_follow_the_plan() {
             2,
         ),
         ("FROM people, pets | SORT city | KEEP city | LIMIT 1", 4, 2),
+        // Renamed columns load under their old names.
+        ("FROM people | RENAME name AS who | KEEP who", 3, 3),
     ] {
         let r = run(&all, query).unwrap();
         assert_eq!(
@@ -1142,5 +1144,34 @@ fn unary_minus_negates_expressions() {
             "Found 1 problem\nline 1:24: argument of [-name] must be [numeric, date_period or time_duration], found value [name] type [keyword]"
         ),
         other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn rename_moves_columns_in_place() {
+    let r = q("FROM people | RENAME name AS who, age AS years | SORT years");
+    assert_eq!(col_names(&r), ["years", "city", "city.keyword", "who"]);
+    assert_eq!(
+        r.values[0],
+        [json!(25), Value::Null, Value::Null, json!("bob")]
+    );
+    // A renamed column replaces one of the same name; renames chain; `new = old` works too.
+    let r = q("ROW a = 1, b = 2, c = 3 | RENAME a AS b, b AS d, e = c, x AS x");
+    assert_eq!(col_names(&r), ["d", "e"]);
+    assert_eq!(r.values, [[json!(1), json!(3)]]);
+    for (query, problem) in [
+        (
+            "FROM people | RENAME nope AS x",
+            "line 1:22: Unknown column [nope]",
+        ),
+        (
+            "ROW a = 1 | RENAME a AS b, a AS c",
+            "line 1:28: Column [a] renamed to [b] and is no longer available [a AS c]",
+        ),
+    ] {
+        match run(&indices(), query) {
+            Err(EsqlError::Verification(m)) => assert_eq!(m, format!("Found 1 problem\n{problem}")),
+            other => panic!("{other:?}"),
+        }
     }
 }
