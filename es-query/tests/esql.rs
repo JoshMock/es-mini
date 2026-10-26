@@ -1579,3 +1579,61 @@ fn stats_values() {
     let r = q("FROM people | WHERE age > 99 | STATS v = VALUES(name)");
     assert_eq!(r.values, [[Value::Null]]);
 }
+
+#[test]
+fn stats_by_bucket() {
+    let r = q("FROM people | STATS c = COUNT(*) BY b = BUCKET(age, 10) | SORT b");
+    assert_eq!(r.columns[1].r#type, "double");
+    let b: Vec<&Value> = r.values.iter().map(|v| &v[1]).collect();
+    assert_eq!(b, [&json!(20.0), &json!(30.0), &json!(40.0)]);
+    // Ten buckets over 20..60 round to a span of 5.
+    let r = q("FROM people | STATS c = COUNT(*) BY b = BUCKET(age, 10, 20, 60) | SORT b");
+    let b: Vec<&Value> = r.values.iter().map(|v| &v[1]).collect();
+    assert_eq!(b, [&json!(25.0), &json!(30.0), &json!(40.0)]);
+    let date = |by: &str| {
+        let r = q(&format!(
+            "ROW d = TO_DATETIME(\"2019-03-15T10:30:00Z\") | STATS c = COUNT(*) BY b = {by}"
+        ));
+        assert_eq!(r.columns[1].r#type, "date");
+        r.values[0][1].clone()
+    };
+    assert_eq!(
+        date("BUCKET(d, 1 month)"),
+        json!("2019-03-01T00:00:00.000Z")
+    );
+    assert_eq!(
+        date("BUCKET(d, 2 hours)"),
+        json!("2019-03-15T10:00:00.000Z")
+    );
+    // The finest rounding giving at most that many buckets over the range: 3 hours, 12 hours.
+    let day = "\"2019-03-15T00:00:00Z\", \"2019-03-16T00:00:00Z\"";
+    assert_eq!(
+        date(&format!("BUCKET(d, 8, {day})")),
+        json!("2019-03-15T09:00:00.000Z")
+    );
+    assert_eq!(
+        date(&format!("BUCKET(d, 7, {day})")),
+        json!("2019-03-15T00:00:00.000Z")
+    );
+    // One bucket over a day is a day; when not even years fit, years.
+    assert_eq!(
+        date(&format!("BUCKET(d, 1, {day})")),
+        json!("2019-03-15T00:00:00.000Z")
+    );
+    let year = "\"2010-01-01T00:00:00Z\", \"2025-01-01T00:00:00Z\"";
+    assert_eq!(
+        date(&format!("BUCKET(d, 5, {year})")),
+        json!("2019-01-01T00:00:00.000Z")
+    );
+    assert!(matches!(
+        run(&indices(), "FROM people | STATS c = COUNT(*) BY b = BUCKET(name, 10)"),
+        Err(EsqlError::Verification(m)) if m.contains(
+            "first argument of [BUCKET(name, 10)] must be [datetime or numeric], found value \
+             [name] type [keyword]"
+        )
+    ));
+    assert!(matches!(
+        run(&indices(), "FROM people | STATS c = COUNT(*) BY b = BUCKET(age, 10, 20)"),
+        Err(EsqlError::Verification(m)) if m.contains("function expects exactly")
+    ));
+}

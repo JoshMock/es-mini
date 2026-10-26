@@ -1,6 +1,7 @@
 //! ES|QL subset: `FROM` (with `METADATA _id, _index, _version`), `ROW` and `SHOW INFO`, with
 //! `WHERE`, `EVAL`, `LIMIT`, `KEEP`, `DROP`, `RENAME`, `SORT`, and `STATS ... [BY ...]` over
-//! `COUNT`, `COUNT_DISTINCT`, `MIN`, `MAX`, `SUM`, `AVG`, `MEDIAN`, `PERCENTILE` and `VALUES`.
+//! `COUNT`, `COUNT_DISTINCT`, `MIN`, `MAX`, `SUM`, `AVG`, `MEDIAN`, `PERCENTILE` and `VALUES`,
+//! grouped by expressions such as `BUCKET`.
 //!
 //! Expressions support comparisons (`== != < <= > >=`), `AND`/`OR`/`NOT`, parentheses,
 //! `IS [NOT] NULL`, arithmetic, and the functions in `CONVERSIONS` and `SCALAR_FNS` over field
@@ -1058,6 +1059,9 @@ fn eval(e: &Expr, row: &Row) -> Option<Value> {
             if let ("DATE_TRUNC", [Expr::Interval(n, unit, _), x]) = (f, &args[..]) {
                 return date_trunc(*n, unit, &eval(x, row)?);
             }
+            if f == "BUCKET" {
+                return bucket(args, t == "date", row);
+            }
             if let "CASE" | "COALESCE" = f {
                 let v = match f {
                     "COALESCE" => args.iter().find_map(|a| eval(a, row)),
@@ -1177,8 +1181,9 @@ const CONVERSIONS: [(&str, &str); 6] = [
 ];
 
 /// The scalar functions and how many arguments they take.
-const SCALAR_FNS: [(&str, RangeInclusive<usize>); 22] = [
+const SCALAR_FNS: [(&str, RangeInclusive<usize>); 23] = [
     ("NOW", 0..=0),
+    ("BUCKET", 2..=4),
     ("DATE_TRUNC", 2..=2),
     ("DATE_EXTRACT", 2..=2),
     ("DATE_FORMAT", 1..=2),
@@ -1220,6 +1225,9 @@ fn accepts(f: &str, i: usize, t: &str) -> (&'static str, bool) {
         ("DATE_EXTRACT" | "DATE_FORMAT" | "DATE_TRUNC", _) => {
             ("datetime or date_nanos", t == "date")
         }
+        ("BUCKET", 0) => ("datetime or numeric", t == "date" || NUMERIC.contains(&t)),
+        // Checked by `bucket_problem`, which knows the field's type.
+        ("BUCKET", _) => ("any", true),
         // ponytail: spatial types are not refused
         ("MV_COUNT" | "MV_MIN" | "MV_MAX", _) => ("any", true),
         ("ROUND", 1) => (
@@ -1449,6 +1457,165 @@ fn date_trunc(n: i64, unit: &str, v: &Value) -> Option<Value> {
     };
     let interval = n.checked_mul(ms).filter(|i| *i > 0)?;
     Some(es_index::iso_date(t.div_euclid(interval) * interval).into())
+}
+
+/// What is wrong with the arguments of `BUCKET`, of types `ts`, like Elasticsearch's
+/// `Bucket.resolveType` and `postOptimizationVerification`.
+fn bucket_problem(ts: &[String], e: &Expr, src: &str) -> Option<String> {
+    let Expr::Call(_, args, ..) = e else {
+        return None;
+    };
+    if ts[0] == "null" || ts[1] == "null" {
+        return None;
+    }
+    let text = |e: &Expr| &src[span(e).1.clone()];
+    let date = ts[0] == "date";
+    let whole = ts[1] == "integer" || ts[1] == "long";
+    let span = ts[1] == "date_period" || ts[1] == "time_duration";
+    let range = match date {
+        true => (
+            "datetime, date_nanos or string",
+            ["date", "keyword", "text"].as_slice(),
+        ),
+        false => ("numeric", &NUMERIC[..]),
+    };
+    let (accepted, ok) = match date {
+        true => ("integral, date_period or time_duration", whole || span),
+        false => ("numeric", NUMERIC.contains(&ts[1].as_str())),
+    };
+    let mut problem = (!ok).then_some((1, accepted));
+    let needed = match date {
+        true if !whole && args.len() == 2 => 2,
+        true => 4,
+        false if whole && args.len() != 2 => 4,
+        false => 2,
+    };
+    if problem.is_none() && args.len() != needed {
+        // ES names the `DataType` constants here.
+        let upper = |t: &str| match t {
+            "date" => "DATETIME".to_owned(),
+            t => t.to_ascii_uppercase(),
+        };
+        return Some(format!(
+            "function expects exactly {} arguments when the first one is of type [{}] and the \
+             second of type [{}]",
+            ["two", "four"][usize::from(needed == 4)],
+            upper(&ts[0]),
+            upper(&ts[1])
+        ));
+    }
+    problem = problem.or_else(|| {
+        (2..ts.len())
+            .find(|&i| !range.1.contains(&ts[i].as_str()))
+            .map(|i| (i, range.0))
+    });
+    if let Some((i, accepted)) = problem.filter(|(i, _)| ts[*i] != "null") {
+        return Some(format!(
+            "{}argument of [{}] must be [{accepted}], found value [{}] type [{}]",
+            ordinal(i),
+            text(e),
+            text(&args[i]),
+            ts[i]
+        ));
+    }
+    let i = (1..args.len()).find(|&i| !names(&args[i]).is_empty())?;
+    Some(format!(
+        "{}argument of [{}] must be a constant, received [{}]",
+        ordinal(i),
+        text(e),
+        text(&args[i])
+    ))
+}
+
+/// `BUCKET(x, ...)` of one row: a date rounded down like `DATE_TRUNC`, or a number rounded down
+/// to a multiple of the span as a double. With a target bucket count and a range, the span is
+/// picked like Elasticsearch's `Bucket`.
+// ponytail: allowed outside STATS ... BY, where ES refuses it
+fn bucket(args: &[Expr], date: bool, row: &Row) -> Option<Value> {
+    let x = eval(&args[0], row)?;
+    let fold = |e: &Expr| eval(e, &Row::new());
+    if date {
+        let (n, unit) = match args {
+            [_, Expr::Interval(n, unit, _)] => (*n, *unit),
+            [_, b, from, to] => {
+                let millis = |e| es_index::parse_date_millis(&fold(e)?);
+                date_rounding(fold(b)?.as_i64()?, millis(from)?, millis(to)?)
+            }
+            _ => return None,
+        };
+        return date_trunc(n, unit, &x);
+    }
+    let span = match args {
+        [_, b] => fold(b)?.as_f64()?,
+        [_, b, from, to] => {
+            let b = fold(b)?.as_i64()? as f64;
+            let precise = (fold(to)?.as_f64()? - fold(from)?.as_f64()?) / b;
+            let next_power_of_ten = 10f64.powf(precise.log10().ceil());
+            let half = next_power_of_ten / 2.0;
+            if precise < half {
+                half
+            } else {
+                next_power_of_ten
+            }
+        }
+        _ => return None,
+    };
+    let r = (x.as_f64()? / span).floor() * span;
+    r.is_finite().then(|| r.into())
+}
+
+/// The finest rounding, as `DATE_TRUNC`'s span, that cuts `from..to` into at most `buckets`
+/// buckets, like Elasticsearch's `Bucket.DateRoundingPicker` in UTC.
+// ponytail: a linear scan where ES binary-searches; the same pick, as coarser units fit sooner
+fn date_rounding(buckets: i64, from: i64, to: i64) -> (i64, &'static str) {
+    const PRIMARY: [(i64, &str); 16] = [
+        (1, "day"),
+        (12, "hour"),
+        (3, "hour"),
+        (1, "hour"),
+        (30, "minute"),
+        (10, "minute"),
+        (5, "minute"),
+        (1, "minute"),
+        (30, "second"),
+        (10, "second"),
+        (5, "second"),
+        (1, "second"),
+        (100, "millisecond"),
+        (50, "millisecond"),
+        (10, "millisecond"),
+        (1, "millisecond"),
+    ];
+    const SECONDARY: [(i64, &str); 3] = [(1, "week"), (1, "month"), (1, "year")];
+    let fits = |&(n, unit): &(i64, &str)| {
+        if buckets <= 0 {
+            return false;
+        }
+        let width = match unit {
+            "hour" => 3_600_000,
+            "minute" => 60_000,
+            "second" => 1000,
+            "millisecond" => 1,
+            // Calendar units vary in length: count them one at a time.
+            _ => {
+                let Some(unit) = crate::aggs::histogram::Unit::parse(unit) else {
+                    return false;
+                };
+                let mut bucket = unit.round(from, false);
+                return (0..buckets).any(|_| {
+                    bucket = unit.round(bucket, true);
+                    bucket >= to
+                });
+            }
+        } * n;
+        let start = from.div_euclid(width) * width;
+        let range = (i128::from(to) - i128::from(start)).max(0) as u128;
+        range.div_ceil(width as u128) <= buckets as u128
+    };
+    let primary = PRIMARY.iter().rev().find(|u| fits(u));
+    *primary
+        .or_else(|| SECONDARY.iter().find(|u| fits(u)))
+        .unwrap_or(&SECONDARY[2])
 }
 
 /// Java's `Character.isWhitespace`.
@@ -1727,22 +1894,25 @@ fn resolve(
                         (!ok).then(|| (i, accepted.to_owned()))
                     }),
                 };
-                if let Some((i, accepted)) = mismatch {
+                let mismatch = mismatch.map(|(i, accepted)| {
                     let nth = match *name {
                         "TRIM" | "ABS" | "CEIL" | "FLOOR" | "CONCAT" | "LENGTH" | "TO_LOWER"
                         | "TO_UPPER" => "",
                         _ => ordinal(i),
                     };
-                    bad.push((
-                        *at,
-                        format!(
-                            "{nth}argument of [{}] must be [{accepted}], found value [{}] type \
-                             [{}]",
-                            text(e),
-                            text(&args[i]),
-                            ts[i]
-                        ),
-                    ));
+                    format!(
+                        "{nth}argument of [{}] must be [{accepted}], found value [{}] type [{}]",
+                        text(e),
+                        text(&args[i]),
+                        ts[i]
+                    )
+                });
+                let problem = match *name {
+                    "BUCKET" => mismatch.or_else(|| bucket_problem(&ts, e, src)),
+                    _ => mismatch,
+                };
+                if let Some(problem) = problem {
+                    bad.push((*at, problem));
                     return None;
                 }
                 // The result type: a string, an integer, a double, or the first argument's.
@@ -1754,6 +1924,8 @@ fn resolve(
                     "TRIM" if ts[0] != "null" => "keyword",
                     "MV_COUNT" => "integer",
                     "NOW" | "DATE_TRUNC" => "date",
+                    "BUCKET" if ts[0] == "date" => "date",
+                    "BUCKET" if ts[0] != "null" => "double",
                     "MV_MIN" | "MV_MAX" => "null",
                     "POW" => "double",
                     _ => NUMERIC.iter().find(|n| **n == ts[0]).unwrap_or(&"null"),
