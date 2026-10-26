@@ -1120,3 +1120,27 @@ fn stats_count_star_by_groups() {
         Err(EsqlError::Verification(m)) if m.contains("Unknown column [nope]")
     ));
 }
+
+#[test]
+fn unary_minus_negates_expressions() {
+    let r = q(
+        "FROM people | EVAL neg = -age, n2 = -(age + 1), d = -TO_DOUBLE(age), p = +age | KEEP neg, n2, d, p | SORT neg",
+    );
+    let types: Vec<&str> = r.columns.iter().map(|c| c.r#type.as_str()).collect();
+    assert_eq!(types, ["long", "long", "double", "long"]);
+    assert_eq!(
+        r.values[0],
+        [json!(-41), json!(-42), json!(-41.0), json!(41)]
+    );
+    // Math.negateExact overflows to null.
+    let r = q("ROW a = -2147483648 | EVAL b = -a, -a");
+    assert_eq!(col_names(&r), ["a", "b", "-a"]);
+    assert_eq!(r.values, [[json!(-2147483648), Value::Null, Value::Null]]);
+    match run(&indices(), "FROM people | EVAL x = -name") {
+        Err(EsqlError::Verification(m)) => assert_eq!(
+            m,
+            "Found 1 problem\nline 1:24: argument of [-name] must be [numeric, date_period or time_duration], found value [name] type [keyword]"
+        ),
+        other => panic!("{other:?}"),
+    }
+}

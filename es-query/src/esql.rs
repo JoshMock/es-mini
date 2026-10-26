@@ -238,6 +238,8 @@ enum Expr {
         OnceCell<&'static str>,
         Span,
     ),
+    /// Unary `-`, with the numeric type `resolve` gives it.
+    Neg(Box<Expr>, OnceCell<&'static str>, Span),
     /// A function call, with its canonical name and, once `resolve` checked it, its argument's
     /// type (a conversion) or its result type (a scalar function).
     Call(
@@ -676,6 +678,17 @@ impl Parser<'_> {
             return Ok(e);
         }
         let start = self.pos;
+        // Unary `+` is a no-op; `-` before a number is part of the literal.
+        if self.sym("+") {
+            return self.primary();
+        }
+        if self.peek() == Some(&Tok::Sym("-"))
+            && !matches!(self.toks.get(self.pos + 1), Some((Tok::Num(_), ..)))
+        {
+            self.pos += 1;
+            let x = self.primary()?;
+            return Ok(Expr::Neg(Box::new(x), OnceCell::new(), self.span(start)));
+        }
         if self.sym("[") {
             let mut items = Vec::new();
             loop {
@@ -904,6 +917,17 @@ fn eval(e: &Expr, row: &Row) -> Option<Value> {
             _ => None,
         },
         Expr::Arith(op, a, b, t, _) => arith(op, t.get().copied()?, &eval(a, row)?, &eval(b, row)?),
+        // Like Java's `Math.negateExact`, null on overflow; null for a multi-value too.
+        Expr::Neg(x, t, _) => {
+            let v = eval(x, row)?;
+            match *t.get()? {
+                "double" => Some((-v.as_f64()?).into()),
+                "integer" => i32::try_from(v.as_i64()?.checked_neg()?)
+                    .ok()
+                    .map(Value::from),
+                _ => v.as_i64()?.checked_neg().map(Value::from),
+            }
+        }
         Expr::Call(_, args, ft, _) => {
             let &(f, t) = ft.get()?;
             if SCALAR_FNS.iter().any(|(n, _)| *n == f) {
@@ -1240,7 +1264,7 @@ fn fields(e: &Expr, out: &mut Vec<Name>) {
         Expr::Call(_, args, ..) => args.iter().for_each(|a| fields(a, out)),
         Expr::Field(f, (at, _)) => out.push((f.clone(), *at)),
         Expr::Lit(..) => {}
-        Expr::Not(x, _) | Expr::IsNull(x, ..) => fields(x, out),
+        Expr::Not(x, _) | Expr::IsNull(x, ..) | Expr::Neg(x, ..) => fields(x, out),
         Expr::Cmp(_, a, b, _)
         | Expr::And(a, b, _)
         | Expr::Or(a, b, _)
@@ -1261,7 +1285,7 @@ fn span(e: &Expr) -> &Span {
     match e {
         Expr::Field(_, s) | Expr::Lit(_, s) | Expr::Not(_, s) | Expr::IsNull(.., s) => s,
         Expr::Cmp(.., s) | Expr::And(.., s) | Expr::Or(.., s) | Expr::Arith(.., s) => s,
-        Expr::Call(.., s) => s,
+        Expr::Call(.., s) | Expr::Neg(.., s) => s,
     }
 }
 
@@ -1431,6 +1455,22 @@ fn resolve(
             };
             let _ = t.set((name, ta));
             return Some(out.to_owned());
+        }
+        Expr::Neg(x, t, _) => {
+            let tx = resolve(x, src, types, bad)?;
+            match NUMERIC.iter().find(|n| **n == tx && **n != "unsigned_long") {
+                Some(n) => {
+                    let _ = t.set(n);
+                    return Some(tx);
+                }
+                None if tx == "null" => return Some(tx),
+                None => Some(format!(
+                    "argument of [{}] must be [numeric, date_period or time_duration], found \
+                     value [{}] type [{tx}]",
+                    text(e),
+                    text(x)
+                )),
+            }
         }
         Expr::IsNull(x, ..) => {
             resolve(x, src, types, bad)?;
@@ -2051,7 +2091,7 @@ fn pushable(e: &Expr) -> bool {
                 && pushable(b)
         }
         // ponytail: ES may rewrite `age + 1 > 30` into a pushable `age > 29`; this does not
-        Expr::Arith(..) | Expr::Call(..) => names(e).is_empty(),
+        Expr::Arith(..) | Expr::Call(..) | Expr::Neg(..) => names(e).is_empty(),
         Expr::Not(x, _) | Expr::IsNull(x, ..) => pushable(x),
         Expr::And(a, b, _) | Expr::Or(a, b, _) => pushable(a) && pushable(b),
         Expr::Field(..) | Expr::Lit(..) => true,

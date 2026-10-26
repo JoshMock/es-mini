@@ -10,7 +10,6 @@ FROM emp | WHERE name RLIKE "[A-C].*" | KEEP name | SORT name
 FROM emp | WHERE name IN ("Alice", "Dave", "Zed") | KEEP name | SORT name
 FROM emp | WHERE age IN (28, 51) | KEEP name, age | SORT name
 FROM emp | WHERE hired > "2020-01-01" | KEEP name, hired | SORT hired
-FROM emp | EVAL neg = -age | KEEP neg | SORT neg
 FROM emp | RENAME name AS who | KEEP who, age | SORT who
 FROM emp | RENAME name AS who, age AS years | KEEP who, years | SORT who
 FROM emp | DROP bio, tags, scores | SORT name | LIMIT 2
