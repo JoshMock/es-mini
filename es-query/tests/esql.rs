@@ -1211,6 +1211,32 @@ fn stats_count_star_by_groups() {
 }
 
 #[test]
+fn stats_min_max_by_groups() {
+    let r = q(
+        "FROM people | STATS m = MAX(age), n = MIN(age) BY has_city = city IS NOT NULL | EVAL older = m > 35 | SORT has_city",
+    );
+    assert_eq!(col_names(&r), ["m", "n", "has_city", "older"]);
+    let types: Vec<&str> = r.columns.iter().map(|c| c.r#type.as_str()).collect();
+    assert_eq!(types, ["long", "long", "boolean", "boolean"]);
+    assert_eq!(
+        r.values,
+        [
+            [json!(25), json!(25), json!(false), json!(false)],
+            [json!(41), json!(30), json!(true), json!(true)]
+        ]
+    );
+    // Multi-values count value by value; a group without values is null.
+    let r = q("ROW a = [3, 9, 1] | STATS hi = MAX(a), lo = MIN(a)");
+    assert_eq!(r.values, [[json!(9), json!(1)]]);
+    let r = q("FROM people | WHERE age > 99 | STATS m = MAX(age)");
+    assert_eq!(r.values, [[Value::Null]]);
+    assert!(matches!(
+        run(&indices(), "FROM people | STATS m = MAX(nope)"),
+        Err(EsqlError::Verification(m)) if m.contains("Unknown column [nope]")
+    ));
+}
+
+#[test]
 fn unary_minus_negates_expressions() {
     let r = q(
         "FROM people | EVAL neg = -age, n2 = -(age + 1), d = -TO_DOUBLE(age), p = +age | KEEP neg, n2, d, p | SORT neg",

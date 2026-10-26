@@ -1,5 +1,6 @@
 //! ES|QL subset: `FROM` (with `METADATA _id, _index, _version`), `ROW` and `SHOW INFO`, with
-//! `WHERE`, `EVAL`, `LIMIT`, `KEEP`, `DROP`, `RENAME`, `SORT`, and `STATS COUNT(*) [BY ...]`.
+//! `WHERE`, `EVAL`, `LIMIT`, `KEEP`, `DROP`, `RENAME`, `SORT`, and `STATS ... [BY ...]` over
+//! `COUNT(*)`, `MIN` and `MAX`.
 //!
 //! Expressions support comparisons (`== != < <= > >=`), `AND`/`OR`/`NOT`, parentheses,
 //! `IS [NOT] NULL`, arithmetic, and the functions in `CONVERSIONS` and `SCALAR_FNS` over field
@@ -285,7 +286,7 @@ enum Command {
     /// `old AS new` (or `new = old`) pairs, each with its text.
     Rename(Vec<(Name, String, String)>),
     Sort(Vec<SortKey>),
-    /// Aggregates (only `COUNT(*)`), then the named grouping expressions.
+    /// Aggregates (`COUNT(*)`, `MIN` or `MAX`), then the named grouping expressions.
     Stats(Vec<(String, Expr)>, Vec<(String, Expr)>),
 }
 
@@ -1877,6 +1878,18 @@ fn count_star(e: &Expr) -> bool {
         if f.eq_ignore_ascii_case("count") && matches!(&args[..], [Expr::Field(s, _)] if s == "*"))
 }
 
+/// For `MIN(x)` or `MAX(x)`, the multi-value function it applies per group, and `x`.
+fn min_max(e: &Expr) -> Option<(&'static str, &Expr)> {
+    match e {
+        Expr::Call(f, args, ..) if args.len() == 1 => match f.to_ascii_uppercase().as_str() {
+            "MIN" => Some(("MV_MIN", &args[0])),
+            "MAX" => Some(("MV_MAX", &args[0])),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn unknown(c: &str) -> String {
     format!("Unknown column [{c}]")
 }
@@ -2034,19 +2047,35 @@ pub fn run(
             }
             Command::Limit(_) => Vec::new(),
             Command::Stats(aggs, by) => {
-                // ponytail: COUNT(*) is the only aggregate; the esql-stats goal adds the rest
-                let mut bad: Vec<_> = aggs
-                    .iter()
-                    .filter(|(_, e)| !count_star(e))
-                    .map(|(_, e)| {
+                // ponytail: COUNT(*), MIN and MAX are the only aggregates; the esql-stats goal
+                // adds the rest
+                let mut bad = Vec::new();
+                let mut out = Vec::new();
+                for (name, e) in aggs {
+                    if count_star(e) {
+                        out.push((name.clone(), "long".to_owned()));
+                        continue;
+                    }
+                    let Some((_, arg)) = min_max(e) else {
                         let msg = format!(
                             "[{}] is not supported by es-mini in STATS",
                             &query[span(e).1.clone()]
                         );
-                        (span(e).0, msg)
-                    })
-                    .collect();
-                let mut grouped = Vec::new();
+                        bad.push((span(e).0, msg));
+                        continue;
+                    };
+                    let mut refs = Vec::new();
+                    fields(arg, &mut refs);
+                    bad.extend(
+                        refs.into_iter()
+                            .filter_map(|(f, at)| Some((at, check(&cols, &conflicts, &f)?))),
+                    );
+                    if bad.is_empty()
+                        && let Some(t) = resolve(arg, query, &types, &mut bad)
+                    {
+                        out.push((name.clone(), t));
+                    }
+                }
                 for (name, e) in by {
                     let mut refs = Vec::new();
                     fields(e, &mut refs);
@@ -2057,13 +2086,12 @@ pub fn run(
                     if bad.is_empty()
                         && let Some(t) = resolve(e, query, &types, &mut bad)
                     {
-                        grouped.push((name.clone(), t));
+                        out.push((name.clone(), t));
                     }
                 }
                 if bad.is_empty() {
-                    let counts = aggs.iter().map(|(n, _)| (n.clone(), "long".to_owned()));
                     cols.clear();
-                    for (name, t) in counts.chain(grouped) {
+                    for (name, t) in out {
                         cols.retain(|c| *c != name);
                         cols.push(name.clone());
                         types.insert(name.clone(), t);
@@ -2123,24 +2151,39 @@ pub fn run(
             Command::Stats(aggs, by) => {
                 // ponytail: linear group lookup, O(rows × groups), and a multi-valued key is one
                 // group rather than one per value; hash and expand keys when that matters
-                let mut buckets: Vec<(Vec<Value>, u64)> = Vec::new();
+                let mut buckets: Vec<(Vec<Value>, Vec<&Row>)> = Vec::new();
                 for r in &rows {
                     let key: Vec<Value> = by
                         .iter()
                         .map(|(_, e)| eval(e, r).unwrap_or(Value::Null))
                         .collect();
                     match buckets.iter_mut().find(|(k, _)| *k == key) {
-                        Some(b) => b.1 += 1,
-                        None => buckets.push((key, 1)),
+                        Some(b) => b.1.push(r),
+                        None => buckets.push((key, vec![r])),
                     }
                 }
                 if by.is_empty() && buckets.is_empty() {
-                    buckets.push((Vec::new(), 0));
+                    buckets.push((Vec::new(), Vec::new()));
                 }
+                let agg = |e: &Expr, group: &[&Row]| match min_max(e) {
+                    // MIN and MAX are MV_MIN and MV_MAX over every value in the group.
+                    Some((f, arg)) => {
+                        let all = group.iter().filter_map(|r| eval(arg, r));
+                        let all = all.flat_map(|v| match v {
+                            Value::Array(a) => a,
+                            v => vec![v],
+                        });
+                        mv_fn(f, &Value::Array(all.collect())).unwrap_or(Value::Null)
+                    }
+                    None => group.len().into(),
+                };
                 rows = buckets
                     .into_iter()
-                    .map(|(key, n)| {
-                        let mut r: Row = aggs.iter().map(|(a, _)| (a.clone(), n.into())).collect();
+                    .map(|(key, group)| {
+                        let mut r: Row = aggs
+                            .iter()
+                            .map(|(a, e)| (a.clone(), agg(e, &group)))
+                            .collect();
                         r.extend(by.iter().map(|(b, _)| b.clone()).zip(key));
                         Cow::Owned(r)
                     })

@@ -13,5 +13,4 @@ FROM emp | STATS c = COUNT(*) BY b = BUCKET(salary, 50000) | SORT b
 FROM emp | STATS c = COUNT(*) BY b = BUCKET(age, 10, 20, 60) | SORT b
 FROM emp | STATS c = COUNT(*) BY y = BUCKET(hired, 1 year) | SORT y
 FROM emp | STATS c = COUNT(*) BY m = BUCKET(hired, 5, "2010-01-01T00:00:00Z", "2025-01-01T00:00:00Z") | SORT m
-FROM emp | STATS max_age = MAX(age) BY active | EVAL older = max_age > 40 | SORT active
 FROM emp | WHERE active | STATS total = SUM(salary)
