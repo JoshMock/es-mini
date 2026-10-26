@@ -5,6 +5,15 @@ use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
+/// Removes a test's scratch directory when the test ends, even on panic.
+struct Cleanup(std::path::PathBuf);
+
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 async fn call(app: &axum::Router, method: &str, uri: &str, body: Value) -> Value {
     let req = Request::builder()
         .method(method)
@@ -20,6 +29,7 @@ async fn call(app: &axum::Router, method: &str, uri: &str, body: Value) -> Value
 #[tokio::test]
 async fn documents_survive_restart() {
     let dir = std::env::temp_dir().join(format!("esm-persist-{}", std::process::id()));
+    let _cleanup = Cleanup(dir.clone());
     let _ = std::fs::remove_dir_all(&dir);
     let app = es_mini::app_persisted(&dir).unwrap();
     call(
@@ -79,6 +89,7 @@ async fn documents_survive_restart() {
 async fn a_write_that_cannot_be_saved_fails() {
     use std::os::unix::fs::PermissionsExt;
     let root = std::env::temp_dir().join(format!("esm-persist-ro-{}", std::process::id()));
+    let _cleanup = Cleanup(root.clone());
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     let app = es_mini::app_persisted(&root.join("data")).unwrap();
@@ -105,6 +116,7 @@ async fn a_write_that_cannot_be_saved_fails() {
 #[tokio::test]
 async fn writes_whose_path_ends_like_a_read_endpoint_survive_restart() {
     let dir = std::env::temp_dir().join(format!("esm-persist-suffix-{}", std::process::id()));
+    let _cleanup = Cleanup(dir.clone());
     let _ = std::fs::remove_dir_all(&dir);
     let app = es_mini::app_persisted(&dir).unwrap();
     call(&app, "PUT", "/my_query", json!({})).await;
@@ -127,6 +139,7 @@ async fn writes_whose_path_ends_like_a_read_endpoint_survive_restart() {
 async fn posted_reads_do_not_save() {
     use std::os::unix::fs::PermissionsExt;
     let root = std::env::temp_dir().join(format!("esm-persist-reads-{}", std::process::id()));
+    let _cleanup = Cleanup(root.clone());
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     let app = es_mini::app_persisted(&root.join("data")).unwrap();
@@ -151,6 +164,7 @@ async fn posted_reads_do_not_save() {
 async fn posted_template_and_msearch_reads_do_not_save() {
     use std::os::unix::fs::PermissionsExt;
     let root = std::env::temp_dir().join(format!("esm-persist-tmpl-{}", std::process::id()));
+    let _cleanup = Cleanup(root.clone());
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     // No index yet, so any save would have to write the data directory's first state.
@@ -179,6 +193,7 @@ async fn posted_template_and_msearch_reads_do_not_save() {
 #[tokio::test]
 async fn graceful_shutdown_flushes() {
     let dir = std::env::temp_dir().join(format!("esm-persist-shutdown-{}", std::process::id()));
+    let _cleanup = Cleanup(dir.clone());
     let _ = std::fs::remove_dir_all(&dir);
     let app = es_mini::app_persisted(&dir).unwrap();
     let mappings = json!({"properties": {"title": {"type": "keyword"}}});
@@ -204,6 +219,7 @@ async fn graceful_shutdown_flushes() {
 #[tokio::test]
 async fn async_durability_syncs_on_a_timer() {
     let dir = std::env::temp_dir().join(format!("esm-persist-async-{}", std::process::id()));
+    let _cleanup = Cleanup(dir.clone());
     let _ = std::fs::remove_dir_all(&dir);
     let app = es_mini::app_persisted(&dir).unwrap();
     let settings = json!({"index.translog": {"durability": "async", "sync_interval": "100ms"}});
@@ -230,6 +246,7 @@ async fn async_durability_syncs_on_a_timer() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_writes_are_all_durable() {
     let dir = std::env::temp_dir().join(format!("esm-persist-group-{}", std::process::id()));
+    let _cleanup = Cleanup(dir.clone());
     let _ = std::fs::remove_dir_all(&dir);
     let app = es_mini::app_persisted(&dir).unwrap();
     call(&app, "PUT", "/books", json!({})).await;

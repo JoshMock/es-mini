@@ -1553,6 +1553,7 @@ mod tests {
         all.insert("books".into(), Index::default());
         save(&dir, &all).unwrap();
         let metas = read_indices(&dir).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(metas[0].settings["index.uuid"], metas[0].uuid);
         assert!(metas[0].settings.contains_key("index.version.created"));
     }

@@ -5,11 +5,26 @@ use es_index::{Indices, disk};
 use serde_json::json;
 use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
 
-fn scratch(name: &str) -> PathBuf {
+struct Scratch(PathBuf, PathBuf);
+
+impl std::ops::Deref for Scratch {
+    type Target = PathBuf;
+    fn deref(&self) -> &PathBuf {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.1);
+    }
+}
+
+fn scratch(name: &str) -> Scratch {
     let root = std::env::temp_dir().join(format!("esm-save-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
-    root
+    Scratch(root.clone(), root)
 }
 
 fn one_doc(source: serde_json::Value) -> Indices {
@@ -46,9 +61,9 @@ fn failed_save_keeps_the_previous_snapshot() {
     // Creating an index rebuilds the directory beside it: a read-only parent makes that fail.
     let mut more = one_doc(json!({"v": 1}));
     more.insert("other".into(), Default::default());
-    fs::set_permissions(&root, fs::Permissions::from_mode(0o555)).unwrap();
+    fs::set_permissions(&*root, fs::Permissions::from_mode(0o555)).unwrap();
     let result = disk::save(&dir, &more);
-    fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(&*root, fs::Permissions::from_mode(0o755)).unwrap();
     assert!(result.is_err());
     assert_eq!(source_of(&dir), json!({"v": 1}));
 }
@@ -81,7 +96,8 @@ fn resaving_an_elasticsearch_directory_keeps_its_index_identity() {
     let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures");
     let es_dir = fixtures.join("es-9.5.5/data");
     let es_meta = es_codec::cluster_state::read_indices(&es_dir).unwrap();
-    let dir = scratch("identity").join("data");
+    let root = scratch("identity");
+    let dir = root.join("data");
     disk::save(&dir, &disk::open(&es_dir).unwrap()).unwrap();
     let fixture = |m: Vec<es_codec::cluster_state::IndexMetadata>| {
         m.into_iter().find(|m| m.name == "fixture").unwrap()
@@ -109,7 +125,8 @@ fn resaving_an_elasticsearch_directory_keeps_its_index_identity() {
 fn resaving_keeps_commit_history() {
     use es_codec::SegmentInfos;
     let es_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/es-9.5.5/data");
-    let dir = scratch("history").join("data");
+    let root = scratch("history");
+    let dir = root.join("data");
     disk::save(&dir, &disk::open(&es_dir).unwrap()).unwrap();
     let saved = es_codec::cluster_state::read_indices(&dir).unwrap();
     assert!(!saved.is_empty());
@@ -162,7 +179,8 @@ fn saves_and_reloads_many_terms_and_docs() {
     }
     let mut indices = Indices::new();
     indices.insert("big".into(), idx);
-    let dir = scratch("big").join("data");
+    let root = scratch("big");
+    let dir = root.join("data");
     disk::save(&dir, &indices).unwrap();
     let back = disk::open(&dir).unwrap();
     assert_eq!(back["big"].docs().count(), 200);
@@ -186,7 +204,8 @@ fn a_term_in_256_docs_saves_every_document() {
     for i in 0..300 {
         idx.put(&i.to_string(), json!({"tag": "same", "ok": true}));
     }
-    let dir = scratch("full-block").join("data");
+    let root = scratch("full-block");
+    let dir = root.join("data");
     disk::save(&dir, &Indices::from([("idx".to_owned(), idx)])).unwrap();
     let back = disk::open(&dir).unwrap();
     assert_eq!(back["idx"].docs().count(), 300);
@@ -207,7 +226,8 @@ fn text_fields_save_positions() {
         .properties
         .insert("t".into(), FieldMapping::Text { store: false });
     idx.put("1", json!({"t": ["Quick fox fox", "", "lazy fox"]}));
-    let dir = scratch("positions").join("data");
+    let root = scratch("positions");
+    let dir = root.join("data");
     disk::save(&dir, &Indices::from([("idx".to_owned(), idx)])).unwrap();
     let uuid = &es_codec::cluster_state::read_indices(&dir).unwrap()[0].uuid;
     let shard = dir.join("indices").join(uuid).join("0/index");
@@ -247,7 +267,8 @@ fn object_fields_save_under_dotted_paths() {
     let doc = json!({"o": {"n": [5, 6]}});
     idx.map_dynamic(&doc);
     idx.put("1", doc);
-    let dir = scratch("objects").join("data");
+    let root = scratch("objects");
+    let dir = root.join("data");
     disk::save(&dir, &Indices::from([("idx".to_owned(), idx)])).unwrap();
     let uuid = &es_codec::cluster_state::read_indices(&dir).unwrap()[0].uuid;
     let shard = dir.join("indices").join(uuid).join("0/index");
@@ -264,7 +285,8 @@ fn object_fields_save_under_dotted_paths() {
 
 #[test]
 fn a_corrupt_segment_fails_open() {
-    let dir = scratch("corrupt").join("data");
+    let root = scratch("corrupt");
+    let dir = root.join("data");
     disk::save(&dir, &one_doc(json!({"v": "corrupt-me"}))).unwrap();
     let meta = es_codec::cluster_state::read_indices(&dir).unwrap();
     let shard = dir.join("indices").join(&meta[0].uuid).join("0/index");
@@ -285,7 +307,8 @@ fn a_corrupt_segment_fails_open() {
 #[test]
 fn saving_segments_of_a_sorted_index_fails() {
     // es-mini writes unsorted segments, and Lucene refuses to open those in a sorted index.
-    let dir = scratch("sorted").join("data");
+    let root = scratch("sorted");
+    let dir = root.join("data");
     let mut indices = Indices::new();
     let ix = indices.entry("idx".into()).or_default();
     ix.settings
@@ -299,7 +322,8 @@ fn saving_segments_of_a_sorted_index_fails() {
 /// List settings are written as arrays, as Elasticsearch's cluster state stores them.
 #[test]
 fn list_settings_survive_a_save() {
-    let dir = scratch("lists").join("data");
+    let root = scratch("lists");
+    let dir = root.join("data");
     let mut indices = Indices::new();
     let list = json!({"index.routing.allocation.include._name": ["a", "b"]});
     indices
