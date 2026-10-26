@@ -30,6 +30,11 @@ pub enum EsqlError {
 pub struct Column {
     pub name: String,
     pub r#type: String,
+    /// The types a field is mapped as when indices disagree (the column is then `unsupported`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_types: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suggested_cast: Option<String>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -322,23 +327,58 @@ impl Parser {
 }
 
 /// Columns of an index: mapped fields plus unmapped source fields, typed like ES dynamic mapping.
-fn columns(index: &Index) -> BTreeMap<String, String> {
-    let mut cols: BTreeMap<String, String> = BTreeMap::new();
+/// Values are `(mapping type, ES|QL type)`, e.g. `("float", "double")`.
+fn columns(index: &Index) -> BTreeMap<String, (String, String)> {
+    let mut dynamic: BTreeMap<String, String> = BTreeMap::new();
     for (_, d) in index.docs() {
-        flatten_types("", &d.source, &mut cols);
+        flatten_types("", &d.source, &mut dynamic);
     }
+    let mut cols: BTreeMap<_, _> = dynamic
+        .into_iter()
+        .map(|(c, t)| (c, (t.clone(), t)))
+        .collect();
     for (name, m) in &index.mappings.properties {
-        let t = m.type_name();
-        cols.insert(name.clone(), t.to_owned());
+        let es_type = serde_json::to_value(m)
+            .ok()
+            .and_then(|v| Some(v["type"].as_str()?.to_owned()));
+        let t = m.type_name().to_owned();
+        cols.insert(name.clone(), (es_type.unwrap_or_else(|| t.clone()), t));
         cols.remove(&format!("{name}.keyword"));
         // ponytail: dynamic strings only ever get a keyword multi-field
         if let FieldMapping::TextKeyword { fields } = m {
             for sub in fields.keys() {
-                cols.insert(format!("{name}.{sub}"), "keyword".to_owned());
+                cols.insert(
+                    format!("{name}.{sub}"),
+                    ("keyword".into(), "keyword".into()),
+                );
             }
         }
     }
     cols
+}
+
+/// ES's message for a field whose types disagree across indices (`TypeConflictedField`).
+fn conflict_error(field: &str, types: &BTreeMap<String, Vec<String>>) -> EsqlError {
+    let listed: Vec<String> = types
+        .iter()
+        .map(|(t, indices)| {
+            let mut s = format!("[{t}] in [{}]", indices[..indices.len().min(3)].join(", "));
+            if indices.len() > 3 {
+                let noun = if indices.len() == 4 {
+                    "index"
+                } else {
+                    "indices"
+                };
+                s += &format!(" and [{}] other {noun}", indices.len() - 3);
+            }
+            s
+        })
+        .collect();
+    EsqlError::Verification(format!(
+        "Cannot use field [{field}] due to ambiguities being mapped as [{}] incompatible types: {}",
+        types.len(),
+        listed.join(", ")
+    ))
 }
 
 fn flatten_types(prefix: &str, v: &Value, cols: &mut BTreeMap<String, String>) {
@@ -488,13 +528,19 @@ pub fn run(indices: &BTreeMap<String, Index>, query: &str) -> Result<Response, E
             sources.join(",")
         )));
     }
-    // ponytail: conflicting types across indices keep the first index's type; ES reports `unsupported`
-    let mut types = BTreeMap::new();
+    // Per column: its ES|QL type, and the indices for each mapping type (named like ES|QL does).
+    let mut mapped: BTreeMap<String, (String, BTreeMap<String, Vec<String>>)> = BTreeMap::new();
     let mut docs = Vec::new();
     for t in &targets {
         let index = &indices[&t.index];
-        for (c, ty) in columns(index) {
-            types.entry(c).or_insert(ty);
+        for (c, (es_type, ty)) in columns(index) {
+            let es_type = if es_type == "date" {
+                "datetime".into()
+            } else {
+                es_type
+            };
+            let e = mapped.entry(c).or_insert_with(|| (ty, BTreeMap::new()));
+            e.1.entry(es_type).or_default().push(t.index.clone());
         }
         let filter = t
             .filter
@@ -515,13 +561,44 @@ pub fn run(indices: &BTreeMap<String, Index>, query: &str) -> Result<Response, E
         mine.sort_by_key(|d| d.seq_no);
         docs.extend(mine);
     }
+    let conflicts: BTreeMap<String, BTreeMap<String, Vec<String>>> = mapped
+        .iter_mut()
+        .filter(|(_, (_, m))| m.len() > 1)
+        .map(|(c, (_, m))| {
+            m.values_mut().for_each(|v| v.sort());
+            (c.clone(), m.clone())
+        })
+        .collect();
+    let types: BTreeMap<String, String> = mapped
+        .into_iter()
+        .map(|(c, (t, _))| {
+            let t = if conflicts.contains_key(&c) {
+                "unsupported".into()
+            } else {
+                t
+            };
+            (c, t)
+        })
+        .collect();
+    // A referenced column must exist and have one type.
+    let check = |cols: &[String], f: &str| match conflicts.get(f) {
+        _ if !cols.iter().any(|c| c == f) => Err(unknown(f)),
+        Some(m) => Err(conflict_error(f, m)),
+        None => Ok(()),
+    };
     let mut cols: Vec<String> = types.keys().cloned().collect();
     let mut rows: Vec<BTreeMap<&str, Value>> = docs
         .iter()
         .map(|d| {
             types
                 .keys()
-                .map(|c| (c.as_str(), cell(&d.source, c)))
+                .map(|c| {
+                    let v = match conflicts.contains_key(c) {
+                        true => Value::Null,
+                        false => cell(&d.source, c),
+                    };
+                    (c.as_str(), v)
+                })
                 .collect()
         })
         .collect();
@@ -532,8 +609,8 @@ pub fn run(indices: &BTreeMap<String, Index>, query: &str) -> Result<Response, E
             Command::Where(e) => {
                 let mut refs = Vec::new();
                 fields(&e, &mut refs);
-                if let Some(f) = refs.iter().find(|f| !cols.contains(f)) {
-                    return Err(unknown(f));
+                for f in &refs {
+                    check(&cols, f)?;
                 }
                 rows.retain(|r| eval(&e, r) == Some(Value::Bool(true)));
             }
@@ -565,8 +642,8 @@ pub fn run(indices: &BTreeMap<String, Index>, query: &str) -> Result<Response, E
                 cols.retain(|c| !patterns.iter().any(|p| aliases::glob(p, c)));
             }
             Command::Sort(keys) => {
-                if let Some(k) = keys.iter().find(|k| !cols.contains(&k.field)) {
-                    return Err(unknown(&k.field));
+                for k in &keys {
+                    check(&cols, &k.field)?;
                 }
                 rows.sort_by(|a, b| {
                     keys.iter().fold(Ordering::Equal, |acc, k| {
@@ -609,9 +686,22 @@ pub fn run(indices: &BTreeMap<String, Index>, query: &str) -> Result<Response, E
         values_loaded,
         columns: cols
             .iter()
-            .map(|c| Column {
-                name: c.clone(),
-                r#type: types[c].clone(),
+            .map(|c| {
+                let original = conflicts
+                    .get(c)
+                    .map(|m| m.keys().cloned().collect::<Vec<_>>());
+                let cast = original
+                    .as_ref()
+                    .map(|o| match o[..] == ["date_nanos", "datetime"] {
+                        true => "date_nanos".into(),
+                        false => "keyword".into(),
+                    });
+                Column {
+                    name: c.clone(),
+                    r#type: types[c].clone(),
+                    original_types: original,
+                    suggested_cast: cast,
+                }
             })
             .collect(),
         values: rows

@@ -132,6 +132,9 @@ fn from_aliases_and_multiple_sources_with_filters() {
     use es_index::aliases::Alias;
     let mut all = indices();
     let mut more = Index::default();
+    more.mappings
+        .properties
+        .insert("name".into(), FieldMapping::Keyword { ignore_above: None });
     more.put("9", json!({"name": "dee", "age": 50}));
     more.aliases.insert(
         "crowd".into(),
@@ -199,4 +202,62 @@ fn implicit_limit_is_1000_and_explicit_limit_up_to_10000() {
         run(&idx, "FROM big | LIMIT 20000").unwrap().values.len(),
         10000
     );
+}
+
+fn conflicting() -> BTreeMap<String, Index> {
+    let mut all = indices();
+    let mut b = Index::default();
+    b.mappings
+        .properties
+        .insert("age".into(), FieldMapping::Keyword { ignore_above: None });
+    b.mappings
+        .properties
+        .insert("name".into(), FieldMapping::Keyword { ignore_above: None });
+    b.put("1", json!({"name": "dan", "age": "old"}));
+    let mut c = Index::default();
+    c.mappings.properties.insert(
+        "age".into(),
+        FieldMapping::Date {
+            format: None,
+            locale: None,
+            fields: BTreeMap::new(),
+        },
+    );
+    all.insert("b".into(), b);
+    all.insert("c".into(), c);
+    all
+}
+
+#[test]
+fn conflicting_types_are_unsupported_with_null_values() {
+    let r = run(&conflicting(), "FROM people, b | KEEP age, name").unwrap();
+    let cols = serde_json::to_value(&r.columns).unwrap();
+    assert_eq!(
+        cols,
+        json!([
+            {"name": "age", "type": "unsupported", "original_types": ["keyword", "long"], "suggested_cast": "keyword"},
+            {"name": "name", "type": "keyword"},
+        ])
+    );
+    assert!(r.values.iter().all(|row| row[0].is_null()));
+    assert!(r.values.iter().any(|row| row[1] == json!("ann")));
+}
+
+#[test]
+fn using_a_conflicting_field_fails_verification() {
+    let all = conflicting();
+    for q in [
+        "FROM people, b, c | WHERE age > 1",
+        "FROM people, b, c | SORT age",
+    ] {
+        assert_eq!(
+            run(&all, q).unwrap_err(),
+            EsqlError::Verification(
+                "Cannot use field [age] due to ambiguities being mapped as [3] incompatible types: \
+                 [datetime] in [c], [keyword] in [b], [long] in [people]"
+                    .into()
+            ),
+            "{q}"
+        );
+    }
 }
