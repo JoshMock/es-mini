@@ -330,7 +330,7 @@ impl Setting {
 }
 
 /// `TimeValue.parseTimeValue`, in millis.
-fn time_millis(v: &str, key: &str) -> Result<i64, String> {
+pub(crate) fn time_millis(v: &str, key: &str) -> Result<i64, String> {
     const S: i128 = 1_000_000_000;
     let lower = v.to_lowercase();
     let n = lower.trim();

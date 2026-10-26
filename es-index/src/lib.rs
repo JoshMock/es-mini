@@ -260,6 +260,8 @@ pub struct Index {
     tombstone_order: VecDeque<(String, Instant)>,
     next_seq_no: u64,
     refreshed_seq_no: u64,
+    /// When `refreshed_seq_no` was last advanced; `None` before the first refresh.
+    refreshed_at: Option<Instant>,
     /// Writes not yet in the translog (see [`disk::persist`]).
     unlogged: Vec<es_codec::translog::Op>,
     request_cache: std::sync::Mutex<RequestCache>,
@@ -307,6 +309,10 @@ impl Index {
     }
 
     fn next_seq_no(&mut self) -> u64 {
+        // The scheduled refresh that came due since the last one, run late but before this write.
+        if self.refresh_due() {
+            self.refresh();
+        }
         self.next_seq_no += 1;
         self.next_seq_no - 1
     }
@@ -449,6 +455,7 @@ impl Index {
             persisted: self.persisted,
             next_seq_no: self.next_seq_no,
             refreshed_seq_no: self.refreshed_seq_no,
+            refreshed_at: self.refreshed_at,
             ..Index::default()
         }
     }
@@ -461,10 +468,10 @@ impl Index {
         key: String,
         compute: impl FnOnce() -> Result<Value, E>,
     ) -> Result<Value, E> {
-        let visible = if self.settings.get("index.refresh_interval") == Some("-1") {
-            self.refreshed_seq_no
-        } else {
+        let visible = if self.refresh_due() {
             self.next_seq_no
+        } else {
+            self.refreshed_seq_no
         };
         let lock = || {
             self.request_cache
@@ -513,11 +520,28 @@ impl Index {
     /// Makes all writes so far visible to search.
     pub fn refresh(&mut self) {
         self.refreshed_seq_no = self.next_seq_no;
+        self.refreshed_at = Some(Instant::now());
     }
 
-    // ponytail: only refresh_interval -1 delays visibility; otherwise writes are searchable at once
+    /// Whether a scheduled refresh has come due since the last refresh, making every write
+    /// visible. Writes run one that came due first, so the writes since all precede it.
+    // ponytail: no refresh_interval set means searchable at once, as a search of an idle
+    // Elasticsearch shard waits for its refresh; `-1` never refreshes on its own
+    fn refresh_due(&self) -> bool {
+        let Some(interval) = self.settings.get("index.refresh_interval") else {
+            return true;
+        };
+        match index_settings::time_millis(interval, "index.refresh_interval") {
+            Ok(ms) if ms >= 0 => self
+                .refreshed_at
+                .is_none_or(|at| at.elapsed() >= Duration::from_millis(ms as u64)),
+            _ => false,
+        }
+    }
+
+    /// Whether the write with `seq_no` is visible to search.
     pub fn searchable(&self, seq_no: u64) -> bool {
-        self.settings.get("index.refresh_interval") != Some("-1") || seq_no < self.refreshed_seq_no
+        seq_no < self.refreshed_seq_no || self.refresh_due()
     }
 
     /// A live document; one on disk is read from its segment.
@@ -1241,6 +1265,24 @@ mod tests {
         let (hits, misses, bytes) = ix.request_cache_stats();
         assert_eq!((hits, misses), (1, 4));
         assert!(bytes > 0);
+    }
+
+    #[test]
+    fn positive_refresh_interval_delays_visibility_until_it_elapses() {
+        let mut ix = Index::default();
+        ix.settings.merge(&json!({"index.refresh_interval": "1s"}));
+        let first = ix.put("1", json!({})).seq_no;
+        assert!(!ix.searchable(first));
+        ix.refresh();
+        assert!(ix.searchable(first));
+        let second = ix.put("2", json!({})).seq_no;
+        assert!(!ix.searchable(second));
+        std::thread::sleep(Duration::from_millis(1100));
+        assert!(ix.searchable(second));
+        // the default interval keeps writes searchable at once (as search-idle shards do)
+        let mut ix = Index::default();
+        let seq_no = ix.put("1", json!({})).seq_no;
+        assert!(ix.searchable(seq_no));
     }
 
     #[test]
