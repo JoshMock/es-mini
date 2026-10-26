@@ -38,11 +38,6 @@ FROM emp | EVAL d = DATE_FORMAT("yyyy-MM-dd", hired) | KEEP name, d | SORT name
 FROM emp | EVAL d = DATE_FORMAT(hired) | KEEP d | SORT d | LIMIT 2
 FROM emp | EVAL y = DATE_TRUNC(1 year, hired), m = DATE_TRUNC(1 month, hired) | KEEP name, y, m | SORT name
 ROW recent = NOW() > TO_DATETIME("2025-01-01T00:00:00Z")
-ROW a = TO_STRING(42), b = TO_STRING(true), c = TO_STRING(1.5)
-ROW a = TO_INTEGER("42"), b = TO_INTEGER(3.9), c = TO_INTEGER(true), d = TO_INTEGER("x")
-ROW a = TO_LONG("9000000000"), b = TO_LONG(2.5)
-ROW a = TO_DOUBLE("1.25"), b = TO_DOUBLE(3), c = TO_DOUBLE(true)
-ROW a = TO_BOOLEAN("true"), b = TO_BOOLEAN("no"), c = TO_BOOLEAN(0), d = TO_BOOLEAN(2)
 ROW a = TO_DATETIME("2024-02-29T12:00:00.000Z"), b = TO_DATETIME(0)
 FROM emp | EVAL c = MV_COUNT(scores), lo = MV_MIN(scores), hi = MV_MAX(scores), t = MV_COUNT(tags) | KEEP name, c, lo, hi, t | SORT name
 ROW a = MV_MIN([3, 1, 2]), b = MV_MAX(["b", "c", "a"]), c = MV_COUNT([1, 2, 3])

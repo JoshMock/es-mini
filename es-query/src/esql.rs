@@ -2,7 +2,8 @@
 //! `WHERE`, `LIMIT`, `KEEP`, `DROP`, and `SORT`.
 //!
 //! WHERE supports comparisons (`== != < <= > >=`), `AND`/`OR`/`NOT`, parentheses, and
-//! `IS [NOT] NULL` over field names and literals. Anything else is a parse error.
+//! `IS [NOT] NULL`, arithmetic and the `TO_STRING`, `TO_INTEGER`, `TO_LONG`, `TO_DOUBLE` and
+//! `TO_BOOLEAN` conversions over field names and literals. Anything else is a parse error.
 
 use es_index::{
     FieldMapping, Index, Mappings,
@@ -234,6 +235,13 @@ enum Expr {
         Box<Expr>,
         Box<Expr>,
         OnceCell<&'static str>,
+        Span,
+    ),
+    /// A function call, with its canonical name and argument's type once `resolve` checked it.
+    Call(
+        String,
+        Vec<Expr>,
+        OnceCell<(&'static str, &'static str)>,
         Span,
     ),
 }
@@ -685,6 +693,31 @@ impl Parser<'_> {
             }
             Tok::Num(n) => (Expr::Lit(n, span), AFTER_LITERAL),
             Tok::Str(s) => (Expr::Lit(Value::String(s), span), AFTER_LITERAL),
+            Tok::Word(w)
+                if self
+                    .toks
+                    .get(self.pos + 1)
+                    .is_some_and(|t| t.0 == Tok::Sym("(")) =>
+            {
+                self.pos += 2;
+                self.parens += 1;
+                let mut args = Vec::new();
+                if !self.sym(")") {
+                    loop {
+                        args.push(self.or()?);
+                        if !self.sym(",") {
+                            break;
+                        }
+                    }
+                    if !self.sym(")") {
+                        return self.bad_expression();
+                    }
+                }
+                self.parens -= 1;
+                // ponytail: not checked against Elasticsearch's follow set after a call
+                self.follow = AFTER_LITERAL;
+                return Ok(Expr::Call(w, args, OnceCell::new(), self.span(start)));
+            }
             Tok::Word(w) => {
                 let lit = match w.to_ascii_lowercase().as_str() {
                     "null" => Some(Value::Null),
@@ -853,6 +886,23 @@ fn eval(e: &Expr, row: &Row) -> Option<Value> {
             _ => None,
         },
         Expr::Arith(op, a, b, t, _) => arith(op, t.get().copied()?, &eval(a, row)?, &eval(b, row)?),
+        Expr::Call(_, args, ft, _) => {
+            let v = eval(&args[0], row)?;
+            let &(f, t) = ft.get()?;
+            let one = |v: &Value| convert(f, t, v);
+            match v {
+                // Converting each value; the ones that fail drop out, like ES (which warns).
+                Value::Array(a) => {
+                    let mut out: Vec<Value> = a.iter().filter_map(one).collect();
+                    match out.len() {
+                        0 => None,
+                        1 => out.pop(),
+                        _ => Some(Value::Array(out)),
+                    }
+                }
+                v => one(&v),
+            }
+        }
         Expr::Cmp(op, a, b, _) => {
             // ponytail: multi-valued fields compare as null, like ES (which also warns)
             let ord = compare(&eval(a, row)?, &eval(b, row)?)?;
@@ -912,8 +962,79 @@ fn arith(op: &str, t: &str, a: &Value, b: &Value) -> Option<Value> {
     }
 }
 
+/// The conversion functions and their result types.
+const CONVERSIONS: [(&str, &str); 5] = [
+    ("TO_STRING", "keyword"),
+    ("TO_INTEGER", "integer"),
+    ("TO_LONG", "long"),
+    ("TO_DOUBLE", "double"),
+    ("TO_BOOLEAN", "boolean"),
+];
+
+/// Java's `Double.parseDouble`, refusing what Elasticsearch's `StringUtils.parseDouble` does.
+// ponytail: no hexadecimal floats
+fn parse_double(s: &str) -> Option<f64> {
+    let s = s.trim_matches(|c| c <= ' ');
+    let s = s.strip_suffix(['d', 'D', 'f', 'F']).unwrap_or(s);
+    let x: f64 = s.parse().ok()?;
+    x.is_finite().then_some(x)
+}
+
+/// Java's `Math.round`: halves round up.
+fn java_round(x: f64) -> f64 {
+    let r = x.floor();
+    if x - r >= 0.5 { r + 1.0 } else { r }
+}
+
+/// Function `f` (upper-case, one of `CONVERSIONS`) of a single value of type `t`, like
+/// Elasticsearch's convert evaluators: `None` where they fail (and warn).
+fn convert(f: &str, t: &str, v: &Value) -> Option<Value> {
+    let num = || match t {
+        "double" => v.as_f64().map(Ok),
+        _ => v
+            .as_i64()
+            .map(Err)
+            .or_else(|| v.as_u64().map(|u| Ok(u as f64))),
+    };
+    match (f, v) {
+        ("TO_STRING", Value::String(_)) | ("TO_BOOLEAN", Value::Bool(_)) => Some(v.clone()),
+        ("TO_STRING", Value::Bool(b)) => Some(b.to_string().into()),
+        ("TO_STRING", _) => match num()? {
+            Ok(x) if t == "double" => Some(crate::aggs::java_double(x).into()),
+            _ => Some(v.to_string().into()),
+        },
+        ("TO_BOOLEAN", Value::String(s)) => Some(s.eq_ignore_ascii_case("true").into()),
+        ("TO_BOOLEAN", _) => Some(num()?.map_or_else(|i| i != 0, |x| x != 0.0).into()),
+        ("TO_DOUBLE", Value::String(s)) => parse_double(s).map(Value::from),
+        (_, Value::Bool(b)) if f != "TO_DOUBLE" => Some((*b as i64).into()),
+        ("TO_DOUBLE", Value::Bool(b)) => Some((*b as u8 as f64).into()),
+        ("TO_DOUBLE", _) => Some(num()?.unwrap_or_else(|i| i as f64).into()),
+        _ => {
+            // TO_INTEGER or TO_LONG: an integer, else a double rounded if in range.
+            let n = match v {
+                Value::String(s) => match s.parse::<i64>() {
+                    Ok(i) => Err(i),
+                    Err(_) => Ok(parse_double(s)?),
+                },
+                _ => num()?,
+            };
+            let i = match n {
+                Err(i) => i,
+                // `Math.round` saturates; 2^63 itself is out of range for a long.
+                Ok(x) if (-(2f64.powi(63))..2f64.powi(63)).contains(&x) => java_round(x) as i64,
+                Ok(_) => return None,
+            };
+            match f {
+                "TO_INTEGER" => i32::try_from(i).ok().map(Value::from),
+                _ => Some(i.into()),
+            }
+        }
+    }
+}
+
 fn fields(e: &Expr, out: &mut Vec<Name>) {
     match e {
+        Expr::Call(_, args, ..) => args.iter().for_each(|a| fields(a, out)),
         Expr::Field(f, (at, _)) => out.push((f.clone(), *at)),
         Expr::Lit(..) => {}
         Expr::Not(x, _) | Expr::IsNull(x, ..) => fields(x, out),
@@ -937,6 +1058,7 @@ fn span(e: &Expr) -> &Span {
     match e {
         Expr::Field(_, s) | Expr::Lit(_, s) | Expr::Not(_, s) | Expr::IsNull(.., s) => s,
         Expr::Cmp(.., s) | Expr::And(.., s) | Expr::Or(.., s) | Expr::Arith(.., s) => s,
+        Expr::Call(.., s) => s,
     }
 }
 
@@ -1033,6 +1155,30 @@ fn resolve(
             };
             bad.push((span(e).0, problem));
             return None;
+        }
+        Expr::Call(f, args, t, (at, _)) => {
+            let upper = f.to_ascii_uppercase();
+            let Some(&(name, out)) = CONVERSIONS.iter().find(|(n, _)| *n == upper) else {
+                bad.push((*at, format!("Unknown function [{f}]")));
+                return None;
+            };
+            // ponytail: single-argument conversions only; arity errors are not ES's messages
+            let [arg] = &args[..] else {
+                bad.push((*at, format!("[{f}] takes exactly one argument")));
+                return None;
+            };
+            let ta = resolve(arg, src, types, bad)?;
+            // ponytail: dates, ips, versions and the like are not converted yet
+            let Some(&ta) = ["null", "boolean", "keyword", "text"]
+                .iter()
+                .chain(&NUMERIC)
+                .find(|n| **n == ta)
+            else {
+                bad.push((*at, format!("[{f}] of [{ta}] is not supported by es-mini")));
+                return None;
+            };
+            let _ = t.set((name, ta));
+            return Some(out.to_owned());
         }
         Expr::IsNull(x, ..) => {
             resolve(x, src, types, bad)?;
@@ -1562,7 +1708,7 @@ fn pushable(e: &Expr) -> bool {
                 && pushable(b)
         }
         // ponytail: ES may rewrite `age + 1 > 30` into a pushable `age > 29`; this does not
-        Expr::Arith(..) => names(e).is_empty(),
+        Expr::Arith(..) | Expr::Call(..) => names(e).is_empty(),
         Expr::Not(x, _) | Expr::IsNull(x, ..) => pushable(x),
         Expr::And(a, b, _) | Expr::Or(a, b, _) => pushable(a) && pushable(b),
         Expr::Field(..) | Expr::Lit(..) => true,

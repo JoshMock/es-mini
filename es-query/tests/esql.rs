@@ -830,3 +830,71 @@ fn arithmetic_widens_like_elasticsearch_and_overflow_is_null() {
         }
     }
 }
+
+#[test]
+fn conversion_functions_match_elasticsearch() {
+    let r = q(
+        r#"ROW a = TO_STRING(42), b = TO_STRING(true), c = TO_STRING(1.5), d = to_string(100000000000000000000.0)"#,
+    );
+    let types: Vec<&str> = r.columns.iter().map(|c| c.r#type.as_str()).collect();
+    assert_eq!(types, ["keyword"; 4]);
+    assert_eq!(
+        r.values,
+        [[json!("42"), json!("true"), json!("1.5"), json!("1.0E20")]]
+    );
+    let r = q(
+        r#"ROW a = TO_INTEGER("42"), b = TO_INTEGER(3.9), c = TO_INTEGER(true), d = TO_INTEGER("x"), e = TO_INTEGER(-2.5), f = TO_INTEGER(" 7.5 "), g = TO_INTEGER(3000000000)"#,
+    );
+    assert_eq!(r.columns[0].r#type, "integer");
+    assert_eq!(
+        r.values,
+        [[
+            json!(42),
+            json!(4),
+            json!(1),
+            Value::Null,
+            json!(-2),
+            json!(8),
+            Value::Null
+        ]]
+    );
+    let r = q(
+        r#"ROW a = TO_LONG("9000000000"), b = TO_LONG(2.5), c = TO_LONG(["1.5", "x"]), d = TO_LONG(null)"#,
+    );
+    assert_eq!(r.columns[3].r#type, "long");
+    assert_eq!(
+        r.values,
+        [[json!(9000000000u64), json!(3), json!(2), Value::Null]]
+    );
+    let r = q(
+        r#"ROW a = TO_DOUBLE("1.25"), b = TO_DOUBLE(3), c = TO_DOUBLE(true), d = TO_DOUBLE("2d")"#,
+    );
+    assert_eq!(
+        r.values,
+        [[json!(1.25), json!(3.0), json!(1.0), json!(2.0)]]
+    );
+    let r = q(
+        r#"ROW a = TO_BOOLEAN("TRUE"), b = TO_BOOLEAN("no"), c = TO_BOOLEAN(0), d = TO_BOOLEAN(2), e = TO_BOOLEAN([0, 1])"#,
+    );
+    assert_eq!(
+        r.values,
+        [[
+            json!(true),
+            json!(false),
+            json!(false),
+            json!(true),
+            json!([false, true])
+        ]]
+    );
+    let r = q("FROM people | WHERE TO_STRING(age) == \"30\" | KEEP name");
+    assert_eq!(r.values, [[json!("ann")]]);
+    match run(&indices(), "FROM people | WHERE UNKNOWN_FN(age)") {
+        Err(EsqlError::Verification(m)) => {
+            assert_eq!(
+                m,
+                "Found 1 problem\nline 1:21: Unknown function [UNKNOWN_FN]"
+            )
+        }
+        other => panic!("{other:?}"),
+    }
+}
