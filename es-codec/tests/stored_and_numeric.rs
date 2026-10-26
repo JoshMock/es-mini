@@ -2,7 +2,10 @@
 //! by real Lucene 10.5.1: see tests/gen/GenStoredAndNumeric.java (its value formulas must match
 //! the ones here).
 
-use es_codec::{doc_values::DocValues, stored_fields::StoredValue};
+use es_codec::{
+    doc_values::{DocValues, write_doc_values_with},
+    stored_fields::StoredValue,
+};
 
 mod common;
 
@@ -121,4 +124,24 @@ fn reads_numeric_doc_values_across_disi_and_value_blocks() {
         v.sort();
         v
     });
+}
+
+/// Rewriting the segment's doc values gives Lucene's own `.dvm` and `.dvd`, byte for byte: the
+/// same table, GCD and block encodings, and the same IndexedDISI rank tables.
+#[test]
+fn writes_numeric_doc_values_like_lucene() {
+    let seg = common::open("stored-and-numeric");
+    let field = |name: &str| match seg.doc_values(name).unwrap() {
+        DocValues::Numbers(n) => (seg.field(name).unwrap().number, n),
+        other => panic!("{name}: {other:?}"),
+    };
+    // Lucene's merge wrote the NUMERIC fields in this order.
+    let numeric = ["head", "varying", "half"].map(field);
+    let id = seg.seg.info.id;
+    let (dvm, dvd) = write_doc_values_with(&numeric, &[field("multi")], &[], &id, "Lucene90_0");
+    let lucene = |ext| seg.cfs.file(ext).unwrap().unwrap();
+    assert_eq!(dvm, lucene("_Lucene90_0.dvm"));
+    let want = lucene("_Lucene90_0.dvd");
+    assert_eq!(dvd.len(), want.len());
+    assert!(dvd == want, "same length, different .dvd bytes");
 }

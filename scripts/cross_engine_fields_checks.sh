@@ -4,6 +4,14 @@ count() { # expected query-json
   got=$(req POST /f/_count "{\"query\":$2}" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("count","error"))')
   if [ "$got" = "$1" ]; then echo "ok   $2"; else echo "FAIL $2: want $1, got $got"; fail=1; fi
 }
+# Aggregations read doc values themselves (both fields below are table-encoded).
+agg() { # expected aggregation field
+  got=$(req POST /f/_search "{\"size\":0,\"aggs\":{\"a\":{\"$2\":{\"field\":\"$3\"}}}}" |
+    python3 -c 'import json,sys;print(json.load(sys.stdin).get("aggregations",{}).get("a",{}).get("value","error"))')
+  if [ "$got" = "$1" ]; then echo "ok   $2 $3"; else echo "FAIL $2 $3: want $1, got $got"; fail=1; fi
+}
+agg 39.0 sum arr
+agg 1709251200000.0 max d
 count 1 '{"term":{"d":"2024-01-01"}}'
 count 2 '{"range":{"d":{"gte":"2024-02-01"}}}'
 count 3 '{"exists":{"field":"d"}}'

@@ -74,31 +74,115 @@ pub(crate) fn write_docs_with_field(
     meta.byte(rank_power);
 }
 
-/// `values` belong to `docs` (ascending), out of `max_doc` docs.
+fn gcd(a: u64, b: u64) -> u64 {
+    if b == 0 { a } else { gcd(b, a % b) }
+}
+
+/// `(min, max - min)` of non-empty `values`.
+fn min_range(values: &[i64]) -> (i64, u64) {
+    let min = values.iter().copied().min().unwrap_or(0);
+    let max = values.iter().copied().max().unwrap_or(0);
+    (min, max.wrapping_sub(min) as u64)
+}
+
+/// Bits `DirectWriter` packs `values` into, all at once (Lucene's `MinMaxTracker` space).
+fn space_in_bits(values: &[i64]) -> u64 {
+    match min_range(values).1 {
+        0 => 0,
+        range => direct_bits(range) as u64 * values.len() as u64,
+    }
+}
+
+/// `values` belong to `docs` (ascending), out of `max_doc` docs. Picks the encoding
+/// Lucene90DocValuesConsumer.writeValues picks: a table of up to 256 distinct values (never for
+/// `ords`), blocks of 2^NUMERIC_BLOCK_SHIFT values with their own bits per value when that saves
+/// 10% or more, or one `DirectWriter` run of `(v - min) / gcd`.
 fn write_numeric_entry(
     dvm: &mut Output,
     dvd: &mut Output,
     values: &[i64],
     docs: &[u32],
     max_doc: usize,
+    ords: bool,
 ) {
-    let min = values.iter().copied().min().unwrap_or(0);
-    let range = values
-        .iter()
-        .fold(0, |m, v| m.max(v.wrapping_sub(min) as u64));
-    let bits = direct_bits(range);
+    let first = values.first().copied().unwrap_or(0);
+    // Values beyond +-2^62 could overflow `v - first`; Lucene gives up on a GCD then.
+    let mut gcd = values.iter().fold(0, |g, v| match g {
+        1 => 1,
+        _ if *v < i64::MIN / 2 || *v > i64::MAX / 2 => 1,
+        _ => gcd(g, (v - first).unsigned_abs()),
+    });
+    let (mut min, range) = min_range(values);
+    let max = min.wrapping_add(range as i64);
+    let mut unique = values.to_vec();
+    unique.sort_unstable();
+    unique.dedup();
+    let (mut bits, mut table, mut blocks) = (0, None, false);
     write_docs_with_field(dvm, dvd, docs, max_doc);
     dvm.long(values.len() as i64);
-    dvm.bytes(&(-1i32).to_le_bytes()); // no table, no blocks
+    if range == 0 {
+        dvm.int(-1);
+    } else if !ords
+        && unique.len() <= 256
+        && direct_bits(unique.len() as u64 - 1) < direct_bits(range / gcd)
+    {
+        bits = direct_bits(unique.len() as u64 - 1);
+        dvm.int(unique.len() as i32);
+        unique.iter().for_each(|v| dvm.long(*v));
+        (min, gcd, table) = (0, 1, Some(unique));
+    } else {
+        let block_space: u64 = values.chunks(NUMERIC_BLOCK_SIZE).map(space_in_bits).sum();
+        blocks = block_space as f64 / space_in_bits(values) as f64 <= 0.9;
+        if blocks {
+            bits = 0xff;
+            dvm.int(-2 - NUMERIC_BLOCK_SHIFT);
+        } else {
+            bits = direct_bits(range / gcd);
+            if gcd == 1 && min > 0 && direct_bits(max as u64) == bits {
+                min = 0;
+            }
+            dvm.int(-1);
+        }
+    }
     dvm.byte(bits);
     dvm.long(min);
-    dvm.long(1);
-    dvm.long(dvd.0.len() as i64);
-    let packed: Vec<u64> = values.iter().map(|v| v.wrapping_sub(min) as u64).collect();
-    let packed = pack(&packed, bits);
-    dvd.bytes(&packed);
-    dvm.long(packed.len() as i64);
-    dvm.long(-1); // no value jump table
+    dvm.long(gcd as i64);
+    let start = dvd.0.len();
+    dvm.long(start as i64);
+    let encode = |v: &i64| match &table {
+        Some(t) => t.binary_search(v).unwrap_or(0) as u64,
+        None => v.wrapping_sub(min) as u64 / gcd,
+    };
+    let mut jump_table = -1;
+    if blocks {
+        let mut offsets = vec![];
+        for block in values.chunks(NUMERIC_BLOCK_SIZE) {
+            offsets.push(dvd.0.len() as i64);
+            let (min, range) = min_range(block);
+            if range == 0 {
+                dvd.byte(0);
+                dvd.long(min);
+            } else {
+                let bits = direct_bits(range / gcd);
+                let deltas: Vec<u64> = block
+                    .iter()
+                    .map(|v| v.wrapping_sub(min) as u64 / gcd)
+                    .collect();
+                let packed = pack(&deltas, bits);
+                dvd.byte(bits);
+                dvd.long(min);
+                dvd.int(packed.len() as i32);
+                dvd.bytes(&packed);
+            }
+        }
+        jump_table = dvd.0.len() as i64;
+        offsets.iter().for_each(|o| dvd.long(*o));
+        dvd.long(jump_table);
+    } else if bits != 0 {
+        dvd.bytes(&pack(&values.iter().map(encode).collect::<Vec<_>>(), bits));
+    }
+    dvm.long((dvd.0.len() - start) as i64);
+    dvm.long(jump_table);
 }
 
 /// Docs with at least one value, and the sorted values of all docs back to back.
@@ -117,9 +201,14 @@ fn flatten(per_doc: &[Vec<i64>]) -> (Vec<u32>, Vec<i64>) {
 
 /// Sorted-numeric entry: the values, the number of docs with any, and (if some doc has several)
 /// the `DirectMonotonic` start of each doc's values.
-fn write_sorted_numeric_entry(dvm: &mut Output, dvd: &mut Output, per_doc: &[Vec<i64>]) {
+fn write_sorted_numeric_entry(
+    dvm: &mut Output,
+    dvd: &mut Output,
+    per_doc: &[Vec<i64>],
+    ords: bool,
+) {
     let (docs, values) = flatten(per_doc);
-    write_numeric_entry(dvm, dvd, &values, &docs, per_doc.len());
+    write_numeric_entry(dvm, dvd, &values, &docs, per_doc.len(), ords);
     dvm.bytes(&(docs.len() as i32).to_le_bytes());
     if docs.len() != values.len() {
         let mut starts = vec![0i64];
@@ -207,8 +296,6 @@ fn write_terms_dict(dvm: &mut Output, dvd: &mut Output, terms: &[&[u8]]) {
 /// Returns `(.dvm, .dvd)` for `numeric` fields (`(field number, values per doc)`; a doc has at
 /// most one) and `keyword` fields as SORTED_SET (`(field number, terms per doc)`; a doc may have
 /// none or several).
-///
-/// ponytail: no table, gcd, or block encoding; add them when size demands.
 pub fn write_doc_values(
     numeric: &[(i32, Vec<Vec<i64>>)],
     keyword: &[(i32, Vec<Vec<Vec<u8>>>)],
@@ -234,12 +321,12 @@ pub fn write_doc_values_with(
         dvm.bytes(&number.to_le_bytes());
         dvm.byte(0);
         let (docs, flat) = flatten(values);
-        write_numeric_entry(&mut dvm, &mut dvd, &flat, &docs, values.len());
+        write_numeric_entry(&mut dvm, &mut dvd, &flat, &docs, values.len(), false);
     }
     for (number, values) in sorted_numeric {
         dvm.bytes(&number.to_le_bytes());
         dvm.byte(4);
-        write_sorted_numeric_entry(&mut dvm, &mut dvd, values);
+        write_sorted_numeric_entry(&mut dvm, &mut dvd, values, false);
     }
     for (number, values) in keyword {
         let mut terms: Vec<&[u8]> = values.iter().flatten().map(|v| &v[..]).collect();
@@ -262,10 +349,10 @@ pub fn write_doc_values_with(
         if ords.iter().all(|o| o.len() <= 1) {
             dvm.byte(0); // single-valued
             let (docs, ords) = flatten(&ords);
-            write_numeric_entry(&mut dvm, &mut dvd, &ords, &docs, values.len());
+            write_numeric_entry(&mut dvm, &mut dvd, &ords, &docs, values.len(), true);
         } else {
             dvm.byte(1);
-            write_sorted_numeric_entry(&mut dvm, &mut dvd, &ords);
+            write_sorted_numeric_entry(&mut dvm, &mut dvd, &ords, true);
         }
         write_terms_dict(&mut dvm, &mut dvd, &terms);
     }

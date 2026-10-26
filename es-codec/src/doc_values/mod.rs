@@ -19,6 +19,9 @@ const TERMS_DICT_BLOCK_LZ4_SHIFT: u32 = 6;
 const TERMS_DICT_BLOCK_SIZE: usize = 1 << TERMS_DICT_BLOCK_LZ4_SHIFT;
 /// Block shift of the direct-monotonic tables the writer emits (Lucene90DocValuesFormat).
 const DIRECT_MONOTONIC_BLOCK_SHIFT: i32 = 16;
+/// Values per block of a block-encoded numeric field (Lucene90DocValuesFormat).
+const NUMERIC_BLOCK_SHIFT: i32 = 14;
+const NUMERIC_BLOCK_SIZE: usize = 1 << NUMERIC_BLOCK_SHIFT;
 const TERMS_DICT_REVERSE_INDEX_SHIFT: i32 = 10;
 const TERMS_DICT_REVERSE_INDEX_MASK: usize = (1 << TERMS_DICT_REVERSE_INDEX_SHIFT) - 1;
 
@@ -60,6 +63,20 @@ mod tests {
         let (m, d) = write_doc_values(&[(7, b.clone())], &[], &id, "Lucene90_0");
         let got = decode(&m, &d, (&id, 3), "Lucene90_0", 7, &|_| Ok(false)).unwrap();
         assert_eq!(got, DocValues::Numbers(b));
+    }
+
+    /// Few distinct values far apart go through a table: 2 bits per value here instead of 32.
+    #[test]
+    fn few_distinct_values_use_a_table() {
+        let id = [2u8; 16];
+        let per_doc: Vec<Vec<i64>> = (0..1000)
+            .map(|i| vec![[-5, 1000, 1_000_000_007][i % 3]])
+            .collect();
+        let (m, d) = write_doc_values(&[(0, per_doc.clone())], &[], &id, "x");
+        let (_, empty) = write_doc_values(&[(0, vec![vec![]; 1000])], &[], &id, "x");
+        assert_eq!(d.len() - empty.len(), 1000 * 2 / 8);
+        let got = decode(&m, &d, (&id, 1000), "x", 0, &|_| Ok(false)).unwrap();
+        assert_eq!(got, DocValues::Numbers(per_doc));
     }
 
     #[test]
