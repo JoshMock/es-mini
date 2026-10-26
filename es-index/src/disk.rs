@@ -440,9 +440,8 @@ pub fn norm_len(norm: i8) -> u32 {
 /// Index data for one shard segment, built from the mapped fields whose values are scalars or
 /// arrays of scalars. Field numbers start at 6, after the metadata fields.
 // ponytail: fields the writer cannot encode yet are left out of the segment, which only
-// Elasticsearch notices (es-mini rebuilds every field from `_source` on open): values of the
-// wrong type or nested objects, `date_nanos`, multi-fields, and any field with a term in 256+
-// docs.
+// Elasticsearch notices (es-mini reads `_source` where a segment lacks a field): values of the
+// wrong type or nested objects, `date_nanos`, and multi-fields.
 #[derive(Default)]
 struct UserFields {
     fields: Vec<es_codec::field_infos::FieldInfo>,
