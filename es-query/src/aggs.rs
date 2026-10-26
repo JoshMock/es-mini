@@ -129,7 +129,7 @@ impl TopHits {
                         &mut t.size
                     }) = n.ok_or_else(|| bad(k))?;
                 }
-                "sort" => t.sort = crate::parse_sorts(v)?,
+                "sort" => t.sort = crate::request::parse_sorts(v)?,
                 "version" => t.version = v.as_bool().ok_or_else(|| bad(k))?,
                 "seq_no_primary_term" => t.seq_no = v.as_bool().ok_or_else(|| bad(k))?,
                 "explain" => t.explain = v.as_bool().ok_or_else(|| bad(k))?,
