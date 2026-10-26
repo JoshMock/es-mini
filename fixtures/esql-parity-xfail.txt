@@ -3,7 +3,6 @@
 # differences. This list may only shrink.
 FROM emp | SORT name | LIMIT 3
 FROM emp | KEEP name, bio, age, salary, height, active, hired, tags, scores | SORT name
-FROM emp* METADATA _index | STATS c = COUNT(*) BY _index | SORT _index
 FROM emp | WHERE name LIKE "*a*" | KEEP name | SORT name
 FROM emp | WHERE name LIKE "?ob" | KEEP name
 FROM emp | WHERE bio LIKE "*chess*" | KEEP name
@@ -16,7 +15,6 @@ FROM emp | RENAME name AS who | KEEP who, age | SORT who
 FROM emp | RENAME name AS who, age AS years | KEEP who, years | SORT who
 FROM emp | DROP bio, tags, scores | SORT name | LIMIT 2
 FROM emp | DROP h* | SORT name | LIMIT 2
-FROM emp | LIMIT 2 | STATS c = COUNT(*)
 FROM emp | EVAL level = CASE(age >= 45, "senior", age >= 30, "mid", "junior") | KEEP name, level | SORT name
 FROM emp | EVAL a = COALESCE(age, 0), s = COALESCE(salary, -1) | KEEP name, a, s | SORT name
 FROM emp | EVAL full = CONCAT(name, "-", TO_STRING(age)) | KEEP full | SORT full
@@ -28,7 +26,6 @@ FROM emp | EVAL d = DATE_FORMAT("yyyy-MM-dd", hired) | KEEP name, d | SORT name
 FROM emp | EVAL d = DATE_FORMAT(hired) | KEEP d | SORT d | LIMIT 2
 FROM emp | EVAL y = DATE_TRUNC(1 year, hired), m = DATE_TRUNC(1 month, hired) | KEEP name, y, m | SORT name
 FROM emp | STATS c = COUNT(*), ca = COUNT(age), cs = COUNT(scores)
-FROM emp | STATS COUNT(*)
 FROM emp | STATS d = COUNT_DISTINCT(tags), da = COUNT_DISTINCT(age)
 FROM emp | STATS a = AVG(salary), s = SUM(salary), mn = MIN(age), mx = MAX(age)
 FROM emp | STATS mh = MIN(hired), xh = MAX(hired), mxh = MAX(height), sa = SUM(age), ah = AVG(height)
@@ -36,14 +33,9 @@ FROM emp | STATS m = MEDIAN(salary), p = PERCENTILE(salary, 90), p0 = PERCENTILE
 FROM emp | WHERE active | STATS v = VALUES(name)
 FROM emp | STATS c = COUNT(*), a = AVG(age) BY active | SORT active
 FROM emp | STATS c = COUNT(*) BY tags | SORT tags
-FROM emp | STATS c = COUNT(*) BY active, age | SORT active, age
-FROM emp | STATS c = COUNT(*) BY decade = age / 10 * 10 | SORT decade
 FROM emp | STATS c = COUNT(*) BY b = BUCKET(salary, 50000) | SORT b
 FROM emp | STATS c = COUNT(*) BY b = BUCKET(age, 10, 20, 60) | SORT b
 FROM emp | STATS c = COUNT(*) BY y = BUCKET(hired, 1 year) | SORT y
 FROM emp | STATS c = COUNT(*) BY m = BUCKET(hired, 5, "2010-01-01T00:00:00Z", "2025-01-01T00:00:00Z") | SORT m
 FROM emp | STATS max_age = MAX(age) BY active | EVAL older = max_age > 40 | SORT active
 FROM emp | WHERE active | STATS total = SUM(salary)
-FROM emp* | STATS c = COUNT(*) BY dept | SORT dept
-ROW a = 1 | STATS c = COUNT(*)
-FROM emp | STATS AVG(name)

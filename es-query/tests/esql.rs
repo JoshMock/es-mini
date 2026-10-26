@@ -1097,3 +1097,26 @@ fn to_datetime_and_now_match_elasticsearch() {
         ]]
     );
 }
+
+#[test]
+fn stats_count_star_by_groups() {
+    let r = q("FROM people METADATA _index | STATS c = COUNT(*) BY _index");
+    assert_eq!(col_names(&r), ["c", "_index"]);
+    assert_eq!(r.columns[0].r#type, "long");
+    assert_eq!(r.values, vec![vec![json!(3), json!("people")]]);
+    let r = q(
+        "FROM people | WHERE age > 26 | STATS COUNT(*) BY has_city = city IS NOT NULL | SORT has_city",
+    );
+    assert_eq!(col_names(&r), ["COUNT(*)", "has_city"]);
+    assert_eq!(r.values, vec![vec![json!(2), json!(true)]]);
+    assert_eq!(
+        q("ROW a = 1 | STATS c = COUNT(*)").values,
+        vec![vec![json!(1)]]
+    );
+    let r = q("FROM people | WHERE age > 99 | STATS c = COUNT(*)");
+    assert_eq!(r.values, vec![vec![json!(0)]]);
+    assert!(matches!(
+        run(&indices(), "FROM people | STATS c = COUNT(*) BY nope"),
+        Err(EsqlError::Verification(m)) if m.contains("Unknown column [nope]")
+    ));
+}

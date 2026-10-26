@@ -1,5 +1,5 @@
 //! ES|QL subset: `FROM` (with `METADATA _id, _index, _version`), `ROW` and `SHOW INFO`, with
-//! `WHERE`, `EVAL`, `LIMIT`, `KEEP`, `DROP`, and `SORT`.
+//! `WHERE`, `EVAL`, `LIMIT`, `KEEP`, `DROP`, `SORT`, and `STATS COUNT(*) [BY ...]`.
 //!
 //! Expressions support comparisons (`== != < <= > >=`), `AND`/`OR`/`NOT`, parentheses,
 //! `IS [NOT] NULL`, arithmetic, and the functions in `CONVERSIONS` and `SCALAR_FNS` over field
@@ -277,6 +277,8 @@ enum Command {
     Keep(Vec<Name>),
     Drop(Vec<Name>),
     Sort(Vec<SortKey>),
+    /// Aggregates (only `COUNT(*)`), then the named grouping expressions.
+    Stats(Vec<(String, Expr)>, Vec<(String, Expr)>),
 }
 
 /// A recursive-descent parser that fails with the messages of Elasticsearch's ANTLR parser.
@@ -364,10 +366,7 @@ impl Parser<'_> {
     /// A command Elasticsearch knows but this subset does not run.
     fn unsupported<T>(&self, commands: &str) -> Result<T, EsqlError> {
         match self.peek() {
-            Some(Tok::Word(w))
-                if commands.contains(&format!("'{}'", w.to_ascii_lowercase()))
-                    || w.eq_ignore_ascii_case("stats") =>
-            {
+            Some(Tok::Word(w)) if commands.contains(&format!("'{}'", w.to_ascii_lowercase())) => {
                 self.error(&format!("unsupported command [{}]", w.to_ascii_lowercase()))
             }
             _ => self.mismatched(commands),
@@ -487,13 +486,23 @@ impl Parser<'_> {
                 Some(Tok::Word(w)) => w.to_ascii_lowercase(),
                 _ => String::new(),
             };
-            if !["where", "eval", "limit", "keep", "drop", "sort"].contains(&command.as_str()) {
+            if !["where", "eval", "limit", "keep", "drop", "sort", "stats"]
+                .contains(&command.as_str())
+            {
                 return self.unsupported(PROCESSING_COMMANDS);
             }
             self.pos += 1;
             let cmd = match command.as_str() {
                 "where" => Command::Where(self.or()?),
                 "eval" => Command::Eval(self.assignments()?),
+                "stats" => {
+                    let aggs = self.assignments()?;
+                    let by = match self.keyword("by") {
+                        true => self.assignments()?,
+                        false => Vec::new(),
+                    };
+                    Command::Stats(aggs, by)
+                }
                 "limit" => self.limit()?,
                 "keep" | "drop" => {
                     let names = self.ident_list(ID_PATTERN)?;
@@ -1474,6 +1483,12 @@ fn resolve(
     }
 }
 
+/// Whether `e` is `COUNT(*)`.
+fn count_star(e: &Expr) -> bool {
+    matches!(e, Expr::Call(f, args, ..)
+        if f.eq_ignore_ascii_case("count") && matches!(&args[..], [Expr::Field(s, _)] if s == "*"))
+}
+
 fn unknown(c: &str) -> String {
     format!("Unknown column [{c}]")
 }
@@ -1599,6 +1614,45 @@ pub fn run(
                 .filter_map(|k| Some((k.at, check(&cols, &conflicts, &k.field)?)))
                 .collect(),
             Command::Limit(_) => Vec::new(),
+            Command::Stats(aggs, by) => {
+                // ponytail: COUNT(*) is the only aggregate; the esql-stats goal adds the rest
+                let mut bad: Vec<_> = aggs
+                    .iter()
+                    .filter(|(_, e)| !count_star(e))
+                    .map(|(_, e)| {
+                        let msg = format!(
+                            "[{}] is not supported by es-mini in STATS",
+                            &query[span(e).1.clone()]
+                        );
+                        (span(e).0, msg)
+                    })
+                    .collect();
+                let mut grouped = Vec::new();
+                for (name, e) in by {
+                    let mut refs = Vec::new();
+                    fields(e, &mut refs);
+                    bad.extend(
+                        refs.into_iter()
+                            .filter_map(|(f, at)| Some((at, check(&cols, &conflicts, &f)?))),
+                    );
+                    if bad.is_empty()
+                        && let Some(t) = resolve(e, query, &types, &mut bad)
+                    {
+                        grouped.push((name.clone(), t));
+                    }
+                }
+                if bad.is_empty() {
+                    let counts = aggs.iter().map(|(n, _)| (n.clone(), "long".to_owned()));
+                    cols.clear();
+                    for (name, t) in counts.chain(grouped) {
+                        cols.retain(|c| *c != name);
+                        cols.push(name.clone());
+                        types.insert(name.clone(), t);
+                        conflicts.remove(&name);
+                    }
+                }
+                bad
+            }
         };
         if !bad.is_empty() {
             return Err(problems(bad));
@@ -1637,6 +1691,32 @@ pub fn run(
             }
             Command::Sort(keys) => {
                 sort_rows(&mut rows, keys);
+            }
+            Command::Stats(aggs, by) => {
+                // ponytail: linear group lookup, O(rows × groups), and a multi-valued key is one
+                // group rather than one per value; hash and expand keys when that matters
+                let mut buckets: Vec<(Vec<Value>, u64)> = Vec::new();
+                for r in &rows {
+                    let key: Vec<Value> = by
+                        .iter()
+                        .map(|(_, e)| eval(e, r).unwrap_or(Value::Null))
+                        .collect();
+                    match buckets.iter_mut().find(|(k, _)| *k == key) {
+                        Some(b) => b.1 += 1,
+                        None => buckets.push((key, 1)),
+                    }
+                }
+                if by.is_empty() && buckets.is_empty() {
+                    buckets.push((Vec::new(), 0));
+                }
+                rows = buckets
+                    .into_iter()
+                    .map(|(key, n)| {
+                        let mut r: Row = aggs.iter().map(|(a, _)| (a.clone(), n.into())).collect();
+                        r.extend(by.iter().map(|(b, _)| b.clone()).zip(key));
+                        Cow::Owned(r)
+                    })
+                    .collect();
             }
         }
     }
@@ -1876,10 +1956,11 @@ fn load_counts(
     out: &[String],
     types: &BTreeMap<String, String>,
 ) -> (usize, usize) {
-    // ponytail: the plan is cut at an EVAL as if at a LIMIT, though ES pushes a LIMIT through it
+    // ponytail: the plan is cut at an EVAL or STATS as if at a LIMIT, though ES pushes a LIMIT
+    // through an EVAL and a STATS reads every match rather than the first 1000
     let (head, tail) = cmds.split_at(
         cmds.iter()
-            .position(|c| matches!(c, Command::Limit(_) | Command::Eval(_)))
+            .position(|c| matches!(c, Command::Limit(_) | Command::Eval(_) | Command::Stats(..)))
             .unwrap_or(cmds.len()),
     );
     let limit = match tail.first() {
@@ -1904,6 +1985,7 @@ fn load_counts(
             Command::Where(e) => later.extend(names(e)),
             Command::Eval(named) => later.extend(named.iter().flat_map(|(_, e)| names(e))),
             Command::Sort(keys) => later.extend(keys.iter().map(|k| k.field.clone())),
+            Command::Stats(_, by) => later.extend(by.iter().flat_map(|(_, e)| names(e))),
             _ => {}
         }
     }
