@@ -1,6 +1,4 @@
 # Known-failing YAML tests. Fix one, then delete its line.
-aggregations/histogram.yml/date_histogram with extended_bounds and offset and unmapped
-aggregations/terms.yml/order by sub agg containing nested
 aggregations/top_hits.yml/having
 aggregations/top_hits.yml/highlight
 aggregations/top_hits.yml/highlight_query

@@ -54,6 +54,10 @@ enum Metric {
     Filter(Box<Query>),
     /// The single bucket of the documents without a value for the field (nor `missing`).
     Missing,
+    /// The single bucket of the documents with an object at the path.
+    // ponytail: nested objects are not separate documents, so `doc_count` counts parents and
+    // sub-aggregations see a parent's values from every object; real nested docs fix both
+    Nested(String),
     /// The single bucket of every document of the searched indices, whatever the query.
     Global,
     /// A bucket per query, and maybe one of the documents matching none.
@@ -430,6 +434,7 @@ impl Metric {
             Metric::Histogram(_) => "histogram",
             Metric::Filter(_) => "filter",
             Metric::Missing => "missing",
+            Metric::Nested(_) => "nested",
             Metric::Global => "global",
             Metric::Filters(_) => "filters",
             Metric::Range(r) if r.date => "date_range",
@@ -448,7 +453,10 @@ impl Metric {
 
     /// Whether this aggregation has a single bucket (a `doc_count` and sub-aggregations).
     fn single(&self) -> bool {
-        matches!(self, Metric::Filter(_) | Metric::Missing | Metric::Global)
+        matches!(
+            self,
+            Metric::Filter(_) | Metric::Missing | Metric::Nested(_) | Metric::Global
+        )
     }
 }
 
@@ -632,6 +640,14 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
         }
         "filter" => Metric::Filter(Box::new(parse_query(params)?)),
         "missing" => Metric::Missing,
+        "nested" => match params.get("path").and_then(Value::as_str) {
+            Some(path) => Metric::Nested(path.to_owned()),
+            None => {
+                return Err(QueryError::x_content(format!(
+                    "Missing [path] field for nested aggregation [{name}]"
+                )));
+            }
+        },
         "global" => Metric::Global,
         "filters" => Metric::Filters(Box::new(Filters::parse(object()?)?)),
         "range" | "date_range" => Metric::Range(Box::new(Ranges::parse(name, t, object()?)?)),
@@ -643,7 +659,12 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
             "Aggregator [{name}] of type [{t}] cannot accept sub-aggregations"
         )));
     }
-    if let Metric::Filter(_) | Metric::Global | Metric::Filters(_) | Metric::TopHits(_) = metric {
+    if let Metric::Filter(_)
+    | Metric::Nested(_)
+    | Metric::Global
+    | Metric::Filters(_)
+    | Metric::TopHits(_) = metric
+    {
         return Ok(Agg {
             name: name.to_owned(),
             meta,
@@ -856,7 +877,7 @@ fn sort_value(agg: &Agg, rest: &str, st: Option<&Stats>) -> Result<f64, String> 
     };
     let avg = st.sum / st.count as f64;
     let single = match agg.metric {
-        Metric::Filter(_) | Metric::Missing | Metric::Global => {
+        Metric::Filter(_) | Metric::Missing | Metric::Nested(_) | Metric::Global => {
             return match key {
                 None | Some("doc_count") => Ok(st.count as f64),
                 Some(_) => Err(format!(
@@ -1376,6 +1397,7 @@ impl<'s, 'a> Collector<'s, 'a> {
                 return;
             }
             Metric::Filter(q) => self.searcher.score(q, id, doc).is_some(),
+            Metric::Nested(path) => !es_index::postings::values(&doc.source, path).is_empty(),
             Metric::Missing => self.values(i, id, doc).is_empty() && self.missing[i].is_none(),
             // collected over every document by `finish_terms`
             Metric::Global => false,
@@ -1608,6 +1630,7 @@ impl Collector<'_, '_> {
             // ponytail: ES may run a filter as FilterByFilterAggregator; not profiled yet
             Metric::Filter(_) => "FilterAggregator",
             Metric::Missing => "MissingAggregator",
+            Metric::Nested(_) => "NestedAggregator",
             Metric::Global => "GlobalAggregator",
             // ponytail: ES may run filters as FilterByFilterAggregator; not profiled yet
             Metric::Filters(_) => "FiltersAggregator",
@@ -1843,7 +1866,7 @@ fn render_counted(
                     h.render(b, &mut body, buckets, sub)?;
                 }
             }
-            Metric::Filter(_) | Metric::Missing | Metric::Global => {
+            Metric::Filter(_) | Metric::Missing | Metric::Nested(_) | Metric::Global => {
                 body.insert("doc_count".into(), st.count.into());
                 sub(&mut st.subs, &mut body)?;
             }
@@ -2587,6 +2610,28 @@ mod tests {
             "filled": {"doc_count": 0},
         });
         assert_eq!(aggs_of(&index(), body), want);
+    }
+
+    #[test]
+    fn nested_buckets_documents_with_objects_at_the_path() {
+        let mut ix = Index::default();
+        let props = &mut ix.mappings.properties;
+        props.insert("n".into(), FieldMapping::Nested);
+        props.insert("n.i".into(), FieldMapping::Integer);
+        ix.put("1", json!({"n": {"i": 2}}));
+        ix.put("2", json!({"n": [{"i": 3}]}));
+        ix.put("3", json!({"other": 1}));
+        let body = json!({"aggs": {
+            "n": {"nested": {"path": "n"}, "aggs": {"s": {"sum": {"field": "n.i"}}}},
+            "none": {"nested": {"path": "nope"}},
+        }});
+        let want = json!({"n": {"doc_count": 2, "s": {"value": 5.0}}, "none": {"doc_count": 0}});
+        assert_eq!(aggs_of(&ix, body), want);
+        let err = SearchRequest::parse(&json!({"aggs": {"n": {"nested": {}}}})).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Missing [path] field for nested aggregation [n]")
+        );
     }
 
     #[test]
