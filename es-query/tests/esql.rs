@@ -756,3 +756,25 @@ fn row_and_show_info_are_sources() {
         other => panic!("{other:?}"),
     }
 }
+
+#[test]
+fn from_metadata_adds_id_index_and_version_columns() {
+    let r = q(
+        "FROM people METADATA _version, _id, _index | KEEP _id, _index, _version, name | SORT _id DESC | LIMIT 1",
+    );
+    let types: Vec<&str> = r.columns.iter().map(|c| c.r#type.as_str()).collect();
+    assert_eq!(types, ["keyword", "keyword", "long", "keyword"]);
+    assert_eq!(
+        r.values,
+        [[json!("3"), json!("people"), json!(1), json!("cid")]]
+    );
+    let r = q("FROM people METADATA _index");
+    assert_eq!(
+        col_names(&r),
+        ["age", "city", "city.keyword", "name", "_index"]
+    );
+    match run(&indices(), "FROM people METADATA _foo") {
+        Err(EsqlError::Parse(m)) => assert_eq!(m, "line 1:22: unsupported metadata field [_foo]"),
+        other => panic!("{other:?}"),
+    }
+}

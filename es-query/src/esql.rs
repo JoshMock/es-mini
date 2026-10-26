@@ -1,4 +1,5 @@
-//! ES|QL subset: `FROM`, `ROW` and `SHOW INFO`, with `WHERE`, `LIMIT`, `KEEP`, `DROP`, and `SORT`.
+//! ES|QL subset: `FROM` (with `METADATA _id, _index, _version`), `ROW` and `SHOW INFO`, with
+//! `WHERE`, `LIMIT`, `KEEP`, `DROP`, and `SORT`.
 //!
 //! WHERE supports comparisons (`== != < <= > >=`), `AND`/`OR`/`NOT`, parentheses, and
 //! `IS [NOT] NULL` over field names and literals. Anything else is a parse error.
@@ -241,7 +242,8 @@ struct SortKey {
 /// Where the rows come from.
 #[derive(Debug, Clone, PartialEq)]
 enum Source {
-    From(Vec<String>),
+    /// Index expressions, and the `METADATA` fields to add as columns.
+    From(Vec<String>, Vec<String>),
     /// `ROW`, and `SHOW INFO` as a row of constants: named expressions without fields.
     Row(Vec<(String, Expr)>),
 }
@@ -435,7 +437,20 @@ impl Parser<'_> {
         }
         let sources = self.ident_list(INDEX_PATTERN)?;
         self.follow = AFTER_SOURCES;
-        Ok(Source::From(sources.into_iter().map(|(s, _)| s).collect()))
+        let mut metadata = Vec::new();
+        if self.keyword("metadata") {
+            for (f, at) in self.ident_list(ID_PATTERN)? {
+                if metadata_type(&f).is_none() {
+                    // ponytail: message not checked against Elasticsearch
+                    let msg = format!("unsupported metadata field [{f}]");
+                    return Err(parse_error(at, &msg));
+                }
+                metadata.push(f);
+            }
+            self.follow = AFTER_ID_PATTERNS;
+        }
+        let sources = sources.into_iter().map(|(s, _)| s).collect();
+        Ok(Source::From(sources, metadata))
     }
 
     fn query(&mut self) -> Result<(Source, Vec<Command>), EsqlError> {
@@ -841,6 +856,15 @@ fn number_type(n: &Value, negative: bool) -> &'static str {
     }
 }
 
+/// The ES|QL type of a supported `METADATA` field.
+fn metadata_type(field: &str) -> Option<&'static str> {
+    match field {
+        "_id" | "_index" => Some("keyword"),
+        "_version" => Some("long"),
+        _ => None,
+    }
+}
+
 /// The ES|QL type of a literal; a list has its first item's type.
 fn literal_type(v: &Value) -> &'static str {
     match v {
@@ -963,7 +987,7 @@ pub fn run(
         empty,
         counted,
     } = match source {
-        Source::From(sources) => table_from(indices, &sources)?,
+        Source::From(sources, metadata) => table_from(indices, &sources, &metadata)?,
         Source::Row(fields) => table_row(fields, query)?,
     };
     // A referenced column must exist and have one type.
@@ -1144,6 +1168,7 @@ fn table_row(named: Vec<(String, Expr)>, query: &str) -> Result<Table, EsqlError
 fn table_from(
     indices: &aliases::Map<impl aliases::IndexMeta + std::borrow::Borrow<Index>>,
     sources: &[String],
+    metadata: &[String],
 ) -> Result<Table, EsqlError> {
     // Like Elasticsearch: a missing index is only "unknown" when no source matches anything.
     let none_match = || {
@@ -1192,9 +1217,8 @@ fn table_from(
                     .as_ref()
                     .is_none_or(|(s, f)| s.score(f, id, d).is_some())
             })
-            .map(|(_, d)| d)
             .collect();
-        mine.sort_by_key(|d| d.seq_no);
+        mine.sort_by_key(|(_, d)| d.seq_no);
         docs.push(mine);
     }
     let conflicts: BTreeMap<String, BTreeMap<String, Vec<String>>> = mapped
@@ -1205,7 +1229,7 @@ fn table_from(
             (c.clone(), m.clone())
         })
         .collect();
-    let types: BTreeMap<String, String> = mapped
+    let mut types: BTreeMap<String, String> = mapped
         .into_iter()
         .map(|(c, (t, _))| {
             let t = if conflicts.contains_key(&c) {
@@ -1223,8 +1247,8 @@ fn table_from(
         .map(|(g, t)| {
             let mappings = &indices[&t.index].borrow().mappings;
             g.iter()
-                .map(|d| {
-                    types
+                .map(|(id, d)| {
+                    let mut row: Row = types
                         .keys()
                         .map(|c| {
                             let v = match conflicts.contains_key(c) {
@@ -1233,13 +1257,29 @@ fn table_from(
                             };
                             (c.clone(), v)
                         })
-                        .collect()
+                        .collect();
+                    for f in metadata {
+                        let v = match f.as_str() {
+                            "_id" => Value::from(id.to_string()),
+                            "_index" => Value::from(t.index.as_str()),
+                            _ => Value::from(d.version),
+                        };
+                        row.insert(f.clone(), v);
+                    }
+                    row
                 })
                 .collect()
         })
         .collect();
+    // Metadata columns follow the fields, in the order listed.
+    let mut cols: Vec<String> = types.keys().cloned().collect();
+    for f in metadata {
+        cols.retain(|c| c != f);
+        cols.push(f.clone());
+        types.insert(f.clone(), metadata_type(f).unwrap_or_default().into());
+    }
     Ok(Table {
-        cols: types.keys().cloned().collect(),
+        cols,
         types,
         conflicts,
         groups,
