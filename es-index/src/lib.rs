@@ -539,7 +539,7 @@ impl Index {
     /// The on-disk documents with a value of numeric or date `field` that `keep` accepts, from
     /// doc values (dates as epoch millis); `None` for other fields. With `exact`, only those
     /// that have one, or `None` if some segment has no doc values for the field to read.
-    // ponytail: floats are skipped, since their f32 values compare differently from the source
+    /// Floats are their f32 values, so `keep` compares them with float semantics.
     pub fn disk_numbers(
         &self,
         field: &str,
@@ -550,6 +550,7 @@ impl Index {
         let decode = match self.mappings.properties.get(field)? {
             M::Long | M::Integer | M::Short | M::Byte | M::Date { .. } => Value::from,
             M::Double => |v| Value::from(sortable_double(v)),
+            M::Float => |v| Value::from(sortable_float(v)),
             _ => return None,
         };
         self.disk.as_ref().map_or_else(
@@ -581,12 +582,7 @@ impl Index {
             match self.mappings.properties.get(field)? {
                 M::Long | M::Integer | M::Short | M::Byte | M::Date { .. } => numbers(Value::from),
                 M::Double => numbers(|v| Value::from(sortable_double(v))),
-                M::Float => numbers(|v| {
-                    let v = v as i32;
-                    Value::from(f64::from(f32::from_bits(
-                        (v ^ ((v >> 31) & i32::MAX)) as u32,
-                    )))
-                }),
+                M::Float => numbers(|v| Value::from(sortable_float(v))),
                 M::HalfFloat => numbers(|v| {
                     let s = v as i16;
                     Value::from(f64::from(half_float(s ^ ((s >> 15) & 0x7fff))))
@@ -722,6 +718,12 @@ fn random_uuid() -> String {
 /// own inverse.
 fn sortable_double(v: i64) -> f64 {
     f64::from_bits((v ^ ((v >> 63) & i64::MAX)) as u64)
+}
+
+/// A float from its sortable-int doc value, as [`sortable_double`] reads a double.
+fn sortable_float(v: i64) -> f64 {
+    let v = v as i32;
+    f64::from(f32::from_bits((v ^ ((v >> 31) & i32::MAX)) as u32))
 }
 
 /// The IEEE half-precision bits nearest `v` (ties to even), like Lucene's
@@ -1418,6 +1420,29 @@ mod tests {
         // text has no doc values; a document written since opening is in memory
         assert_eq!(read("t", "1"), None);
         assert_eq!(read("n", "3"), None);
+    }
+
+    #[test]
+    fn float_ranges_narrow_disk_docs() {
+        let dir = std::env::temp_dir().join(format!("esm-disk-float-{}", std::process::id()));
+        let mut ix = Index::default();
+        (ix.mappings.properties).insert("f".into(), FieldMapping::Float);
+        ix.put("1", json!({"f": 1.1}));
+        ix.put("2", json!({"f": [-3.5, 2.5]}));
+        ix.put("3", json!({}));
+        disk::save(&dir, &Indices::from([("i".to_owned(), ix)])).unwrap();
+        let opened = disk::open(&dir).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let ix = &opened["i"];
+        let ids = |keep: fn(f64) -> bool| {
+            let docs = ix.disk_numbers("f", |v| keep(v.as_f64().unwrap()), true);
+            let has = |id: &&str| docs.as_ref().unwrap().contains(&ix.disk_pos(id).unwrap());
+            ["1", "2", "3"].into_iter().filter(has).collect::<Vec<_>>()
+        };
+        // values are their f32 doc values
+        assert_eq!(ids(|v| v == f64::from(1.1f32)), ["1"]);
+        assert_eq!(ids(|v| v < 0.0), ["2"]);
+        assert_eq!(ids(|v| v > 1.0), ["1", "2"]);
     }
 
     #[test]

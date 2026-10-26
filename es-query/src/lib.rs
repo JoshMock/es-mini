@@ -460,6 +460,14 @@ impl<'a> Searcher<'a> {
         bounds: [Option<&Value>; 4],
         exact: bool,
     ) -> Option<BTreeSet<DiskPos>> {
+        if let Some(FieldMapping::Float) = self.index.mappings.field(field) {
+            // ponytail: a superset, so exact answers read sources; exact once scoring rounds too
+            return if exact {
+                None
+            } else {
+                self.float_docs(field, bounds)
+            };
+        }
         let instant = self.instant(field);
         self.index.disk_numbers(
             field,
@@ -474,6 +482,19 @@ impl<'a> Searcher<'a> {
             },
             exact,
         )
+    }
+
+    /// The on-disk documents a range of float `field` may match, by its f32 doc values: a
+    /// source value within `bounds` rounds to a float within them rounded, strict ones included.
+    fn float_docs(&self, field: &str, bounds: [Option<&Value>; 4]) -> Option<BTreeSet<DiskPos>> {
+        let round = |b: &Value| num(b).map_or(b.clone(), |x| Value::from(f64::from(x as f32)));
+        let [gt, gte, lt, lte] = bounds.map(|b| b.map(round));
+        let keep = |v: &Value| {
+            let cmp = |b: &Value| scalar_cmp(v, b);
+            in_range([None, gt.as_ref(), None, lt.as_ref()], cmp)
+                && in_range([None, gte.as_ref(), None, lte.as_ref()], cmp)
+        };
+        self.index.disk_numbers(field, keep, false)
     }
 
     /// For a date field, how it reads a value as epoch millis.
@@ -1544,6 +1565,38 @@ mod tests {
         // number terms score 1.0: no BM25 statistics, which would read every source
         let q = parse_query(&json!({"match": {"n": 7}})).unwrap();
         assert!(Searcher::new(ix, &q).field_stats.is_empty());
+    }
+
+    #[test]
+    fn float_ranges_on_an_opened_index_narrow_by_their_f32_doc_values() {
+        let dir = std::env::temp_dir().join(format!("esm-float-ranges-{}", std::process::id()));
+        let mut ix = Index::default();
+        (ix.mappings.properties).insert("f".into(), FieldMapping::Float);
+        for i in 0..20 {
+            ix.put(&i.to_string(), json!({"f": f64::from(i) / 10.0}));
+        }
+        disk::save(&dir, &Indices::from([("i".to_owned(), ix)])).unwrap();
+        let opened = disk::open(&dir).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let ix = &opened["i"];
+        let read = |q: Value| {
+            let q = parse_query(&q).unwrap();
+            let s = Searcher::new(ix, &q);
+            // values a strict bound excludes may round onto it, so floats only narrow
+            assert_eq!(s.candidates(&q, true), None);
+            let on_disk = s.candidates(&q, false).expect("narrowed");
+            let mut ids: Vec<_> = ix.docs_at(None, Some(&on_disk)).map(|(id, _)| id).collect();
+            ids.sort_by_key(|id| id.parse::<u32>().unwrap());
+            ids.join(",")
+        };
+        // 1.1 is above 1.1 as an f32, as 0.3 is below 0.3
+        let range = json!({"range": {"f": {"gte": 0.3, "lte": 1.1}}});
+        assert_eq!(read(range), "3,4,5,6,7,8,9,10,11");
+        let range = json!({"range": {"f": {"gt": 0.3, "lt": "1.1"}}});
+        assert_eq!(read(range), "3,4,5,6,7,8,9,10,11");
+        assert_eq!(read(json!({"term": {"f": 1.1}})), "11");
+        let q = parse_query(&json!({"range": {"f": {"gt": 0.3, "lte": 1.1}}})).unwrap();
+        assert_eq!(count(ix, &q), 8);
     }
 
     /// Zeroes the stored fields (`.fdt`) in every segment of every shard under `dir`.
