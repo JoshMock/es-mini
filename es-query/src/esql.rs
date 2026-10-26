@@ -211,14 +211,17 @@ const AFTER_LIMIT: &str = "{<EOF>, '|'}";
 
 #[derive(Debug, Clone, PartialEq)]
 enum Expr {
-    Field(String, Pos),
-    Lit(Value),
-    Cmp(&'static str, Box<Expr>, Box<Expr>),
-    And(Box<Expr>, Box<Expr>),
-    Or(Box<Expr>, Box<Expr>),
-    Not(Box<Expr>),
-    IsNull(Box<Expr>, bool),
+    Field(String, Span),
+    Lit(Value, Span),
+    Cmp(&'static str, Box<Expr>, Box<Expr>, Span),
+    And(Box<Expr>, Box<Expr>, Span),
+    Or(Box<Expr>, Box<Expr>, Span),
+    Not(Box<Expr>, Span),
+    IsNull(Box<Expr>, bool, Span),
 }
+
+/// Where an expression starts, and its text's byte range in the query.
+type Span = (Pos, Range<usize>);
 
 #[derive(Debug, Clone, PartialEq)]
 struct SortKey {
@@ -362,13 +365,7 @@ impl Parser<'_> {
         if let Some(n) = n.as_u64().filter(|&n| !negative && n <= i32::MAX as u64) {
             return Ok(Command::Limit(n as usize));
         }
-        let signed = n.as_i64().map(|v| if negative { -v } else { v });
-        let r#type = match () {
-            _ if signed.is_some_and(|v| i32::try_from(v).is_ok()) => "integer",
-            _ if signed.is_some() => "long",
-            _ if n.is_u64() => "unsigned_long",
-            _ => "double",
-        };
+        let r#type = number_type(&n, negative);
         let value = &self.src[(if negative {
             self.toks[self.pos - 2].2.start
         } else {
@@ -455,18 +452,28 @@ impl Parser<'_> {
         }
     }
 
+    /// The span from token `start` through the last token consumed.
+    fn span(&self, start: usize) -> Span {
+        let (_, at, ref r) = self.toks[start];
+        (at, r.start..self.toks[self.pos - 1].2.end)
+    }
+
     fn or(&mut self) -> Result<Expr, EsqlError> {
+        let start = self.pos;
         let mut e = self.and()?;
         while self.keyword("or") {
-            e = Expr::Or(Box::new(e), Box::new(self.and()?));
+            let right = self.and()?;
+            e = Expr::Or(Box::new(e), Box::new(right), self.span(start));
         }
         Ok(e)
     }
 
     fn and(&mut self) -> Result<Expr, EsqlError> {
+        let start = self.pos;
         let mut e = self.not()?;
         while self.keyword("and") {
-            e = Expr::And(Box::new(e), Box::new(self.not()?));
+            let right = self.not()?;
+            e = Expr::And(Box::new(e), Box::new(right), self.span(start));
         }
         Ok(e)
     }
@@ -475,13 +482,18 @@ impl Parser<'_> {
         if self.parens == 0 {
             self.operand = self.pos;
         }
+        let start = self.pos;
         match self.keyword("not") {
-            true => Ok(Expr::Not(Box::new(self.not()?))),
+            true => {
+                let e = self.not()?;
+                Ok(Expr::Not(Box::new(e), self.span(start)))
+            }
             false => self.cmp(),
         }
     }
 
     fn cmp(&mut self) -> Result<Expr, EsqlError> {
+        let start = self.pos;
         let left = self.primary()?;
         if self.keyword("is") {
             let negated = self.keyword("not");
@@ -492,13 +504,19 @@ impl Parser<'_> {
                 };
             }
             self.follow = AFTER_IS_NULL;
-            return Ok(Expr::IsNull(Box::new(left), negated));
+            return Ok(Expr::IsNull(Box::new(left), negated, self.span(start)));
         }
         match self.peek() {
             Some(Tok::Sym(op @ ("==" | "!=" | "<" | "<=" | ">" | ">="))) => {
                 let op = *op;
                 self.pos += 1;
-                Ok(Expr::Cmp(op, Box::new(left), Box::new(self.primary()?)))
+                let right = self.primary()?;
+                Ok(Expr::Cmp(
+                    op,
+                    Box::new(left),
+                    Box::new(right),
+                    self.span(start),
+                ))
             }
             _ => Ok(left),
         }
@@ -515,10 +533,14 @@ impl Parser<'_> {
             self.follow = AFTER_PARENS;
             return Ok(e);
         }
-        let (e, follow) = match self.peek().cloned() {
-            Some(Tok::Num(n)) => (Expr::Lit(n), AFTER_LITERAL),
-            Some(Tok::Str(s)) => (Expr::Lit(Value::String(s)), AFTER_LITERAL),
-            Some(Tok::Word(w)) => {
+        let Some((tok, at, r)) = self.toks.get(self.pos).cloned() else {
+            return self.bad_expression();
+        };
+        let span = (at, r);
+        let (e, follow) = match tok {
+            Tok::Num(n) => (Expr::Lit(n, span), AFTER_LITERAL),
+            Tok::Str(s) => (Expr::Lit(Value::String(s), span), AFTER_LITERAL),
+            Tok::Word(w) => {
                 let lit = match w.to_ascii_lowercase().as_str() {
                     "null" => Some(Value::Null),
                     "true" => Some(true.into()),
@@ -526,11 +548,11 @@ impl Parser<'_> {
                     _ => None,
                 };
                 match lit {
-                    Some(v) => (Expr::Lit(v), AFTER_LITERAL),
-                    None => (Expr::Field(w, self.toks[self.pos].1), AFTER_FIELD),
+                    Some(v) => (Expr::Lit(v, span), AFTER_LITERAL),
+                    None => (Expr::Field(w, span), AFTER_FIELD),
                 }
             }
-            _ => return self.bad_expression(),
+            Tok::Sym(_) => return self.bad_expression(),
         };
         self.pos += 1;
         self.follow = follow;
@@ -675,21 +697,21 @@ fn compare(a: &Value, b: &Value) -> Option<Ordering> {
 fn eval(e: &Expr, row: &BTreeMap<&str, Value>) -> Option<Value> {
     let truth = |e: &Expr| eval(e, row).and_then(|v| v.as_bool());
     match e {
-        Expr::Lit(v) => Some(v.clone()).filter(|v| !v.is_null()),
+        Expr::Lit(v, _) => Some(v.clone()).filter(|v| !v.is_null()),
         Expr::Field(f, _) => row.get(f.as_str()).cloned().filter(|v| !v.is_null()),
-        Expr::IsNull(x, negated) => Some(Value::Bool(eval(x, row).is_none() != *negated)),
-        Expr::Not(x) => truth(x).map(|b| Value::Bool(!b)),
-        Expr::And(a, b) => match (truth(a), truth(b)) {
+        Expr::IsNull(x, negated, _) => Some(Value::Bool(eval(x, row).is_none() != *negated)),
+        Expr::Not(x, _) => truth(x).map(|b| Value::Bool(!b)),
+        Expr::And(a, b, _) => match (truth(a), truth(b)) {
             (Some(false), _) | (_, Some(false)) => Some(false.into()),
             (Some(true), Some(true)) => Some(true.into()),
             _ => None,
         },
-        Expr::Or(a, b) => match (truth(a), truth(b)) {
+        Expr::Or(a, b, _) => match (truth(a), truth(b)) {
             (Some(true), _) | (_, Some(true)) => Some(true.into()),
             (Some(false), Some(false)) => Some(false.into()),
             _ => None,
         },
-        Expr::Cmp(op, a, b) => {
+        Expr::Cmp(op, a, b, _) => {
             // ponytail: multi-valued fields compare as null, like ES (which also warns)
             let ord = compare(&eval(a, row)?, &eval(b, row)?)?;
             let r = match *op {
@@ -707,10 +729,10 @@ fn eval(e: &Expr, row: &BTreeMap<&str, Value>) -> Option<Value> {
 
 fn fields(e: &Expr, out: &mut Vec<Name>) {
     match e {
-        Expr::Field(f, at) => out.push((f.clone(), *at)),
-        Expr::Lit(_) => {}
-        Expr::Not(x) | Expr::IsNull(x, _) => fields(x, out),
-        Expr::Cmp(_, a, b) | Expr::And(a, b) | Expr::Or(a, b) => {
+        Expr::Field(f, (at, _)) => out.push((f.clone(), *at)),
+        Expr::Lit(..) => {}
+        Expr::Not(x, _) | Expr::IsNull(x, ..) => fields(x, out),
+        Expr::Cmp(_, a, b, _) | Expr::And(a, b, _) | Expr::Or(a, b, _) => {
             fields(a, out);
             fields(b, out);
         }
@@ -721,6 +743,102 @@ fn names(e: &Expr) -> Vec<String> {
     let mut out = Vec::new();
     fields(e, &mut out);
     out.into_iter().map(|(f, _)| f).collect()
+}
+
+fn span(e: &Expr) -> &Span {
+    match e {
+        Expr::Field(_, s) | Expr::Lit(_, s) | Expr::Not(_, s) | Expr::IsNull(.., s) => s,
+        Expr::Cmp(.., s) | Expr::And(.., s) | Expr::Or(.., s) => s,
+    }
+}
+
+/// The ES|QL type of a numeric literal, negated when `negative`.
+fn number_type(n: &Value, negative: bool) -> &'static str {
+    let signed = n.as_i64().map(|v| if negative { -v } else { v });
+    match () {
+        _ if signed.is_some_and(|v| i32::try_from(v).is_ok()) => "integer",
+        _ if signed.is_some() => "long",
+        _ if n.is_u64() => "unsigned_long",
+        _ => "double",
+    }
+}
+
+/// The ES|QL type of an expression whose fields all exist, like Elasticsearch's type
+/// resolution. `None` once a problem is recorded in `bad`: like Elasticsearch, an expression
+/// is only checked when its operands resolved.
+fn resolve(
+    e: &Expr,
+    src: &str,
+    types: &BTreeMap<String, String>,
+    bad: &mut Vec<(Pos, String)>,
+) -> Option<String> {
+    let text = |e: &Expr| &src[span(e).1.clone()];
+    // "found value [x] type [t]" when an operand is not boolean (null is allowed).
+    let not_boolean = |e: &Expr, t: &str| {
+        (t != "boolean" && t != "null").then(|| format!("found value [{}] type [{t}]", text(e)))
+    };
+    let problem = match e {
+        Expr::Field(f, _) => return Some(types[f].clone()),
+        Expr::Lit(v, _) => {
+            return Some(
+                match v {
+                    Value::Null => "null",
+                    Value::Bool(_) => "boolean",
+                    Value::Number(_) => number_type(v, false),
+                    _ => "keyword",
+                }
+                .into(),
+            );
+        }
+        Expr::IsNull(x, ..) => {
+            resolve(x, src, types, bad)?;
+            None
+        }
+        Expr::Not(x, _) => {
+            let t = resolve(x, src, types, bad)?;
+            not_boolean(x, &t)
+                .map(|found| format!("argument of [{}] must be [boolean], {found}", text(e)))
+        }
+        Expr::And(a, b, _) | Expr::Or(a, b, _) => {
+            let (ta, tb) = (resolve(a, src, types, bad), resolve(b, src, types, bad));
+            let (ta, tb) = (ta?, tb?);
+            let (nth, found) = match not_boolean(a, &ta) {
+                Some(found) => ("first", Some(found)),
+                None => ("second", not_boolean(b, &tb)),
+            };
+            found.map(|found| format!("{nth} argument of [{}] must be [boolean], {found}", text(e)))
+        }
+        Expr::Cmp(_, a, b, _) => {
+            let (ta, tb) = (resolve(a, src, types, bad), resolve(b, src, types, bad));
+            let (ta, tb) = (ta?, tb?);
+            // ponytail: only numeric, string and boolean operands are checked; dates, ips and
+            // the like take string literals through implicit casts that this does not model.
+            let class = |t: &str| match t {
+                "integer" | "long" | "unsigned_long" | "double" => Some("numeric"),
+                "keyword" | "text" => Some("string"),
+                "boolean" => Some("boolean"),
+                _ => None,
+            };
+            match (class(&ta), class(&tb)) {
+                (Some(ca), Some(cb)) if ca != cb => {
+                    let first = if ca == "numeric" { ca } else { &ta };
+                    Some(format!(
+                        "first argument of [{}] is [{first}] so second argument must also be \
+                         [{first}] but was [{tb}]",
+                        text(e)
+                    ))
+                }
+                _ => None,
+            }
+        }
+    };
+    match problem {
+        Some(p) => {
+            bad.push((span(e).0, p));
+            None
+        }
+        None => Some("boolean".into()),
+    }
 }
 
 fn unknown(c: &str) -> String {
@@ -861,9 +979,21 @@ pub fn run(indices: &BTreeMap<String, Index>, query: &str) -> Result<Response, E
             Command::Where(e) => {
                 let mut refs = Vec::new();
                 fields(e, &mut refs);
-                refs.into_iter()
+                let mut bad: Vec<_> = refs
+                    .into_iter()
                     .filter_map(|(f, at)| Some((at, check(&cols, &f)?)))
-                    .collect()
+                    .collect();
+                if bad.is_empty()
+                    && let Some(t) = resolve(e, query, &types, &mut bad)
+                    && t != "boolean"
+                    && t != "null"
+                {
+                    let found = t.to_ascii_uppercase();
+                    let problem =
+                        format!("Condition expression needs to be boolean, found [{found}]");
+                    bad.push((span(e).0, problem));
+                }
+                bad
             }
             Command::Keep(patterns) | Command::Drop(patterns) => patterns
                 .iter()
@@ -1062,7 +1192,7 @@ fn load_counts(
 
 fn conjuncts<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
     match e {
-        Expr::And(a, b) => {
+        Expr::And(a, b, _) => {
             conjuncts(a, out);
             conjuncts(b, out);
         }
@@ -1073,9 +1203,9 @@ fn conjuncts<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
 /// Whether Lucene can run the filter: anything but a comparison of two fields.
 fn pushable(e: &Expr) -> bool {
     match e {
-        Expr::Cmp(_, a, b) => !matches!((&**a, &**b), (Expr::Field(..), Expr::Field(..))),
-        Expr::Not(x) | Expr::IsNull(x, _) => pushable(x),
-        Expr::And(a, b) | Expr::Or(a, b) => pushable(a) && pushable(b),
-        Expr::Field(..) | Expr::Lit(_) => true,
+        Expr::Cmp(_, a, b, _) => !matches!((&**a, &**b), (Expr::Field(..), Expr::Field(..))),
+        Expr::Not(x, _) | Expr::IsNull(x, ..) => pushable(x),
+        Expr::And(a, b, _) | Expr::Or(a, b, _) => pushable(a) && pushable(b),
+        Expr::Field(..) | Expr::Lit(..) => true,
     }
 }

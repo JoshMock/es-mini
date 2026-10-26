@@ -404,6 +404,67 @@ fn verification_errors_match_elasticsearch() {
     }
 }
 
+/// Type errors as a live Elasticsearch 9.5.5 reported them for the same queries and mappings.
+#[test]
+fn where_type_errors_match_elasticsearch() {
+    for (query, problem) in [
+        (
+            "FROM people | WHERE age > \"x\"",
+            "line 1:21: first argument of [age > \"x\"] is [numeric] so second argument must also be [numeric] but was [keyword]",
+        ),
+        (
+            "FROM people | WHERE name > 1",
+            "line 1:21: first argument of [name > 1] is [keyword] so second argument must also be [keyword] but was [integer]",
+        ),
+        (
+            "FROM people | WHERE city > 1",
+            "line 1:21: first argument of [city > 1] is [text] so second argument must also be [text] but was [integer]",
+        ),
+        (
+            "FROM people | WHERE age == true",
+            "line 1:21: first argument of [age == true] is [numeric] so second argument must also be [numeric] but was [boolean]",
+        ),
+        (
+            "FROM people | WHERE age",
+            "line 1:21: Condition expression needs to be boolean, found [LONG]",
+        ),
+        (
+            "FROM people | WHERE name",
+            "line 1:21: Condition expression needs to be boolean, found [KEYWORD]",
+        ),
+        (
+            "FROM people | WHERE 1",
+            "line 1:21: Condition expression needs to be boolean, found [INTEGER]",
+        ),
+        (
+            "FROM people | WHERE NOT age",
+            "line 1:21: argument of [NOT age] must be [boolean], found value [age] type [long]",
+        ),
+        (
+            "FROM people | WHERE age AND name",
+            "line 1:21: first argument of [age AND name] must be [boolean], found value [age] type [long]",
+        ),
+        (
+            "FROM people | WHERE name IS NULL AND age",
+            "line 1:21: second argument of [name IS NULL AND age] must be [boolean], found value [age] type [long]",
+        ),
+    ] {
+        assert_eq!(
+            run(&indices(), query).unwrap_err(),
+            EsqlError::Verification(format!("Found 1 problem\n{problem}")),
+            "{query}"
+        );
+    }
+    for ok in [
+        "FROM people | WHERE age > 1.5",
+        "FROM people | WHERE city == \"Oslo\"",
+        "FROM people | WHERE null",
+        "FROM people | WHERE age > null",
+    ] {
+        assert!(run(&indices(), ok).is_ok(), "{ok}");
+    }
+}
+
 /// Parse errors as a live Elasticsearch 9.5.5 reported them for the same queries.
 #[test]
 fn parse_errors_match_elasticsearch() {
