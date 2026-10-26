@@ -42,7 +42,7 @@ fn explanation(value: f64, description: String, details: Vec<Value>) -> Value {
 }
 
 /// Lucene wildcard syntax: `*` any run, `?` one char, `\\` escapes.
-fn wildcard_match(p: &[char], t: &[char]) -> bool {
+pub(crate) fn wildcard_match(p: &[char], t: &[char]) -> bool {
     match p.split_first() {
         None => t.is_empty(),
         Some(('*', rest)) => (0..=t.len()).any(|i| wildcard_match(rest, &t[i..])),

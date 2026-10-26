@@ -230,6 +230,8 @@ enum Expr {
     Or(Box<Expr>, Box<Expr>, Span),
     Not(Box<Expr>, Span),
     IsNull(Box<Expr>, bool, Span),
+    /// `x LIKE "pattern"`.
+    Like(Box<Expr>, String, Span),
     /// `+ - * / %`, with the numeric type `resolve` gives it, which `eval` computes in.
     Arith(
         &'static str,
@@ -636,6 +638,21 @@ impl Parser<'_> {
             self.follow = AFTER_IS_NULL;
             return Ok(Expr::IsNull(Box::new(left), negated, self.span(start)));
         }
+        let is = |i: usize, kw: &str| matches!(self.toks.get(self.pos + i), Some((Tok::Word(w), ..)) if w.eq_ignore_ascii_case(kw));
+        let negated = is(0, "not");
+        if is(negated as usize, "like") {
+            self.pos += 1 + negated as usize;
+            let Some(Tok::Str(p)) = self.peek().cloned() else {
+                return self.mismatched("QUOTED_STRING");
+            };
+            self.pos += 1;
+            self.follow = AFTER_LITERAL;
+            let e = Expr::Like(Box::new(left), p, self.span(start));
+            return Ok(match negated {
+                true => Expr::Not(Box::new(e), self.span(start)),
+                false => e,
+            });
+        }
         match self.peek() {
             Some(Tok::Sym(op @ ("==" | "!=" | "<" | "<=" | ">" | ">="))) => {
                 let op = *op;
@@ -958,6 +975,14 @@ fn eval(e: &Expr, row: &Row) -> Option<Value> {
         Expr::Lit(v, _) => Some(v.clone()).filter(|v| !v.is_null()),
         Expr::Field(f, _) => row.get(f.as_str()).cloned().filter(|v| !v.is_null()),
         Expr::IsNull(x, negated, _) => Some(Value::Bool(eval(x, row).is_none() != *negated)),
+        // A multi-value is null, like ES (which warns).
+        Expr::Like(x, p, _) => match eval(x, row)? {
+            Value::String(s) => {
+                let (p, s): (Vec<char>, Vec<char>) = (p.chars().collect(), s.chars().collect());
+                Some(crate::wildcard_match(&p, &s).into())
+            }
+            _ => None,
+        },
         Expr::Not(x, _) => truth(x).map(|b| Value::Bool(!b)),
         Expr::And(a, b, _) => match (truth(a), truth(b)) {
             (Some(false), _) | (_, Some(false)) => Some(false.into()),
@@ -1405,7 +1430,9 @@ fn fields(e: &Expr, out: &mut Vec<Name>) {
         Expr::Call(_, args, ..) => args.iter().for_each(|a| fields(a, out)),
         Expr::Field(f, (at, _)) => out.push((f.clone(), *at)),
         Expr::Lit(..) => {}
-        Expr::Not(x, _) | Expr::IsNull(x, ..) | Expr::Neg(x, ..) => fields(x, out),
+        Expr::Not(x, _) | Expr::IsNull(x, ..) | Expr::Neg(x, ..) | Expr::Like(x, ..) => {
+            fields(x, out)
+        }
         Expr::Cmp(_, a, b, _)
         | Expr::And(a, b, _)
         | Expr::Or(a, b, _)
@@ -1426,7 +1453,7 @@ fn span(e: &Expr) -> &Span {
     match e {
         Expr::Field(_, s) | Expr::Lit(_, s) | Expr::Not(_, s) | Expr::IsNull(.., s) => s,
         Expr::Cmp(.., s) | Expr::And(.., s) | Expr::Or(.., s) | Expr::Arith(.., s) => s,
-        Expr::Call(.., s) | Expr::Neg(.., s) => s,
+        Expr::Call(.., s) | Expr::Neg(.., s) | Expr::Like(.., s) => s,
     }
 }
 
@@ -1629,6 +1656,16 @@ fn resolve(
         Expr::IsNull(x, ..) => {
             resolve(x, src, types, bad)?;
             None
+        }
+        Expr::Like(x, ..) => {
+            let t = resolve(x, src, types, bad)?;
+            (!matches!(t.as_str(), "keyword" | "text" | "null")).then(|| {
+                format!(
+                    "argument of [{}] must be [string], found value [{}] type [{t}]",
+                    text(e),
+                    text(x)
+                )
+            })
         }
         Expr::Not(x, _) => {
             let t = resolve(x, src, types, bad)?;
@@ -2302,7 +2339,7 @@ fn pushable(e: &Expr) -> bool {
         }
         // ponytail: ES may rewrite `age + 1 > 30` into a pushable `age > 29`; this does not
         Expr::Arith(..) | Expr::Call(..) | Expr::Neg(..) => names(e).is_empty(),
-        Expr::Not(x, _) | Expr::IsNull(x, ..) => pushable(x),
+        Expr::Not(x, _) | Expr::IsNull(x, ..) | Expr::Like(x, ..) => pushable(x),
         Expr::And(a, b, _) | Expr::Or(a, b, _) => pushable(a) && pushable(b),
         Expr::Field(..) | Expr::Lit(..) => true,
     }

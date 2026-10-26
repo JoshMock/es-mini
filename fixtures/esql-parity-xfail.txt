@@ -1,9 +1,6 @@
 # ES|QL queries (lines of esql-queries.txt) whose responses es-mini does not match yet.
 # Fix one, then delete its line. Run the esql_parity test with PARITY_VERBOSE=1 to see the
 # differences. This list may only shrink.
-FROM emp | WHERE name LIKE "*a*" | KEEP name | SORT name
-FROM emp | WHERE name LIKE "?ob" | KEEP name
-FROM emp | WHERE bio LIKE "*chess*" | KEEP name
 FROM emp | WHERE name RLIKE "[A-C].*" | KEEP name | SORT name
 FROM emp | WHERE name IN ("Alice", "Dave", "Zed") | KEEP name | SORT name
 FROM emp | WHERE age IN (28, 51) | KEEP name, age | SORT name

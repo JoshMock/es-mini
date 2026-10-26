@@ -1322,3 +1322,27 @@ fn from_reads_fields_like_doc_values() {
         ]]
     );
 }
+
+#[test]
+fn like_matches_wildcards() {
+    let names =
+        |query: &str| -> Vec<Value> { q(query).values.into_iter().map(|r| r[0].clone()).collect() };
+    assert_eq!(
+        names(r#"FROM people | WHERE name LIKE "?o*" | KEEP name"#),
+        [json!("bob")]
+    );
+    assert_eq!(
+        names(r#"FROM people | WHERE city NOT LIKE "*m*" | KEEP name"#),
+        [json!("ann")]
+    );
+    let r = q(
+        r#"ROW a = "x*y", b = ["x"] | EVAL e = a LIKE "x\\*y", s = a LIKE "x\\*", m = b LIKE "x""#,
+    );
+    assert_eq!(r.values[0][2..], [json!(true), json!(false), Value::Null]);
+    assert_eq!(
+        run(&indices(), r#"FROM people | WHERE age LIKE "3*""#).unwrap_err(),
+        EsqlError::Verification(
+            "Found 1 problem\nline 1:21: argument of [age LIKE \"3*\"] must be [string], found value [age] type [long]".into()
+        )
+    );
+}
