@@ -1479,7 +1479,7 @@ impl Collector<'_, '_> {
         let index = self.searcher.index;
         for (i, st) in stats.iter_mut().enumerate() {
             if self.aggs[i].metric == Metric::Global {
-                for (id, doc) in index.docs().filter(|(_, d)| index.searchable(d)) {
+                for (id, doc) in index.docs().filter(|(_, d)| index.searchable(d.seq_no)) {
                     st.count += 1;
                     if let Some(sub) = &mut self.subs[i] {
                         // ES scores `global` matches as match_all does
@@ -1508,7 +1508,7 @@ impl Collector<'_, '_> {
             if let Some(t) = terms
                 && t.wants_zero_buckets(b)
             {
-                for (id, doc) in index.docs().filter(|(_, d)| index.searchable(d)) {
+                for (id, doc) in index.docs().filter(|(_, d)| index.searchable(d.seq_no)) {
                     b.add_zero(self.values(i, id, &doc));
                 }
             }

@@ -352,7 +352,8 @@ pub async fn get(
     // A non-realtime get sees what search sees, unless it asks for a refresh first.
     let realtime = params.get("realtime").is_none_or(|v| v != "false")
         || params.get("refresh").is_some_and(|v| v != "false");
-    Ok(match i.get(&id).filter(|d| realtime || i.searchable(d)) {
+    let found = i.get(&id).filter(|d| realtime || i.searchable(d.seq_no));
+    Ok(match found {
         Some(d) => {
             let mut r = json!({
                 "_index": index, "_id": id, "_version": d.version, "_seq_no": d.seq_no,

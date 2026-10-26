@@ -2,7 +2,8 @@
 //!
 //! Term, match and bool queries on an index opened from disk read only the on-disk documents
 //! their postings name; the rest scan every document. `_count` reads no documents where postings
-//! and doc values answer its query exactly (see [`count_many`]).
+//! and doc values answer its query exactly (see [`count_many`]), and a search whose scores do not
+//! matter reads only the on-disk hits it returns (see [`search_many`]).
 //!
 //! ponytail: matched documents are still scored from their sources; score from postings and
 //! norms if loading the hits shows up.
@@ -1044,28 +1045,124 @@ fn fielddata_disabled(field: &str) -> QueryError {
     ))
 }
 
-impl Searcher<'_> {
+impl<'a> Searcher<'a> {
     /// A matching document's values for `sort` (`score` its query score).
     fn sort_values(&self, sort: &[SortField], score: f64, doc: &Document) -> Vec<Value> {
         sort.iter()
             .map(|f| match f.field.as_str() {
                 "_score" => Value::from(score as f32),
-                field => {
-                    let (_, path) = self.kind(field);
-                    let mut v = values(&doc.source, path);
-                    v.sort_by(|a, b| scalar_cmp(a, b));
-                    let pick = if f.desc { v.last() } else { v.first() };
-                    pick.map_or_else(
-                        || match &f.missing {
-                            Some(m) if !matches!(m.as_str(), Some("_first" | "_last")) => m.clone(),
-                            _ => Value::Null,
-                        },
-                        |v| (*v).clone(),
-                    )
-                }
+                field => sort_value(f, values(&doc.source, self.kind(field).1)),
             })
             .collect()
     }
+
+    /// The on-disk documents a leaf query matches, from postings and doc values; `None` if
+    /// they cannot tell (see [`exact`]).
+    fn disk_leaf(&self, q: &Query) -> Option<HashSet<DiskPos>> {
+        match q {
+            Query::Term { .. } | Query::Match { .. } | Query::Range { .. } => {
+                Some(self.candidates(q, true)?.into_iter().collect())
+            }
+            _ => None,
+        }
+    }
+
+    /// The searchable on-disk documents `q` matches, as hits of `target` ordered by `sort`
+    /// values, from postings and doc values alone; `None` if they cannot tell, or if hits are
+    /// ordered `by_score` and the query's score varies.
+    fn select_on_disk(
+        &self,
+        target: usize,
+        q: &Query,
+        sort: &[SortField],
+        by_score: bool,
+    ) -> Option<Vec<Found<'a>>> {
+        use FieldMapping as M;
+        let score = if by_score { constant_score(q)? } else { 0.0 };
+        let mut columns = (sort.iter())
+            .map(|f| match self.index.mappings.properties.get(&f.field) {
+                _ if f.field == "_score" => Some(None),
+                // types whose doc values order like their sources
+                Some(
+                    M::Long
+                    | M::Integer
+                    | M::Short
+                    | M::Byte
+                    | M::Double
+                    | M::Boolean
+                    | M::Keyword { ignore_above: None },
+                ) => Some(Some(self.index.disk_values(&f.field))),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let live: HashMap<_, _> = self.index.disk_live().collect();
+        let matched = exact(q, &live.keys().copied().collect(), &|c| self.disk_leaf(c))?;
+        let mut out = vec![];
+        for (id, seq_no) in matched.iter().map(|p| live[p]) {
+            if !self.index.searchable(seq_no) {
+                continue;
+            }
+            let sort = (sort.iter().zip(&mut columns))
+                .map(|(f, column)| match column {
+                    None => Some(Value::from(score as f32)),
+                    Some(read) => Some(sort_value(f, read(id)?.iter().collect())),
+                })
+                .collect::<Option<_>>()?;
+            out.push(Found {
+                target,
+                id,
+                seq_no,
+                doc: None,
+                score,
+                sort,
+            });
+        }
+        Some(out)
+    }
+}
+
+/// A document's value for sort field `f` among its `values`, or the `missing` one.
+fn sort_value(f: &SortField, mut values: Vec<&Value>) -> Value {
+    values.sort_by(|a, b| scalar_cmp(a, b));
+    let pick = if f.desc {
+        values.last()
+    } else {
+        values.first()
+    };
+    pick.map_or_else(
+        || match &f.missing {
+            Some(m) if !matches!(m.as_str(), Some("_first" | "_last")) => m.clone(),
+            _ => Value::Null,
+        },
+        |v| (*v).clone(),
+    )
+}
+
+/// The score of every document `q` matches, if it does not vary (see [`Searcher::score`]).
+fn constant_score(q: &Query) -> Option<f64> {
+    match q {
+        Query::Match { .. } => None,
+        Query::Term { field, .. } if field != "_id" => None,
+        Query::Named { query, .. } => constant_score(query),
+        Query::Bool { must, should, .. } if should.is_empty() => {
+            must.iter().map(constant_score).sum()
+        }
+        Query::Bool { .. } => None,
+        _ => Some(1.0),
+    }
+}
+
+/// A matching document, before hits are paged and read.
+struct Found<'a> {
+    /// The position of its index among the searched targets.
+    target: usize,
+    id: &'a str,
+    seq_no: u64,
+    /// `None` until read, for one selected without reading it.
+    doc: Option<Cow<'a, Document>>,
+    score: f64,
+    /// Its values to order hits by, as [`Searcher::sort_values`] gives them.
+    sort: Vec<Value>,
 }
 
 /// Orders two hits, given as their `sort_values` and score, by `sort` (by score if empty).
@@ -1100,14 +1197,27 @@ pub fn search_many<'a>(
     req: &SearchRequest,
 ) -> Result<SearchResult<'a>, QueryError> {
     let by_score = req.sort.is_empty() || req.sort.iter().any(|f| f.field == "_score");
-    // (target position, hit, score, sort values)
     let mut hits = Vec::new();
+    let mut searchers = HashMap::new();
     let mut aggs = vec![aggs::Stats::default(); req.aggs.len()];
     let mut profile = req.profile.then(Vec::new);
     let mut failures = Vec::new();
     for (pos, (name, index, filter)) in targets.iter().enumerate() {
         let query = with_filter(&req.query, *filter)?;
-        let s = Searcher::new(index, &query);
+        let mut s = Searcher::unscored(index, &query);
+        if by_score || !req.aggs.is_empty() {
+            s.gather(&query);
+        }
+        // Without aggregations to feed, the documents on disk are selected and ordered from
+        // postings and doc values where they can be; only the hits returned are read.
+        let selected = (req.aggs.is_empty())
+            .then(|| s.select_on_disk(pos, &query, &req.sort, by_score))
+            .flatten();
+        s.on_disk = match selected {
+            Some(_) => Some(BTreeSet::new()),
+            None => s.candidates(&query, false),
+        };
+        s.in_memory = s.memory_candidates(&query);
         let mut collector = match aggs::Collector::new(&req.aggs, &s, name, req.profile) {
             Ok(c) => c,
             Err(e) => {
@@ -1115,39 +1225,33 @@ pub fn search_many<'a>(
                 continue;
             }
         };
-        for (id, doc) in s.docs().filter(|(_, d)| index.searchable(d)) {
+        hits.extend(selected.into_iter().flatten());
+        for (id, doc) in s.docs().filter(|(_, d)| index.searchable(d.seq_no)) {
             let Some(score) = s.score(&query, id, &doc) else {
                 continue;
             };
             collector.collect(id, &doc, score);
-            let sort = s.sort_values(&req.sort, score, &doc);
-            let matched_queries = s.matched_queries(id, &doc);
-            let fields = aggs::hit_fields(&s, &req.fields, &doc, true);
-            hits.push((
-                pos,
-                Hit {
-                    index: name,
-                    id,
-                    doc,
-                    score: Some(score as f32),
-                    sort,
-                    matched_queries,
-                    fields,
-                },
+            hits.push(Found {
+                target: pos,
+                id,
+                seq_no: doc.seq_no,
+                sort: s.sort_values(&req.sort, score, &doc),
+                doc: Some(doc),
                 score,
-            ));
+            });
         }
         let (stats, p) = collector.finish(matches!(query, Query::MatchAll));
         aggs::reduce(&mut aggs, stats);
         if let (Some(all), Some(p)) = (&mut profile, p) {
             all.push(p);
         }
+        searchers.insert(pos, s);
     }
-    hits.sort_by(|(pa, a, sa), (pb, b, sb)| {
+    hits.sort_by(|a, b| {
         // ponytail: ties fall back to index order then write order, standing in for shard/doc order
-        cmp_sorted(&req.sort, (&a.sort, *sa), (&b.sort, *sb))
-            .then(pa.cmp(pb))
-            .then(a.doc.seq_no.cmp(&b.doc.seq_no))
+        cmp_sorted(&req.sort, (&a.sort, a.score), (&b.sort, b.score))
+            .then(a.target.cmp(&b.target))
+            .then(a.seq_no.cmp(&b.seq_no))
     });
     if !failures.is_empty() && failures.len() == targets.len() {
         // ponytail: ES wraps this in an all-shards-failed search_phase_execution_exception
@@ -1155,7 +1259,7 @@ pub fn search_many<'a>(
     }
     // Elasticsearch collects no top docs for size 0, so it reports no max_score.
     let max_score = (by_score && req.size > 0)
-        .then(|| hits.iter().map(|h| h.2 as f32).reduce(f32::max))
+        .then(|| hits.iter().map(|h| h.score as f32).reduce(f32::max))
         .flatten();
     Ok(SearchResult {
         failures,
@@ -1169,11 +1273,19 @@ pub fn search_many<'a>(
             .into_iter()
             .skip(req.from)
             .take(req.size)
-            .map(|(_, mut h, _)| {
-                if !by_score {
-                    h.score = None;
-                }
-                h
+            .filter_map(|h| {
+                let s = &searchers[&h.target];
+                // ponytail: a hit whose segment cannot be read is left out
+                let doc = h.doc.or_else(|| s.index.get(h.id))?;
+                Some(Hit {
+                    index: targets[h.target].0,
+                    id: h.id,
+                    score: by_score.then_some(h.score as f32),
+                    sort: s.sort_values(&req.sort, h.score, &doc),
+                    matched_queries: s.matched_queries(h.id, &doc),
+                    fields: aggs::hit_fields(s, &req.fields, &doc, true),
+                    doc,
+                })
             })
             .collect(),
     })
@@ -1191,12 +1303,7 @@ pub fn count_many(targets: &[Target], q: &Query) -> Result<usize, QueryError> {
         let q = with_filter(q, *filter)?;
         let mut s = Searcher::unscored(index, &q);
         let (disk, memory) = index.live();
-        let on_disk = exact(&q, &disk, &|c| match c {
-            Query::Term { .. } | Query::Match { .. } | Query::Range { .. } => {
-                Some(s.candidates(c, true)?.into_iter().collect())
-            }
-            _ => None,
-        });
+        let on_disk = exact(&q, &disk, &|c| s.disk_leaf(c));
         let in_memory = exact(&q, &memory, &|c| match c {
             Query::Term { .. } | Query::Match { .. } => {
                 let ids = s.memory_candidates(c)?;
@@ -1420,6 +1527,18 @@ mod tests {
         }
         disk::save(&dir, &Indices::from([("i".to_owned(), ix)])).unwrap();
         let mut opened = disk::open(&dir).unwrap();
+        let search = |ix: &Index, body: Value| {
+            let r = search(ix, &SearchRequest::parse(&body).unwrap());
+            (
+                r.total,
+                r.hits.iter().map(|h| h.id.to_owned()).collect::<Vec<_>>(),
+            )
+        };
+        let three = json!({"constant_score": {"filter": {"term": {"tag": "three"}}}});
+        let by_n = |order: &str, size: usize| json!({"query": three, "sort": [{"n": order}], "size": size});
+        // sorted from doc values, then only the hits returned are read
+        let first = search(&opened["i"], by_n("asc", 3));
+        assert_eq!(first, (10, vec!["0".into(), "3".into(), "6".into()]));
         zero_stored_fields(&dir);
         let ix = opened.get_mut("i").unwrap();
         assert!(ix.get("3").is_none(), "on-disk sources are unreadable");
@@ -1456,6 +1575,10 @@ mod tests {
         assert_eq!(n(constant), 21);
         // on disk from doc values; the documents in memory are scanned
         assert_eq!(n(json!({"range": {"n": {"gte": 5, "lt": 10}}})), 5);
+        // searches that need no scores select from postings and doc values too
+        let filter_only = json!({"query": {"bool": {"filter": {"term": {"tag": "three"}}}}});
+        assert_eq!(search(ix, filter_only), (9, vec!["30".into()]));
+        assert_eq!(search(ix, by_n("desc", 1)), (9, vec!["30".into()]));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

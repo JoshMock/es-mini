@@ -455,9 +455,8 @@ impl Index {
     }
 
     // ponytail: only refresh_interval -1 delays visibility; otherwise writes are searchable at once
-    pub fn searchable(&self, d: &Document) -> bool {
-        self.settings.get("index.refresh_interval") != Some("-1")
-            || d.seq_no < self.refreshed_seq_no
+    pub fn searchable(&self, seq_no: u64) -> bool {
+        self.settings.get("index.refresh_interval") != Some("-1") || seq_no < self.refreshed_seq_no
     }
 
     /// A live document; one on disk is read from its segment.
@@ -508,8 +507,13 @@ impl Index {
 
     /// Every live document, without reading it: its position on disk or its id in memory.
     pub fn live(&self) -> (HashSet<disk::DiskPos>, HashSet<&str>) {
-        let on_disk = self.disk.iter().flat_map(disk::Shard::positions).collect();
+        let on_disk = self.disk_live().map(|(p, _)| p).collect();
         (on_disk, self.docs.keys().map(String::as_str).collect())
+    }
+
+    /// Every live document on disk, without reading it: its position, id and sequence number.
+    pub fn disk_live(&self) -> impl Iterator<Item = (disk::DiskPos, (&str, u64))> {
+        self.disk.iter().flat_map(disk::Shard::positions)
     }
 
     /// The on-disk documents that may index `term` in `field`, from its postings (see

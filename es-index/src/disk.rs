@@ -206,9 +206,9 @@ impl Shard {
         Some(out)
     }
 
-    /// Where every live document is.
-    pub(crate) fn positions(&self) -> impl Iterator<Item = DiskPos> + '_ {
-        self.ids.values().map(|d| (d.segment, d.doc))
+    /// Where every live document is, with its id and sequence number.
+    pub(crate) fn positions(&self) -> impl Iterator<Item = (DiskPos, (&str, u64))> {
+        (self.ids.iter()).map(|(id, d)| ((d.segment, d.doc), (id.as_str(), d.seq_no)))
     }
 
     /// The live documents at a position `keep` accepts, segment by segment, read a chunk at a
