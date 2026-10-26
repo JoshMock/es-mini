@@ -918,3 +918,47 @@ fn eval_adds_or_replaces_columns_in_order() {
         other => panic!("{other:?}"),
     }
 }
+
+#[test]
+fn substring_and_trim_match_elasticsearch() {
+    let r = q(
+        r#"ROW a = SUBSTRING("hello", 2), b = SUBSTRING("héllo", 2, 3), c = SUBSTRING("hello", -3, 2), d = SUBSTRING("hello", 0, 1), e = SUBSTRING("hi", 9), f = SUBSTRING(["ab", "cd"], 1), g = SUBSTRING(null, 1)"#,
+    );
+    let types: Vec<&str> = r.columns.iter().map(|c| c.r#type.as_str()).collect();
+    assert_eq!(types, ["keyword"; 7]);
+    assert_eq!(
+        r.values,
+        [[
+            json!("ello"),
+            json!("éll"),
+            json!("ll"),
+            json!("h"),
+            json!(""),
+            Value::Null,
+            Value::Null
+        ]]
+    );
+    // Java's Character.isWhitespace: not U+00A0, but U+001F and U+2003.
+    let r =
+        q("ROW a = TRIM(\"  padded \\t \"), b = TRIM(\"\u{a0}x\u{1f}\u{2003}\"), c = TRIM(null)");
+    let types: Vec<&str> = r.columns.iter().map(|c| c.r#type.as_str()).collect();
+    assert_eq!(types, ["keyword", "keyword", "null"]);
+    assert_eq!(r.values, [[json!("padded"), json!("\u{a0}x"), Value::Null]]);
+    let r = q("FROM people | EVAL t = TRIM(name), s = SUBSTRING(name, 1, 1) | KEEP t, s | SORT t");
+    assert_eq!(r.values[0], [json!("ann"), json!("a")]);
+    for (query, problem) in [
+        (
+            "FROM people | EVAL x = SUBSTRING(name, 1.5)",
+            "line 1:24: second argument of [SUBSTRING(name, 1.5)] must be [integer], found value [1.5] type [double]",
+        ),
+        (
+            "FROM people | EVAL y = TRIM(age)",
+            "line 1:24: argument of [TRIM(age)] must be [string], found value [age] type [long]",
+        ),
+    ] {
+        match run(&indices(), query) {
+            Err(EsqlError::Verification(m)) => assert_eq!(m, format!("Found 1 problem\n{problem}")),
+            other => panic!("{other:?}"),
+        }
+    }
+}

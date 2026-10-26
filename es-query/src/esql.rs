@@ -2,8 +2,9 @@
 //! `WHERE`, `LIMIT`, `KEEP`, `DROP`, and `SORT`.
 //!
 //! WHERE supports comparisons (`== != < <= > >=`), `AND`/`OR`/`NOT`, parentheses, and
-//! `IS [NOT] NULL`, arithmetic and the `TO_STRING`, `TO_INTEGER`, `TO_LONG`, `TO_DOUBLE` and
-//! `TO_BOOLEAN` conversions over field names and literals. Anything else is a parse error.
+//! `IS [NOT] NULL`, arithmetic, the `TO_STRING`, `TO_INTEGER`, `TO_LONG`, `TO_DOUBLE` and
+//! `TO_BOOLEAN` conversions, and `SUBSTRING` and `TRIM` over field names and literals. Anything
+//! else is a parse error.
 
 use es_index::{
     FieldMapping, Index, Mappings,
@@ -16,7 +17,7 @@ use std::{
     cell::OnceCell,
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
-    ops::Range,
+    ops::{Range, RangeInclusive},
 };
 
 /// ES applies an implicit `LIMIT 1000`.
@@ -895,8 +896,12 @@ fn eval(e: &Expr, row: &Row) -> Option<Value> {
         },
         Expr::Arith(op, a, b, t, _) => arith(op, t.get().copied()?, &eval(a, row)?, &eval(b, row)?),
         Expr::Call(_, args, ft, _) => {
-            let v = eval(&args[0], row)?;
             let &(f, t) = ft.get()?;
+            if STRING_FNS.iter().any(|(n, _)| *n == f) {
+                let args: Vec<Value> = args.iter().map(|a| eval(a, row)).collect::<Option<_>>()?;
+                return string_fn(f, &args);
+            }
+            let v = eval(&args[0], row)?;
             let one = |v: &Value| convert(f, t, v);
             match v {
                 // Converting each value; the ones that fail drop out, like ES (which warns).
@@ -978,6 +983,48 @@ const CONVERSIONS: [(&str, &str); 5] = [
     ("TO_DOUBLE", "double"),
     ("TO_BOOLEAN", "boolean"),
 ];
+
+/// The string functions and how many arguments they take.
+const STRING_FNS: [(&str, RangeInclusive<usize>); 2] = [("SUBSTRING", 2..=3), ("TRIM", 1..=1)];
+
+/// Java's `Character.isWhitespace`.
+fn java_whitespace(c: char) -> bool {
+    matches!(c, '\u{1c}'..='\u{1f}')
+        || c.is_whitespace() && !matches!(c, '\u{85}' | '\u{a0}' | '\u{2007}' | '\u{202f}')
+}
+
+/// String function `f` (one of `STRING_FNS`) of its arguments, like Elasticsearch's
+/// evaluators: `None` for a multi-valued argument (where ES warns).
+fn string_fn(f: &str, args: &[Value]) -> Option<Value> {
+    let s = args[0].as_str()?;
+    if f == "TRIM" {
+        return Some(s.trim_matches(java_whitespace).into());
+    }
+    // SUBSTRING counts code points from 1; 0 counts as 1 and a negative start from the end.
+    let n = s.chars().count() as i64;
+    let start = args[1].as_i64()?;
+    let len = match args.get(2) {
+        Some(l) => l.as_i64()?,
+        None => n,
+    };
+    // ponytail: a negative length fails the query in ES; null here
+    if len < 0 {
+        return None;
+    }
+    let from = match start {
+        0 => 0,
+        s if s > 0 => s - 1,
+        s => n + s,
+    }
+    .clamp(0, n);
+    let to = n.min(from + len);
+    let out: String = s
+        .chars()
+        .skip(from as usize)
+        .take((to - from) as usize)
+        .collect();
+    Some(out.into())
+}
 
 /// Java's `Double.parseDouble`, refusing what Elasticsearch's `StringUtils.parseDouble` does.
 // ponytail: no hexadecimal floats
@@ -1166,6 +1213,44 @@ fn resolve(
         }
         Expr::Call(f, args, t, (at, _)) => {
             let upper = f.to_ascii_uppercase();
+            if let Some((name, arity)) = STRING_FNS.iter().find(|(n, _)| *n == upper) {
+                // ponytail: arity errors are not ES's messages
+                if !arity.contains(&args.len()) {
+                    bad.push((*at, format!("[{f}] takes {arity:?} arguments")));
+                    return None;
+                }
+                let ts: Vec<_> = args.iter().map(|a| resolve(a, src, types, bad)).collect();
+                let ts: Vec<String> = ts.into_iter().collect::<Option<_>>()?;
+                // Elasticsearch's `isType`: a string, then integers, or null.
+                for (i, (a, ta)) in args.iter().zip(&ts).enumerate() {
+                    let accepted = if i == 0 { "string" } else { "integer" };
+                    let ok = match i {
+                        0 => ta == "keyword" || ta == "text",
+                        _ => ta == "integer",
+                    };
+                    if !ok && ta != "null" {
+                        let nth = match (*name, i) {
+                            ("TRIM", _) => "",
+                            (_, 0) => "first ",
+                            (_, 1) => "second ",
+                            _ => "third ",
+                        };
+                        bad.push((
+                            *at,
+                            format!(
+                                "{nth}argument of [{}] must be [{accepted}], found value [{}] \
+                                 type [{ta}]",
+                                text(e),
+                                text(a)
+                            ),
+                        ));
+                        return None;
+                    }
+                }
+                let _ = t.set((*name, "keyword"));
+                let null = *name == "TRIM" && ts[0] == "null";
+                return Some(if null { "null" } else { "keyword" }.into());
+            }
             let Some(&(name, out)) = CONVERSIONS.iter().find(|(n, _)| *n == upper) else {
                 bad.push((*at, format!("Unknown function [{f}]")));
                 return None;

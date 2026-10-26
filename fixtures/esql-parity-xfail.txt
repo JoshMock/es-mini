@@ -21,11 +21,7 @@ FROM emp | EVAL level = CASE(age >= 45, "senior", age >= 30, "mid", "junior") | 
 FROM emp | EVAL a = COALESCE(age, 0), s = COALESCE(salary, -1) | KEEP name, a, s | SORT name
 FROM emp | EVAL full = CONCAT(name, "-", TO_STRING(age)) | KEEP full | SORT full
 FROM emp | EVAL n = LENGTH(name) | KEEP name, n | SORT name
-FROM emp | EVAL s = SUBSTRING(name, 2, 3) | KEEP s | SORT s
-ROW s = SUBSTRING("hello", 2)
 FROM emp | EVAL l = TO_LOWER(name), u = TO_UPPER(name) | KEEP l, u | SORT l
-FROM emp | EVAL t = TRIM(bio) | KEEP name, t | SORT name
-ROW t = TRIM("  padded  ")
 FROM emp | WHERE STARTS_WITH(name, "A") OR ENDS_WITH(name, "e") | KEEP name | SORT name
 ROW a = ABS(-3), b = ABS(-2.5), c = ROUND(3.14159, 2), d = ROUND(2.5), e = FLOOR(2.7), f = CEIL(2.1), g = POW(2, 10), h = POW(2.0, 0.5)
 FROM emp | EVAL r = ROUND(height, 1), f = FLOOR(height), c = CEIL(height) | KEEP name, r, f, c | SORT name
