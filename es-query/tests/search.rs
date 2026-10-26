@@ -258,6 +258,26 @@ fn date_ranges_read_formats_time_zones_and_date_math() {
 }
 
 #[test]
+fn date_terms_match_the_instants_they_name() {
+    let hits = |q: Value| date_hits(q).unwrap();
+    // a date without a time matches its whole day (the upper bound rounds up)
+    assert_eq!(
+        hits(json!({"term": {"date": "2022-01-01"}})),
+        ["1", "3", "4"]
+    );
+    let at = json!({"term": {"date": "2022-01-01T12:12:12"}});
+    assert_eq!(hits(at), ["1"]);
+    assert_eq!(hits(json!({"match": {"date": "2022-01-02"}})), ["2"]);
+    let millis = json!({"term": {"date": 1_641_000_000_000_i64}});
+    assert_eq!(hits(millis), ["3"]);
+    assert!(hits(json!({"term": {"date": 2022}})).is_empty());
+    let any = json!({"terms": {"date": ["2022-01-02", "2021"]}});
+    assert_eq!(hits(any), ["2"]);
+    let e = date_hits(json!({"term": {"date": "bogus"}})).unwrap_err();
+    assert_eq!(e.kind, es_query::ErrorKind::Parse);
+}
+
+#[test]
 fn bad_date_range_bounds_are_errors() {
     use es_query::ErrorKind::{IllegalArgument, Parse};
     let err = |q: Value| date_hits(q).unwrap_err();

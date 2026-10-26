@@ -1110,7 +1110,7 @@ fn now_millis() -> i64 {
 /// `q` with the bounds of ranges on date fields of `index` resolved to inclusive epoch millis,
 /// like ES's DateFieldType.dateRangeQuery: read with the query's `format` (epoch_millis if a
 /// bound is a number), else the field's, in the query's `time_zone`, with date math from `now`;
-/// `gt` and `lte` round up.
+/// `gt` and `lte` round up. Terms and matches on date fields become such ranges.
 // ponytail: filter aggregations' queries are not resolved, so their date ranges skip date math
 fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, QueryError> {
     let all = |qs: Vec<Query>| -> Result<Vec<Query>, QueryError> {
@@ -1118,7 +1118,28 @@ fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, QueryError>
             .map(|c| resolve_dates(index, c, now))
             .collect()
     };
+    let date = |field: &str| {
+        matches!(
+            index.mappings.field(field),
+            Some(FieldMapping::Date { .. } | FieldMapping::DateNanos { .. })
+        )
+    };
+    // a term on a date field is the range from the instant to the instant rounded up
+    let term = |field: String, v: Value| {
+        let range = Query::Range {
+            field,
+            gt: None,
+            gte: Some(v.clone()),
+            lt: None,
+            lte: Some(v),
+            format: None,
+            time_zone: None,
+        };
+        resolve_dates(index, range, now)
+    };
     Ok(match q {
+        Query::Term { field, value } if date(&field) => term(field, value)?,
+        Query::Match { field, query, .. } if date(&field) => term(field, query.into())?,
         Query::Bool {
             must,
             should,
