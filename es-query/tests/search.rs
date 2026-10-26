@@ -278,6 +278,31 @@ fn date_terms_match_the_instants_they_name() {
 }
 
 #[test]
+fn dates_sort_as_epoch_millis() {
+    let idx = dates();
+    let sort = |s: Value| {
+        let req = SearchRequest::parse(&json!({"sort": [s]})).unwrap();
+        (search(&idx, &req).hits.iter())
+            .map(|h| (h.id.to_owned(), h.sort[0].clone()))
+            .collect::<Vec<_>>()
+    };
+    let got = sort(json!({"date": "desc"}));
+    let want = [
+        ("2", 1_641_083_400_000_i64),
+        ("1", 1_641_039_132_123),
+        ("3", 1_641_000_000_000),
+        ("4", 1_640_995_200_000),
+    ];
+    assert_eq!(got, want.map(|(id, t)| (id.to_owned(), json!(t))));
+    // the mapping's format reads the values; documents without one sort last
+    let got = sort(json!({"f": "asc"}));
+    let ids: Vec<_> = got.iter().map(|(id, _)| id.as_str()).collect();
+    assert_eq!(ids, ["3", "1", "2", "4"]);
+    assert_eq!(got[0].1, json!(1_640_991_600_000_i64));
+    assert_eq!(got[2].1, json!(1_641_081_600_000_i64));
+}
+
+#[test]
 fn bad_date_range_bounds_are_errors() {
     use es_query::ErrorKind::{IllegalArgument, Parse};
     let err = |q: Value| date_hits(q).unwrap_err();

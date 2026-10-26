@@ -75,7 +75,8 @@ fn resolve(index: &Index, field: &str, sample: impl Fn(&str) -> Option<Value>) -
         Some(FieldMapping::Text { .. } | FieldMapping::TextKeyword { .. }) => Kind::Text,
         Some(FieldMapping::Keyword { .. }) => Kind::Keyword,
         Some(FieldMapping::Boolean) => Kind::Bool,
-        // ponytail: dates match and sort as their JSON values; only ranges read instants
+        // terms, ranges and sorts read dates as instants (see `resolve_dates`, `sort_values`);
+        // ponytail: prefix and wildcard queries match their JSON strings
         Some(FieldMapping::Date { .. } | FieldMapping::DateNanos { .. }) => Kind::Keyword,
         // ponytail: ips match as their JSON strings; no CIDR or address normalization in queries
         Some(FieldMapping::Ip) => Kind::Keyword,
@@ -1268,7 +1269,20 @@ impl<'a> Searcher<'a> {
         sort.iter()
             .map(|f| match f.field.as_str() {
                 "_score" => Value::from(score as f32),
-                field => sort_value(f, values(&doc.source, self.kind(field).1)),
+                field => {
+                    let vals = values(&doc.source, self.kind(field).1);
+                    // ponytail: date_nanos sort by their JSON values, not epoch nanos
+                    let Some(FieldMapping::Date { format, locale, .. }) =
+                        self.index.mappings.field(field)
+                    else {
+                        return sort_value(f, vals);
+                    };
+                    let millis: Vec<Value> = (vals.into_iter())
+                        .filter_map(|v| date_millis(format.as_deref(), locale.as_deref(), v))
+                        .map(Value::from)
+                        .collect();
+                    sort_value(f, millis.iter().collect())
+                }
             })
             .collect()
     }
