@@ -278,6 +278,22 @@ fn date_terms_match_the_instants_they_name() {
 }
 
 #[test]
+fn filter_aggregations_read_dates_as_queries_do() {
+    let idx = dates();
+    let aggs = json!({
+        "day": {"filter": {"term": {"date": "2022-01-01"}}},
+        "by": {"filters": {"filters": {"past": {"range": {"date": {"lt": "now"}}}}},
+            "aggs": {"tz": {"filter": {"range": {"date": {"gte": "2022-01-01", "time_zone": "-01:00"}}}}}},
+    });
+    let req = SearchRequest::parse(&json!({"size": 0, "aggs": aggs})).unwrap();
+    let r = es_query::search_many(&[("d", &idx, None)], &req).unwrap();
+    let a = r.aggregations.unwrap();
+    assert_eq!(a["day"]["doc_count"], 3);
+    assert_eq!(a["by"]["buckets"]["past"]["doc_count"], 4);
+    assert_eq!(a["by"]["buckets"]["past"]["tz"]["doc_count"], 3);
+}
+
+#[test]
 fn dates_sort_as_epoch_millis() {
     let idx = dates();
     let sort = |s: Value| {

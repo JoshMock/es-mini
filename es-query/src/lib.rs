@@ -1112,7 +1112,6 @@ fn now_millis() -> i64 {
 /// like ES's DateFieldType.dateRangeQuery: read with the query's `format` (epoch_millis if a
 /// bound is a number), else the field's, in the query's `time_zone`, with date math from `now`;
 /// `gt` and `lte` round up. Terms and matches on date fields become such ranges.
-// ponytail: filter aggregations' queries are not resolved, so their date ranges skip date math
 fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, QueryError> {
     let all = |qs: Vec<Query>| -> Result<Vec<Query>, QueryError> {
         qs.into_iter()
@@ -1458,7 +1457,8 @@ pub fn search_many<'a>(
             None => s.candidates(&query, false),
         };
         s.in_memory = s.memory_candidates(&query);
-        let mut collector = match aggs::Collector::new(&req.aggs, &s, name, req.profile) {
+        let index_aggs = aggs::resolve_dates(&req.aggs, index, now)?;
+        let mut collector = match aggs::Collector::new(&index_aggs, &s, name, req.profile) {
             Ok(c) => c,
             Err(e) => {
                 failures.push((*name, e));

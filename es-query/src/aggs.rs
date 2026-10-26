@@ -503,6 +503,31 @@ pub struct Agg {
     subs: Vec<Agg>,
 }
 
+/// `aggs` with the queries of their filter aggregations resolved for `index` (see
+/// [`crate::resolve_dates`]).
+pub(crate) fn resolve_dates(
+    aggs: &[Agg],
+    index: &es_index::Index,
+    now: i64,
+) -> Result<Vec<Agg>, QueryError> {
+    let resolve = |q: &mut Query| -> Result<(), QueryError> {
+        *q = crate::resolve_dates(index, q.clone(), now)?;
+        Ok(())
+    };
+    (aggs.iter())
+        .map(|a| {
+            let mut a = a.clone();
+            match &mut a.metric {
+                Metric::Filter(q) => resolve(q)?,
+                Metric::Filters(f) => f.filters.iter_mut().try_for_each(|(_, q)| resolve(q))?,
+                _ => {}
+            }
+            a.subs = resolve_dates(&a.subs, index, now)?;
+            Ok(a)
+        })
+        .collect()
+}
+
 /// Parses the object under `aggs`/`aggregations`.
 pub(crate) fn parse(v: &Value) -> Result<Vec<Agg>, QueryError> {
     let aggs = v
