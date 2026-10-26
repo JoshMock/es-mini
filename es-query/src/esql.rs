@@ -653,6 +653,34 @@ impl Parser<'_> {
                 false => e,
             });
         }
+        // `x IN (a, b)` is `x == a OR x == b`, which has IN's three-valued result.
+        if is(negated as usize, "in") {
+            self.pos += 1 + negated as usize;
+            if !self.sym("(") {
+                return self.mismatched("'('");
+            }
+            self.parens += 1;
+            let mut items = vec![self.add()?];
+            while self.sym(",") {
+                items.push(self.add()?);
+            }
+            if !self.sym(")") {
+                return self.mismatched("{',', ')'}");
+            }
+            self.parens -= 1;
+            self.follow = AFTER_LITERAL;
+            let span = self.span(start);
+            let eq = |x| Expr::Cmp("==", Box::new(left.clone()), Box::new(x), span.clone());
+            let mut items = items.into_iter().map(eq);
+            let first = items.next().expect("one item");
+            let e = items.fold(first, |a, b| {
+                Expr::Or(Box::new(a), Box::new(b), span.clone())
+            });
+            return Ok(match negated {
+                true => Expr::Not(Box::new(e), span),
+                false => e,
+            });
+        }
         match self.peek() {
             Some(Tok::Sym(op @ ("==" | "!=" | "<" | "<=" | ">" | ">="))) => {
                 let op = *op;

@@ -1346,3 +1346,19 @@ fn like_matches_wildcards() {
         )
     );
 }
+
+#[test]
+fn in_matches_any_listed_value() {
+    let names =
+        |query: &str| -> Vec<Value> { q(query).values.into_iter().map(|r| r[0].clone()).collect() };
+    assert_eq!(
+        names(r#"FROM people | WHERE name IN ("bob", "zed", name) | KEEP name | SORT name"#),
+        [json!("ann"), json!("bob"), json!("cid")]
+    );
+    assert_eq!(
+        names("FROM people | WHERE age NOT IN (30, 41) | KEEP name"),
+        [json!("bob")]
+    );
+    let r = q("ROW a = 1 | EVAL t = a IN (2, 1), n = a IN (2, null), m = [1, 2] IN (1)");
+    assert_eq!(r.values[0][1..], [json!(true), Value::Null, Value::Null]);
+}
