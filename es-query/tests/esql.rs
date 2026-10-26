@@ -403,3 +403,232 @@ fn verification_errors_match_elasticsearch() {
         );
     }
 }
+
+/// Parse errors as a live Elasticsearch 9.5.5 reported them for the same queries.
+#[test]
+fn parse_errors_match_elasticsearch() {
+    const COMMANDS: &str = "{'change_point', 'enrich', 'completion', 'dissect', 'eval', 'grok', \
+        'limit', 'rerank', 'sample', 'sort', STATS, 'where', 'uri_parts', 'metrics_info', \
+        'registered_domain', 'ts_info', 'user_agent', 'ts_collapse', 'ip_location', 'fork', \
+        'fuse', 'inline', 'inlinestats', 'lookup', 'mmr', 'mv_expand', 'drop', 'keep', 'rename'}";
+    let mut all = indices();
+    let people = all.remove("people").unwrap();
+    all.insert("idx".into(), people);
+    for (query, message) in [
+        (
+            "FROM",
+            "line 1:5: mismatched input '<EOF>' expecting {QUOTED_STRING, '(', UNQUOTED_SOURCE}",
+        ),
+        (
+            "idx",
+            "line 1:1: mismatched input 'idx' expecting {, 'row', 'from', 'ts', 'promql', 'set', 'show'}",
+        ),
+        (
+            "FROM idx | WHERE",
+            "line 1:17: mismatched input '<EOF>' expecting {QUOTED_STRING, INTEGER_LITERAL, \
+             DECIMAL_LITERAL, 'false', 'first', 'last', 'not', 'null', '?', 'true', '+', '-', \
+             '??', NAMED_OR_POSITIONAL_PARAM, NAMED_OR_POSITIONAL_DOUBLE_PARAMS, '[', '(', \
+             UNQUOTED_IDENTIFIER, QUOTED_IDENTIFIER}",
+        ),
+        (
+            "FROM idx | LIMIT x",
+            "line 1:18: mismatched input 'x' expecting {QUOTED_STRING, INTEGER_LITERAL, \
+             DECIMAL_LITERAL, 'false', 'null', '?', 'true', '+', '-', NAMED_OR_POSITIONAL_PARAM, '['}",
+        ),
+        (
+            "FROM idx | FOO",
+            &format!("line 1:12: mismatched input 'FOO' expecting {COMMANDS}"),
+        ),
+        (
+            "FROM idx |",
+            &format!("line 1:11: mismatched input '<EOF>' expecting {COMMANDS}"),
+        ),
+        (
+            "FROM idx | KEEP",
+            "line 1:16: mismatched input '<EOF>' expecting {'?', '??', NAMED_OR_POSITIONAL_PARAM, \
+             NAMED_OR_POSITIONAL_DOUBLE_PARAMS, '[', ID_PATTERN}",
+        ),
+        (
+            "FROM idx | WHERE age IS",
+            "line 1:24: mismatched input '<EOF>' expecting {'not', 'null'}",
+        ),
+        (
+            "FROM idx | SORT age NULLS",
+            "line 1:26: missing {'first', 'last'} at '<EOF>'",
+        ),
+        (
+            "FROM idx | WHERE age >",
+            "line 1:23: no viable alternative at input 'age >'",
+        ),
+        (
+            "FROM idx | WHERE (age > 1",
+            "line 1:26: no viable alternative at input '(age > 1'",
+        ),
+        (
+            "FROM idx extra",
+            "line 1:10: extraneous input 'extra' expecting <EOF>",
+        ),
+        (
+            "FROM idx | WHERE age > 1 1",
+            "line 1:26: extraneous input '1' expecting <EOF>",
+        ),
+        (
+            "FROM idx | WHERE \"x",
+            "line 1:18: token recognition error at: '\"x'",
+        ),
+        (
+            "FROM idx | WHERE age # 1",
+            "line 1:22: token recognition error at: '#'",
+        ),
+        (
+            "FROM idx | LIMIT -1",
+            "line 1:12: value of [LIMIT -1] must be a non negative integer, found value [-1] type [integer]",
+        ),
+        (
+            "FROM idx | LIMIT 1.5",
+            "line 1:12: value of [LIMIT 1.5] must be a non negative integer, found value [1.5] type [double]",
+        ),
+        (
+            "FROM idx | LIMIT 99999999999999999999",
+            "line 1:12: value of [LIMIT 99999999999999999999] must be a non negative integer, \
+             found value [99999999999999999999] type [double]",
+        ),
+        (
+            "FROM idx | LIMIT 3000000000",
+            "line 1:12: value of [LIMIT 3000000000] must be a non negative integer, \
+             found value [3000000000] type [long]",
+        ),
+        (
+            "FROM idx | LIMIT 9223372036854775808",
+            "line 1:12: value of [LIMIT 9223372036854775808] must be a non negative integer, \
+             found value [9223372036854775808] type [unsigned_long]",
+        ),
+        (
+            "FROM idx extra stuff",
+            "line 1:10: mismatched input 'extra' expecting {<EOF>, '|', '::', ',', 'metadata'}",
+        ),
+        (
+            "FROM idx, | LIMIT 1",
+            "line 1:11: mismatched input '|' expecting {QUOTED_STRING, '(', UNQUOTED_SOURCE}",
+        ),
+        (
+            "FROM idx | WHERE age > 1 1 1",
+            "line 1:26: mismatched input '1' expecting \
+             {<EOF>, '|', 'and', '::', 'or', '+', '-', '*', '/', '%'}",
+        ),
+        (
+            "FROM idx | WHERE age = 1",
+            "line 1:22: mismatched input '=' expecting \
+             {<EOF>, '|', 'and', '::', '.', 'or', '+', '-', '*', '/', '%'}",
+        ),
+        (
+            "FROM idx | WHERE age =",
+            "line 1:22: extraneous input '=' expecting <EOF>",
+        ),
+        (
+            "FROM idx | WHERE 1.2.3 > 1",
+            "line 1:21: mismatched input '.3' expecting \
+             {<EOF>, '|', 'and', '::', 'or', '+', '-', '*', '/', '%'}",
+        ),
+        (
+            "FROM idx | WHERE age IS NULL x y",
+            "line 1:30: mismatched input 'x' expecting {<EOF>, '|', 'and', 'or'}",
+        ),
+        (
+            "FROM idx | WHERE (age > 1) x y",
+            "line 1:28: mismatched input 'x' expecting \
+             {'and', '::', 'or', '+', '-', '*', '/', '%', ')'}",
+        ),
+        (
+            "FROM idx | WHERE age IS NOT",
+            "line 1:28: missing 'null' at '<EOF>'",
+        ),
+        (
+            "FROM idx | WHERE age IS NOT | LIMIT 1",
+            "line 1:29: missing 'null' at '|'",
+        ),
+        (
+            "FROM idx | WHERE age IS NOT age",
+            "line 1:29: mismatched input 'age' expecting 'null'",
+        ),
+        (
+            "FROM idx | WHERE (age > 1 AND",
+            "line 1:30: no viable alternative at input '(age > 1 AND'",
+        ),
+        (
+            "FROM idx | WHERE (age > 1 | LIMIT 1",
+            "line 1:27: no viable alternative at input '(age > 1 |'",
+        ),
+        (
+            "FROM idx | WHERE age >  | LIMIT 1",
+            "line 1:25: no viable alternative at input 'age >  |'",
+        ),
+        (
+            "FROM idx | WHERE age > 1 AND (name",
+            "line 1:35: no viable alternative at input '(name'",
+        ),
+        (
+            "FROM idx | WHERE age > 1 AND name >",
+            "line 1:36: no viable alternative at input 'name >'",
+        ),
+        (
+            "FROM idx\n| WHERE (",
+            "line 2:10: no viable alternative at input '('",
+        ),
+        (
+            "FROM idx | WHERE age > 1 OR",
+            "line 1:28: mismatched input '<EOF>' expecting {QUOTED_STRING, INTEGER_LITERAL, \
+             DECIMAL_LITERAL, 'false', 'first', 'last', 'not', 'null', '?', 'true', '+', '-', \
+             '??', NAMED_OR_POSITIONAL_PARAM, NAMED_OR_POSITIONAL_DOUBLE_PARAMS, '[', '(', \
+             UNQUOTED_IDENTIFIER, QUOTED_IDENTIFIER}",
+        ),
+        (
+            "FROM idx | KEEP a b c",
+            "line 1:19: mismatched input 'b' expecting {<EOF>, '|', ',', '.'}",
+        ),
+        (
+            "FROM idx | KEEP a b",
+            "line 1:19: extraneous input 'b' expecting <EOF>",
+        ),
+        (
+            "FROM idx | KEEP name,",
+            "line 1:22: mismatched input '<EOF>' expecting {'?', '??', NAMED_OR_POSITIONAL_PARAM, \
+             NAMED_OR_POSITIONAL_DOUBLE_PARAMS, '[', ID_PATTERN}",
+        ),
+        (
+            "FROM idx | SORT age x y",
+            "line 1:21: mismatched input 'x' expecting {<EOF>, '|', 'and', 'asc', '::', ',', \
+             'desc', '.', 'nulls', 'or', '+', '-', '*', '/', '%'}",
+        ),
+        (
+            "FROM idx | SORT age DESC x y",
+            "line 1:26: mismatched input 'x' expecting {<EOF>, '|', ',', 'nulls'}",
+        ),
+        (
+            "FROM idx | SORT age NULLS LAST x y",
+            "line 1:32: mismatched input 'x' expecting {<EOF>, '|', ','}",
+        ),
+        (
+            "FROM idx | SORT age NULLS x",
+            "line 1:27: mismatched input 'x' expecting {'first', 'last'}",
+        ),
+        (
+            "FROM idx | SORT age NULLS | LIMIT 1",
+            "line 1:27: missing {'first', 'last'} at '|'",
+        ),
+        (
+            "FROM idx | WHERE `abc",
+            "line 1:18: token recognition error at: '`abc'",
+        ),
+        (
+            "FROM idx | WHERE \"x\ny\"",
+            "line 1:18: token recognition error at: '\"x\\n'",
+        ),
+    ] {
+        assert_eq!(
+            run(&all, query).unwrap_err(),
+            EsqlError::Parse(message.into()),
+            "{query}"
+        );
+    }
+}

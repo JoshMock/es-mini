@@ -12,6 +12,7 @@ use serde_json::Value;
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
+    ops::Range,
 };
 
 /// ES applies an implicit `LIMIT 1000`.
@@ -62,13 +63,40 @@ type Pos = (usize, usize);
 /// An identifier and where it starts.
 type Name = (String, Pos);
 
-fn lex(src: &str) -> Result<Vec<(Tok, Pos)>, EsqlError> {
-    let err = |m: String| EsqlError::Parse(m);
+/// A token, where it starts, and its byte range in the query.
+type Token = (Tok, Pos, Range<usize>);
+
+/// A parsing error at `at`, formatted like Elasticsearch's `ParsingException`.
+fn parse_error((line, col): Pos, msg: &str) -> EsqlError {
+    EsqlError::Parse(format!("line {line}:{col}: {msg}"))
+}
+
+/// Input text the way ANTLR shows it in messages (`getErrorDisplay`).
+fn display(text: &str) -> String {
+    text.replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
+}
+
+/// The tokens of `src` and the position of its end.
+fn lex(src: &str) -> Result<(Vec<Token>, Pos), EsqlError> {
     let mut out = Vec::new();
     let mut it = src.char_indices().peekable();
     let (mut line, mut line_start) = (1, 0);
+    let digits = |from: usize| {
+        from + src[from..]
+            .find(|d: char| !d.is_ascii_digit())
+            .unwrap_or(src.len() - from)
+    };
     while let Some(&(i, c)) = it.peek() {
         let at = (line, src[line_start..i].chars().count() + 1);
+        // ANTLR's lexer error for input from `i` to `end` that no token matches.
+        let unrecognized = |end: usize| {
+            parse_error(
+                at,
+                &format!("token recognition error at: '{}'", display(&src[i..end])),
+            )
+        };
         if c.is_whitespace() {
             it.next();
             if c == '\n' {
@@ -76,18 +104,20 @@ fn lex(src: &str) -> Result<Vec<(Tok, Pos)>, EsqlError> {
             }
             continue;
         }
+        let mut end = None;
         let tok = if c == '"' {
             it.next();
             let mut s = String::new();
             loop {
                 match it.next() {
-                    None => return Err(err(format!("unterminated string at {i}"))),
+                    None => return Err(unrecognized(src.len())),
                     Some((_, '"')) => break,
+                    Some((j, c @ ('\n' | '\r'))) => return Err(unrecognized(j + c.len_utf8())),
                     Some((_, '\\')) => match it.next() {
                         Some((_, 'n')) => s.push('\n'),
                         Some((_, 't')) => s.push('\t'),
                         Some((_, c)) => s.push(c),
-                        None => return Err(err(format!("unterminated string at {i}"))),
+                        None => return Err(unrecognized(src.len())),
                     },
                     Some((_, c)) => s.push(c),
                 }
@@ -98,23 +128,29 @@ fn lex(src: &str) -> Result<Vec<(Tok, Pos)>, EsqlError> {
             let mut s = String::new();
             loop {
                 match it.next() {
-                    None => return Err(err(format!("unterminated quoted identifier at {i}"))),
+                    None => return Err(unrecognized(src.len())),
                     Some((_, '`')) => break,
                     Some((_, c)) => s.push(c),
                 }
             }
             Tok::Word(s)
-        } else if c.is_ascii_digit() {
-            let mut s = String::new();
-            while let Some(&(_, c)) = it.peek().filter(|(_, c)| c.is_ascii_digit() || *c == '.') {
-                s.push(c);
-                it.next();
-            }
+        } else if c.is_ascii_digit()
+            || c == '.' && src[i + 1..].starts_with(|d: char| d.is_ascii_digit())
+        {
+            let int_end = digits(i);
+            let e = match src[int_end..].starts_with('.') {
+                true => digits(int_end + 1),
+                false => int_end,
+            };
+            end = Some(e);
+            let s = &src[i..e];
             let n = match s.contains('.') {
                 true => s.parse::<f64>().ok().map(Value::from),
-                false => s.parse::<i64>().ok().map(Value::from),
+                false => (s.parse::<i64>().ok().map(Value::from))
+                    .or_else(|| s.parse::<u64>().ok().map(Value::from))
+                    .or_else(|| s.parse::<f64>().ok().map(Value::from)),
             };
-            Tok::Num(n.ok_or_else(|| err(format!("invalid number [{s}]")))?)
+            Tok::Num(n.ok_or_else(|| unrecognized(e))?)
         } else if c.is_alphabetic() || "_@*".contains(c) {
             let mut s = String::new();
             while let Some(&(_, c)) = it
@@ -127,19 +163,51 @@ fn lex(src: &str) -> Result<Vec<(Tok, Pos)>, EsqlError> {
             Tok::Word(s)
         } else {
             let rest = &src[i..];
-            let sym = ["==", "!=", "<=", ">=", "<", ">", "|", "(", ")", ","]
-                .into_iter()
-                .find(|s| rest.starts_with(s))
-                .ok_or_else(|| err(format!("unexpected character [{c}] at {i}")))?;
-            sym.chars().for_each(|_| {
-                it.next();
-            });
+            let sym = [
+                "==", "!=", "<=", ">=", "<", ">", "=", "-", "|", "(", ")", ",",
+            ]
+            .into_iter()
+            .find(|s| rest.starts_with(s))
+            .ok_or_else(|| unrecognized(i + c.len_utf8()))?;
+            end = Some(i + sym.len());
             Tok::Sym(sym)
         };
-        out.push((tok, at));
+        if let Some(end) = end {
+            while it.next_if(|&(j, _)| j < end).is_some() {}
+        }
+        let end = it.peek().map_or(src.len(), |&(j, _)| j);
+        out.push((tok, at, i..end));
     }
-    Ok(out)
+    Ok((out, (line, src[line_start..].chars().count() + 1)))
 }
+
+// The token sets Elasticsearch 9.5.5's ANTLR parser reports as expected at each point.
+const SOURCE_COMMANDS: &str = "{, 'row', 'from', 'ts', 'promql', 'set', 'show'}";
+const PROCESSING_COMMANDS: &str = "{'change_point', 'enrich', 'completion', 'dissect', 'eval', \
+    'grok', 'limit', 'rerank', 'sample', 'sort', STATS, 'where', 'uri_parts', 'metrics_info', \
+    'registered_domain', 'ts_info', 'user_agent', 'ts_collapse', 'ip_location', 'fork', 'fuse', \
+    'inline', 'inlinestats', 'lookup', 'mmr', 'mv_expand', 'drop', 'keep', 'rename'}";
+const INDEX_PATTERN: &str = "{QUOTED_STRING, '(', UNQUOTED_SOURCE}";
+const ID_PATTERN: &str = "{'?', '??', NAMED_OR_POSITIONAL_PARAM, \
+    NAMED_OR_POSITIONAL_DOUBLE_PARAMS, '[', ID_PATTERN}";
+const EXPRESSION: &str = "{QUOTED_STRING, INTEGER_LITERAL, DECIMAL_LITERAL, 'false', 'first', \
+    'last', 'not', 'null', '?', 'true', '+', '-', '??', NAMED_OR_POSITIONAL_PARAM, \
+    NAMED_OR_POSITIONAL_DOUBLE_PARAMS, '[', '(', UNQUOTED_IDENTIFIER, QUOTED_IDENTIFIER}";
+const CONSTANT: &str = "{QUOTED_STRING, INTEGER_LITERAL, DECIMAL_LITERAL, 'false', 'null', '?', \
+    'true', '+', '-', NAMED_OR_POSITIONAL_PARAM, '['}";
+// What may follow each construct, reported for a stray token that is not the last one.
+const AFTER_SOURCES: &str = "{<EOF>, '|', '::', ',', 'metadata'}";
+const AFTER_ID_PATTERNS: &str = "{<EOF>, '|', ',', '.'}";
+const AFTER_FIELD: &str = "{<EOF>, '|', 'and', '::', '.', 'or', '+', '-', '*', '/', '%'}";
+const AFTER_LITERAL: &str = "{<EOF>, '|', 'and', '::', 'or', '+', '-', '*', '/', '%'}";
+const AFTER_PARENS: &str = "{'and', '::', 'or', '+', '-', '*', '/', '%', ')'}";
+const AFTER_IS_NULL: &str = "{<EOF>, '|', 'and', 'or'}";
+const AFTER_SORT_FIELD: &str = "{<EOF>, '|', 'and', 'asc', '::', ',', 'desc', '.', 'nulls', \
+    'or', '+', '-', '*', '/', '%'}";
+const AFTER_SORT_ORDER: &str = "{<EOF>, '|', ',', 'nulls'}";
+const AFTER_SORT_NULLS: &str = "{<EOF>, '|', ','}";
+// ponytail: not checked against Elasticsearch (`LIMIT 1 x` lexes as a time span there).
+const AFTER_LIMIT: &str = "{<EOF>, '|'}";
 
 #[derive(Debug, Clone, PartialEq)]
 enum Expr {
@@ -169,17 +237,26 @@ enum Command {
     Sort(Vec<SortKey>),
 }
 
-struct Parser {
-    toks: Vec<(Tok, Pos)>,
+/// A recursive-descent parser that fails with the messages of Elasticsearch's ANTLR parser.
+struct Parser<'a> {
+    src: &'a str,
+    toks: Vec<Token>,
+    eof: Pos,
     pos: usize,
+    /// The token where the current top-level operand of a boolean expression starts; ANTLR
+    /// reports a failure past it as "no viable alternative" from there.
+    operand: usize,
+    parens: usize,
+    /// The tokens that may follow what was parsed last.
+    follow: &'static str,
 }
 
-impl Parser {
+impl Parser<'_> {
     fn peek(&self) -> Option<&Tok> {
-        self.toks.get(self.pos).map(|(t, _)| t)
+        self.toks.get(self.pos).map(|(t, ..)| t)
     }
 
-    fn next(&mut self) -> Option<(Tok, Pos)> {
+    fn next(&mut self) -> Option<Token> {
         self.pos += 1;
         self.toks.get(self.pos - 1).cloned()
     }
@@ -196,55 +273,152 @@ impl Parser {
         hit
     }
 
-    fn fail<T>(&self, what: &str) -> Result<T, EsqlError> {
-        let found = self
-            .peek()
-            .map_or("end of input".to_owned(), |t| format!("{t:?}"));
-        Err(EsqlError::Parse(format!("expected {what}, found {found}")))
+    fn error<T>(&self, msg: &str) -> Result<T, EsqlError> {
+        let at = self.toks.get(self.pos).map_or(self.eof, |(_, at, _)| *at);
+        Err(parse_error(at, msg))
     }
 
-    fn ident(&mut self) -> Result<Name, EsqlError> {
-        match self.next() {
-            Some((Tok::Word(w), at)) => Ok((w, at)),
-            _ => {
-                self.pos -= 1;
-                self.fail("an identifier")
+    /// The current token as ANTLR shows it.
+    fn text(&self) -> String {
+        self.toks
+            .get(self.pos)
+            .map_or("<EOF>".into(), |(.., r)| display(&self.src[r.clone()]))
+    }
+
+    fn mismatched<T>(&self, expecting: &str) -> Result<T, EsqlError> {
+        self.error(&format!(
+            "mismatched input '{}' expecting {expecting}",
+            self.text()
+        ))
+    }
+
+    /// A required token is absent: ANTLR reports it as missing when the current token could
+    /// follow it.
+    fn missing<T>(&self, expecting: &str) -> Result<T, EsqlError> {
+        match self.peek() {
+            None | Some(Tok::Sym("|")) => {
+                self.error(&format!("missing {expecting} at '{}'", self.text()))
             }
+            _ => self.mismatched(expecting),
         }
     }
 
-    fn ident_list(&mut self) -> Result<Vec<Name>, EsqlError> {
-        let mut out = vec![self.ident()?];
+    /// An expression cannot start, or cannot continue, at the current token.
+    fn bad_expression<T>(&self) -> Result<T, EsqlError> {
+        if self.pos == self.operand {
+            return self.mismatched(EXPRESSION);
+        }
+        let start = self.toks[self.operand].2.start;
+        let end = self
+            .toks
+            .get(self.pos)
+            .map_or(self.src.len(), |(.., r)| r.end);
+        self.error(&format!(
+            "no viable alternative at input '{}'",
+            display(&self.src[start..end])
+        ))
+    }
+
+    /// A command Elasticsearch knows but this subset does not run.
+    fn unsupported<T>(&self, commands: &str) -> Result<T, EsqlError> {
+        match self.peek() {
+            Some(Tok::Word(w))
+                if commands.contains(&format!("'{}'", w.to_ascii_lowercase()))
+                    || w.eq_ignore_ascii_case("stats") =>
+            {
+                self.error(&format!("unsupported command [{}]", w.to_ascii_lowercase()))
+            }
+            _ => self.mismatched(commands),
+        }
+    }
+
+    fn ident(&mut self, expecting: &str) -> Result<Name, EsqlError> {
+        match self.peek() {
+            Some(Tok::Word(_)) => match self.next() {
+                Some((Tok::Word(w), at, _)) => Ok((w, at)),
+                _ => unreachable!("peeked a word"),
+            },
+            _ => self.mismatched(expecting),
+        }
+    }
+
+    fn ident_list(&mut self, expecting: &str) -> Result<Vec<Name>, EsqlError> {
+        let mut out = vec![self.ident(expecting)?];
         while self.sym(",") {
-            out.push(self.ident()?);
+            out.push(self.ident(expecting)?);
         }
         Ok(out)
     }
 
+    fn limit(&mut self) -> Result<Command, EsqlError> {
+        let (_, at, ref keyword) = self.toks[self.pos - 1];
+        let start = keyword.start;
+        let negative = self.sym("-");
+        let Some((Tok::Num(n), _, lit)) = self.toks.get(self.pos).cloned() else {
+            return self.mismatched(CONSTANT);
+        };
+        self.pos += 1;
+        self.follow = AFTER_LIMIT;
+        if let Some(n) = n.as_u64().filter(|&n| !negative && n <= i32::MAX as u64) {
+            return Ok(Command::Limit(n as usize));
+        }
+        let signed = n.as_i64().map(|v| if negative { -v } else { v });
+        let r#type = match () {
+            _ if signed.is_some_and(|v| i32::try_from(v).is_ok()) => "integer",
+            _ if signed.is_some() => "long",
+            _ if n.is_u64() => "unsigned_long",
+            _ => "double",
+        };
+        let value = &self.src[(if negative {
+            self.toks[self.pos - 2].2.start
+        } else {
+            lit.start
+        })..lit.end];
+        Err(parse_error(
+            at,
+            &format!(
+                "value of [{}] must be a non negative integer, found value [{value}] type [{type}]",
+                &self.src[start..lit.end]
+            ),
+        ))
+    }
+
     fn query(&mut self) -> Result<(Vec<String>, Vec<Command>), EsqlError> {
         if !self.keyword("from") {
-            return self.fail("FROM");
+            return self.unsupported(SOURCE_COMMANDS);
         }
-        let sources = self.ident_list()?.into_iter().map(|(s, _)| s).collect();
+        let sources = self.ident_list(INDEX_PATTERN)?;
+        let sources = sources.into_iter().map(|(s, _)| s).collect();
+        self.follow = AFTER_SOURCES;
         let mut cmds = Vec::new();
         while self.sym("|") {
-            let cmd = match self.ident()?.0.to_ascii_lowercase().as_str() {
+            let command = match self.peek() {
+                Some(Tok::Word(w)) => w.to_ascii_lowercase(),
+                _ => String::new(),
+            };
+            if !["where", "limit", "keep", "drop", "sort"].contains(&command.as_str()) {
+                return self.unsupported(PROCESSING_COMMANDS);
+            }
+            self.pos += 1;
+            let cmd = match command.as_str() {
                 "where" => Command::Where(self.or()?),
-                "limit" => match self.next() {
-                    Some((Tok::Num(n), _)) if n.is_u64() => {
-                        Command::Limit(n.as_u64().unwrap_or_default() as usize)
+                "limit" => self.limit()?,
+                "keep" | "drop" => {
+                    let names = self.ident_list(ID_PATTERN)?;
+                    self.follow = AFTER_ID_PATTERNS;
+                    match command.as_str() {
+                        "keep" => Command::Keep(names),
+                        _ => Command::Drop(names),
                     }
-                    _ => return self.fail("an integer"),
-                },
-                "keep" => Command::Keep(self.ident_list()?),
-                "drop" => Command::Drop(self.ident_list()?),
-                "sort" => {
+                }
+                _ => {
                     let mut keys = Vec::new();
                     loop {
-                        let (field, at) = self.ident()?;
+                        let (field, at) = self.ident(EXPRESSION)?;
+                        self.follow = AFTER_SORT_FIELD;
                         let desc = self.keyword("desc");
-                        if !desc {
-                            self.keyword("asc");
+                        if desc || self.keyword("asc") {
+                            self.follow = AFTER_SORT_ORDER;
                         }
                         // Nulls are larger than any value by default.
                         let mut nulls_first = desc;
@@ -252,8 +426,9 @@ impl Parser {
                             nulls_first = match () {
                                 _ if self.keyword("first") => true,
                                 _ if self.keyword("last") => false,
-                                _ => return self.fail("FIRST or LAST"),
+                                _ => return self.missing("{'first', 'last'}"),
                             };
+                            self.follow = AFTER_SORT_NULLS;
                         }
                         keys.push(SortKey {
                             field,
@@ -267,13 +442,16 @@ impl Parser {
                     }
                     Command::Sort(keys)
                 }
-                other => return Err(EsqlError::Parse(format!("unsupported command [{other}]"))),
             };
             cmds.push(cmd);
         }
-        match self.peek() {
-            None => Ok((sources, cmds)),
-            Some(_) => self.fail("| or end of input"),
+        match self.toks.len() - self.pos {
+            0 => Ok((sources, cmds)),
+            1 => self.error(&format!(
+                "extraneous input '{}' expecting <EOF>",
+                self.text()
+            )),
+            _ => self.mismatched(self.follow),
         }
     }
 
@@ -294,6 +472,9 @@ impl Parser {
     }
 
     fn not(&mut self) -> Result<Expr, EsqlError> {
+        if self.parens == 0 {
+            self.operand = self.pos;
+        }
         match self.keyword("not") {
             true => Ok(Expr::Not(Box::new(self.not()?))),
             false => self.cmp(),
@@ -305,8 +486,12 @@ impl Parser {
         if self.keyword("is") {
             let negated = self.keyword("not");
             if !self.keyword("null") {
-                return self.fail("NULL");
+                return match negated {
+                    true => self.missing("'null'"),
+                    false => self.mismatched("{'not', 'null'}"),
+                };
             }
+            self.follow = AFTER_IS_NULL;
             return Ok(Expr::IsNull(Box::new(left), negated));
         }
         match self.peek() {
@@ -321,28 +506,35 @@ impl Parser {
 
     fn primary(&mut self) -> Result<Expr, EsqlError> {
         if self.sym("(") {
+            self.parens += 1;
             let e = self.or()?;
-            return match self.sym(")") {
-                true => Ok(e),
-                false => self.fail(")"),
-            };
-        }
-        let Some((tok, at)) = self.next() else {
-            self.pos -= 1;
-            return self.fail("an expression");
-        };
-        match tok {
-            Tok::Num(n) => Ok(Expr::Lit(n)),
-            Tok::Str(s) => Ok(Expr::Lit(Value::String(s))),
-            Tok::Word(w) if w.eq_ignore_ascii_case("null") => Ok(Expr::Lit(Value::Null)),
-            Tok::Word(w) if w.eq_ignore_ascii_case("true") => Ok(Expr::Lit(true.into())),
-            Tok::Word(w) if w.eq_ignore_ascii_case("false") => Ok(Expr::Lit(false.into())),
-            Tok::Word(w) => Ok(Expr::Field(w, at)),
-            _ => {
-                self.pos -= 1;
-                self.fail("an expression")
+            if !self.sym(")") {
+                return self.bad_expression();
             }
+            self.parens -= 1;
+            self.follow = AFTER_PARENS;
+            return Ok(e);
         }
+        let (e, follow) = match self.peek().cloned() {
+            Some(Tok::Num(n)) => (Expr::Lit(n), AFTER_LITERAL),
+            Some(Tok::Str(s)) => (Expr::Lit(Value::String(s)), AFTER_LITERAL),
+            Some(Tok::Word(w)) => {
+                let lit = match w.to_ascii_lowercase().as_str() {
+                    "null" => Some(Value::Null),
+                    "true" => Some(true.into()),
+                    "false" => Some(false.into()),
+                    _ => None,
+                };
+                match lit {
+                    Some(v) => (Expr::Lit(v), AFTER_LITERAL),
+                    None => (Expr::Field(w, self.toks[self.pos].1), AFTER_FIELD),
+                }
+            }
+            _ => return self.bad_expression(),
+        };
+        self.pos += 1;
+        self.follow = follow;
+        Ok(e)
     }
 }
 
@@ -552,9 +744,15 @@ fn problems(found: Vec<(Pos, String)>) -> EsqlError {
 }
 
 pub fn run(indices: &BTreeMap<String, Index>, query: &str) -> Result<Response, EsqlError> {
+    let (toks, eof) = lex(query)?;
     let (sources, cmds) = Parser {
-        toks: lex(query)?,
+        src: query,
+        toks,
+        eof,
         pos: 0,
+        operand: 0,
+        parens: 0,
+        follow: "<EOF>",
     }
     .query()?;
     let unknown_index = |e| match e {
