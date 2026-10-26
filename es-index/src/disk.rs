@@ -1386,6 +1386,17 @@ fn write_shard(prev: &Path, dir: &Path, ix: &Index) -> es_codec::Result<bool> {
     }
     owned.sort_by_key(|(_, d)| d.seq_no);
     let docs: Vec<_> = owned.iter().map(|(id, d)| (*id, &**d)).collect();
+    let sorted = ix
+        .settings
+        .flat()
+        .keys()
+        .any(|k| k.starts_with("index.sort."));
+    // ponytail: Lucene refuses unsorted segments in a sorted index; sort docs to support it
+    if sorted && !docs.is_empty() {
+        return Err(es_codec::Error(
+            "writing documents to an index with index.sort.* settings is unsupported".into(),
+        ));
+    }
     if !docs.is_empty() {
         infos.segments.push(write_docs(
             dir,
