@@ -968,6 +968,59 @@ pub fn parse_date_millis(v: &serde_json::Value) -> Option<i64> {
     Some(((days * 24 + h) * 60 + min - offset) * 60_000 + sec * 1000 + milli)
 }
 
+const MONTHS: [(&str, [&str; 12]); 2] = [
+    (
+        "fr",
+        [
+            "janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.",
+            "nov.", "déc.",
+        ],
+    ),
+    (
+        "en",
+        [
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        ],
+    ),
+];
+
+/// Epoch millis of `"E, d MMM yyyy HH:mm:ss Z"` with localized month names.
+// ponytail: only this one custom format; generalize to a token-driven parser when another is needed.
+fn parse_dated(v: &Value, locale: &str) -> Option<i64> {
+    let months = MONTHS.iter().find(|(l, _)| *l == locale)?.1;
+    let mut p = v.as_str()?.split_once(", ")?.1.split(' ');
+    let d: i64 = p.next()?.parse().ok()?;
+    let name = p.next()?;
+    let m = months.iter().position(|n| *n == name)? as i64 + 1;
+    let y: i64 = p.next()?.parse().ok()?;
+    let mut t = p.next()?.split(':').map(|x| x.parse::<i64>());
+    let secs = t.next()?.ok()? * 3600 + t.next()?.ok()? * 60 + t.next()?.ok()?;
+    let z = p.next()?;
+    let off = (z[1..3].parse::<i64>().ok()? * 3600 + z[3..5].parse::<i64>().ok()? * 60)
+        * if z.starts_with('-') { -1 } else { 1 };
+    Some((days_from_civil(y, m, d) * 86400 + secs - off) * 1000)
+}
+
+/// Epoch millis of a value of a date field with `format` and `locale`.
+pub fn date_millis(format: Option<&str>, locale: Option<&str>, v: &Value) -> Option<i64> {
+    let Some(format) = format else {
+        return parse_date_millis(v);
+    };
+    (format.split("||"))
+        .find_map(|f| match f {
+            "epoch_millis" => json_num(v).map(|x| x as i64),
+            "epoch_second" => json_num(v).map(|x| (x * 1000.0) as i64),
+            // ponytail: other named formats (`strict_date_time`, ...) parse as the default format
+            _ if format_pattern(f, 0).is_none() => v.as_str().and_then(|_| parse_date_millis(v)),
+            _ => parse_pattern(f, v.as_str()?),
+        })
+        .or_else(|| parse_dated(v, locale.unwrap_or("en")))
+}
+
+fn json_num(v: &Value) -> Option<f64> {
+    v.as_f64().or_else(|| v.as_str()?.parse().ok())
+}
+
 /// Parses an ES time value (`250ms`, `60s`, `2m`, `1h`, `1d`); `None` for `-1` or junk.
 pub fn parse_time(v: &str) -> Option<Duration> {
     let units = [
