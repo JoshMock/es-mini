@@ -11,7 +11,8 @@ fn nodes_header() -> Value {
 }
 
 fn doc_count(state: &AppState) -> (usize, usize) {
-    let store = state.read().expect("lock poisoned");
+    let shared = state.read();
+    let store = shared.all();
     (store.len(), store.values().map(|i| i.docs().count()).sum())
 }
 

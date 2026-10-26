@@ -87,7 +87,8 @@ pub async fn field_caps(
     let list =
         |k: &str| -> Vec<&str> { params.get(k).map_or(Vec::new(), |v| v.split(',').collect()) };
     let (filters, types) = (list("filters"), list("types"));
-    let indices = state.read().expect("lock poisoned");
+    let shared = state.read();
+    let indices = shared.all();
     let names: BTreeSet<String> = crate::indices::data_targets(&indices, &name, &params)?
         .into_iter()
         .map(|t| t.index)

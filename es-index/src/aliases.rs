@@ -1,8 +1,9 @@
 //! Index aliases and index-expression resolution (comma lists, `*` wildcards, `_all`, aliases).
 
-use crate::Indices;
+use crate::Index;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::borrow::Borrow;
 use std::collections::BTreeMap;
 
 /// Alias metadata as ES returns it. Routing is stored and echoed back, but has no effect with
@@ -75,8 +76,13 @@ pub fn glob(pattern: &str, name: &str) -> bool {
     }
 }
 
-pub fn is_alias(indices: &Indices, name: &str) -> bool {
-    indices.values().any(|i| i.aliases.contains_key(name))
+/// Indices keyed by name, held directly ([`crate::Indices`]) or through locks.
+pub type Map<I> = BTreeMap<String, I>;
+
+pub fn is_alias(indices: &Map<impl Borrow<Index>>, name: &str) -> bool {
+    indices
+        .values()
+        .any(|i| i.borrow().aliases.contains_key(name))
 }
 
 /// How an index expression resolves, like Elasticsearch's `IndicesOptions`. Endpoints start
@@ -137,7 +143,7 @@ impl IndicesOptions {
 /// `-exclusions` after the first part) to concrete indices in name order, each with the filter
 /// of the alias it was reached through (none if it was also reached directly).
 pub fn resolve(
-    indices: &Indices,
+    indices: &Map<impl Borrow<Index>>,
     expr: &str,
     o: &IndicesOptions,
 ) -> Result<Vec<Target>, ResolveError> {
@@ -155,7 +161,7 @@ pub fn resolve(
             (None, Some(_)) => {}
         }
     }
-    let expands = |i: &crate::Index| {
+    let expands = |i: &Index| {
         if i.closed {
             o.expand_closed && !o.refuse_closed
         } else {
@@ -167,14 +173,22 @@ pub fn resolve(
         if let (true, Some(excluded)) = (n > 0, part.strip_prefix('-')) {
             hits.retain(|name, _| {
                 !glob(excluded, name)
-                    && !(o.aliases && indices[*name].aliases.keys().any(|a| glob(excluded, a)))
+                    && !(o.aliases
+                        && indices[*name]
+                            .borrow()
+                            .aliases
+                            .keys()
+                            .any(|a| glob(excluded, a)))
             });
             continue;
         }
         let pattern = if part == "_all" { "*" } else { part };
         if pattern.contains('*') {
             let mut found = false;
-            for (name, index) in indices.iter().filter(|(_, i)| expands(i)) {
+            for (name, index) in indices.iter().map(|(n, i)| (n, i.borrow())) {
+                if !expands(index) {
+                    continue;
+                }
                 if glob(pattern, name) {
                     add(&mut hits, name, None);
                     found = true;
@@ -198,7 +212,9 @@ pub fn resolve(
             Some((name, _)) => vec![(name.as_str(), None)],
             None => indices
                 .iter()
-                .filter_map(|(name, i)| Some((name.as_str(), i.aliases.get(part)?.filter.as_ref())))
+                .filter_map(|(name, i)| {
+                    Some((name.as_str(), i.borrow().aliases.get(part)?.filter.as_ref()))
+                })
                 .collect(),
         };
         let missing = match () {
@@ -211,7 +227,7 @@ pub fn resolve(
             }
             _ => named
                 .iter()
-                .find(|(name, _)| o.refuse_closed && indices[*name].closed)
+                .find(|(name, _)| o.refuse_closed && indices[*name].borrow().closed)
                 .map(|(name, _)| ResolveError::IndexClosed((*name).to_owned())),
         };
         match missing {
@@ -240,31 +256,43 @@ pub fn resolve(
 }
 
 /// [`resolve`] with [`IndicesOptions::READ`]: metadata reads.
-pub fn resolve_read(indices: &Indices, expr: &str) -> Result<Vec<Target>, ResolveError> {
+pub fn resolve_read(
+    indices: &Map<impl Borrow<Index>>,
+    expr: &str,
+) -> Result<Vec<Target>, ResolveError> {
     resolve(indices, expr, &IndicesOptions::READ)
 }
 
 /// [`resolve`] with [`IndicesOptions::DATA`]: document reads and searches.
-pub fn resolve_data(indices: &Indices, expr: &str) -> Result<Vec<Target>, ResolveError> {
+pub fn resolve_data(
+    indices: &Map<impl Borrow<Index>>,
+    expr: &str,
+) -> Result<Vec<Target>, ResolveError> {
     resolve(indices, expr, &IndicesOptions::DATA)
 }
 
 /// Resolves a write target: an index (existing or to be auto-created) or an alias's write index.
-pub fn resolve_write(indices: &Indices, name: &str) -> Result<String, ResolveError> {
+pub fn resolve_write(
+    indices: &Map<impl Borrow<Index>>,
+    name: &str,
+) -> Result<String, ResolveError> {
     let target = resolve_write_target(indices, name)?;
     match indices.get(&target) {
-        Some(i) if i.closed => Err(ResolveError::IndexClosed(target)),
+        Some(i) if i.borrow().closed => Err(ResolveError::IndexClosed(target)),
         _ => Ok(target),
     }
 }
 
-fn resolve_write_target(indices: &Indices, name: &str) -> Result<String, ResolveError> {
+fn resolve_write_target(
+    indices: &Map<impl Borrow<Index>>,
+    name: &str,
+) -> Result<String, ResolveError> {
     if indices.contains_key(name) {
         return Ok(name.to_owned());
     }
     let members: Vec<(&String, &Alias)> = indices
         .iter()
-        .filter_map(|(n, i)| Some((n, i.aliases.get(name)?)))
+        .filter_map(|(n, i)| Some((n, i.borrow().aliases.get(name)?)))
         .collect();
     let explicit: Vec<&String> = members
         .iter()
@@ -282,7 +310,7 @@ fn resolve_write_target(indices: &Indices, name: &str) -> Result<String, Resolve
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Index;
+    use crate::{Index, Indices};
     use serde_json::json;
 
     fn indices() -> Indices {

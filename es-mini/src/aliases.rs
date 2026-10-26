@@ -109,7 +109,10 @@ pub fn parse_alias(v: &Value) -> Result<Alias, AppError> {
 }
 
 /// Concrete index names an expression refers to (aliases expand to their indices).
-fn resolved_names(indices: &Indices, expr: &str) -> Result<Vec<String>, AppError> {
+fn resolved_names(
+    indices: &aliases::Map<impl std::borrow::Borrow<es_index::Index>>,
+    expr: &str,
+) -> Result<Vec<String>, AppError> {
     Ok(aliases::resolve_read(indices, expr)?
         .into_iter()
         .map(|t| t.index)
@@ -147,7 +150,7 @@ pub async fn put(
 ) -> Result<Json<Value>, AppError> {
     check(&uri, &params, &WRITE_PARAMS)?;
     let meta = parse_alias(&parse_body(&body)?)?;
-    let mut indices = state.write().expect("lock poisoned");
+    let mut indices = state.write();
     check_alias_name(&indices, &alias)?;
     for name in resolved_names(&indices, &index)? {
         if let Some(i) = indices.get_mut(&name) {
@@ -164,7 +167,7 @@ pub async fn delete(
     Query(params): Params,
 ) -> Result<Json<Value>, AppError> {
     check(&uri, &params, &WRITE_PARAMS)?;
-    let mut indices = state.write().expect("lock poisoned");
+    let mut indices = state.write();
     let mut removed = false;
     for name in resolved_names(&indices, &index)? {
         if let Some(i) = indices.get_mut(&name) {
@@ -185,7 +188,7 @@ pub async fn delete(
 /// `{index: {aliases: {...}}}` for the selected indices and alias names, plus the literal
 /// names that matched nothing.
 fn lookup(
-    indices: &Indices,
+    indices: &aliases::Map<impl std::borrow::Borrow<es_index::Index>>,
     index: Option<&str>,
     names: Option<&str>,
 ) -> Result<(Value, Vec<String>), AppError> {
@@ -197,8 +200,7 @@ fn lookup(
     let mut out = Map::new();
     let mut seen = BTreeSet::new();
     for name in selected {
-        let aliases: Map<String, Value> = indices[&name]
-            .aliases
+        let aliases: Map<String, Value> = (indices[&name].borrow().aliases)
             .iter()
             .inspect(|(a, _)| {
                 if let Some(ps) = &patterns {
@@ -250,7 +252,7 @@ fn get_response(
     index: Option<&str>,
     names: Option<&str>,
 ) -> Result<Response, AppError> {
-    let (mut body, missing) = lookup(&state.read().expect("lock poisoned"), index, names)?;
+    let (mut body, missing) = lookup(&state.read().all(), index, names)?;
     if missing.is_empty() {
         return Ok(Json(body).into_response());
     }
@@ -304,7 +306,7 @@ pub async fn get_for_index_named(
 }
 
 fn exists(state: &AppState, index: Option<&str>, names: &str) -> StatusCode {
-    match lookup(&state.read().expect("lock poisoned"), index, Some(names)) {
+    match lookup(&state.read().all(), index, Some(names)) {
         Ok((body, missing))
             if missing.is_empty() && body.as_object().is_some_and(|o| !o.is_empty()) =>
         {
@@ -359,7 +361,7 @@ pub async fn update(
     let actions = body["actions"]
         .as_array()
         .ok_or_else(|| AppError::ActionRequestValidation("no actions specified".into()))?;
-    let mut indices = state.write().expect("lock poisoned");
+    let mut indices = state.write();
     let mut tables: BTreeMap<String, BTreeMap<String, Alias>> = indices
         .iter()
         .map(|(n, i)| (n.clone(), i.aliases.clone()))

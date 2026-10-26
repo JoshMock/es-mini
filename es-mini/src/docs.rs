@@ -54,8 +54,16 @@ fn write<T>(
     name: &str,
     f: impl FnOnce(&mut Index) -> T,
 ) -> Result<(T, u64, String), AppError> {
-    let mut indices = state.write().expect("lock poisoned");
-    let target = aliases::resolve_write(&indices, name)?;
+    let shared = state.read();
+    // A write to an existing index locks only that index; auto-creating one locks them all.
+    let target = write_target(&shared, name)?;
+    if let Some(mut index) = shared.write(&target) {
+        return Ok(apply(&mut index, target, f));
+    }
+    drop(shared);
+    let mut indices = state.write();
+    // Resolved again: another request may have created the index meanwhile.
+    let target = aliases::resolve_write(&*indices, name)?;
     if !indices.contains_key(&target) {
         crate::indices::validate_index_name(&target)?;
     }
@@ -64,16 +72,33 @@ fn write<T>(
         created.settings.record_creation(&target);
         created
     });
+    Ok(apply(index, target, f))
+}
+
+/// [`aliases::resolve_write`] without locking any index when `name` is one.
+pub(crate) fn write_target(shared: &crate::store::Shared, name: &str) -> Result<String, AppError> {
+    match shared.read(name).map(|ix| ix.closed) {
+        Some(true) => Err(aliases::ResolveError::IndexClosed(name.to_owned()).into()),
+        Some(false) => Ok(name.to_owned()),
+        None => Ok(aliases::resolve_write(&shared.all(), name)?),
+    }
+}
+
+/// `f`'s result on `index`, with its shard total and name.
+fn apply<T>(index: &mut Index, name: String, f: impl FnOnce(&mut Index) -> T) -> (T, u64, String) {
     let replicas = index
         .settings
         .get("index.number_of_replicas")
         .and_then(|r| r.parse().ok())
         .unwrap_or(0);
-    Ok((f(index), 1 + replicas, target))
+    (f(index), 1 + replicas, name)
 }
 
 /// The one concrete index a single-document read targets.
-pub(crate) fn single_index(indices: &es_index::Indices, name: &str) -> Result<String, AppError> {
+pub(crate) fn single_index(
+    indices: &es_index::aliases::Map<impl std::borrow::Borrow<Index>>,
+    name: &str,
+) -> Result<String, AppError> {
     let targets = aliases::resolve_data(indices, name)?;
     match targets.as_slice() {
         [t] => Ok(t.index.clone()),
@@ -192,7 +217,7 @@ fn require_alias(
     index: &str,
 ) -> Result<(), AppError> {
     let flagged = params.get("require_alias").is_some_and(|v| v == "true");
-    match flagged && !aliases::is_alias(&state.read().expect("lock poisoned"), index) {
+    match flagged && !aliases::is_alias(&state.read().all(), index) {
         true => Err(AppError::RequireAlias(index.to_owned())),
         false => Ok(()),
     }
@@ -335,7 +360,8 @@ pub async fn get(
     Query(params): Query<HashMap<String, String>>,
 ) -> Reply {
     params::check(&uri, &params, &GET_PARAMS)?;
-    let indices = state.read().expect("lock poisoned");
+    let shared = state.read();
+    let indices = shared.all();
     let index = single_index(&indices, &index)?;
     let i = &indices[&index];
     // A non-realtime get sees what search sees, unless it asks for a refresh first.

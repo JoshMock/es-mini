@@ -863,7 +863,10 @@ fn problems(found: Vec<(Pos, String)>) -> EsqlError {
     ))
 }
 
-pub fn run(indices: &BTreeMap<String, Index>, query: &str) -> Result<Response, EsqlError> {
+pub fn run(
+    indices: &aliases::Map<impl std::borrow::Borrow<Index>>,
+    query: &str,
+) -> Result<Response, EsqlError> {
     let (toks, eof) = lex(query)?;
     let (sources, cmds) = Parser {
         src: query,
@@ -898,7 +901,7 @@ pub fn run(indices: &BTreeMap<String, Index>, query: &str) -> Result<Response, E
     let mut mapped: BTreeMap<String, (String, BTreeMap<String, Vec<String>>)> = BTreeMap::new();
     let mut docs = Vec::new();
     for t in &targets {
-        let index = &indices[&t.index];
+        let index: &Index = indices[&t.index].borrow();
         for (c, (es_type, ty)) in columns(index) {
             let es_type = if es_type == "date" {
                 "datetime".into()
@@ -958,7 +961,7 @@ pub fn run(indices: &BTreeMap<String, Index>, query: &str) -> Result<Response, E
         .iter()
         .zip(&targets)
         .map(|(g, t)| {
-            let mappings = &indices[&t.index].mappings;
+            let mappings = &indices[&t.index].borrow().mappings;
             g.iter()
                 .map(|d| {
                     types

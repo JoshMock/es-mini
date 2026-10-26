@@ -130,7 +130,7 @@ fn by_query(
     req.from = 0;
     req.size = max_docs.unwrap_or(usize::MAX);
 
-    let mut indices = state.write().expect("lock poisoned");
+    let mut indices = state.write();
     let resolved = crate::indices::data_targets(&indices, &name, &params)?;
     let targets = crate::search::targets(&indices, &resolved);
     let hits: Vec<(String, String, Value)> = es_query::search_many(&targets, &req)?

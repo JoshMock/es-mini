@@ -5,22 +5,29 @@ use axum::{
     extract::{Path, Query, State},
     http::Uri,
 };
-use es_index::{Indices, aliases};
+use es_index::aliases;
 use es_query::{
     SearchRequest,
     esql::{self, EsqlError},
     parse_query,
 };
 use serde_json::{Value, json};
+use std::borrow::Borrow;
 use std::{collections::HashMap, time::Instant};
 
 pub(crate) fn targets<'a>(
-    indices: &'a Indices,
+    indices: &'a aliases::Map<impl Borrow<es_index::Index>>,
     resolved: &'a [aliases::Target],
 ) -> Vec<es_query::Target<'a>> {
     resolved
         .iter()
-        .map(|t| (t.index.as_str(), &indices[&t.index], t.filter.as_ref()))
+        .map(|t| {
+            (
+                t.index.as_str(),
+                indices[&t.index].borrow(),
+                t.filter.as_ref(),
+            )
+        })
         .collect()
 }
 
@@ -118,7 +125,10 @@ fn profile(targets: &[es_query::Target], aggs: Vec<Value>) -> Value {
 /// Replaces each terms lookup (`"terms": {field: {"index", "id", "path"}}`) in a request body
 /// with the values at `path` in that document (none if it is missing), as Elasticsearch fetches
 /// them before searching.
-fn terms_lookups(indices: &Indices, v: &mut Value) -> Result<(), AppError> {
+fn terms_lookups(
+    indices: &aliases::Map<impl Borrow<es_index::Index>>,
+    v: &mut Value,
+) -> Result<(), AppError> {
     match v {
         Value::Array(a) => a.iter_mut().try_for_each(|x| terms_lookups(indices, x)),
         Value::Object(o) => {
@@ -130,7 +140,8 @@ fn terms_lookups(indices: &Indices, v: &mut Value) -> Result<(), AppError> {
                     }) else {
                         continue;
                     };
-                    let index = &indices[&crate::docs::single_index(indices, index)?];
+                    let index: &es_index::Index =
+                        indices[&crate::docs::single_index(indices, index)?].borrow();
                     *spec = match index.get(id) {
                         Some(d) => es_index::postings::values(&d.source, path)
                             .into_iter()
@@ -188,7 +199,7 @@ pub async fn search(
             "[indices] cannot be used with point in time. Do not specify any index with point in time.".into(),
         ));
     }
-    terms_lookups(&state.read().expect("lock poisoned"), &mut body)?;
+    terms_lookups(&state.read().all(), &mut body)?;
     let mut req = SearchRequest::parse(&body).map_err(AppError::from)?;
     if let Some(q) = params.get("q") {
         req.query = query_from_params(q, &params)?;
@@ -206,14 +217,15 @@ pub async fn search(
         ));
     }
     let snapshot = pit.map(|p| crate::scroll::pit(&contexts, &p)).transpose()?;
-    let (indices, resolved);
+    let (shared, indices, resolved);
     let targets = match &snapshot {
         Some(s) => s
             .iter()
             .map(|(n, i, f)| (n.as_str(), i, f.as_ref()))
             .collect(),
         None => {
-            indices = state.read().expect("lock poisoned");
+            shared = state.read();
+            indices = shared.all();
             resolved = crate::indices::data_targets(&indices, &name, &params)?;
             targets(&indices, &resolved)
         }
@@ -509,7 +521,8 @@ pub async fn count(
             "request does not support [{k}]"
         )));
     }
-    let indices = state.read().expect("lock poisoned");
+    let shared = state.read();
+    let indices = shared.all();
     terms_lookups(&indices, &mut body)?;
     let query = match params.get("q") {
         Some(q) => query_from_params(q, &params)?,
@@ -540,7 +553,7 @@ pub async fn esql(
         .as_str()
         .filter(|q| !q.is_empty())
         .ok_or_else(|| AppError::ActionRequestValidation("[query] is required".into()))?;
-    let r = esql::run(&state.read().expect("lock poisoned"), query).map_err(|e| match e {
+    let r = esql::run(&state.read().all(), query).map_err(|e| match e {
         EsqlError::Parse(m) => AppError::ParsingException(m),
         EsqlError::Verification(m) => AppError::Verification(m),
         EsqlError::IndexClosed(i) => AppError::IndexClosedBlock(i),

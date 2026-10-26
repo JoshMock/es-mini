@@ -6,9 +6,9 @@ use axum::{
     extract::{Path, Query, State},
     http::{StatusCode, Uri},
 };
+use es_index::aliases;
 use es_index::index_settings::{self, Update};
 use es_index::{FieldMapping, Index, Mappings};
-use es_index::{Indices, aliases};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
@@ -161,7 +161,7 @@ pub async fn create(
             .aliases
             .insert(resolve_date_math(alias)?, parse_alias(meta)?);
     }
-    let mut indices = state.write().expect("lock poisoned");
+    let mut indices = state.write();
     if indices.contains_key(&name) {
         return Err(AppError::IndexExists(name));
     }
@@ -192,7 +192,7 @@ pub async fn delete(
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, AppError> {
     check(&uri, &params, &["timeout", "master_timeout"])?;
-    let mut indices = state.write().expect("lock poisoned");
+    let mut indices = state.write();
     let opts = aliases::IndicesOptions::DELETE.with_params(&params);
     let to_remove: Vec<String> = aliases::resolve(&indices, &name, &opts)?
         .into_iter()
@@ -207,7 +207,7 @@ pub async fn delete(
 /// Concrete indices a metadata request names (GET index, mappings, settings, open/close, ...),
 /// honoring its `ignore_unavailable`, `allow_no_indices` and `expand_wildcards`.
 fn read_indices(
-    indices: &Indices,
+    indices: &aliases::Map<impl std::borrow::Borrow<es_index::Index>>,
     expr: &str,
     params: &HashMap<String, String>,
 ) -> Result<Vec<String>, AppError> {
@@ -220,7 +220,7 @@ fn read_indices(
 
 /// Search/count targets for `expr`, honoring the request's indices options.
 pub fn data_targets(
-    indices: &Indices,
+    indices: &aliases::Map<impl std::borrow::Borrow<es_index::Index>>,
     expr: &str,
     params: &HashMap<String, String>,
 ) -> Result<Vec<aliases::Target>, AppError> {
@@ -246,7 +246,8 @@ pub async fn get(
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, AppError> {
     check(&uri, &params, &GET_PARAMS)?;
-    let indices = state.read().expect("lock poisoned");
+    let shared = state.read();
+    let indices = shared.all();
     let body: Map<String, Value> = read_indices(&indices, &name, &params)?
         .into_iter()
         .map(|n| {
@@ -280,7 +281,7 @@ pub async fn get(
 }
 
 pub async fn head(State(state): State<AppState>, Path(name): Path<String>) -> StatusCode {
-    match aliases::resolve_read(&state.read().expect("lock poisoned"), &name) {
+    match aliases::resolve_read(&state.read().all(), &name) {
         Ok(t) if !t.is_empty() => StatusCode::OK,
         _ => StatusCode::NOT_FOUND,
     }
@@ -301,7 +302,7 @@ pub async fn refresh(
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, AppError> {
     check(&uri, &params, &[])?;
-    let mut indices = state.write().expect("lock poisoned");
+    let mut indices = state.write();
     let names = read_indices(&indices, &name, &params)?;
     for n in &names {
         indices.get_mut(n).expect("resolved index exists").refresh();
@@ -375,7 +376,8 @@ fn settings_response(
         }
         out
     };
-    let indices = state.read().expect("lock poisoned");
+    let shared = state.read();
+    let indices = shared.all();
     let out: Map<String, Value> = read_indices(&indices, &name, &params)?
         .into_iter()
         .map(|n| (n.clone(), render(&indices[&n])))
@@ -400,7 +402,7 @@ fn set_closed(
     params: &HashMap<String, String>,
     closed: bool,
 ) -> Result<Vec<String>, AppError> {
-    let mut indices = state.write().expect("lock poisoned");
+    let mut indices = state.write();
     let names = read_indices(&indices, name, params)?;
     for n in &names {
         indices.get_mut(n).expect("resolved index exists").closed = closed;
@@ -506,7 +508,7 @@ fn put_settings_on(
         }
     }
     let reopen = params.get("reopen").map(String::as_str) == Some("true");
-    let mut indices = state.write().expect("lock poisoned");
+    let mut indices = state.write();
     let names = read_indices(&indices, &name, &params)?;
     // Indices that take the non-dynamic settings: closed ones, and open ones `reopen` closes
     // because a value changes; open indices keep the rest unchanged.
@@ -587,7 +589,8 @@ pub async fn get_mapping(
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, AppError> {
     check(&uri, &params, &["local", "master_timeout"])?;
-    let indices = state.read().expect("lock poisoned");
+    let shared = state.read();
+    let indices = shared.all();
     let out: Map<String, Value> = read_indices(&indices, &name, &params)?
         .into_iter()
         .map(|n| (n.clone(), json!({"mappings": indices[&n].mappings})))
@@ -625,7 +628,8 @@ pub async fn stats(
     let path = path.map(|Path(p)| p).unwrap_or_default();
     let metric = path.get("metric").map_or("_all", String::as_str);
     let wanted = |m: &str| metric == "_all" || metric.split(',').any(|x| x == m);
-    let indices = state.read().expect("lock poisoned");
+    let shared = state.read();
+    let indices = shared.all();
     let names = read_indices(
         &indices,
         path.get("index").map_or("_all", String::as_str),

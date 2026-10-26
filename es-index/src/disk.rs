@@ -828,7 +828,7 @@ const INACTIVE: Duration = Duration::from_secs(300);
 
 /// The shortest `index.translog.sync_interval` (default 5s) of all indices.
 // ponytail: one timer for all indices, so some sync more often than they ask (never less)
-pub fn sync_interval(indices: &Indices) -> Duration {
+pub fn sync_interval(indices: &crate::aliases::Map<impl std::borrow::Borrow<Index>>) -> Duration {
     let default = Duration::from_secs(5);
     let every = |ix: &Index| {
         ix.settings
@@ -836,7 +836,11 @@ pub fn sync_interval(indices: &Indices) -> Duration {
             .and_then(crate::parse_time)
             .unwrap_or(default)
     };
-    indices.values().map(every).min().unwrap_or(default)
+    indices
+        .values()
+        .map(|ix| every(ix.borrow()))
+        .min()
+        .unwrap_or(default)
 }
 
 fn log(data_dir: &Path, indices: &mut Indices, all: bool) -> es_codec::Result<Pending> {

@@ -140,7 +140,8 @@ pub async fn open_pit(
         .ok_or_else(|| AppError::ActionRequestValidation("[keep_alive] is not specified".into()))?;
     let keep = keep_alive(keep)?;
     let targets: Vec<_> = {
-        let indices = state.read().expect("lock poisoned");
+        let shared = state.read();
+        let indices = shared.all();
         crate::indices::data_targets(&indices, &name, &params)?
             .into_iter()
             .map(|t| (t.index.clone(), indices[&t.index].snapshot(), t.filter))

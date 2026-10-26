@@ -11,6 +11,7 @@ mod nodes;
 mod params;
 mod scroll;
 mod search;
+mod store;
 mod template;
 
 use axum::{
@@ -24,10 +25,10 @@ use error::AppError;
 use es_index::Indices;
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use store::Store;
 
-// ponytail: one global lock over all indices; per-index locks if write contention shows up
-type AppState = Arc<RwLock<Indices>>;
+type AppState = Arc<Store>;
 
 const CLUSTER_NAME: &str = "es-mini";
 
@@ -72,7 +73,8 @@ async fn health(
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<(StatusCode, Json<Value>), AppError> {
     params::check(&uri, &params, &HEALTH_PARAMS)?;
-    let store = state.read().expect("lock poisoned");
+    let shared = state.read();
+    let store = shared.all();
     let names: Vec<String> = match &index {
         None => store.keys().cloned().collect(),
         Some(Path(expr)) => match es_index::aliases::resolve_read(&store, expr) {
@@ -153,7 +155,7 @@ pub fn app() -> Router {
 
 /// The full HTTP API over `indices`, e.g. ones opened with [`es_index::disk::open`].
 pub fn app_with(indices: Indices) -> Router {
-    with_es_405(router(Arc::new(RwLock::new(indices))))
+    with_es_405(router(Arc::new(Store::new(indices))))
 }
 
 /// The full HTTP API over the data directory `dir` (created if missing): its indices are loaded
@@ -176,7 +178,7 @@ pub async fn serve_persisted(
         .with_graceful_shutdown(shutdown)
         .await
         .map_err(|e| e.to_string())?;
-    es_index::disk::save(dir, &state.read().expect("lock poisoned")).map_err(|e| e.0)
+    es_index::disk::save(dir, &state.write()).map_err(|e| e.0)
 }
 
 fn persisted(dir: &std::path::Path) -> Result<(Router, AppState), String> {
@@ -186,7 +188,7 @@ fn persisted(dir: &std::path::Path) -> Result<(Router, AppState), String> {
     } else {
         Indices::new()
     };
-    let state = Arc::new(RwLock::new(indices));
+    let state = Arc::new(Store::new(indices));
     spawn_syncer(dir.to_owned(), Arc::downgrade(&state));
     let (dir, saved, group) = (dir.to_owned(), state.clone(), Arc::new(Group::default()));
     let app = with_es_405(router(state.clone()).layer(axum::middleware::from_fn(
@@ -250,7 +252,7 @@ struct Rounds {
 
 impl Group {
     /// Returns once a round that began after this call made the caller's writes durable.
-    fn persist(&self, dir: &std::path::Path, state: &RwLock<Indices>) -> Result<(), String> {
+    fn persist(&self, dir: &std::path::Path, state: &Store) -> Result<(), String> {
         let mut r = self.rounds.lock().expect("lock poisoned");
         let mine = r.started + 1;
         while r.finished < mine {
@@ -261,8 +263,7 @@ impl Group {
             (r.running, r.started) = (true, mine);
             drop(r);
             // The fsync runs without the indices lock, so other writes apply meanwhile.
-            let begun =
-                es_index::disk::begin_persist(dir, &mut state.write().expect("lock poisoned"));
+            let begun = es_index::disk::begin_persist(dir, &mut state.write());
             let saved = begun.and_then(es_index::disk::Pending::finish);
             r = self.rounds.lock().expect("lock poisoned");
             (r.running, r.finished) = (false, mine);
@@ -281,7 +282,7 @@ impl Group {
 }
 
 /// Runs [`es_index::disk::sync`] every [`es_index::disk::sync_interval`] until `state` is dropped.
-fn spawn_syncer(dir: std::path::PathBuf, state: std::sync::Weak<RwLock<Indices>>) {
+fn spawn_syncer(dir: std::path::PathBuf, state: std::sync::Weak<Store>) {
     use std::time::{Duration, Instant};
     std::thread::spawn(move || {
         let mut last = Instant::now();
@@ -289,14 +290,13 @@ fn spawn_syncer(dir: std::path::PathBuf, state: std::sync::Weak<RwLock<Indices>>
             // Elasticsearch's smallest index.translog.sync_interval.
             std::thread::sleep(Duration::from_millis(100));
             let Some(state) = state.upgrade() else { return };
-            let every = es_index::disk::sync_interval(&state.read().expect("lock poisoned"));
+            let every = es_index::disk::sync_interval(&state.read().all());
             if last.elapsed() < every {
                 continue;
             }
             last = Instant::now();
             // The fsync runs without the indices lock, as in `Group::persist`.
-            let begun =
-                es_index::disk::begin_sync(&dir, &mut state.write().expect("lock poisoned"));
+            let begun = es_index::disk::begin_sync(&dir, &mut state.write());
             if let Err(e) = begun.and_then(es_index::disk::Pending::finish) {
                 tracing::error!("syncing {}: {e}", dir.display());
             }

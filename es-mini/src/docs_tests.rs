@@ -449,3 +449,25 @@ async fn refresh_without_an_index_refreshes_every_index() {
     let (_, r) = call(&app, Method::GET, "/b/_doc/1?realtime=false", None).await;
     assert_eq!(r["found"], true);
 }
+
+#[test]
+fn writes_to_different_indices_run_concurrently() {
+    let state = std::sync::Arc::new(crate::store::Store::new(es_index::Indices::from(
+        ["a", "b"].map(|n| (n.to_owned(), es_index::Index::default())),
+    )));
+    let shared = state.read();
+    let writing_a = shared.write("a").unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let to_b = std::thread::spawn({
+        let state = state.clone();
+        move || {
+            let wrote = crate::docs::put_or_create(&state, "b", "1", json!({}), false, 0);
+            tx.send(wrote.is_ok()).unwrap();
+        }
+    });
+    let wrote_b = rx.recv_timeout(std::time::Duration::from_secs(10));
+    drop(writing_a);
+    drop(shared);
+    to_b.join().unwrap();
+    assert_eq!(wrote_b, Ok(true));
+}
