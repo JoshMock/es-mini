@@ -5,6 +5,7 @@ pub mod analysis;
 pub mod date_math;
 pub mod disk;
 pub mod filter_path;
+pub mod index_settings;
 pub mod mapping;
 pub mod postings;
 pub mod tz;

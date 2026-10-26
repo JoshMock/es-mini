@@ -6,6 +6,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{StatusCode, Uri},
 };
+use es_index::index_settings::{self, Update};
 use es_index::{FieldMapping, Index, Mappings};
 use es_index::{Indices, aliases};
 use serde::Deserialize;
@@ -99,12 +100,13 @@ pub async fn create(
     let mut index = Index::default();
     index.settings.record_creation(&name);
     index.settings.merge(&body["settings"]);
-    if let Some(l) = index.settings.get("index.mapping.array_objects.limit")
-        && !l.parse::<u64>().is_ok_and(|n| n > 0)
-    {
-        return Err(AppError::IllegalArgument(format!(
-            "Failed to parse value [{l}] for setting [index.mapping.array_objects.limit] must be >= 1"
-        )));
+    // ponytail: only this setting's value is validated on create
+    let limit = "index.mapping.array_objects.limit";
+    if let Some(l) = index.settings.get(limit) {
+        index_settings::get(limit)
+            .expect("registered")
+            .validate(l)
+            .map_err(AppError::IllegalArgument)?;
     }
     if index.settings.get("index.soft_deletes.enabled") == Some("false") {
         return Err(AppError::IllegalArgument(
@@ -456,28 +458,6 @@ pub async fn put_all_settings(
     put_settings_on(state, "_all".into(), uri, params, body)
 }
 
-/// How Elasticsearch lets a setting change after index creation.
-#[derive(Clone, Copy, PartialEq)]
-enum Update {
-    Dynamic,
-    /// Only on closed indices (or with `reopen=true`).
-    Static,
-    /// Never.
-    Final,
-}
-
-/// Top-level `index.*` settings PUT _settings accepts, from IndexScopedSettings.
-const TOP_LEVEL_SETTINGS: [(&str, Update); 8] = [
-    ("codec", Update::Static),
-    ("number_of_shards", Update::Final),
-    ("number_of_routing_shards", Update::Final),
-    ("routing_partition_size", Update::Final),
-    ("number_of_replicas", Update::Dynamic),
-    ("refresh_interval", Update::Dynamic),
-    ("hidden", Update::Dynamic),
-    ("max_result_window", Update::Dynamic),
-];
-
 const REINDEX_DOCS: &str =
     "See https://www.elastic.co/docs/api/doc/elasticsearch/operation/operation-reindex";
 
@@ -503,25 +483,41 @@ fn put_settings_on(
     let settings = body.get("settings").unwrap_or(&body);
     // Non-dynamic keys in the request, with their new values and whether they are final.
     let mut skipped = Vec::new();
+    // Registered settings the request sets, with their new values.
+    let mut values = Vec::new();
     // ponytail: only rejects unknown top-level index.* names; nested groups (index.mapping.*) pass
     for (key, value) in es_index::flatten_settings(settings) {
         let short = key.strip_prefix("index.").unwrap_or(&key);
-        let update = match TOP_LEVEL_SETTINGS.iter().find(|(k, _)| *k == short) {
-            Some((_, u)) => *u,
+        let key = format!("index.{short}");
+        let value = match value {
+            Value::Null => None,
+            Value::String(v) => Some(v.clone()),
+            v => Some(v.to_string()),
+        };
+        let update = match index_settings::get(&key) {
+            Some(s) => {
+                if let Some(v) = &value {
+                    values.push((s, v.clone()));
+                }
+                s.update
+            }
             None if short.contains('.') => Update::Dynamic,
             None => {
                 return Err(AppError::IllegalArgument(format!(
-                    "unknown setting [index.{short}] please check that any required plugins are installed, or check the breaking changes documentation for removed settings"
+                    "unknown setting [{key}] please check that any required plugins are installed, or check the breaking changes documentation for removed settings"
                 )));
             }
         };
-        if update != Update::Dynamic {
-            let value = match value {
-                Value::Null => None,
-                Value::String(v) => Some(v.clone()),
-                v => Some(v.to_string()),
-            };
-            skipped.push((format!("index.{short}"), value, update == Update::Final));
+        match update {
+            Update::Dynamic => {}
+            Update::Private => {
+                return Err(AppError::IllegalArgument(format!(
+                    "can not update private setting [{key}]; this setting is managed by Elasticsearch"
+                )));
+            }
+            Update::Static | Update::Final => {
+                skipped.push((key, value, update == Update::Final));
+            }
         }
     }
     let reopen = params.get("reopen").map(String::as_str) == Some("true");
@@ -582,6 +578,9 @@ fn put_settings_on(
         return Err(AppError::IllegalArgument(format!(
             "final {n} setting [{k}], not updateable"
         )));
+    }
+    for (setting, value) in &values {
+        setting.validate(value).map_err(AppError::IllegalArgument)?;
     }
     for n in names {
         indices
