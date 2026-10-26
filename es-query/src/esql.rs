@@ -1,10 +1,9 @@
 //! ES|QL subset: `FROM` (with `METADATA _id, _index, _version`), `ROW` and `SHOW INFO`, with
-//! `WHERE`, `LIMIT`, `KEEP`, `DROP`, and `SORT`.
+//! `WHERE`, `EVAL`, `LIMIT`, `KEEP`, `DROP`, and `SORT`.
 //!
-//! WHERE supports comparisons (`== != < <= > >=`), `AND`/`OR`/`NOT`, parentheses, and
-//! `IS [NOT] NULL`, arithmetic, the `TO_STRING`, `TO_INTEGER`, `TO_LONG`, `TO_DOUBLE` and
-//! `TO_BOOLEAN` conversions, and `SUBSTRING` and `TRIM` over field names and literals. Anything
-//! else is a parse error.
+//! Expressions support comparisons (`== != < <= > >=`), `AND`/`OR`/`NOT`, parentheses,
+//! `IS [NOT] NULL`, arithmetic, and the functions in `CONVERSIONS` and `SCALAR_FNS` over field
+//! names and literals. Any other syntax is a parse error; any other function fails verification.
 
 use es_index::{
     FieldMapping, Index, Mappings,
@@ -239,7 +238,8 @@ enum Expr {
         OnceCell<&'static str>,
         Span,
     ),
-    /// A function call, with its canonical name and argument's type once `resolve` checked it.
+    /// A function call, with its canonical name and, once `resolve` checked it, its argument's
+    /// type (a conversion) or its result type (a scalar function).
     Call(
         String,
         Vec<Expr>,
@@ -1125,7 +1125,7 @@ fn java_whitespace(c: char) -> bool {
         || c.is_whitespace() && !matches!(c, '\u{85}' | '\u{a0}' | '\u{2007}' | '\u{202f}')
 }
 
-/// String function `f` (one of `STRING_FNS`) of its arguments, like Elasticsearch's
+/// String function `f` (`SUBSTRING` or `TRIM`) of its arguments, like Elasticsearch's
 /// evaluators: `None` for a multi-valued argument (where ES warns).
 fn string_fn(f: &str, args: &[Value]) -> Option<Value> {
     let s = args[0].as_str()?;
