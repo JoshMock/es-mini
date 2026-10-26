@@ -31,6 +31,7 @@ pub mod terms;
 pub mod translog;
 mod trie;
 pub mod uid;
+pub mod zstd;
 
 pub use compound::CompoundFile;
 pub use segment::SegmentReader;
