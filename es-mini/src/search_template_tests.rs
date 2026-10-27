@@ -103,3 +103,40 @@ async fn search_template_msearch() {
     assert_eq!(rs[1]["hits"]["hits"], json!([]));
     assert_eq!(rs[2]["status"], 400);
 }
+
+/// Outputs recorded from Elasticsearch 9.5.5's `_render/template`: a top-level list renders as
+/// its index map, maps in Java `HashMap` order, doubles as `Double.toString`.
+#[test]
+fn error_shapes_template_renders_lists_and_maps_like_java() {
+    let params = json!({
+        "a": [1, "x", {"k": "v"}, null, true, 1.5],
+        "o": {"k": [1, 2], "z": "q\"w"},
+        "n": (0..13).collect::<Vec<_>>(),
+        "big": {"a": 1, "b": 2, "c": 3, "d": 4, "e": 5, "f": 6, "g": 7, "h": 8, "i": 9, "j": 10,
+            "k": 11, "l": 12, "m": 13, "aa": 14, "bb": 15, "é": 16, "€x": 17},
+        "nest": [[1, [2]], {"q": [3]}], "e": [], "m": {"Aa": 1, "BB": 2},
+        "x": -0.0, "y": 1e-5, "z": 123456789.0, "g": 1e20, "f": 1.0
+    });
+    let r = |s: &str| render(s, &params).unwrap();
+    assert_eq!(r("{{a}}"), "{0=1, 1=x, 2={k=v}, 3=null, 4=true, 5=1.5}");
+    assert_eq!(
+        r("{{o}}|{{{o}}}"),
+        "{z=q\\\"w, k=[1, 2]}|{z=q\"w, k=[1, 2]}"
+    );
+    assert_eq!(
+        r("{{n}}"),
+        "{0=0, 1=1, 2=2, 3=3, 4=4, 5=5, 6=6, 7=7, 8=8, 9=9, 10=10, 11=11, 12=12}"
+    );
+    assert_eq!(
+        r("{{big}}"),
+        "{aa=14, bb=15, a=1, b=2, c=3, d=4, e=5, f=6, g=7, h=8, i=9, é=16, j=10, k=11, l=12, m=13, €x=17}"
+    );
+    assert_eq!(
+        r("{{nest}} {{e}} {{m}}"),
+        "{0=[1, [2]], 1={q=[3]}} {} {Aa=1, BB=2}"
+    );
+    assert_eq!(
+        r("{{x}} {{y}} {{z}} {{g}} {{f}}"),
+        "-0.0 1.0E-5 1.23456789E8 1.0E20 1.0"
+    );
+}

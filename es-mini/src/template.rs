@@ -85,16 +85,27 @@ fn emit<'v>(nodes: &[Node], stack: &mut Vec<&'v Value>, out: &mut String) {
     for node in nodes {
         match node {
             Node::Text(t) => out.push_str(t),
-            Node::Var(name, escape) => match lookup(stack, name) {
-                None | Some(Value::Null) => {}
-                Some(Value::String(s)) if *escape => {
-                    let quoted = Value::from(s.as_str()).to_string();
-                    out.push_str(&quoted[1..quoted.len() - 1]);
+            Node::Var(name, escape) => {
+                let s = match lookup(stack, name) {
+                    None | Some(Value::Null) => continue,
+                    // ES's mustache wraps a list in a map from index to item
+                    Some(Value::Array(a)) => format!(
+                        "{{{}}}",
+                        (a.iter().enumerate())
+                            .map(|(i, v)| format!("{i}={}", java_string(v)))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    Some(v) => java_string(v),
+                };
+                match escape {
+                    true => {
+                        let quoted = Value::from(s).to_string();
+                        out.push_str(&quoted[1..quoted.len() - 1]);
+                    }
+                    false => out.push_str(&s),
                 }
-                Some(Value::String(s)) => out.push_str(s),
-                // ponytail: arrays/objects render as JSON, where ES prints Java's toString
-                Some(v) => out.push_str(&v.to_string()),
-            },
+            }
             Node::Section(name, inverted, children) => {
                 let v = lookup(stack, name);
                 let falsy = match v {
@@ -122,6 +133,25 @@ fn emit<'v>(nodes: &[Node], stack: &mut Vec<&'v Value>, out: &mut String) {
                 }
             }
         }
+    }
+}
+
+/// A params value as Java's `toString` prints it, params being parsed into `HashMap`s.
+// ponytail: integers past u64 print as doubles; Java's are BigIntegers
+fn java_string(v: &Value) -> String {
+    let join = |parts: Vec<String>| parts.join(", ");
+    match v {
+        Value::Array(a) => format!("[{}]", join(a.iter().map(java_string).collect())),
+        Value::Object(o) => {
+            let mut entries: Vec<_> = o.iter().collect();
+            es_query::java_hash_order(&mut entries);
+            let entries = entries
+                .iter()
+                .map(|(k, v)| format!("{k}={}", java_string(v)));
+            format!("{{{}}}", join(entries.collect()))
+        }
+        Value::Number(n) if n.is_f64() => es_query::java_double(n.as_f64().unwrap_or(f64::NAN)),
+        v => es_index::setting_string(v),
     }
 }
 

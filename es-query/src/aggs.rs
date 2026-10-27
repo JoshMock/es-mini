@@ -491,7 +491,7 @@ impl Metric {
 }
 
 /// Java's `Double.toString`, which names the keys of `percentiles`.
-pub(crate) fn java_double(x: f64) -> String {
+pub fn java_double(x: f64) -> String {
     if x == 0.0 || (1e-3..1e7).contains(&x.abs()) {
         return format!("{x:?}");
     }

@@ -21,6 +21,7 @@ mod regexp;
 mod request;
 mod tdigest;
 
+pub use aggs::java_double;
 use dates::{now_millis, resolve_dates};
 pub use es_index::date_millis;
 use es_index::json_num as num;
@@ -179,14 +180,20 @@ fn named_queries(q: &Query) -> Vec<(String, Query)> {
     walk(q, &mut all);
     // ponytail: names sharing a bucket keep query order (Java's follows Map.copyOf's), and a
     // repeated name keeps its first query (Java's its last)
-    let cap = (all.len() * 4).div_ceil(3).next_power_of_two().max(16);
-    let bucket = |name: &str| {
-        let h = (name.encode_utf16()).fold(0u32, |h, c| h.wrapping_mul(31).wrapping_add(c.into()));
-        (h ^ (h >> 16)) as usize & (cap - 1)
-    };
-    all.sort_by_key(|(name, _)| bucket(name));
+    java_hash_order(&mut all);
     all.dedup_by(|a, b| a.0 == b.0);
     all
+}
+
+/// Sorts `entries`, put in this order, into a Java `HashMap`'s iteration order: by hash bucket,
+/// with keys sharing a bucket in put order.
+pub fn java_hash_order<K: AsRef<str>, T>(entries: &mut [(K, T)]) {
+    let cap = (entries.len() * 4).div_ceil(3).next_power_of_two().max(16);
+    entries.sort_by_key(|(k, _)| {
+        let h = (k.as_ref().encode_utf16())
+            .fold(0u32, |h, c| h.wrapping_mul(31).wrapping_add(c.into()));
+        (h ^ (h >> 16)) as usize & (cap - 1)
+    });
 }
 
 struct Searcher<'a> {
