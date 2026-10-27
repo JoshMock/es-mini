@@ -1537,6 +1537,38 @@ mod tests {
     }
 
     #[test]
+    fn mapping_validation_numeric_detection_follows_java_parse_double() {
+        let mut i: Index = Index {
+            mappings: serde_json::from_value(json!({"numeric_detection": true})).unwrap(),
+            ..Default::default()
+        };
+        let floats = [
+            "1f",
+            " 2.5D ",
+            "0x1.8p3",
+            "-0X1P-2d",
+            "NaN",
+            "-Infinity",
+            ".5",
+            "5.",
+            "1e+5",
+        ];
+        let strings = [
+            "inf", "nan", "infinity", "0x1.8", "NaNd", "+-1", "1_0", "1e", ".",
+        ];
+        let all: Vec<_> = floats.iter().chain(&strings).collect();
+        let doc: serde_json::Map<String, Value> = (all.iter().enumerate())
+            .map(|(n, s)| (format!("f{n}"), json!(s)))
+            .collect();
+        i.map_dynamic("1", &doc.into()).unwrap();
+        for (n, s) in all.iter().enumerate() {
+            let float = n < floats.len();
+            let t = i.mappings.properties[&format!("f{n}")].mapping_type();
+            assert_eq!(t, if float { "float" } else { "text" }, "{s}");
+        }
+    }
+
+    #[test]
     fn object_mappings_round_trip_through_dotted_paths() {
         let raw = json!({"properties": {
             "o": {"properties": {"a": {"type": "keyword"}, "b": {"properties": {"c": {"type": "long"}}}}}

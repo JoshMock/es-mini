@@ -222,21 +222,19 @@ impl Index {
             }
             _ if get(path).is_some() => return Ok(()),
             // Like Elasticsearch's DynamicFieldsBuilder: numeric strings are never dates.
-            // ponytail: Rust's f64 parse stands in for Java's Double.parseDouble (which also
-            // takes `1f`, hex and surrounding spaces, but not `inf`)
             Value::String(s)
                 if self.mappings.numeric_detection == Some(true) && s.parse::<i64>().is_ok() =>
             {
                 FieldMapping::Long
             }
             Value::String(s)
-                if self.mappings.numeric_detection == Some(true) && s.parse::<f64>().is_ok() =>
+                if self.mappings.numeric_detection == Some(true) && is_java_double(s) =>
             {
                 FieldMapping::Float
             }
             d @ Value::String(s)
                 if self.mappings.date_detection != Some(false)
-                    && s.parse::<f64>().is_err()
+                    && !is_java_double(s)
                     && parse_date_millis(d).is_some() =>
             {
                 FieldMapping::Date {
@@ -270,6 +268,34 @@ impl Index {
         };
         added.insert(path.to_owned(), mapping);
         Ok(())
+    }
+}
+
+/// Whether Java's `Double.parseDouble` accepts `s`: surrounding spaces and control characters,
+/// a sign, `NaN`, `Infinity`, hexadecimal floats (`0x1.8p3`) and an `f`/`d` suffix.
+fn is_java_double(s: &str) -> bool {
+    let s = s.trim_matches(|c| c <= ' ');
+    let s = s.strip_prefix(['+', '-']).unwrap_or(s);
+    if s == "NaN" || s == "Infinity" {
+        return true;
+    }
+    let s = s.strip_suffix(['f', 'F', 'd', 'D']).unwrap_or(s);
+    let digits = |s: &str, hex: bool| {
+        !s.is_empty()
+            && s.chars().all(|c| {
+                if hex {
+                    c.is_ascii_hexdigit()
+                } else {
+                    c.is_ascii_digit()
+                }
+            })
+    };
+    match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        Some(h) => h.split_once(['p', 'P']).is_some_and(|(m, e)| {
+            let e = e.strip_prefix(['+', '-']).unwrap_or(e);
+            digits(e, false) && digits(&m.replacen('.', "", 1), true)
+        }),
+        None => s.starts_with(|c: char| c.is_ascii_digit() || c == '.') && s.parse::<f64>().is_ok(),
     }
 }
 
