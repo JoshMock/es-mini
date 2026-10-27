@@ -3,6 +3,7 @@
 pub mod aliases;
 pub mod analysis;
 pub mod date_math;
+pub mod date_pattern;
 pub mod disk;
 pub mod filter_path;
 pub mod index_settings;
@@ -980,98 +981,15 @@ pub fn iso_date(millis: i64) -> String {
     format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{sec:02}.{milli:03}Z")
 }
 
-/// A Java DateTimeFormatter pattern as runs of a field letter (`y`, `u`, `M`, `d`, `H`, `m`,
-/// `s`, `S`) and its width, or of literal text (width 0); `None` for other letters.
-// ponytail: numeric fields only; no month or day names, zones, or optional sections
-fn pattern_runs(pattern: &str) -> Option<Vec<(char, usize, String)>> {
-    let mut runs: Vec<(char, usize, String)> = vec![];
-    let mut chars = pattern.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            'y' | 'u' | 'M' | 'd' | 'H' | 'm' | 's' | 'S' => match runs.last_mut() {
-                Some((l, n, _)) if *l == c => *n += 1,
-                _ => runs.push((c, 1, String::new())),
-            },
-            '\'' => {
-                let quoted: String = chars.by_ref().take_while(|&c| c != '\'').collect();
-                runs.push(('\'', 0, quoted));
-            }
-            c if c.is_ascii_alphabetic() => return None,
-            c => runs.push(('\'', 0, c.into())),
-        }
-    }
-    Some(runs)
-}
-
-/// Epoch milliseconds (UTC) of `s` in a Java date pattern of numeric fields (see `pattern_runs`).
+/// Epoch milliseconds (UTC) of `s` in a Java DateTimeFormatter pattern (see [`date_pattern`]).
 pub fn parse_pattern(pattern: &str, s: &str) -> Option<i64> {
-    parse_pattern_local(pattern, s, false)
+    date_pattern::Pattern::new(pattern)?.parse(s, "", &tz::TimeZone::UTC, false)
 }
 
-/// [`parse_pattern`]'s local epoch millis; with `round_up`, missing time fields default to
-/// 23:59:59.999 like ES's round-up parser.
-fn parse_pattern_local(pattern: &str, mut s: &str, round_up: bool) -> Option<i64> {
-    let [mut y, mut mo, mut d] = [1970, 1, 1];
-    let [mut h, mut mi, mut sec, mut ms] = match round_up {
-        true => [23, 59, 59, 999],
-        false => [0; 4],
-    };
-    for (c, n, text) in pattern_runs(pattern)? {
-        if n == 0 {
-            s = s.strip_prefix(text.as_str())?;
-            continue;
-        }
-        let (digits, rest) = s.split_at_checked(n)?;
-        if !digits.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        s = rest;
-        let v: i64 = digits.parse().ok()?;
-        match c {
-            'y' | 'u' => y = v,
-            'M' => mo = v,
-            'd' => d = v,
-            'H' => h = v,
-            'm' => mi = v,
-            's' => sec = v,
-            _ => ms = format!("{digits:0<3}")[..3].parse().ok()?,
-        }
-    }
-    let valid = (1..=12).contains(&mo) && (1..=31).contains(&d) && h < 24 && mi < 60 && sec < 60;
-    (s.is_empty() && valid)
-        .then(|| days_from_civil(y, mo, d) * 86_400_000 + ((h * 60 + mi) * 60 + sec) * 1000 + ms)
-}
-
-/// Epoch milliseconds `t` (already shifted to local time) in a Java date pattern of numeric fields (see `pattern_runs`).
-pub fn format_pattern(pattern: &str, t: i64) -> Option<String> {
-    let (days, ms) = (t.div_euclid(86_400_000), t.rem_euclid(86_400_000));
-    let (y, mo, d) = civil_from_days(days);
-    let mut out = String::new();
-    for (c, n, text) in pattern_runs(pattern)? {
-        let v = match c {
-            'y' | 'u' if n == 2 => y.rem_euclid(100),
-            'y' | 'u' => y,
-            'M' => mo,
-            'd' => d,
-            'H' => ms / 3_600_000,
-            'm' => ms / 60_000 % 60,
-            's' => ms / 1000 % 60,
-            'S' => {
-                out += &format!("{:03}", ms % 1000)
-                    .chars()
-                    .chain(std::iter::repeat('0'))
-                    .take(n)
-                    .collect::<String>();
-                continue;
-            }
-            _ => {
-                out += &text;
-                continue;
-            }
-        };
-        out += &format!("{v:0n$}");
-    }
-    Some(out)
+/// Epoch milliseconds `t` in a Java DateTimeFormatter pattern at its offset in `tz`, in the
+/// root locale; `None` for a pattern es-mini cannot print (see [`date_pattern`]).
+pub fn format_pattern(pattern: &str, t: i64, tz: &tz::TimeZone) -> Option<String> {
+    date_pattern::Pattern::new(pattern)?.format(t, tz.offset(t), "")
 }
 
 /// The `(year, month, day)` of days since 1970-01-01 (Howard Hinnant's civil_from_days).
@@ -1176,39 +1094,6 @@ fn parse_iso(mut s: &str, round_up: bool) -> Option<(i64, Option<i64>)> {
     ))
 }
 
-const MONTHS: [(&str, [&str; 12]); 2] = [
-    (
-        "fr",
-        [
-            "janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.",
-            "nov.", "déc.",
-        ],
-    ),
-    (
-        "en",
-        [
-            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-        ],
-    ),
-];
-
-/// Epoch millis of `"E, d MMM yyyy HH:mm:ss Z"` with localized month names.
-// ponytail: only this one custom format; generalize to a token-driven parser when another is needed.
-fn parse_dated(v: &Value, locale: &str) -> Option<i64> {
-    let months = MONTHS.iter().find(|(l, _)| *l == locale)?.1;
-    let mut p = v.as_str()?.split_once(", ")?.1.split(' ');
-    let d: i64 = p.next()?.parse().ok()?;
-    let name = p.next()?;
-    let m = months.iter().position(|n| *n == name)? as i64 + 1;
-    let y: i64 = p.next()?.parse().ok()?;
-    let mut t = p.next()?.split(':').map(|x| x.parse::<i64>());
-    let secs = t.next()?.ok()? * 3600 + t.next()?.ok()? * 60 + t.next()?.ok()?;
-    let z = p.next()?;
-    let off = (z[1..3].parse::<i64>().ok()? * 3600 + z[3..5].parse::<i64>().ok()? * 60)
-        * if z.starts_with('-') { -1 } else { 1 };
-    Some((days_from_civil(y, m, d) * 86400 + secs - off) * 1000)
-}
-
 /// Epoch millis of a value of a date field with `format` and `locale`.
 pub fn date_millis(format: Option<&str>, locale: Option<&str>, v: &Value) -> Option<i64> {
     date_millis_in(format, locale, v, &tz::TimeZone::UTC, false)
@@ -1223,24 +1108,25 @@ pub(crate) fn date_millis_in(
     tz: &tz::TimeZone,
     round_up: bool,
 ) -> Option<i64> {
-    let local = |l: i64| tz.at_local(l, 0);
-    let iso = |s: &str| parse_iso(s, round_up).map(|(l, o)| o.map_or_else(|| local(l), |o| l - o));
+    let iso = |s: &str| {
+        parse_iso(s, round_up).map(|(l, o)| o.map_or_else(|| tz.at_local(l, 0), |o| l - o))
+    };
     let Some(format) = format else {
         // strict_date_optional_time||epoch_millis
         return v
             .as_str()
             .map_or_else(|| v.as_i64(), |s| iso(s).or_else(|| s.parse().ok()));
     };
-    (format.split("||"))
-        .find_map(|f| match f {
-            "epoch_millis" => json_num(v).map(|x| x as i64),
-            "epoch_second" => json_num(v)
-                .map(|x| (x * 1000.0) as i64 + if round_up && x.fract() == 0.0 { 999 } else { 0 }),
-            // ponytail: other named formats (`strict_date_time`, ...) parse as the default format
-            _ if format_pattern(f, 0).is_none() => iso(v.as_str()?),
-            _ => parse_pattern_local(f, v.as_str()?, round_up).map(local),
-        })
-        .or_else(|| parse_dated(v, locale.unwrap_or("en")))
+    (format.split("||")).find_map(|f| match f {
+        "epoch_millis" => json_num(v).map(|x| x as i64),
+        "epoch_second" => json_num(v)
+            .map(|x| (x * 1000.0) as i64 + if round_up && x.fract() == 0.0 { 999 } else { 0 }),
+        // ponytail: other named formats (`strict_date_time`, ...) parse as the default format
+        f => match date_pattern::Pattern::new(f) {
+            Some(p) => p.parse(v.as_str()?, locale.unwrap_or(""), tz, round_up),
+            None => iso(v.as_str()?),
+        },
+    })
 }
 
 /// A JSON number, or a string holding one, as `f64`.
@@ -1385,18 +1271,86 @@ mod tests {
         let p = "yyyy-MM-dd HH:mm:ss";
         let t = 1_619_899_200_000;
         assert_eq!(parse_pattern(p, "2021-05-01 20:00:00"), Some(t));
-        assert_eq!(format_pattern(p, t).as_deref(), Some("2021-05-01 20:00:00"));
+        let utc = &tz::TimeZone::UTC;
+        assert_eq!(
+            format_pattern(p, t, utc).as_deref(),
+            Some("2021-05-01 20:00:00")
+        );
         let q = "yyyy-MM-dd'T'HH:mm:ss.SSS";
         assert_eq!(parse_pattern(q, "1969-12-31T23:59:59.999"), Some(-1));
         assert_eq!(
-            format_pattern(q, -1).as_deref(),
+            format_pattern(q, -1, utc).as_deref(),
             Some("1969-12-31T23:59:59.999")
         );
         assert_eq!(parse_pattern(p, "2021-05-01T20:00:00"), None);
         assert_eq!(parse_pattern(p, "2021-05-01 20:00:00 extra"), None);
-        // patterns with other fields (names, zones) are not supported
-        assert_eq!(parse_pattern("dd MMM yyyy", "01 May 2021"), None);
-        assert_eq!(format_pattern("yyyy Z", t), None);
+    }
+
+    #[test]
+    fn date_formats_patterns_parse_names_zones_and_optional_sections() {
+        let at = |iso: &str| parse_date_millis(&json!(iso)).unwrap();
+        let t = at("2021-05-01T20:00:00Z");
+        assert_eq!(
+            parse_pattern("dd MMM yyyy", "01 May 2021"),
+            Some(at("2021-05-01"))
+        );
+        let p = "EEEE, MMMM d, uuuu h:mm a";
+        assert_eq!(parse_pattern(p, "Saturday, May 1, 2021 8:00 PM"), Some(t));
+        // a proleptic year (`u`) resolves the date, which must fall on the day named
+        assert_eq!(parse_pattern(p, "Friday, May 1, 2021 8:00 PM"), None);
+        let z = "yyyy-MM-dd'T'HH:mmXXX";
+        assert_eq!(parse_pattern(z, "2021-05-01T22:00+02:00"), Some(t));
+        assert_eq!(parse_pattern(z, "2021-05-01T20:00Z"), Some(t));
+        let v = "yyyy-MM-dd HH:mm VV";
+        assert_eq!(parse_pattern(v, "2021-05-01 22:00 Europe/Paris"), Some(t));
+        let o = "yyyy-MM-dd[ HH:mm[:ss]]";
+        assert_eq!(parse_pattern(o, "2021-05-01"), Some(at("2021-05-01")));
+        assert_eq!(parse_pattern(o, "2021-05-01 20:00"), Some(t));
+        assert_eq!(parse_pattern(o, "2021-05-01 20:00:05"), Some(t + 5000));
+        // adjacent fields share a digit run; invalid dates and patterns fail
+        assert_eq!(parse_pattern("yyyyMMddHHmm", "202105012000"), Some(t));
+        assert_eq!(parse_pattern("yyyy-MM-dd", "2021-02-29"), None);
+        assert_eq!(parse_pattern("yyyy-MM-dd'T", "2021-02-28T"), None);
+        let paris = tz::TimeZone::parse("Europe/Paris").unwrap();
+        let f = "EEE, dd MMM yy HH:mm:ss.SS Z '['xxx']'";
+        assert_eq!(
+            format_pattern(f, t + 120, &paris).as_deref(),
+            Some("Sat, 01 May 21 22:00:00.12 +0200 [+02:00]")
+        );
+        assert_eq!(
+            format_pattern("[uuuu]G hh a O", t, &tz::TimeZone::UTC).as_deref(),
+            Some("2021AD 08 PM GMT")
+        );
+    }
+
+    #[test]
+    fn date_formats_custom_patterns_use_the_mapping_locale_and_round_up() {
+        let at = |iso: &str| parse_date_millis(&json!(iso)).unwrap();
+        let f = Some("E, d MMM yyyy HH:mm:ss Z");
+        let v = json!("mer., 6 déc. 2000 02:55:00 -0800");
+        assert_eq!(
+            date_millis(f, Some("fr"), &v),
+            Some(at("2000-12-06T10:55:00Z"))
+        );
+        assert_eq!(
+            date_millis(f, None, &v),
+            None,
+            "French names in the root locale"
+        );
+        let v = json!("Wed, 6 Dec 2000 02:55:00 -0800");
+        assert_eq!(
+            date_millis(f, Some("en-US"), &v),
+            Some(at("2000-12-06T10:55:00Z"))
+        );
+        // only the mapping's own format reads such values
+        assert_eq!(date_millis(Some("yyyy-MM-dd"), None, &v), None);
+        let up =
+            |f: &str, s: &str| date_millis_in(Some(f), None, &json!(s), &tz::TimeZone::UTC, true);
+        assert_eq!(
+            up("yyyy-MM", "2021-05"),
+            Some(at("2021-05-01T23:59:59.999Z"))
+        );
+        assert_eq!(up("MMMM d", "May 3"), Some(at("1970-05-03T23:59:59.999Z")));
     }
 
     #[test]

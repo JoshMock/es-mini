@@ -481,10 +481,12 @@ impl Histogram {
             let key_as_string = match (b.format, &self.format) {
                 (Format::Date, _) => {
                     let (t, tz) = (key as i64, self.time_zone.as_ref());
-                    let local = t + tz.map_or(0, |tz| tz.offset(t));
                     let pattern = self.format.as_deref();
+                    let utc = &es_index::tz::TimeZone::UTC;
                     Some(
-                        match pattern.and_then(|p| es_index::format_pattern(p, local)) {
+                        match pattern
+                            .and_then(|p| es_index::format_pattern(p, t, tz.unwrap_or(utc)))
+                        {
                             Some(s) => s,
                             None => tz.map_or_else(|| iso_date(t), |tz| tz.format(t)),
                         },

@@ -73,7 +73,7 @@ fn resolve_expr(expr: &str, now: i64) -> Result<String, String> {
     let (fmt, zone) = spec.split_once('|').unwrap_or((spec, "UTC"));
     let tz = es_index::tz::TimeZone::parse(zone).ok_or(format!("unknown time zone [{zone}]"))?;
     let t = es_index::date_math::parse(math, None, None, &tz, false, now)?;
-    es_index::format_pattern(fmt, t + tz.offset(t)).ok_or(format!("invalid date format [{fmt}]"))
+    es_index::format_pattern(fmt, t, &tz).ok_or(format!("invalid date format [{fmt}]"))
 }
 
 /// Rejects values of the wrong scalar type for alias fields, as ES does at index creation.

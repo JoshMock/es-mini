@@ -113,7 +113,8 @@ fn terms(kind: Kind, vals: &[&Value]) -> Vec<String> {
 /// epoch or a pattern and none reads it.
 // ponytail: named formats only parse as the default format, so they never reject values
 pub fn bad_date(format: Option<&str>, locale: Option<&str>, v: &Value) -> bool {
-    let known = |f: &str| f.starts_with("epoch_") || es_index::format_pattern(f, 0).is_some();
+    let known =
+        |f: &str| f.starts_with("epoch_") || es_index::date_pattern::Pattern::new(f).is_some();
     format.is_some_and(|f| f.split("||").all(known)) && date_millis(format, locale, v).is_none()
 }
 

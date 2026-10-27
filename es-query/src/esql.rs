@@ -1394,14 +1394,16 @@ fn mv_fn(f: &str, v: &Value) -> Option<Value> {
 
 /// `DATE_EXTRACT(part, date)` or `DATE_FORMAT([pattern,] date)` in UTC, like Elasticsearch's
 /// evaluators: `None` for a multi-valued argument (where ES warns).
-// ponytail: an unknown part or a pattern es_index::format_pattern lacks (names, zones) is null,
-// where ES fails the query or formats them
+// ponytail: an unknown part or a pattern es_index::format_pattern lacks (week fields, zone
+// names) is null, where ES fails the query or formats them
 fn date_fn(f: &str, args: &[Value]) -> Option<Value> {
     const DAY: i64 = 86_400_000;
     let t = es_index::parse_date_millis(args.last()?)?;
     if f == "DATE_FORMAT" {
         return match args {
-            [pattern, _] => es_index::format_pattern(pattern.as_str()?, t),
+            [pattern, _] => {
+                es_index::format_pattern(pattern.as_str()?, t, &es_index::tz::TimeZone::UTC)
+            }
             _ => Some(es_index::iso_date(t)),
         }
         .map(Value::from);
