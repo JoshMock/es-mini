@@ -1037,7 +1037,7 @@ fn eval(e: &Expr, row: &Row) -> Option<Value> {
         // A multi-value is null, like ES (which warns).
         Expr::Like(x, p, rlike, _) => match eval(x, row)? {
             // ponytail: parsed again per row; `resolve` checked that it parses
-            Value::String(s) if *rlike => Some(crate::regexp::parse(p)?.matches(&s).into()),
+            Value::String(s) if *rlike => Some(crate::regexp::compile(p).ok()?.matches(&s).into()),
             Value::String(s) => {
                 let (p, s): (Vec<char>, Vec<char>) = (p.chars().collect(), s.chars().collect());
                 Some(crate::wildcard_match(&p, &s).into())
@@ -2000,7 +2000,7 @@ fn resolve(
         Expr::Like(x, p, rlike, _) => {
             let t = resolve(x, src, types, bad)?;
             // ponytail: not Elasticsearch's message, which names what is wrong
-            if *rlike && crate::regexp::parse(p).is_none() {
+            if *rlike && crate::regexp::compile(p).is_err() {
                 bad.push((span(e).0, format!("Invalid regex pattern for RLIKE [{p}]")));
                 return None;
             }
