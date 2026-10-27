@@ -1484,8 +1484,10 @@ fn round_whole(n: i128, decimals: i64) -> i128 {
     mid * scale
 }
 
-/// Elasticsearch's `Maths.round(Number, long)` for a double: half away from zero.
-// ponytail: past 2^63 ES divides in BigDecimal; an f64 division can differ by an ulp there
+/// Elasticsearch's `Maths.round(Number, long)` for a double: half away from zero. Past 2^63 ES
+/// divides in 34-digit `BigDecimal`s, which rounds to the same double as an f64 division: a
+/// quotient of two doubles is never within 2^-107 (relative) of a halfway point between doubles,
+/// and the two 34-digit roundings move it by less than 10^-33.
 fn round_double(x: f64, decimals: i64) -> f64 {
     let scale = 10f64.powf(decimals as f64);
     if scale == 0.0 || x == 0.0 {

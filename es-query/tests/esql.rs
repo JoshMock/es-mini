@@ -2117,3 +2117,24 @@ fn esql_es_semantics_concat_is_capped_at_1mb() {
         })
     );
 }
+
+/// Past 2^63, Elasticsearch 9.5.5's ROUND divides in `BigDecimal`; these results (an ulp off the
+/// input) are the ones it returns.
+#[test]
+fn esql_es_semantics_round_past_2_63() {
+    let r = q(
+        "ROW a = ROUND(-22612367103578135000000000000000000000000000000000000000000000.0, -27), \
+               b = ROUND(-11199114434478000000000000000000000000000000000.0, -12), \
+               c = ROUND(283768897543175020000000000000000000.0, 1), \
+               d = ROUND(30068952992873390000.0, 6)",
+    );
+    assert_eq!(
+        r.values,
+        [[
+            json!(-2.2612367103578138e61),
+            json!(-1.1199114434478002e46),
+            json!(2.83768897543175e35),
+            json!(3.006895299287339e19)
+        ]]
+    );
+}
