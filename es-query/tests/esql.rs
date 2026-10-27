@@ -2138,3 +2138,47 @@ fn esql_es_semantics_round_past_2_63() {
         ]]
     );
 }
+
+/// Like Elasticsearch 9.5.5's `ImplicitCasting`, CASE and COALESCE cast whole numbers after an
+/// unsigned_long to unsigned_long (a negative value is null), but not an unsigned_long after a
+/// long or integer.
+#[test]
+fn esql_es_semantics_conditionals_widen_to_unsigned_long() {
+    let r = q(
+        "ROW x = [1, -2, 3] | EVAL a = COALESCE(18446744073709551615, 1), \
+               b = CASE(false, 18446744073709551615, 7), c = CASE(false, 18446744073709551615, -1), \
+               d = CASE(false, 18446744073709551615, x), e = COALESCE(1.5, 18446744073709551615), \
+               f = CASE(false, 2.5, 18446744073709551615) | DROP x",
+    );
+    let types: Vec<&str> = r.columns.iter().map(|c| c.r#type.as_str()).collect();
+    assert_eq!(
+        types,
+        [
+            "unsigned_long",
+            "unsigned_long",
+            "unsigned_long",
+            "unsigned_long",
+            "double",
+            "double"
+        ]
+    );
+    assert_eq!(
+        r.values,
+        [[
+            json!(18446744073709551615u64),
+            json!(7),
+            Value::Null,
+            json!([1, 3]),
+            json!(1.5),
+            json!(1.8446744073709552e19)
+        ]]
+    );
+    assert_eq!(
+        run(&indices(), "ROW a = COALESCE(1, 18446744073709551615)"),
+        Err(EsqlError::Verification(
+            "Found 1 problem\nline 1:9: second argument of [COALESCE(1, 18446744073709551615)] \
+             must be [integer], found value [18446744073709551615] type [unsigned_long]"
+                .into()
+        ))
+    );
+}

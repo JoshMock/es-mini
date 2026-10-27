@@ -1197,13 +1197,23 @@ fn eval(e: &Expr, row: &Row) -> Option<Value> {
                         })
                         .flatten(),
                 }?;
-                // Numbers widened to double by `conditional_type`.
-                let double = |v: &Value| v.as_f64().map_or(v.clone(), Value::from);
-                return Some(match (t, v) {
-                    ("double", Value::Array(a)) => Value::Array(a.iter().map(double).collect()),
-                    ("double", v) => double(&v),
-                    (_, v) => v,
-                });
+                // Numbers widened by `conditional_type`; a negative one is not an unsigned_long.
+                let widen = |v: &Value| match t {
+                    "double" => v.as_f64().map(Value::from),
+                    "unsigned_long" => v.as_u64().map(Value::from),
+                    _ => Some(v.clone()),
+                };
+                return match v {
+                    Value::Array(a) => {
+                        let mut out: Vec<Value> = a.iter().filter_map(widen).collect();
+                        match out.len() {
+                            0 => None,
+                            1 => out.pop(),
+                            _ => Some(Value::Array(out)),
+                        }
+                    }
+                    v => widen(&v),
+                };
             }
             if SCALAR_FNS.iter().any(|(n, _)| *n == f) {
                 let args: Vec<Value> = args.iter().map(|a| eval(a, row)).collect::<Option<_>>()?;
@@ -1394,9 +1404,11 @@ fn ordinal(i: usize) -> &'static str {
 fn conditional_type(f: &str, ts: &[String]) -> Result<String, (usize, String)> {
     let numeric = |t: &str| NUMERIC.contains(&t);
     let target = ts.iter().map(String::as_str).find(|t| numeric(t));
-    // ponytail: unsigned_long widens to double here; not checked against Elasticsearch
-    let widens = |t: &str| {
-        Some(t) == target || target == Some("double") || (t, target) == ("integer", Some("long"))
+    // Elasticsearch's `EsqlDataTypeConverter.commonType(t, target) == target`.
+    let widens = |t: &str| match target {
+        Some("double") => true,
+        Some("unsigned_long") => t != "double",
+        _ => Some(t) == target || (t, target) == ("integer", Some("long")),
     };
     let cast = target.filter(|_| ts.iter().all(|t| !numeric(t) || widens(t)));
     let mut out = "null";
@@ -2102,7 +2114,9 @@ fn resolve(
                 let mismatch = match *name {
                     "CASE" | "COALESCE" => match conditional_type(name, &ts) {
                         Ok(out) => {
-                            let _ = t.set((*name, if out == "double" { "double" } else { "any" }));
+                            let widened =
+                                ["double", "unsigned_long"].into_iter().find(|w| out == *w);
+                            let _ = t.set((*name, widened.unwrap_or("any")));
                             return Some(out);
                         }
                         Err(found) => Some(found),
