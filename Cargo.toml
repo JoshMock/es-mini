@@ -11,7 +11,7 @@ es-codec = { path = "es-codec" }
 es-index = { path = "es-index" }
 es-query = { path = "es-query" }
 axum = "0.8"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "signal"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 tracing = "0.1"
