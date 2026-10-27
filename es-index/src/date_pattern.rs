@@ -309,6 +309,17 @@ impl Pattern {
     /// Epoch millis of `s`, its local time in `tz` unless it gives an offset or zone; with
     /// `round_up`, missing fields default to the end of their range like ES's round-up parser.
     pub fn parse(&self, s: &str, locale: &str, tz: &TimeZone, round_up: bool) -> Option<i64> {
+        self.parse_wide(s, locale, tz, round_up)?.try_into().ok()
+    }
+
+    /// [`Pattern::parse`] before the epoch millis are checked to fit in a long.
+    pub(crate) fn parse_wide(
+        &self,
+        s: &str,
+        locale: &str,
+        tz: &TimeZone,
+        round_up: bool,
+    ) -> Option<i128> {
         let mut p = Fields {
             lenient: self.lenient,
             ..Fields::default()
@@ -403,13 +414,17 @@ fn append_pattern(stack: &mut Vec<Seq>, pattern: &str) -> Option<()> {
     Some(())
 }
 
-/// The instant of local epoch millis `local` in the zone a value gave, else in `tz`.
-fn instant(local: i64, zone: Option<&Zone>, tz: &TimeZone) -> i64 {
-    match zone {
-        Some(Zone::Offset(o)) => local - o,
-        Some(Zone::Region(z)) => z.at_local(local, i64::MIN),
-        None => tz.at_local(local, 0),
-    }
+/// The instant of local epoch millis `local` in the zone a value gave, else in `tz`. Past half
+/// a long's range (beyond it, a value only names the instant in an error), a time zone's
+/// offset is the one it has at that half.
+fn instant(local: i128, zone: Option<&Zone>, tz: &TimeZone) -> i128 {
+    let near = local.clamp((i64::MIN / 2).into(), (i64::MAX / 2).into()) as i64;
+    local
+        - i128::from(match zone {
+            Some(Zone::Offset(o)) => *o,
+            Some(Zone::Region(z)) => near - z.at_local(near, i64::MIN),
+            None => near - tz.at_local(near, 0),
+        })
 }
 
 /// The fields `toks` parse, as `DateTimeFormatter.toString` names them for `defaultRoundUp`.
@@ -719,7 +734,7 @@ fn date(y: i64, m: Option<i64>, d: Option<i64>, doy: Option<i64>) -> Option<Opti
 
 /// Local epoch millis of parsed fields: `Parsed.resolve` with ResolverStyle.STRICT, then
 /// `DateFormatters.from`; `None` where either throws.
-fn resolve(p: &mut Fields) -> Option<i64> {
+fn resolve(p: &mut Fields) -> Option<i128> {
     // IsoChronology.resolveYMD when lenient: Jan 1, plus months, plus days
     if let (true, Some(y), Some(m), Some(d)) = (
         p.lenient,
@@ -825,7 +840,7 @@ fn resolve(p: &mut Fields) -> Option<i64> {
         (None, None, Some(y), m) => days_from_civil(y, m.unwrap_or(1), 1),
         (None, None, None, None) => return None,
     };
-    days.checked_mul(86_400_000)?.checked_add(time.unwrap_or(0))
+    Some(i128::from(days) * 86_400_000 + i128::from(time.unwrap_or(0)))
 }
 
 /// The value of field `f` at local epoch millis `t`.

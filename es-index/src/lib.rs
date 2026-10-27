@@ -1048,19 +1048,35 @@ pub(crate) fn date_millis_in(
     tz: &tz::TimeZone,
     round_up: bool,
 ) -> Option<i64> {
+    date_instant_in(format, locale, v, tz, round_up)?
+        .try_into()
+        .ok()
+}
+
+/// [`date_millis_in`] before the epoch millis are checked to fit in a long: the first `||`
+/// alternative that reads the value gives its instant, as in ES, which only then converts it.
+pub(crate) fn date_instant_in(
+    format: Option<&str>,
+    locale: Option<&str>,
+    v: &Value,
+    tz: &tz::TimeZone,
+    round_up: bool,
+) -> Option<i128> {
     let format = format.unwrap_or("strict_date_optional_time||epoch_millis");
     (format.split("||")).find_map(|f| match f {
         "epoch_millis" => v
             .as_i64()
             .or_else(|| v.as_str()?.parse().ok())
-            .or_else(|| json_num(v).map(|x| x as i64)),
-        "epoch_second" => json_num(v)
-            .map(|x| (x * 1000.0) as i64 + if round_up && x.fract() == 0.0 { 999 } else { 0 }),
+            .or_else(|| json_num(v).map(|x| x as i64))
+            .map(i128::from),
+        "epoch_second" => json_num(v).map(|x| {
+            i128::from((x * 1000.0) as i64) + if round_up && x.fract() == 0.0 { 999 } else { 0 }
+        }),
         // ponytail: formats es-mini lacks (week-based fields, see date_pattern) parse as
         // strict_date_optional_time
         f => date_pattern::DateFormat::new(f)
             .or_else(|| date_pattern::DateFormat::new("strict_date_optional_time"))?
-            .parse(v.as_str()?, locale.unwrap_or(""), tz, round_up),
+            .parse_wide(v.as_str()?, locale.unwrap_or(""), tz, round_up),
     })
 }
 

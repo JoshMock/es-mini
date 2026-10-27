@@ -1,10 +1,14 @@
 //! Date math, like Elasticsearch's JavaDateMathParser: `now` or a date (`2024-01-01||`), then
 //! operations such as `+1d`, `-2h` or `/M` (round to the unit).
 
-use crate::{civil_from_days, date_millis_in, days_from_civil, tz::TimeZone};
+use crate::{civil_from_days, date_instant_in, days_from_civil, tz::TimeZone};
 use serde_json::Value;
 
 const DAY: i64 = 86_400_000;
+
+/// How the reason of an `illegal_argument_exception` (rather than a `parse_exception`) for a
+/// date past the range of a long of epoch millis ends, as ES's DateUtils.toLongMillis words it.
+pub const TOO_FAR: &str = "to be represented in a long milliseconds variable";
 
 /// Epoch millis of date math `text` read with a date field's `format` (`||` alternatives) in
 /// time zone `tz` (for dates without an offset, and for rounding). With `round_up`, rounding
@@ -22,10 +26,17 @@ pub fn parse(
         if s.is_empty() {
             return Err("cannot parse empty datetime".to_owned());
         }
-        date_millis_in(format, locale, &Value::from(s), tz, round_up).ok_or_else(|| {
+        let Some(t) = date_instant_in(format, locale, &Value::from(s), tz, round_up) else {
             let f = format.unwrap_or("strict_date_optional_time||epoch_millis");
             let e = format!("failed to parse date field [{s}] with format [{f}]");
-            format!("{e}: [{e}]")
+            return Err(format!("{e}: [{e}]"));
+        };
+        i64::try_from(t).map_err(|_| {
+            let when = if t > 0 { "future" } else { "past" };
+            format!(
+                "date[{}] is too far in the {when} {TOO_FAR}",
+                instant_string(t)
+            )
         })
     };
     let (t, math) = match text.strip_prefix("now") {
@@ -111,6 +122,28 @@ fn apply(math: &str, mut t: i64, round_up: bool, tz: &TimeZone) -> Result<i64, S
         };
     }
     Ok(t)
+}
+
+/// Epoch millis `t` as Java's `Instant.toString`: `+` before years past 9999, a fraction only if
+/// there is one.
+fn instant_string(t: i128) -> String {
+    let (days, ms) = (
+        t.div_euclid(DAY.into()) as i64,
+        t.rem_euclid(DAY.into()) as i64,
+    );
+    let (y, m, d) = civil_from_days(days);
+    let year = match y {
+        10_000.. => format!("+{y}"),
+        ..0 => format!("-{:04}", -y),
+        _ => format!("{y:04}"),
+    };
+    let (h, mi, s, milli) = (ms / 3_600_000, ms / 60_000 % 60, ms / 1000 % 60, ms % 1000);
+    let fraction = if milli > 0 {
+        format!(".{milli:03}")
+    } else {
+        String::new()
+    };
+    format!("{year}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}{fraction}Z")
 }
 
 /// Local millis `l` plus `n` months, the day clamped to the month's last, like `plusMonths`.

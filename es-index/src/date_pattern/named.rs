@@ -231,7 +231,7 @@ impl Iso {
         self
     }
 
-    fn parse(&self, s: &str, tz: &TimeZone, round_up: bool) -> Option<i64> {
+    fn parse(&self, s: &str, tz: &TimeZone, round_up: bool) -> Option<i128> {
         // a negative year parses as a positive one, then is negated
         let (negative, s) = match s.strip_prefix('-') {
             Some(rest) => (true, rest),
@@ -252,7 +252,8 @@ impl Iso {
             ((h * 60 + mi.unwrap_or(0)) * 60 + sec.unwrap_or(0)) * 1000
                 + nano.unwrap_or(0) / 1_000_000
         });
-        Some(instant(days * 86_400_000 + time, zone.as_ref(), tz))
+        let local = i128::from(days) * 86_400_000 + i128::from(time);
+        Some(instant(local, zone.as_ref(), tz))
     }
 
     /// `Iso8601Parser.parse`: the fields of `s` (a year not negative) and its zone. Fields
@@ -419,8 +420,13 @@ impl DateFormat {
 
     /// Epoch millis of `s` by the first parser that reads it (see [`Pattern::parse`]).
     pub fn parse(&self, s: &str, locale: &str, tz: &TimeZone, round_up: bool) -> Option<i64> {
+        self.parse_wide(s, locale, tz, round_up)?.try_into().ok()
+    }
+
+    /// [`DateFormat::parse`] before the epoch millis are checked to fit in a long.
+    pub fn parse_wide(&self, s: &str, locale: &str, tz: &TimeZone, round_up: bool) -> Option<i128> {
         self.parsers.iter().find_map(|p| match p {
-            Parser::Java(p) => p.parse(s, locale, tz, round_up),
+            Parser::Java(p) => p.parse_wide(s, locale, tz, round_up),
             Parser::Iso(iso) => iso.parse(s, tz, round_up),
         })
     }

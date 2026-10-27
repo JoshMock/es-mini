@@ -146,7 +146,10 @@ pub(crate) fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, 
                     )
                 };
                 b.map(parse).transpose().map_err(|msg| QueryError {
-                    kind: ErrorKind::Parse,
+                    kind: match msg.ends_with(es_index::date_math::TOO_FAR) {
+                        true => ErrorKind::IllegalArgument,
+                        false => ErrorKind::Parse,
+                    },
                     msg,
                 })
             };

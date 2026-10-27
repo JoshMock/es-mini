@@ -1613,6 +1613,44 @@ mod tests {
     }
 
     #[test]
+    fn date_formats_dates_past_a_long_of_millis_are_illegal() {
+        let mut ix = Index::default();
+        let date = FieldMapping::Date {
+            format: None,
+            locale: None,
+            fields: Default::default(),
+        };
+        ix.mappings.properties.insert("d".into(), date);
+        let range = |bound: &str, v: Value| {
+            let q = json!({"range": {"d": {bound: v, "format": "date_optional_time"}}});
+            resolve_dates(&ix, parse_query(&q).unwrap(), 0)
+        };
+        let too_far = |when: &str, date: &str| {
+            QueryError::illegal(format!(
+                "date[{date}] is too far in the {when} to be represented in a long milliseconds variable"
+            ))
+        };
+        // Elasticsearch 9.5.5: the long's range ends in 292278994 and starts in -292275055
+        assert!(range("gte", json!("292278994-01-01")).is_ok());
+        assert!(range("gte", json!("-292275054-01-01")).is_ok());
+        assert_eq!(
+            range("gte", json!("-292278994-01-01")),
+            Err(too_far("past", "-292278994-01-01T00:00:00Z"))
+        );
+        // bare numbers are years in this format (search/500_date_range.yml)
+        assert_eq!(
+            range("gte", json!(-522_000_000)),
+            Err(too_far("past", "-522000000-01-01T00:00:00Z"))
+        );
+        assert_eq!(
+            range("gte", json!("292278995-03-04T05:06:07.1Z")),
+            Err(too_far("future", "+292278995-03-04T05:06:07.100Z"))
+        );
+        let up = range("lte", json!(522_000_000)).unwrap_err();
+        assert_eq!(up.kind, ErrorKind::IllegalArgument, "{up:?}");
+    }
+
+    #[test]
     fn date_formats_date_nanos_sort_by_epoch_nanos() {
         let mut ix = Index::default();
         let nanos = FieldMapping::DateNanos {
