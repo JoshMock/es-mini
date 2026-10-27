@@ -787,7 +787,14 @@ impl<'a> Searcher<'a> {
                 lte,
                 ..
             } => {
-                let (_, path) = self.kind(field);
+                let (kind, path) = self.kind(field);
+                let bounds = [gt, gte, lt, lte].map(Option::as_deref);
+                if kind == Kind::Text {
+                    // a text field's indexed terms, compared as Lucene's TermRangeQuery does
+                    return (terms(kind, &values(&d.source, path)).iter())
+                        .any(|t| in_range(bounds, |b| t.as_str().cmp(&text(b))))
+                        .then_some(1.0);
+                }
                 let instant = self.instant(field);
                 let cmp = |a: &Value, b: &Value| match &instant {
                     None => scalar_cmp(a, b),
@@ -797,7 +804,6 @@ impl<'a> Searcher<'a> {
                         _ => Ordering::Less,
                     },
                 };
-                let bounds = [gt, gte, lt, lte].map(Option::as_deref);
                 (values(&d.source, path).into_iter())
                     .any(|v| in_range(bounds, |b| cmp(v, b)))
                     .then_some(1.0)

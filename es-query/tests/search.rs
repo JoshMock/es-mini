@@ -1426,3 +1426,18 @@ fn query_dsl_gaps_query_string_boosts() {
         );
     }
 }
+
+#[test]
+fn query_dsl_gaps_ranges_on_text_compare_terms() {
+    let q = |q: Value| sorted(ids(json!({ "query": q })));
+    // a text field's range matches its analyzed terms, here "rabbits"
+    assert_eq!(
+        q(json!({"range": {"title": {"gte": "r", "lt": "s"}}})),
+        ["2"]
+    );
+    // query_string normalizes text fields' bounds, but not keyword fields'
+    let qs = |s: &str| q(json!({"query_string": {"query": s}}));
+    assert_eq!(qs("title:[R TO S}"), ["2"]);
+    assert_eq!(qs("title:>=RAB"), ["1", "2"]);
+    assert_eq!(qs("tag:[P TO Q]"), ["4"]);
+}

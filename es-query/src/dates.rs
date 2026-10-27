@@ -87,14 +87,31 @@ pub(crate) fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, 
             query: Box::new(resolve_dates(index, *query, now)?),
         },
         Query::Normalized(mut query) => {
-            if let Query::Prefix { field, prefix: t }
-            | Query::Wildcard {
-                field, pattern: t, ..
-            } = &mut *query
-                && Searcher::unscored(index, &Query::MatchAll).kind(field).0 == Kind::Text
-            {
-                // the standard analyzer's normalization
-                *t = t.to_lowercase();
+            let text = |field: &str| {
+                Searcher::unscored(index, &Query::MatchAll).kind(field).0 == Kind::Text
+            };
+            // the standard analyzer's normalization
+            let lower = |t: &mut String| *t = t.to_lowercase();
+            match &mut *query {
+                Query::Prefix { field, prefix: t }
+                | Query::Wildcard {
+                    field, pattern: t, ..
+                } if text(field) => lower(t),
+                Query::Range {
+                    field,
+                    gt,
+                    gte,
+                    lt,
+                    lte,
+                    ..
+                } if text(field) => {
+                    for b in [gt, gte, lt, lte].into_iter().flatten() {
+                        if let Value::String(t) = &mut **b {
+                            lower(t);
+                        }
+                    }
+                }
+                _ => {}
             }
             resolve_dates(index, *query, now)?
         }

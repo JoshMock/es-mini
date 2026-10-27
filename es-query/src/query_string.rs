@@ -433,8 +433,7 @@ impl Parser {
     }
 }
 
-/// A range on `field`; a `*` bound is open.
-// ponytail: bounds compare with the source values, not text fields' normalized terms
+/// A range on `field`, its bounds normalized like the field's terms; a `*` bound is open.
 fn range(
     field: String,
     lo: Option<String>,
@@ -446,7 +445,7 @@ fn range(
     let (lo, hi) = (open(lo), open(hi));
     let (gte, gt) = if lo_inc { (lo, None) } else { (None, lo) };
     let (lte, lt) = if hi_inc { (hi, None) } else { (None, hi) };
-    Query::Range {
+    Query::Normalized(Box::new(Query::Range {
         field,
         gt,
         gte,
@@ -454,7 +453,7 @@ fn range(
         lte,
         format: None,
         time_zone: None,
-    }
+    }))
 }
 
 /// Lucene's `getBooleanQuery`, with ES's `fixNegativeQueryIfNeeded`: only prohibited clauses
