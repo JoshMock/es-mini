@@ -1532,3 +1532,64 @@ fn query_dsl_gaps_sloppy_phrase_repeated_terms() {
     assert_eq!(hits(1).len(), 2);
     assert!(two[1].1 < two[0].1, "{two:?}");
 }
+
+/// ES's `resolveMappingFields`: a field pattern queries every mapped field it matches, and no
+/// fields means `index.query.default_field`, `*`, queried leniently.
+#[test]
+fn query_dsl_gaps_field_patterns_and_all_fields() {
+    let mut idx = Index::default();
+    for (id, doc) in [
+        (
+            "1",
+            json!({"title": "quick fox", "body": "lazy", "d": "2020-01-01"}),
+        ),
+        ("2", json!({"title": "dog", "body": "quick quick", "n": 3})),
+        ("3", json!({"other": "quick", "ok": true})),
+    ] {
+        idx.map_dynamic(id, &doc).unwrap();
+        idx.put(id, doc);
+    }
+    let run = |q: Value| {
+        let r = search(&idx, &SearchRequest::parse(&json!({ "query": q })).unwrap());
+        let mut v: Vec<_> = (r.hits.iter())
+            .map(|h| (h.id.to_owned(), h.score.unwrap()))
+            .collect();
+        v.sort_by(|a, b| a.0.cmp(&b.0));
+        v
+    };
+    let ids = |q: Value| run(q).into_iter().map(|h| h.0).collect::<Vec<_>>();
+    let mm = |fields: Value| json!({"multi_match": {"query": "quick", "fields": fields}});
+    assert_eq!(ids(mm(json!(["t*"]))), ["1"]);
+    assert_eq!(ids(mm(json!(["nothing*"]))), Vec::<String>::new());
+    // `title.keyword` holds "quick fox", so only the text fields match
+    assert_eq!(ids(mm(json!(["title*", "b*"]))), ["1", "2"]);
+    let body = run(json!({"match": {"body": "quick"}}));
+    let boosted = run(mm(json!(["title", "bo*^2"])));
+    assert!((boosted[1].1 - 2.0 * body[0].1).abs() < 1e-5, "{boosted:?}");
+    // a field two patterns match takes both boosts
+    let twice = run(mm(json!(["bo*^2", "*dy^3"])));
+    assert!((twice[0].1 - 6.0 * body[0].1).abs() < 1e-5, "{twice:?}");
+    // all fields, leniently: "quick" is no date, number or boolean
+    let all = json!({"multi_match": {"query": "quick"}});
+    assert_eq!(ids(all), ["1", "2", "3"]);
+    assert_eq!(
+        ids(json!({"query_string": {"query": "quick"}})),
+        ["1", "2", "3"]
+    );
+    assert_eq!(
+        ids(json!({"query_string": {"query": "*:quick"}})),
+        ["1", "2", "3"]
+    );
+    assert_eq!(
+        ids(json!({"query_string": {"query": "qu*"}})),
+        ["1", "2", "3"]
+    );
+    assert_eq!(
+        ids(json!({"query_string": {"query": "\"quick fox\""}})),
+        ["1"]
+    );
+    assert_eq!(
+        ids(json!({"query_string": {"query": "n:3 AND quick"}})),
+        ["2"]
+    );
+}

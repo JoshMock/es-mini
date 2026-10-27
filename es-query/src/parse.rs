@@ -80,6 +80,15 @@ pub enum Query {
     /// A query_string prefix, wildcard or range whose text the field's search analyzer
     /// normalizes; `resolve_dates` replaces it with the query it wraps, normalized.
     Normalized(Box<Query>),
+    /// `query` on each field `fields` names, a `*` pattern standing for every mapped field it
+    /// matches, with the entry's boost, as a dis_max with `tie_breaker`; `resolve_dates`
+    /// expands it per index. With a `*` field it is lenient: fields `query` fails on are left
+    /// out, as in ES.
+    Fields {
+        fields: Vec<(String, f64)>,
+        query: Box<Query>,
+        tie_breaker: f64,
+    },
 }
 
 impl Query {
@@ -92,6 +101,25 @@ impl Query {
                 query: Box::new(self),
             },
         }
+    }
+
+    /// This query (a leaf, maybe boosted, named or normalized) on `field` instead.
+    pub(crate) fn on_field(mut self, to: &str) -> Query {
+        match &mut self {
+            Query::Match { field, .. }
+            | Query::MatchPhrase { field, .. }
+            | Query::MatchPhrasePrefix { field, .. }
+            | Query::Term { field, .. }
+            | Query::Prefix { field, .. }
+            | Query::Wildcard { field, .. }
+            | Query::Exists { field }
+            | Query::Range { field, .. } => to.clone_into(field),
+            Query::Boosted { query, .. }
+            | Query::Named { query, .. }
+            | Query::Normalized(query) => **query = query.as_ref().clone().on_field(to),
+            _ => {}
+        }
+        self
     }
 }
 
@@ -564,7 +592,7 @@ fn parse_kind(kind: &str, body: &Value) -> Result<Query, QueryError> {
             )?;
             o.get("query")
                 .ok_or("No text specified for multi_match query")?;
-            // ponytail: no cross_fields or bool_prefix types, field patterns or default `*` fields
+            // ponytail: no cross_fields or bool_prefix types
             let (field_kind, params, tie) = match o.get("type").and_then(Value::as_str) {
                 None | Some("best_fields") => ("match", &["query", "operator"][..], 0.0),
                 Some("most_fields") => ("match", &["query", "operator"][..], 1.0),
@@ -584,35 +612,30 @@ fn parse_kind(kind: &str, body: &Value) -> Result<Query, QueryError> {
                     .into());
                 }
             };
-            let fields = (o.get("fields").and_then(Value::as_array))
-                .filter(|f| !f.is_empty())
-                .ok_or("[multi_match] requires fields")?;
+            // ES defaults to index.query.default_field, `*`
+            let fields = match o.get("fields").and_then(Value::as_array) {
+                Some(f) if !f.is_empty() => (f.iter())
+                    .map(|f| {
+                        let f = f.as_str().ok_or("[multi_match] fields must be strings")?;
+                        field_boost(f).map(|(f, b)| (f.to_owned(), b))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                _ => vec![("*".to_owned(), 1.0)],
+            };
             let p: serde_json::Map<_, _> = (o.iter())
                 .filter(|(k, _)| params.contains(&k.as_str()))
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
-            let mut queries = (fields.iter())
-                .map(|f| match f.as_str() {
-                    Some(f) if !f.contains('*') => {
-                        let (f, boost) = field_boost(f)?;
-                        let query = parse_kind(field_kind, &serde_json::json!({ f: p }))?;
-                        Ok::<_, QueryError>(query.boosted(boost))
-                    }
-                    _ => Err(format!("[multi_match] field [{f}] is not supported").into()),
-                })
-                .collect::<Result<Vec<_>, _>>()?;
             let tie_breaker = match o.get("tie_breaker") {
                 None => tie,
                 Some(t) => t
                     .as_f64()
                     .ok_or("[multi_match] tie_breaker must be a number")?,
             };
-            Ok(match queries.len() {
-                1 => queries.remove(0),
-                _ => Query::DisMax {
-                    queries,
-                    tie_breaker,
-                },
+            Ok(Query::Fields {
+                fields,
+                query: Box::new(parse_kind(field_kind, &serde_json::json!({ "*": p }))?),
+                tie_breaker,
             })
         }
         "simple_query_string" => {

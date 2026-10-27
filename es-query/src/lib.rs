@@ -844,6 +844,8 @@ impl<'a> Searcher<'a> {
             Query::Boosted { boost, query } => self.score(query, id, d).map(|s| s * boost),
             // `resolve_dates` unwraps it before a search
             Query::Normalized(query) => self.score(query, id, d),
+            // `resolve_dates` expands it before a search
+            Query::Fields { .. } => None,
         }
     }
 

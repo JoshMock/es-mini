@@ -119,6 +119,61 @@ pub(crate) fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, 
             name,
             query: Box::new(resolve_dates(index, *query, now)?),
         },
+        Query::Fields {
+            fields,
+            query,
+            tie_breaker,
+        } => {
+            // ES's resolveMappingFields: a field two entries name takes both boosts
+            let mapped = (index.mappings.properties.iter())
+                .filter(|(_, m)| !m.is_object())
+                .flat_map(|(f, m)| {
+                    let subs = m.fields().into_iter().flatten();
+                    [f.clone()]
+                        .into_iter()
+                        .chain(subs.map(move |(s, _)| format!("{f}.{s}")))
+                })
+                .collect::<Vec<_>>();
+            let mut boosts: Vec<(String, f64)> = vec![];
+            for (pattern, boost) in &fields {
+                let names = match pattern.contains('*') {
+                    true => (mapped.iter())
+                        .filter(|f| es_index::aliases::glob(pattern, f))
+                        .cloned()
+                        .collect(),
+                    false => vec![pattern.clone()],
+                };
+                for name in names {
+                    match boosts.iter_mut().find(|(f, _)| *f == name) {
+                        Some((_, b)) => *b *= boost,
+                        None => boosts.push((name, *boost)),
+                    }
+                }
+            }
+            let lenient = fields.iter().any(|(f, _)| f == "*");
+            let mut queries = vec![];
+            for (field, boost) in boosts {
+                match resolve_dates(index, query.as_ref().clone().on_field(&field), now) {
+                    Ok(q) => queries.push(q.boosted(boost)),
+                    Err(_) if lenient => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            match queries.len() {
+                0 => Query::Bool {
+                    must: vec![],
+                    should: vec![],
+                    must_not: vec![],
+                    filter: vec![],
+                    min_should: 1,
+                },
+                1 => queries.remove(0),
+                _ => Query::DisMax {
+                    queries,
+                    tie_breaker,
+                },
+            }
+        }
         Query::DisMax {
             queries,
             tie_breaker,

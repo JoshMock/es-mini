@@ -348,12 +348,9 @@ impl Parser {
             return Err("fuzzy queries (`~`) are not supported".into());
         }
         let field = field.to_owned();
-        if field == "*" && tok != Some(Tok::Star) {
-            // ponytail: all-fields (`*`) queries need ES's per-type lenient multi-field query
-            return Err("querying all fields (`*`) is not supported".into());
-        }
-        Ok(Some(match tok {
-            Some(Tok::Term(t)) => return Ok(Some(self.field_query(field, unescape(&t)?))),
+        let all = field == "*" && tok != Some(Tok::Star);
+        let q = match tok {
+            Some(Tok::Term(t)) => self.field_query(field, unescape(&t)?),
             Some(Tok::Star) if field == "*" => Query::MatchAll,
             Some(Tok::Star) => Query::Exists { field },
             Some(Tok::Prefix(p)) => Query::Normalized(Box::new(Query::Prefix {
@@ -392,6 +389,15 @@ impl Parser {
                 self.at -= 1;
                 return Err(self.unexpected());
             }
+        };
+        // ES queries each term on every field, as a best_fields multi_match
+        Ok(Some(match all {
+            true => Query::Fields {
+                fields: vec![("*".into(), 1.0)],
+                query: Box::new(q),
+                tie_breaker: 0.0,
+            },
+            false => q,
         }))
     }
 
