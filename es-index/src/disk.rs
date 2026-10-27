@@ -947,7 +947,8 @@ fn append(
         f.set_len(cp.offset as u64 - bytes.len() as u64)?;
         f.seek(SeekFrom::End(0))?;
         f.write_all(bytes)?;
-        f.sync_all()
+        // fdatasync, like TranslogWriter's force(false): it still persists the new length.
+        f.sync_data()
     };
     write().map_err(|e| es_codec::Error(format!("{}: {e}", path.display())))?;
     // A fixed-size record rewritten in place and fsynced, like Elasticsearch's Checkpoint.write.
@@ -955,7 +956,8 @@ fn append(
     let write = || -> std::io::Result<()> {
         let mut f = std::fs::OpenOptions::new().write(true).open(&ckp)?;
         f.write_all(&es_codec::translog::checkpoint(cp))?;
-        f.sync_all()
+        // Same size, so no metadata to force (Checkpoint.write's force(false)).
+        f.sync_data()
     };
     write().map_err(|e| es_codec::Error(format!("{}: {e}", ckp.display())))
 }
