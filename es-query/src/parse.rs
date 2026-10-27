@@ -631,19 +631,20 @@ fn parse_kind(kind: &str, body: &Value) -> Result<Query, QueryError> {
                 o.get("query")
                     .ok_or("[simple_query_string] requires query")?,
             );
-            // ponytail: no `+ | - " * ( ) ~` operators, field boosts or default `*` fields
+            // ponytail: no `+ | - " * ( ) ~` operators or default `*` fields
             if query.contains(['+', '|', '"', '*', '(', ')', '~'])
                 || query.split_whitespace().any(|t| t.starts_with('-'))
             {
                 return Err("[simple_query_string] operators are not supported".into());
             }
-            let fields: Vec<&str> = o
+            let fields = o
                 .get("fields")
                 .and_then(Value::as_array)
                 .ok_or("[simple_query_string] requires fields")?
                 .iter()
                 .filter_map(Value::as_str)
-                .collect();
+                .map(field_boost)
+                .collect::<Result<Vec<_>, _>>()?;
             let and = match o.get("default_operator").and_then(Value::as_str) {
                 None => false,
                 Some(op) if op.eq_ignore_ascii_case("and") => true,
@@ -657,10 +658,19 @@ fn parse_kind(kind: &str, body: &Value) -> Result<Query, QueryError> {
                     must: vec![],
                     should: fields
                         .iter()
-                        .map(|f| Query::Match {
-                            field: (*f).to_owned(),
-                            query: t.to_owned(),
-                            and: false,
+                        .map(|&(f, boost)| {
+                            let q = Query::Match {
+                                field: f.to_owned(),
+                                query: t.to_owned(),
+                                and: false,
+                            };
+                            match boost == 1.0 {
+                                true => q,
+                                false => Query::Boosted {
+                                    boost,
+                                    query: Box::new(q),
+                                },
+                            }
                         })
                         .collect(),
                     must_not: vec![],

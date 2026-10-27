@@ -1468,3 +1468,26 @@ fn query_dsl_gaps_multi_match_field_boosts() {
     let err = parse_query(&json!({"multi_match": {"query": "q", "fields": ["title^x"]}}));
     assert!(err.is_err());
 }
+
+#[test]
+fn query_dsl_gaps_simple_query_string_field_boosts() {
+    let idx = index();
+    let scores = |q: Value| {
+        let r = search(&idx, &SearchRequest::parse(&json!({ "query": q })).unwrap());
+        let mut s: Vec<_> = (r.hits.iter())
+            .map(|h| (h.id.to_owned(), h.score.unwrap()))
+            .collect();
+        s.sort_by(|a, b| a.0.cmp(&b.0));
+        s
+    };
+    let base = scores(json!({"match": {"title": "quick"}}));
+    let got =
+        scores(json!({"simple_query_string": {"query": "quick", "fields": ["title^2", "tag"]}}));
+    assert_eq!(got.len(), base.len());
+    for ((id, s), (bid, b)) in got.iter().zip(&base) {
+        assert!(
+            id == bid && (s - b * 2.0).abs() < 1e-5,
+            "{got:?} vs {base:?}"
+        );
+    }
+}
