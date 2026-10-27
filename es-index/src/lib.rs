@@ -456,16 +456,23 @@ impl Index {
     // ponytail: copies the ids and versions of the documents (not their sources); memory grows
     // with the document count times open snapshots, where Lucene shares per-segment live docs
     pub fn snapshot(&self) -> Index {
+        let mut settings = self.settings.clone();
+        // it sees the writes visible now, and is never refreshed
+        settings.merge(&serde_json::json!({ index_settings::REFRESH_INTERVAL: "-1" }));
         Index {
             stats: self.stats.clone(),
-            settings: self.settings.clone(),
+            settings,
             mappings: self.mappings.clone(),
             docs: self.docs.clone(),
             disk: self.disk.clone(),
             superseded: self.superseded.clone(),
             persisted: self.persisted,
             next_seq_no: self.next_seq_no,
-            refreshed_seq_no: self.refreshed_seq_no,
+            refreshed_seq_no: if self.refresh_due() {
+                self.next_seq_no
+            } else {
+                self.refreshed_seq_no
+            },
             refreshed_at: self.refreshed_at,
             ..Index::default()
         }
@@ -1332,6 +1339,21 @@ mod tests {
         let mut ix = Index::default();
         let seq_no = ix.put("1", json!({})).seq_no;
         assert!(ix.searchable(seq_no));
+    }
+
+    #[test]
+    fn a_snapshot_keeps_the_writes_visible_when_taken() {
+        let mut ix = Index::default();
+        ix.settings
+            .merge(&json!({"index.refresh_interval": "100ms"}));
+        let first = ix.put("1", json!({})).seq_no;
+        std::thread::sleep(Duration::from_millis(200));
+        let second = ix.put("2", json!({})).seq_no;
+        let snap = ix.snapshot();
+        assert!(snap.searchable(first) && !snap.searchable(second));
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(ix.searchable(second));
+        assert!(!snap.searchable(second), "a snapshot is not refreshed");
     }
 
     #[test]
