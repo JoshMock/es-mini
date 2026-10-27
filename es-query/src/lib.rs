@@ -1133,11 +1133,7 @@ pub fn check_sortable(targets: &[Target], req: &SearchRequest) -> Result<(), Que
                         index.mappings.properties.get(b),
                         Some(FieldMapping::TextKeyword { .. })
                     )
-                })
-                // ponytail: a path a source has but the mappings lack is accepted; ES refuses it
-                || index
-                    .docs()
-                    .any(|(_, d)| !values(&d.source, &f.field).is_empty());
+                });
             if !known {
                 return Err(QueryError::illegal(format!(
                     "No mapping found for [{}] in order to sort on",

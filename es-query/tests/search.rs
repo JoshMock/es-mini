@@ -512,9 +512,18 @@ fn sorting_on_an_unmapped_field_is_refused_unless_unmapped_type_is_set() {
     assert_eq!(e.msg, "No mapping found for [nope] in order to sort on");
     assert_eq!(e.kind, es_query::ErrorKind::IllegalArgument);
     assert!(check(json!([{"nope": {"unmapped_type": "long"}}])).is_ok());
-    for ok in ["tag", "nested.x", "_score", "_doc", "_id", "_index"] {
+    for ok in ["tag", "_score", "_doc", "_id", "_index"] {
         assert!(check(json!([ok])).is_ok(), "{ok}");
     }
+}
+
+#[test]
+fn mapping_validation_sorting_on_a_source_path_the_mappings_lack_is_refused() {
+    let idx = index();
+    let targets = [("i", &idx, None)];
+    let req = SearchRequest::parse(&json!({"sort": ["nested.x"]})).unwrap();
+    let e = es_query::check_sortable(&targets, &req).unwrap_err();
+    assert_eq!(e.msg, "No mapping found for [nested.x] in order to sort on");
 }
 
 #[test]
