@@ -188,6 +188,7 @@ pub async fn search(
 ) -> Result<Json<Value>, AppError> {
     params::check(&uri, &params, &SEARCH_PARAMS)?;
     let start = Instant::now();
+    let raw = body.clone();
     let mut body = parse_body(&body)?;
     let pit = body.as_object_mut().and_then(|o| o.remove("pit"));
     let pit_id = pit.as_ref().map(|p| p["id"].clone());
@@ -214,7 +215,7 @@ pub async fn search(
         ));
     }
     let snapshot = match pit {
-        Some(p) => Some(crate::scroll::pit(&contexts, &p)?),
+        Some(p) => Some(crate::scroll::pit(&contexts, &p, &raw)?),
         None if scroll.is_some() => Some(crate::scroll::snapshot(&state, &name, &params)?),
         None => None,
     };

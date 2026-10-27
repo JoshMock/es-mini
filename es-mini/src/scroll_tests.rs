@@ -261,3 +261,57 @@ async fn pit_keeps_on_disk_documents_across_saves() {
     assert_eq!(s, StatusCode::OK, "{r}");
     assert_eq!(r["hits"]["hits"][0]["_source"], json!({"n": 1}));
 }
+
+/// Elasticsearch 9.5.5's errors for ids that are not base64 (URL-safe, as Java decodes them).
+#[tokio::test]
+async fn error_shapes_undecodable_ids_fail_like_elasticsearch() {
+    let app = app();
+    for (id, reason) in [
+        (
+            "a",
+            "Input byte[] should at least have 2 bytes for base64 bytes",
+        ),
+        ("bogus", "Last unit does not have enough valid bits"),
+        ("ab=", "Input byte array has wrong 4-byte ending unit"),
+        ("abcd=", "Input byte array has wrong 4-byte ending unit"),
+        ("abc=d", "Input byte array has incorrect ending byte at 4"),
+        ("ab==c", "Input byte array has incorrect ending byte at 4"),
+        ("a+b/", "Illegal base64 character 2b"),
+        ("a.b", "Illegal base64 character 2e"),
+        ("abé", "Illegal base64 character -17"),
+        ("", "search context id is is not provided"),
+    ] {
+        let (s, r) = call(&app, Method::DELETE, "/_pit", Some(json!({"id": id}))).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{id}");
+        let cause = json!({"type": "illegal_argument_exception", "reason": reason});
+        assert_eq!(
+            r["error"],
+            json!({"root_cause": [cause], "type": "illegal_argument_exception", "reason": reason}),
+            "{id}"
+        );
+    }
+    let cause =
+        json!({"type": "illegal_argument_exception", "reason": "Illegal base64 character 2e"});
+    let (s, r) = call(
+        &app,
+        Method::POST,
+        "/_search",
+        Some(json!({"pit": {"id": "a.b"}})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let reason = "[1:14] [pit] failed to parse field [id]";
+    let root = json!({"type": "x_content_parse_exception", "reason": reason});
+    assert_eq!(
+        r["error"],
+        json!({"root_cause": [root], "type": "x_content_parse_exception", "reason": reason, "caused_by": cause})
+    );
+    let body = json!({"scroll_id": "a.b"});
+    let (s, r) = call(&app, Method::POST, "/_search/scroll", Some(body)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let root = json!({"type": "illegal_argument_exception", "reason": "Cannot parse scroll id"});
+    assert_eq!(
+        r["error"],
+        json!({"root_cause": [root], "type": "illegal_argument_exception", "reason": "Cannot parse scroll id", "caused_by": cause})
+    );
+}

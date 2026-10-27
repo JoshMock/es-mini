@@ -127,16 +127,63 @@ fn encode(id: u64) -> String {
 }
 
 fn decode(id: &str) -> Result<u64, AppError> {
+    let error = AppError::IllegalArgument("Cannot parse scroll id".into());
+    if let Some(e) = base64_error(id) {
+        let cause = json!({"type": "illegal_argument_exception", "reason": e});
+        return Err(AppError::Caused(Box::new(error), cause));
+    }
     id.strip_prefix("esmini-scroll-")
         .and_then(|n| n.parse().ok())
-        .ok_or_else(|| AppError::IllegalArgument("Cannot parse scroll id".into()))
+        .ok_or(error)
 }
 
 fn decode_pit(id: &str) -> Result<u64, AppError> {
+    if let Some(e) = base64_error(id) {
+        return Err(AppError::IllegalArgument(e));
+    }
     id.strip_prefix("esmini-pit-")
         .and_then(|n| n.parse().ok())
-        // ponytail: message not checked against Elasticsearch
+        // ponytail: ES reads a base64 id on and fails on what it holds; es-mini, whose ids are
+        // not ES's, gives this message for any base64 id it did not issue
         .ok_or_else(|| AppError::IllegalArgument(format!("invalid id: [{id}]")))
+}
+
+/// The error Java's URL-safe `Base64` decoder throws for `id` (read as ISO-8859-1 bytes),
+/// which Elasticsearch reports for an id it cannot decode.
+fn base64_error(id: &str) -> Option<String> {
+    // characters past U+00FF encode as `?`
+    let src: Vec<u8> = id
+        .chars()
+        .map(|c| u8::try_from(c).unwrap_or(b'?'))
+        .collect();
+    if src.len() == 1 {
+        return Some("Input byte[] should at least have 2 bytes for base64 bytes".into());
+    }
+    let (mut shift, mut at) = (18, 0);
+    while at < src.len() {
+        let b = src[at];
+        at += 1;
+        if b == b'=' {
+            if shift == 18 || shift == 6 && src.get(at).is_none_or(|b| *b != b'=') {
+                return Some("Input byte array has wrong 4-byte ending unit".into());
+            }
+            at += usize::from(shift == 6);
+            break;
+        }
+        if !(b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+            // Java's Integer.toString(byte, 16): signed
+            let (sign, b) = (
+                if b < 0x80 { "" } else { "-" },
+                i32::from(b as i8).unsigned_abs(),
+            );
+            return Some(format!("Illegal base64 character {sign}{b:x}"));
+        }
+        shift = if shift == 0 { 18 } else { shift - 6 };
+    }
+    if shift == 12 {
+        return Some("Last unit does not have enough valid bits".into());
+    }
+    (at < src.len()).then(|| format!("Input byte array has incorrect ending byte at {at}"))
 }
 
 /// `POST /{index}/_pit`: snapshots the indices `index` resolves to.
@@ -181,11 +228,19 @@ pub async fn open_pit(
 }
 
 /// The snapshot of the point in time `pit` (`{id, keep_alive}`), renewing its keep-alive.
-pub(crate) fn pit(contexts: &Contexts, pit: &Value) -> Result<Snapshot, AppError> {
+/// The point in time `pit` names, from the search body `raw`.
+pub(crate) fn pit(contexts: &Contexts, pit: &Value, raw: &[u8]) -> Result<Snapshot, AppError> {
     let id = pit["id"]
         .as_str()
         .ok_or_else(|| AppError::ParsingException("[pit] requires an [id]".into()))?;
-    let n = decode_pit(id)?;
+    let n = decode_pit(id).map_err(|e| {
+        let (_, mut cause) = e.parts();
+        cause.as_object_mut().map(|c| c.remove("root_cause"));
+        let at = crate::docs::locate(raw, "pit.id", &pit["id"]);
+        let at = at.map_or(String::new(), |(l, c)| format!("[{l}:{c}] "));
+        let error = AppError::XContentParse(format!("{at}[pit] failed to parse field [id]"));
+        AppError::Caused(Box::new(error), cause)
+    })?;
     let keep = pit["keep_alive"].as_str().map(keep_alive).transpose()?;
     let mut store = contexts.lock().expect("lock poisoned");
     let p = store
@@ -207,6 +262,11 @@ pub async fn close_pit(
     let id = body["id"]
         .as_str()
         .ok_or_else(|| AppError::ActionRequestValidation("[id] is required".into()))?;
+    if id.is_empty() {
+        return Err(AppError::IllegalArgument(
+            "search context id is is not provided".into(),
+        ));
+    }
     let n = decode_pit(id)?;
     let freed = usize::from(
         contexts

@@ -29,7 +29,7 @@ fn parse_source(body: &[u8]) -> Result<Value, AppError> {
 
 /// Where (1-based line, and column in bytes, as Jackson counts) the first value equal to `v`
 /// under the dotted key `path` starts in the JSON document `raw`.
-fn locate(raw: &[u8], path: &str, v: &Value) -> Option<(usize, usize)> {
+pub(crate) fn locate(raw: &[u8], path: &str, v: &Value) -> Option<(usize, usize)> {
     fn skip_ws(raw: &[u8], at: &mut usize) {
         while raw.get(*at).is_some_and(u8::is_ascii_whitespace) {
             *at += 1;
