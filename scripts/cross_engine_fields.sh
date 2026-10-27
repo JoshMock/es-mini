@@ -4,7 +4,7 @@
 # exists queries on each of them, phrase queries on text, term queries on dynamic object fields,
 # stored_fields of text mapped with `store`, multi-fields, keyword ignore_above (and `_ignored`),
 # values of another JSON type that Elasticsearch coerces (numbers in keyword fields, numeric
-# strings), and date_nanos at nanosecond precision.
+# strings), date_nanos at nanosecond precision, and long and date ranges (points and doc values).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DATA="$(mktemp -d)"; PORT=${ES_MINI_PORT:-9392}
@@ -15,13 +15,13 @@ PID=$!
 trap 'kill $PID 2>/dev/null || true; rm -rf "$DATA" "$DATA.log"' EXIT
 for _ in $(seq 50); do curl -s "localhost:$PORT/" >/dev/null && break; sleep 0.2; done
 mini() { curl -sf -X "$1" "localhost:$PORT$2" -H 'content-type: application/json' --data-binary "$3" >/dev/null; }
-mini PUT /f '{"settings":{"number_of_shards":1,"number_of_replicas":0},"mappings":{"properties":{"d":{"type":"date"},"fl":{"type":"float"},"db":{"type":"double"},"arr":{"type":"long"},"kw":{"type":"keyword"},"t":{"type":"text"},"m":{"type":"text"},"st":{"type":"text","store":true},"lg":{"type":"keyword","ignore_above":3},"ck":{"type":"keyword"},"cn":{"type":"long"},"cb":{"type":"boolean"},"dn":{"type":"date_nanos"}}}}'
+mini PUT /f '{"settings":{"number_of_shards":1,"number_of_replicas":0},"mappings":{"properties":{"d":{"type":"date"},"fl":{"type":"float"},"db":{"type":"double"},"arr":{"type":"long"},"kw":{"type":"keyword"},"t":{"type":"text"},"m":{"type":"text"},"st":{"type":"text","store":true},"lg":{"type":"keyword","ignore_above":3},"ck":{"type":"keyword"},"cn":{"type":"long"},"cb":{"type":"boolean"},"dn":{"type":"date_nanos"},"lr":{"type":"long_range"},"dr":{"type":"date_range"}}}}'
 mini POST '/f/_bulk?refresh=true' '{"index":{"_id":"1"}}
-{"d":"2024-01-01","fl":1.5,"db":2.5,"arr":[1,2,3],"kw":["a","b"],"t":"quick fox","o":{"n":5,"s":"x"},"st":["one two","three"],"lg":["abc","abcd"],"dn":"2024-01-01T00:00:00.123456789Z"}
+{"d":"2024-01-01","fl":1.5,"db":2.5,"arr":[1,2,3],"kw":["a","b"],"t":"quick fox","o":{"n":5,"s":"x"},"st":["one two","three"],"lg":["abc","abcd"],"dn":"2024-01-01T00:00:00.123456789Z","lr":[{"gte":1,"lt":5},{"gt":10,"lte":20}],"dr":{"gte":"2024-01-01","lt":"2024-02-01"}}
 {"index":{"_id":"2"}}
-{"d":"2024-02-01T10:00:00Z","fl":2.5,"db":-1.5,"arr":[3],"m":["brown cat","red hen"]}
+{"d":"2024-02-01T10:00:00Z","fl":2.5,"db":-1.5,"arr":[3],"m":["brown cat","red hen"],"lr":{"gte":3},"dr":{"gt":"2024-01-15","lte":"2024-01-20"}}
 {"index":{"_id":"3"}}
-{"d":"2024-03-01","arr":[10,20],"kw":"b","t":"lazy dog"}
+{"d":"2024-03-01","arr":[10,20],"kw":"b","t":"lazy dog","lr":{"lte":-5}}
 {"index":{"_id":"4"}}
 {"fl":-3.5,"db":7,"kw":["c","c"],"lg":"abcde"}
 {"index":{"_id":"5"}}

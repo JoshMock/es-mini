@@ -536,6 +536,65 @@ fn date_nanos(format: Option<&str>, locale: Option<&str>, v: &Value) -> Option<O
     (nanos >= 0).then_some(Some(nanos))
 }
 
+/// `(from, to, include_from, include_to)` of a range field's value.
+type Range = (i64, i64, bool, bool);
+
+/// A range field's value as RangeFieldMapper parses it, its bounds parsed by `end` (rounding up a `gt` or `lte` date) and made inclusive,
+/// an open end at the long limits. Malformed if not an object (ES rejects the document); `None` for
+/// an unknown key, an overflowing bound or `from > to` (ES rejects those too; es-mini ignores them).
+fn range(v: &Value, end: &dyn Fn(&Value, bool) -> Option<Option<i64>>) -> Option<Option<Range>> {
+    let Some(o) = v.as_object() else {
+        return Some(None);
+    };
+    let (mut from, mut to, mut include_from, mut include_to) = (None, None, true, true);
+    for (k, x) in o {
+        let (bound, include, step) = match k.as_str() {
+            "gt" | "gte" => (&mut from, &mut include_from, 1),
+            "lt" | "lte" => (&mut to, &mut include_to, -1),
+            _ => return None,
+        };
+        *include = k.ends_with('e');
+        if !x.is_null() {
+            // `from` rounds up when excluded, `to` when included
+            let Some(n) = end(x, *include == (step < 0))? else {
+                return Some(None);
+            };
+            *bound = Some(if *include { n } else { n.checked_add(step)? });
+        }
+    }
+    let from = from.unwrap_or(i64::MIN + i64::from(!include_from));
+    let to = to.unwrap_or(i64::MAX - i64::from(!include_to));
+    (from <= to).then_some(Some((from, to, include_from, include_to)))
+}
+
+/// `BinaryRangeUtil.encodeLongRanges` of a doc's sorted ranges: their count, then each bound as
+/// a sign bit, 4 bits of length and the value's significant bytes (negatives inverted).
+fn encode_ranges(ranges: &[Range]) -> Vec<u8> {
+    let mut out = es_codec::output::Output::default();
+    out.vint(ranges.len() as i32);
+    for &(from, to, ..) in ranges {
+        for n in [from, to] {
+            let (l, negative) = if n < 0 {
+                (!n as u64, true)
+            } else {
+                (n as u64, false)
+            };
+            let extra = (64 - l.leading_zeros() as usize)
+                .saturating_sub(3)
+                .div_ceil(8);
+            let mut b = u128::from(l).to_be_bytes()[15 - extra..].to_vec();
+            if negative {
+                b.iter_mut().for_each(|x| *x = !*x);
+                b[0] = (b[0] & 7) | ((15 - extra as u8) << 3);
+            } else {
+                b[0] |= 0x80 | (extra as u8) << 3;
+            }
+            out.bytes(&b);
+        }
+    }
+    out.0
+}
+
 fn user_fields(
     mappings: &Mappings,
     docs: &[(&str, &Document)],
@@ -598,7 +657,7 @@ fn user_fields(
             });
             keys
         };
-        let mut point_width = 0;
+        let (mut point_width, mut point_dims) = (0, 1);
         let (index_options, doc_values, omit_norms) = match mapping {
             M::Text { .. } | M::TextKeyword { .. } => {
                 let Some(texts) = typed(&values, &|v| scalar_text(v).map(Some)) else {
@@ -667,9 +726,48 @@ fn user_fields(
                 out.keyword.push((number, keys));
                 (IndexOptions::Docs, DocValuesType::SortedSet, true)
             }
-            // ponytail: ranges are not indexed on disk; their `_source` is kept
-            // `nested` objects are left out too (see `UserFields`)
-            M::LongRange | M::DateRange { .. } | M::Nested => continue,
+            M::LongRange | M::DateRange { .. } => {
+                // Like ES: a two-dimensional LongRange point per range, and binary doc values of
+                // the doc's distinct ranges.
+                let end = |v: &Value, round_up: bool| match mapping {
+                    M::DateRange { format } => Some(crate::date_millis_in(
+                        format.as_deref(),
+                        None,
+                        v,
+                        &crate::tz::TimeZone::UTC,
+                        round_up,
+                    )),
+                    _ => integer(v, i64::MIN, i64::MAX),
+                };
+                let Some(mut ranges) = typed(&values, &|v| range(v, &end)) else {
+                    continue;
+                };
+                out.points.push((
+                    number,
+                    (ranges.iter().enumerate())
+                        .flat_map(|(doc, rs)| {
+                            rs.iter().map(move |r| {
+                                let bytes = |n| es_codec::points::sortable_bytes(n, 8);
+                                (doc as u32, [bytes(r.0), bytes(r.1)].concat())
+                            })
+                        })
+                        .collect(),
+                ));
+                (point_width, point_dims) = (8, 2);
+                ranges.iter_mut().for_each(|rs| {
+                    rs.sort();
+                    rs.dedup();
+                });
+                out.binary.push((
+                    number,
+                    (ranges.iter())
+                        .map(|rs| (!rs.is_empty()).then(|| encode_ranges(rs)))
+                        .collect(),
+                ));
+                (IndexOptions::None, DocValuesType::Binary, false)
+            }
+            // `nested` objects are left out (see `UserFields`)
+            M::Nested => continue,
             M::Ip => {
                 // Like ES: points and sorted-set doc values of the 16-byte encoding, no postings.
                 let Some(ips) = typed(&values, &|v| Some(crate::ip_bytes(v))) else {
@@ -818,8 +916,8 @@ fn user_fields(
             index_options,
             doc_values,
             attributes,
-            point_dimensions: i32::from(point_width > 0),
-            point_index_dimensions: i32::from(point_width > 0),
+            point_dimensions: if point_width > 0 { point_dims } else { 0 },
+            point_index_dimensions: if point_width > 0 { point_dims } else { 0 },
             point_num_bytes: point_width,
             ..meta[2].clone()
         });

@@ -214,3 +214,58 @@ fn disk_writer_completeness_reads_stats_of_every_field_but_id_from_elasticsearch
     }
     assert!(checked > 0);
 }
+
+#[test]
+fn disk_writer_completeness_writes_ranges_as_points_and_binary_doc_values() {
+    use es_codec::{doc_values::DocValues, field_infos::DocValuesType};
+    let mut idx = Index::default();
+    let props = &mut idx.mappings.properties;
+    props.insert("l".into(), FieldMapping::LongRange);
+    props.insert("d".into(), FieldMapping::DateRange { format: None });
+    // gt/lt exclude their bound, an open end is the type's limit, and the doc values hold each
+    // doc's distinct ranges sorted, as RangeFieldMapper indexes them
+    idx.put(
+        "1",
+        json!({"l": [{"gte": 1, "lt": 5}, {"gt": -2, "lte": -1}, {"gte": 1, "lt": 5}]}),
+    );
+    idx.put(
+        "2",
+        json!({"l": {"gte": null, "lte": 7}, "d": {"gt": "2024-01-01", "lte": "2024-01-02"}}),
+    );
+    idx.put("3", json!({"x": 1}));
+    let (_root, r) = saved_segment("ranges", idx);
+    for f in ["l", "d"] {
+        let info = r.field(f).unwrap();
+        assert_eq!((info.point_dimensions, info.point_index_dimensions), (2, 2));
+        assert_eq!(info.point_num_bytes, 8);
+        assert_eq!(info.doc_values, DocValuesType::Binary);
+    }
+    let DocValues::Bytes(l) = r.doc_values("l").unwrap() else {
+        panic!("range doc values are binary");
+    };
+    // vint count, then BinaryRangeUtil.encodeLong of each from and to: -1 is 0x7f, 1 is 0x81
+    let min = [0x3f, 0x80, 0, 0, 0, 0, 0, 0, 0];
+    assert_eq!(l[0].as_deref(), Some(&[2, 0x7f, 0x7f, 0x81, 0x84][..]));
+    assert_eq!(
+        l[1].as_deref(),
+        Some(&[[1].as_slice(), &min, &[0x87]].concat()[..])
+    );
+    assert_eq!(l[2], None);
+    let DocValues::Bytes(d) = r.doc_values("d").unwrap() else {
+        panic!("range doc values are binary");
+    };
+    // gt and lte round their dates up to the day's last millisecond (gt then adds one)
+    let encode = |n: i64| {
+        let mut b = n.to_be_bytes()[2..].to_vec();
+        b[0] |= 0x80 | 5 << 3;
+        b
+    };
+    let want = [
+        vec![1],
+        encode(1_704_153_600_000),
+        encode(1_704_239_999_999),
+    ]
+    .concat();
+    assert_eq!(d[1].as_deref(), Some(&want[..]));
+    assert_eq!((d[0].as_ref(), d[2].as_ref()), (None, None));
+}
