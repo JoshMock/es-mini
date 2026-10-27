@@ -16,7 +16,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::{
     borrow::{Borrow, Cow},
-    cell::OnceCell,
+    cell::{OnceCell, RefCell},
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
     ops::{Range, RangeInclusive},
@@ -37,6 +37,30 @@ pub enum EsqlError {
     IndexClosed(String),
     /// A source names a missing index while others match (`index_not_found_exception`).
     IndexNotFound(String),
+    /// An evaluation error that fails the query in ES (one its evaluators do not turn into a
+    /// warning and a null): the HTTP status, the error type and its reason.
+    Failed {
+        status: u16,
+        kind: &'static str,
+        reason: String,
+    },
+}
+
+thread_local! {
+    /// The first [`EsqlError::Failed`] raised while evaluating the running query.
+    static FAILURE: RefCell<Option<EsqlError>> = const { RefCell::new(None) };
+}
+
+/// Fails the running query with `kind` and `reason` (once `run` finishes); null meanwhile.
+fn fail(status: u16, kind: &'static str, reason: String) -> Option<Value> {
+    FAILURE.with_borrow_mut(|f| {
+        f.get_or_insert(EsqlError::Failed {
+            status,
+            kind,
+            reason,
+        });
+    });
+    None
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -1798,9 +1822,9 @@ fn string_fn(f: &str, args: &[Value]) -> Option<Value> {
         Some(l) => l.as_i64()?,
         None => n,
     };
-    // ponytail: a negative length fails the query in ES; null here
     if len < 0 {
-        return None;
+        let reason = format!("Length parameter cannot be negative, found [{len}]");
+        return fail(400, "illegal_argument_exception", reason);
     }
     let from = match start {
         0 => 0,
@@ -2272,7 +2296,9 @@ pub fn run(
     indices: &aliases::Map<impl aliases::IndexMeta + std::borrow::Borrow<Index>>,
     query: &str,
 ) -> Result<Response, EsqlError> {
-    run_at(indices, query, crate::dates::now_millis())
+    FAILURE.take();
+    let r = run_at(indices, query, crate::dates::now_millis());
+    FAILURE.take().map_or(r, Err)
 }
 
 /// `run` with `now` (epoch millis) as the query's start time.

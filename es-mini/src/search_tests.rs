@@ -161,6 +161,32 @@ async fn esql_query() {
     assert_eq!(s, StatusCode::BAD_REQUEST);
 }
 
+/// An evaluation error fails the query with Elasticsearch 9.5.5's status, type and reason.
+#[tokio::test]
+async fn esql_es_semantics_evaluation_failure_response() {
+    let query = "ROW n = -1 | EVAL s = SUBSTRING(\"abc\", 1, n)";
+    let (s, r) = call(
+        &app(),
+        Method::POST,
+        "/_query",
+        Some(json!({"query": query})),
+    )
+    .await;
+    let cause = json!({
+        "type": "illegal_argument_exception",
+        "reason": "Length parameter cannot be negative, found [-1]",
+    });
+    let mut error = cause.clone();
+    error["root_cause"] = json!([cause]);
+    assert_eq!(
+        (s, r),
+        (
+            StatusCode::BAD_REQUEST,
+            json!({"error": error, "status": 400})
+        )
+    );
+}
+
 #[tokio::test]
 async fn profile_times_each_aggregation_per_shard() {
     let app = seeded().await;

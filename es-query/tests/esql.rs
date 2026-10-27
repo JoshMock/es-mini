@@ -2045,3 +2045,24 @@ fn esql_es_semantics_no_spatial_types() {
         ))
     );
 }
+
+/// Elasticsearch 9.5.5 fails the query on a negative SUBSTRING length (400
+/// `illegal_argument_exception`).
+#[test]
+fn esql_es_semantics_negative_substring_length_fails() {
+    assert_eq!(
+        run(
+            &indices(),
+            "FROM people | EVAL n = -1 | EVAL s = SUBSTRING(name, 1, n)"
+        ),
+        Err(EsqlError::Failed {
+            status: 400,
+            kind: "illegal_argument_exception",
+            reason: "Length parameter cannot be negative, found [-1]".into()
+        })
+    );
+    assert_eq!(
+        q("ROW s = SUBSTRING(\"abc\", 2), t = SUBSTRING(\"abc\", 1, 0)").values,
+        [[json!("bc"), json!("")]]
+    );
+}

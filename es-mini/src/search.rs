@@ -3,7 +3,7 @@ use axum::{
     Extension, Json,
     body::Bytes,
     extract::{Path, Query, State},
-    http::Uri,
+    http::{StatusCode, Uri},
 };
 use es_index::aliases;
 use es_query::{
@@ -557,6 +557,15 @@ pub async fn esql(
         EsqlError::Verification(m) => AppError::Verification(m),
         EsqlError::IndexClosed(i) => AppError::IndexClosedBlock(i),
         EsqlError::IndexNotFound(i) => AppError::IndexNotFound(i),
+        EsqlError::Failed {
+            status,
+            kind,
+            reason,
+        } => AppError::Other(
+            StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            kind,
+            reason,
+        ),
     })?;
     Ok(Json(json!({
         "took": start.elapsed().as_millis() as u64,

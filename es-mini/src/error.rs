@@ -54,6 +54,8 @@ pub enum AppError {
     AllShardsFailed(Vec<(String, es_query::QueryError)>),
     /// Settings (given as JSON) with a list holding more than strings, numbers and booleans.
     SettingsLists(String),
+    /// Any other error: its status, type and reason.
+    Other(StatusCode, &'static str, String),
 }
 
 impl AppError {
@@ -240,6 +242,7 @@ impl AppError {
                 r,
                 None,
             ),
+            Self::Other(status, kind, r) => (status, kind, r, None),
         };
         let mut cause = json!({"type": kind, "reason": reason});
         if let Some(i) = index {
