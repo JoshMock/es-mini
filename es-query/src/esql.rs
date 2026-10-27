@@ -393,7 +393,12 @@ impl Parser<'_> {
         if self.pos == self.operand {
             return self.mismatched(EXPRESSION);
         }
-        let start = self.toks[self.operand].2.start;
+        self.no_viable_alternative(self.operand)
+    }
+
+    /// ANTLR found no rule that fits the tokens from `from` through the current one.
+    fn no_viable_alternative<T>(&self, from: usize) -> Result<T, EsqlError> {
+        let start = self.toks[from].2.start;
         let end = self
             .toks
             .get(self.pos)
@@ -575,11 +580,10 @@ impl Parser<'_> {
                     loop {
                         let start = self.pos;
                         let a = self.ident(ID_PATTERN)?;
-                        // ponytail: not checked against Elasticsearch's expected-token sets
                         let (old, new) = match () {
                             _ if self.keyword("as") => (a, self.ident(ID_PATTERN)?.0),
                             _ if self.sym("=") => (self.ident(ID_PATTERN)?, a.0),
-                            _ => return self.mismatched("{'=', 'as'}"),
+                            _ => return self.no_viable_alternative(start),
                         };
                         let text = self.src[self.span(start).1].to_owned();
                         pairs.push((old, new, text));

@@ -1899,3 +1899,46 @@ fn esql_es_semantics_date_function_argument_messages() {
         assert_eq!(err(q), format!("Found 1 problem\nline {msg}"), "{q}");
     }
 }
+
+/// Elasticsearch 9.5.5's parse errors for a malformed RENAME.
+#[test]
+fn esql_es_semantics_rename_parse_errors() {
+    let err = |q: &str| match run(&indices(), q) {
+        Err(EsqlError::Parse(m)) => m,
+        other => panic!("{q}: {other:?}"),
+    };
+    let id = "{'?', '??', NAMED_OR_POSITIONAL_PARAM, NAMED_OR_POSITIONAL_DOUBLE_PARAMS, '[', \
+              ID_PATTERN}";
+    for (q, msg) in [
+        (
+            "ROW a = 1 | RENAME a b",
+            "1:22: no viable alternative at input 'a b'".into(),
+        ),
+        (
+            "ROW a = 1 | RENAME a b c",
+            "1:22: no viable alternative at input 'a b'".into(),
+        ),
+        (
+            "ROW a = 1 | RENAME a",
+            "1:21: no viable alternative at input 'a'".into(),
+        ),
+        (
+            "ROW a = 1 | RENAME a, b",
+            "1:21: no viable alternative at input 'a,'".into(),
+        ),
+        (
+            "ROW a = 1 | RENAME a AS",
+            format!("1:24: mismatched input '<EOF>' expecting {id}"),
+        ),
+        (
+            "ROW a = 1 | RENAME a = ",
+            format!("1:24: mismatched input '<EOF>' expecting {id}"),
+        ),
+        (
+            "ROW a = 1 | RENAME a AS b c",
+            "1:27: extraneous input 'c' expecting <EOF>".into(),
+        ),
+    ] {
+        assert_eq!(err(q), format!("line {msg}"), "{q}");
+    }
+}
