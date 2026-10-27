@@ -9,7 +9,7 @@
 //! names and literals. Any other syntax is a parse error; any other function fails verification.
 
 use es_index::{
-    FieldMapping, Index, Mappings,
+    FieldMapping, Index,
     aliases::{self, ResolveError},
 };
 use serde::Serialize;
@@ -857,10 +857,13 @@ impl Parser<'_> {
 
 /// Columns of an index: mapped fields plus unmapped source fields, typed like ES dynamic mapping.
 /// Values are `(mapping type, ES|QL type)`, e.g. `("float", "double")`.
-fn columns(index: &Index) -> BTreeMap<String, (String, String)> {
+fn columns<'a>(
+    index: &Index,
+    sources: impl Iterator<Item = &'a Value>,
+) -> BTreeMap<String, (String, String)> {
     let mut dynamic: BTreeMap<String, String> = BTreeMap::new();
-    for (_, d) in index.docs() {
-        flatten_types("", &d.source, &mut dynamic);
+    for source in sources {
+        flatten_types(&mut String::new(), source, &mut dynamic);
     }
     let mut cols: BTreeMap<_, _> = dynamic
         .into_iter()
@@ -905,41 +908,47 @@ fn conflict_error(field: &str, types: &BTreeMap<String, Vec<String>>) -> String 
     )
 }
 
-fn flatten_types(prefix: &str, v: &Value, cols: &mut BTreeMap<String, String>) {
+/// Adds the dynamic types of `v`'s fields under `path`, a buffer it restores. It runs on every
+/// document per query, so it allocates only for a column it has not seen.
+fn flatten_types(path: &mut String, v: &Value, cols: &mut BTreeMap<String, String>) {
+    let mut add = |path: &str, t: &str| {
+        if !cols.contains_key(path) {
+            cols.insert(path.to_owned(), t.to_owned());
+        }
+    };
+    let len = path.len();
     let t = match v {
         Value::Object(o) => {
             for (k, v) in o {
-                let key = if prefix.is_empty() {
-                    k.clone()
-                } else {
-                    format!("{prefix}.{k}")
-                };
-                flatten_types(&key, v, cols);
+                if len > 0 {
+                    path.push('.');
+                }
+                path.push_str(k);
+                flatten_types(path, v, cols);
+                path.truncate(len);
             }
             return;
         }
-        Value::Array(a) => return a.iter().for_each(|x| flatten_types(prefix, x, cols)),
+        Value::Array(a) => return a.iter().for_each(|x| flatten_types(path, x, cols)),
         Value::Null => return,
         Value::String(_) => {
-            cols.entry(format!("{prefix}.keyword"))
-                .or_insert_with(|| "keyword".into());
+            path.push_str(".keyword");
+            add(path, "keyword");
+            path.truncate(len);
             "text"
         }
         Value::Bool(_) => "boolean",
         Value::Number(n) if n.is_f64() => "double",
         Value::Number(_) => "long",
     };
-    cols.entry(prefix.to_owned())
-        .or_insert_with(|| t.to_owned());
+    add(path, t);
 }
 
 /// The value of a column in one document; multi-values become arrays. A multi-field (or the
 /// `.keyword` of an unmapped string) reads its parent's source value.
-fn cell(source: &Value, column: &str, mappings: &Mappings) -> Value {
+fn cell(source: &Value, column: &str, multi_field: bool) -> Value {
     let mut vals = Vec::new();
     collect(source, column, &mut vals);
-    let multi_field = column.ends_with(".keyword")
-        || !mappings.properties.contains_key(column) && mappings.field(column).is_some();
     if vals.is_empty()
         && multi_field
         && let Some((base, _)) = column.rsplit_once('.')
@@ -2111,7 +2120,7 @@ pub fn run(
         empty,
         counted,
     } = match source {
-        Some((sources, metadata)) => table_from(indices, &sources, &metadata)?,
+        Some((sources, metadata)) => table_from(indices, &sources, &metadata, &read(&cmds))?,
         None => Table {
             types: BTreeMap::new(),
             conflicts: BTreeMap::new(),
@@ -2583,6 +2592,7 @@ fn table_from(
     indices: &aliases::Map<impl aliases::IndexMeta + std::borrow::Borrow<Index>>,
     sources: &[String],
     metadata: &[String],
+    read: &dyn Fn(&str) -> bool,
 ) -> Result<Table, EsqlError> {
     // Like Elasticsearch: a missing index is only "unknown" when no source matches anything.
     let none_match = || {
@@ -2608,7 +2618,9 @@ fn table_from(
     let mut docs = Vec::new();
     for t in &targets {
         let index: &Index = indices[&t.index].borrow();
-        for (c, (es_type, ty)) in columns(index) {
+        // Read once: on-disk documents are decoded on every read.
+        let mut mine: Vec<_> = index.docs().collect();
+        for (c, (es_type, ty)) in columns(index, mine.iter().map(|(_, d)| &d.source)) {
             let es_type = if es_type == "date" {
                 "datetime".into()
             } else {
@@ -2624,14 +2636,11 @@ fn table_from(
             .transpose()
             .map_err(|e| EsqlError::Verification(e.msg))?;
         let searcher = filter.as_ref().map(|f| (crate::Searcher::new(index, f), f));
-        let mut mine: Vec<_> = index
-            .docs()
-            .filter(|(id, d)| {
-                searcher
-                    .as_ref()
-                    .is_none_or(|(s, f)| s.score(f, id, d).is_some())
-            })
-            .collect();
+        mine.retain(|(id, d)| {
+            searcher
+                .as_ref()
+                .is_none_or(|(s, f)| s.score(f, id, d).is_some())
+        });
         mine.sort_by_key(|(_, d)| d.seq_no);
         docs.push(mine);
     }
@@ -2660,18 +2669,28 @@ fn table_from(
         .zip(&targets)
         .map(|(g, t)| {
             let mappings = &indices[&t.index].borrow().mappings;
+            // Per column read, what loading it needs: looked up once, not per document.
+            let read: Vec<_> = (types.iter())
+                .filter(|(c, _)| read(c))
+                .map(|(c, ty)| {
+                    let multi_field = c.ends_with(".keyword")
+                        || !mappings.properties.contains_key(c) && mappings.field(c).is_some();
+                    (
+                        c,
+                        ty,
+                        conflicts.contains_key(c),
+                        mappings.field(c),
+                        multi_field,
+                    )
+                })
+                .collect();
             g.iter()
                 .map(|(id, d)| {
-                    let mut row: Row = types
-                        .keys()
-                        .map(|c| {
-                            let v = match conflicts.contains_key(c) {
+                    let mut row: Row = (read.iter())
+                        .map(|&(c, ty, conflict, m, multi_field)| {
+                            let v = match conflict {
                                 true => Value::Null,
-                                false => doc_value(
-                                    cell(&d.source, c, mappings),
-                                    &types[c],
-                                    mappings.field(c),
-                                ),
+                                false => doc_value(cell(&d.source, c, multi_field), ty, m),
                             };
                             (c.clone(), v)
                         })
@@ -2704,6 +2723,33 @@ fn table_from(
         empty: targets.is_empty(),
         counted: true,
     })
+}
+
+/// Whether a query reads (or outputs) a source column: every column unless a KEEP or STATS
+/// narrows the output to the columns its commands name. Skipping the rest saves loading them.
+fn read(cmds: &[Command]) -> impl Fn(&str) -> bool + '_ {
+    let narrowed = (cmds.iter()).any(|c| matches!(c, Command::Keep(_) | Command::Stats(..)));
+    let mut named = BTreeSet::new();
+    for c in cmds {
+        match c {
+            Command::Where(e) => named.extend(names(e)),
+            Command::Eval(es) => named.extend(es.iter().flat_map(|(_, e)| names(e))),
+            Command::Sort(keys) => named.extend(keys.iter().map(|k| k.field.clone())),
+            Command::Rename(pairs) => named.extend(pairs.iter().map(|((old, _), ..)| old.clone())),
+            Command::Stats(aggs, by) => {
+                named.extend(aggs.iter().chain(by).flat_map(|(_, e)| names(e)))
+            }
+            Command::Keep(_) | Command::Drop(_) | Command::Limit(_) => {}
+        }
+    }
+    move |c| {
+        !narrowed
+            || named.contains(c)
+            || cmds.iter().any(|cmd| match cmd {
+                Command::Keep(ps) => ps.iter().any(|(p, _)| aliases::glob(p, c)),
+                _ => false,
+            })
+    }
 }
 
 fn sort_rows<R: Borrow<Row>>(rows: &mut [R], keys: &[SortKey]) {
