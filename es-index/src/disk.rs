@@ -1690,12 +1690,13 @@ fn ours(mut seg: es_codec::SegmentCommitInfo, empty: &[String]) -> es_codec::Seg
 /// Lucene's `SegmentMerger`, it appends the segments' live docs in the merge's order, copying
 /// each format from them a field at a time, and stored fields a doc at a time. Fields a segment
 /// leaves out without listing them [`EMPTY`] are left out of the merge.
-// ponytail: holds the merged documents in memory; stream them if large merges need it. That is,
-// their index data (every field's postings, doc values, norms and points), not their sources.
+// ponytail: holds one field's merged postings, doc values, norms and points at a time, plus the
+// new segment's encoded index files until it is written. Lucene streams both (term by term, to
+// its outputs); do that if one field or a segment's index outgrows memory.
 fn merge(dir: &Path, infos: &mut SegmentInfos) -> es_codec::Result<()> {
     use es_codec::{
         field_infos::DocValuesType as Dv,
-        segment_writer::{NewSegment, write_segment},
+        segment_writer::{DocValuesData, FieldData, SegmentWriter},
         terms::TermPostings,
     };
     let size = |s: &es_codec::SegmentCommitInfo| {
@@ -1738,17 +1739,14 @@ fn merge(dir: &Path, infos: &mut SegmentInfos) -> es_codec::Result<()> {
                 .all(|(r, e)| r.field(name).is_ok() || e.contains(name))
     };
     let meta = meta_fields();
-    let mut out = UserFields::default();
-    let mut numeric = vec![];
+    let (name, id) = segment_name(infos.counter);
+    let mut segment = SegmentWriter::new(&name, id);
+    let (mut fields, mut empty) = (Vec::<&str>::new(), Vec::<String>::new());
     for f in readers.iter().flat_map(|r| &r.fields) {
         let name = f.name.as_str();
-        if out.fields.iter().any(|g| g.name == name) || out.empty.iter().any(|e| e == name) {
+        if fields.contains(&name) || empty.iter().any(|e| e == name) || !covered(name) {
             continue;
         }
-        if !covered(name) {
-            continue;
-        }
-        let number = out.fields.len() as i32;
         let mut terms = BTreeMap::<Vec<u8>, TermPostings>::new();
         if f.index_options != IndexOptions::None {
             for (r, map) in readers.iter().zip(&maps) {
@@ -1772,6 +1770,7 @@ fn merge(dir: &Path, infos: &mut SegmentInfos) -> es_codec::Result<()> {
             }
             terms.retain(|_, t| !t.docs.is_empty());
         }
+        let terms: Vec<_> = terms.into_values().collect();
         let mut points = vec![];
         if f.point_dimensions > 0 {
             for (r, map) in readers.iter().zip(&maps) {
@@ -1782,97 +1781,87 @@ fn merge(dir: &Path, infos: &mut SegmentInfos) -> es_codec::Result<()> {
             }
         }
         let wrong = || es_codec::Error(format!("unexpected doc values type for {name}"));
-        let numbers = || {
-            concat_live(&readers, &maps, name, |r| match r.doc_values(name)? {
-                DocValues::Numbers(n) => Ok(n),
-                _ => Err(wrong()),
-            })
-        };
-        let mut dv = UserFields::default();
-        let mut dv_numeric = vec![];
+        let (mut numbers, mut bytes) = (vec![], vec![]);
+        let mut keywords: Vec<Vec<Vec<u8>>> = vec![];
         let has_dv = match f.doc_values {
             Dv::None => false,
-            Dv::Numeric => {
-                let mut n = numbers()?;
-                let has = n.iter().any(|v| !v.is_empty());
-                if !has {
-                    n.clear(); // as a flush writes `__soft_deletes`
-                }
-                dv_numeric.push((number, n));
-                has
-            }
-            Dv::SortedNumeric => {
-                let n = numbers()?;
-                let has = n.iter().any(|v| !v.is_empty());
-                dv.sorted_numeric.push((number, n));
-                has
+            Dv::Numeric | Dv::SortedNumeric => {
+                numbers = concat_live(&readers, &maps, name, |r| match r.doc_values(name)? {
+                    DocValues::Numbers(n) => Ok(n),
+                    _ => Err(wrong()),
+                })?;
+                numbers.iter().any(|v| !v.is_empty())
             }
             Dv::SortedSet => {
-                let k: Vec<Vec<Vec<u8>>> =
-                    concat_live(&readers, &maps, name, |r| match r.doc_values(name)? {
-                        DocValues::Ordinals { ords, terms } => (ords.into_iter())
-                            .map(|o| {
-                                (o.into_iter())
-                                    .map(|o| terms.get(o).cloned().ok_or_else(wrong))
-                                    .collect()
-                            })
-                            .collect(),
-                        _ => Err(wrong()),
-                    })?;
-                let has = k.iter().any(|v| !v.is_empty());
-                dv.keyword.push((number, k));
-                has
+                keywords = concat_live(&readers, &maps, name, |r| match r.doc_values(name)? {
+                    DocValues::Ordinals { ords, terms } => (ords.into_iter())
+                        .map(|o| {
+                            (o.into_iter())
+                                .map(|o| terms.get(o).cloned().ok_or_else(wrong))
+                                .collect()
+                        })
+                        .collect(),
+                    _ => Err(wrong()),
+                })?;
+                keywords.iter().any(|v| !v.is_empty())
             }
             Dv::Binary => {
-                let b = concat_live(&readers, &maps, name, |r| match r.doc_values(name)? {
+                bytes = concat_live(&readers, &maps, name, |r| match r.doc_values(name)? {
                     DocValues::Bytes(b) => Ok(b),
                     _ => Err(wrong()),
                 })?;
-                let has = b.iter().any(Option::is_some);
-                dv.binary.push((number, b));
-                has
+                bytes.iter().any(Option::is_some)
             }
             Dv::Sorted => return Err(wrong()),
         };
-        let has = has_dv || !terms.is_empty() || !points.is_empty();
-        if !has && !meta.iter().any(|m| m.name == name) {
-            out.empty.push(f.name.clone());
+        if !has_dv && terms.is_empty() && points.is_empty() && !meta.iter().any(|m| m.name == name)
+        {
+            empty.push(f.name.clone());
             continue;
         }
-        numeric.extend(dv_numeric);
-        out.sorted_numeric.extend(dv.sorted_numeric);
-        out.keyword.extend(dv.keyword);
-        out.binary.extend(dv.binary);
-        if !f.omit_norms && f.index_options != IndexOptions::None {
-            let norms = concat_live(&readers, &maps, name, |r| {
+        let doc_values = match f.doc_values {
+            Dv::Numeric if !has_dv => {
+                Some(DocValuesData::Numeric(&[])) // as a flush writes `__soft_deletes`
+            }
+            Dv::Numeric => Some(DocValuesData::Numeric(&numbers)),
+            Dv::SortedNumeric => Some(DocValuesData::SortedNumeric(&numbers)),
+            Dv::SortedSet => Some(DocValuesData::Keyword(&keywords)),
+            Dv::Binary => Some(DocValuesData::Binary(&bytes)),
+            _ => None,
+        };
+        let mut norms = vec![];
+        let has_norms = !f.omit_norms && f.index_options != IndexOptions::None;
+        if has_norms {
+            norms = concat_live(&readers, &maps, name, |r| {
                 let norms = r.norms(name)?.unwrap_or_default();
                 Ok(norms
                     .into_iter()
                     .map(|n| (n != 0).then_some(n as i8))
                     .collect())
             })?;
-            out.norms.push((number, norms));
         }
-        if !terms.is_empty() {
-            out.terms.push((number, terms.into_values().collect()));
-        }
-        if !points.is_empty() {
-            out.points.push((number, points));
-        }
-        out.fields.push(es_codec::field_infos::FieldInfo {
-            number,
+        let info = es_codec::field_infos::FieldInfo {
+            number: fields.len() as i32,
             dv_gen: -1,
             ..f.clone()
-        });
+        };
+        let data = FieldData {
+            doc_values,
+            norms: has_norms.then_some(&norms[..]),
+            terms: &terms,
+            points: (!points.is_empty()).then_some(&points[..]),
+        };
+        segment.add(info, data)?;
+        fields.push(name);
     }
     // Fields no merged segment has values of
     for name in empties.first().into_iter().flatten() {
-        if empties.iter().all(|e| e.contains(name)) && !out.empty.contains(name) {
-            out.empty.push(name.clone());
+        if empties.iter().all(|e| e.contains(name)) && !empty.contains(name) {
+            empty.push(name.clone());
         }
     }
-    let numbers: HashMap<&str, i32> = (out.fields.iter())
-        .map(|f| (f.name.as_str(), f.number))
+    let numbers: HashMap<&str, i32> = (fields.iter().enumerate())
+        .map(|(n, &f)| (f, n as i32))
         .collect();
     let stored = readers.iter().zip(&maps).flat_map(|(r, map)| {
         let docs: Box<dyn Iterator<Item = _>> = match r.documents_where(|d| map[d].is_some()) {
@@ -1890,30 +1879,13 @@ fn merge(dir: &Path, infos: &mut SegmentInfos) -> es_codec::Result<()> {
             Ok(out)
         })
     });
-    let (name, id) = segment_name(infos.counter);
-    let seg = write_segment(
-        dir,
-        &NewSegment {
-            name: &name,
-            id,
-            max_doc: max_doc as i32,
-            fields: &out.fields,
-            numeric: &numeric,
-            sorted_numeric: &out.sorted_numeric,
-            keyword: &out.keyword,
-            binary: &out.binary,
-            norms: &out.norms,
-            terms: &out.terms,
-            points: &out.points,
-        },
-        stored,
-    )?;
+    let seg = segment.finish(dir, max_doc as i32, stored)?;
     infos.counter += 1;
     let mut at = 0..;
     infos
         .segments
         .retain(|_| !picked.contains(&at.next().unwrap()));
-    infos.segments.insert(first, ours(seg, &out.empty));
+    infos.segments.insert(first, ours(seg, &empty));
     Ok(())
 }
 
