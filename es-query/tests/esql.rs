@@ -1756,3 +1756,54 @@ fn esql_es_semantics_expected_tokens_after_expressions() {
         assert_eq!(err(q), format!("line {msg}"), "{q}");
     }
 }
+
+/// Elasticsearch 9.5.5 reads an integer followed by an identifier as a time span, so an unknown
+/// unit, or a span as a LIMIT, is a parse error of its own.
+#[test]
+fn esql_es_semantics_time_span_units() {
+    let err = |q: &str| match run(&indices(), q) {
+        Err(EsqlError::Parse(m)) => m,
+        other => panic!("{q}: {other:?}"),
+    };
+    for (q, msg) in [
+        ("ROW a = 1 foo", "1:9: Unexpected temporal unit: 'foo'"),
+        ("ROW a = -1 foo", "1:9: Unexpected temporal unit: 'foo'"),
+        ("ROW a = 1 as", "1:9: Unexpected temporal unit: 'as'"),
+        (
+            "ROW a = DATE_TRUNC(1 foo, NOW())",
+            "1:20: Unexpected temporal unit: 'foo'",
+        ),
+        (
+            "ROW a = 1 | LIMIT 1 x | WHERE b",
+            "1:19: Unexpected temporal unit: 'x'",
+        ),
+        (
+            "ROW a = 1 | LIMIT 1 day",
+            "1:13: value of [LIMIT 1 day] must be a non negative integer, found value [1day] \
+             type [date_period]",
+        ),
+        (
+            "ROW a = 1 | LIMIT 2 HOURS",
+            "1:13: value of [LIMIT 2 HOURS] must be a non negative integer, found value \
+             [2HOURS] type [time_duration]",
+        ),
+        (
+            "ROW a = 1 asc",
+            "1:11: extraneous input 'asc' expecting <EOF>",
+        ),
+        (
+            "ROW a = 1 where",
+            "1:11: extraneous input 'where' expecting <EOF>",
+        ),
+        (
+            "ROW a = 1 `days`",
+            "1:11: extraneous input '`days`' expecting <EOF>",
+        ),
+        (
+            "ROW a = 1.5 days",
+            "1:13: extraneous input 'days' expecting <EOF>",
+        ),
+    ] {
+        assert_eq!(err(q), format!("line {msg}"), "{q}");
+    }
+}

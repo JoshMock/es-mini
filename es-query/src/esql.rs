@@ -222,8 +222,13 @@ const AFTER_SORT_FIELD: &str = "{<EOF>, '|', 'and', 'asc', '::', ',', 'desc', '.
     'or', '+', '-', '*', '/', '%'}";
 const AFTER_SORT_ORDER: &str = "{<EOF>, '|', ',', 'nulls'}";
 const AFTER_SORT_NULLS: &str = "{<EOF>, '|', ','}";
-// ponytail: not checked against Elasticsearch (`LIMIT 1 x` lexes as a time span there).
 const AFTER_LIMIT: &str = "{<EOF>, '|'}";
+/// The words Elasticsearch's lexer reads as keywords in an expression; any other identifier
+/// after an integer is a time span's unit.
+const EXPRESSION_KEYWORDS: [&str; 19] = [
+    "and", "asc", "by", "desc", "false", "first", "in", "is", "last", "like", "not", "null",
+    "nulls", "on", "or", "rlike", "true", "with", "where",
+];
 
 /// What may follow the last item of a comma-separated list (`ROW`, `EVAL`, `BY`), or of `STATS`
 /// aggregates, that ends where `follow` may.
@@ -427,24 +432,53 @@ impl Parser<'_> {
         let Some((Tok::Num(n), _, lit)) = self.toks.get(self.pos).cloned() else {
             return self.mismatched(CONSTANT);
         };
+        let (_, lit_at, ref r) = self.toks[self.pos - negative as usize];
+        let from = r.start;
         self.pos += 1;
         self.follow = AFTER_LIMIT;
-        if let Some(n) = n.as_u64().filter(|&n| !negative && n <= i32::MAX as u64) {
-            return Ok(Command::Limit(n as usize));
-        }
-        let r#type = number_type(&n, negative);
-        let value = &self.src[(if negative {
-            self.toks[self.pos - 2].2.start
-        } else {
-            lit.start
-        })..lit.end];
+        let unit = match n.as_i64() {
+            Some(_) => self.time_unit_here(lit_at)?,
+            None => None,
+        };
+        let (end, r#type) = match unit {
+            Some((unit, word)) => (word.end, span_type(unit)),
+            None => match n.as_u64().filter(|&n| !negative && n <= i32::MAX as u64) {
+                Some(n) => return Ok(Command::Limit(n as usize)),
+                None => (lit.end, number_type(&n, negative)),
+            },
+        };
+        // ANTLR's text of a time span leaves out the space: `1day`.
+        let value = self.src[from..end].replace(char::is_whitespace, "");
         Err(parse_error(
             at,
             &format!(
                 "value of [{}] must be a non negative integer, found value [{value}] type [{type}]",
-                &self.src[start..lit.end]
+                &self.src[start..end]
             ),
         ))
+    }
+
+    /// The unit of a time span whose integer, starting at `at`, ends before the current token:
+    /// an unquoted identifier that is not a keyword (and then the token is consumed).
+    fn time_unit_here(
+        &mut self,
+        at: Pos,
+    ) -> Result<Option<(&'static str, Range<usize>)>, EsqlError> {
+        let Some((Tok::Word(w), _, r)) = self.toks.get(self.pos) else {
+            return Ok(None);
+        };
+        // An unquoted identifier: not `` `quoted` ``, nor a `*` pattern.
+        if !self.src[r.clone()].starts_with(|c: char| c.is_alphabetic() || c == '_' || c == '@')
+            || EXPRESSION_KEYWORDS.contains(&w.to_ascii_lowercase().as_str())
+        {
+            return Ok(None);
+        }
+        let Some(unit) = time_unit(w) else {
+            return Err(parse_error(at, &format!("Unexpected temporal unit: '{w}'")));
+        };
+        let r = r.clone();
+        self.pos += 1;
+        Ok(Some((unit, r)))
     }
 
     fn source(&mut self) -> Result<Source, EsqlError> {
@@ -812,14 +846,17 @@ impl Parser<'_> {
                     (true, Some(i)) => Value::from(-i),
                     (true, None) => Value::from(-n.as_f64().unwrap_or_default()),
                 };
-                let unit = match self.toks.get(self.pos + 1) {
-                    Some((Tok::Word(w), _, r)) => time_unit(w).map(|u| (u, r.end)),
-                    _ => None,
+                // Look past the integer for a unit; the step past the literal below then
+                // steps past the unit too.
+                self.pos += 1;
+                let unit = match n.as_i64() {
+                    Some(i) => self.time_unit_here(span.0)?.map(|u| (i, u)),
+                    None => None,
                 };
-                match (n.as_i64(), unit) {
-                    (Some(i), Some((u, end))) => {
-                        self.pos += 1;
-                        let span = (span.0, span.1.start..end);
+                self.pos -= 1;
+                match unit {
+                    Some((i, (u, r))) => {
+                        let span = (span.0, span.1.start..r.end);
                         (Expr::Interval(i, u, span), AFTER_LITERAL)
                     }
                     _ => (Expr::Lit(n, span), AFTER_LITERAL),
@@ -1477,7 +1514,6 @@ fn date_fn(f: &str, args: &[Value]) -> Option<Value> {
 
 /// The canonical unit of a time span literal's unit, like Elasticsearch's
 /// `ExpressionBuilder.visitQualifiedIntegerLiteral` (ignoring case).
-// ponytail: an unknown unit is a parse error of its own in ES; here the literal ends at the number
 fn time_unit(w: &str) -> Option<&'static str> {
     Some(match w.to_ascii_lowercase().as_str() {
         "millisecond" | "milliseconds" | "ms" => "millisecond",
@@ -1491,6 +1527,14 @@ fn time_unit(w: &str) -> Option<&'static str> {
         "year" | "years" | "yr" | "y" => "year",
         _ => return None,
     })
+}
+
+/// The type of a time span in canonical `unit` (see `time_unit`).
+fn span_type(unit: &str) -> &'static str {
+    match unit {
+        "millisecond" | "second" | "minute" | "hour" => "time_duration",
+        _ => "date_period",
+    }
 }
 
 /// `DATE_TRUNC(n unit, date)` in UTC, like Elasticsearch's `DateTrunc.createRounding`: a single
@@ -1877,12 +1921,7 @@ fn resolve(
     let problem = match e {
         Expr::Field(f, _) => return Some(types[f].clone()),
         Expr::Lit(v, _) => return Some(literal_type(v).into()),
-        Expr::Interval(_, unit, _) => {
-            return Some(match *unit {
-                "millisecond" | "second" | "minute" | "hour" => "time_duration".into(),
-                _ => "date_period".into(),
-            });
-        }
+        Expr::Interval(_, unit, _) => return Some(span_type(unit).into()),
         Expr::Arith(op, a, b, t, _) => {
             let (ta, tb) = (resolve(a, src, types, bad), resolve(b, src, types, bad));
             let (ta, tb) = (ta?, tb?);
