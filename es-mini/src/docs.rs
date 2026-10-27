@@ -515,8 +515,9 @@ pub fn update_doc(state: &AppState, index: &str, id: &str, body: &Value) -> Repl
     let detect_noop = body["detect_noop"].as_bool() != Some(false);
     let (w, total, index) = write(state, index, |i| {
         i.update(id, &partial, upsert, detect_noop)
+            .map_err(AppError::DocumentParsing)
     })?;
-    let w = w.ok_or_else(|| AppError::DocumentMissing {
+    let w = w?.ok_or_else(|| AppError::DocumentMissing {
         index: index.clone(),
         id: id.to_owned(),
     })?;

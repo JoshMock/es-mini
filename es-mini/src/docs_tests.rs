@@ -201,6 +201,36 @@ async fn rejected_document_adds_no_dynamic_mappings() {
 }
 
 #[tokio::test]
+async fn updates_map_new_fields_dynamically() {
+    let app = app();
+    call(&app, Method::PUT, "/idx/_doc/1", Some(json!({"a": 1}))).await;
+    for (id, body) in [
+        ("1", json!({"doc": {"n": 5}})),
+        ("2", json!({"doc": {"n": 3}, "doc_as_upsert": true})),
+    ] {
+        let (s, _) = call(
+            &app,
+            Method::POST,
+            &format!("/idx/_update/{id}"),
+            Some(body),
+        )
+        .await;
+        assert!(s.is_success());
+    }
+    let (_, r) = call(&app, Method::GET, "/idx/_mapping", None).await;
+    assert_eq!(
+        r["idx"]["mappings"]["properties"]["n"],
+        json!({"type": "long"})
+    );
+    let body = json!({"doc": {"a": {"b": 1}}});
+    let (s, r) = call(&app, Method::POST, "/idx/_update/1", Some(body)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(r["error"]["type"], "document_parsing_exception");
+    let (_, r) = call(&app, Method::GET, "/idx/_doc/1", None).await;
+    assert_eq!(r["_source"], json!({"a": 1, "n": 5}));
+}
+
+#[tokio::test]
 async fn mapping_validation_object_for_a_leaf_rejects_the_document() {
     let app = app();
     call(&app, Method::PUT, "/idx/_doc/1", Some(json!({"a": 1}))).await;

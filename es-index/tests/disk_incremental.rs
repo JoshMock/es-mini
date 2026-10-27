@@ -195,7 +195,10 @@ fn writes_replace_and_delete_documents_served_from_disk() {
     let mut indices = disk::open(&dir).unwrap();
     let ix = indices.get_mut("idx").unwrap();
     assert_eq!(ix.create("0", json!({})), Err(1));
-    let r = ix.update("1", &json!({"w": 1}), None, true).unwrap();
+    let r = ix
+        .update("1", &json!({"w": 1}), None, true)
+        .unwrap()
+        .unwrap();
     assert_eq!((r.version, r.seq_no), (2, 5));
     assert_eq!(ix.delete("2").version, 2);
     assert!(ix.get("2").is_none());

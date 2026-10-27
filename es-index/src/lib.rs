@@ -794,30 +794,36 @@ impl Index {
         }
     }
 
-    /// Merges `partial` into an existing document, or indexes `upsert` if it is missing.
-    /// `None` means the document is missing and there is no upsert.
+    /// Merges `partial` into an existing document, or indexes `upsert` if it is missing,
+    /// mapping new fields as [`Index::map_dynamic`] does (whose error it returns). `None` means
+    /// the document is missing and there is no upsert.
     pub fn update(
         &mut self,
         id: &str,
         partial: &Value,
         upsert: Option<Value>,
         detect_noop: bool,
-    ) -> Option<WriteResult> {
+    ) -> Result<Option<WriteResult>, String> {
         let Some(doc) = self.get(id) else {
-            return upsert.map(|source| self.put(id, source));
+            let Some(source) = upsert else {
+                return Ok(None);
+            };
+            self.map_dynamic(id, &source)?;
+            return Ok(Some(self.put(id, source)));
         };
         let mut source = doc.source.clone();
         merge(&mut source, partial);
         if detect_noop && source == doc.source {
             let (version, seq_no) = (doc.version, doc.seq_no);
-            return Some(WriteResult {
+            return Ok(Some(WriteResult {
                 result: DocResult::Noop,
                 version,
                 seq_no,
-            });
+            }));
         }
         drop(doc);
-        Some(self.put(id, source))
+        self.map_dynamic(id, &source)?;
+        Ok(Some(self.put(id, source)))
     }
 }
 
@@ -1751,7 +1757,7 @@ mod tests {
         let mut idx = Index::default();
         idx.put("1", json!({"a": 1, "o": {"x": 1, "y": 1}}));
         let r = idx.update("1", &json!({"b": 2, "o": {"y": 2}}), None, true);
-        assert_eq!(r, Some(w(DocResult::Updated, 2, 1)));
+        assert_eq!(r, Ok(Some(w(DocResult::Updated, 2, 1))));
         assert_eq!(
             idx.get("1").unwrap().source,
             json!({"a": 1, "b": 2, "o": {"x": 1, "y": 2}})
@@ -1764,7 +1770,7 @@ mod tests {
         idx.put("1", json!({"a": 1}));
         assert_eq!(
             idx.update("1", &json!({"a": 1}), None, true),
-            Some(w(DocResult::Noop, 1, 0))
+            Ok(Some(w(DocResult::Noop, 1, 0)))
         );
     }
 
@@ -1772,16 +1778,19 @@ mod tests {
     fn update_without_detect_noop_bumps_version() {
         let mut idx = Index::default();
         idx.put("1", json!({"a": 1}));
-        let r = idx.update("1", &json!({"a": 1}), None, false).unwrap();
+        let r = idx
+            .update("1", &json!({"a": 1}), None, false)
+            .unwrap()
+            .unwrap();
         assert_eq!((r.result, r.version), (DocResult::Updated, 2));
     }
 
     #[test]
     fn update_missing_doc() {
         let mut idx = Index::default();
-        assert_eq!(idx.update("1", &json!({"a": 1}), None, true), None);
+        assert_eq!(idx.update("1", &json!({"a": 1}), None, true), Ok(None));
         let r = idx.update("1", &json!({"a": 1}), Some(json!({"u": 1})), true);
-        assert_eq!(r, Some(w(DocResult::Created, 1, 0)));
+        assert_eq!(r, Ok(Some(w(DocResult::Created, 1, 0))));
         assert_eq!(idx.get("1").unwrap().source, json!({"u": 1}));
     }
 
