@@ -1379,3 +1379,15 @@ fn query_dsl_gaps_query_string_unicode_escapes() {
         assert_eq!(err.msg, format!("Cannot parse '{q}': {msg}"));
     }
 }
+
+#[test]
+fn query_dsl_gaps_query_string_keeps_keyword_case() {
+    let qs = |q: &str| sorted(ids(json!({"query": {"query_string": {"query": q}}})));
+    // tag is a keyword: "animal", "animal", "pet", "Pet"
+    assert_eq!(qs("tag:Pe*"), ["4"]);
+    assert_eq!(qs("tag:P?t"), ["4"]);
+    assert_eq!(qs("tag:pe*"), ["3"]);
+    // text fields' prefixes and wildcards are lowercased like their terms
+    assert_eq!(qs("title:QUI*"), ["1", "2"]);
+    assert_eq!(qs("title:L?ZY"), ["3"]);
+}

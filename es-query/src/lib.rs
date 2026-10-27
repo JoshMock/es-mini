@@ -830,6 +830,8 @@ impl<'a> Searcher<'a> {
             }
             Query::Named { query, .. } => self.score(query, id, d),
             Query::Boosted { boost, query } => self.score(query, id, d).map(|s| s * boost),
+            // `resolve_dates` unwraps it before a search
+            Query::Normalized(query) => self.score(query, id, d),
         }
     }
 

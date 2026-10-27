@@ -345,17 +345,15 @@ impl Parser {
             Some(Tok::Term(t)) => return Ok(Some(self.field_query(field, unescape(&t)?))),
             Some(Tok::Star) if field == "*" => Query::MatchAll,
             Some(Tok::Star) => Query::Exists { field },
-            // ponytail: prefixes and wildcards are lowercased, as for text fields, even on
-            // keyword fields
-            Some(Tok::Prefix(p)) => Query::Prefix {
+            Some(Tok::Prefix(p)) => Query::Normalized(Box::new(Query::Prefix {
                 field,
-                prefix: unescape(&p)?.to_lowercase(),
-            },
-            Some(Tok::Wild(w)) => Query::Wildcard {
+                prefix: unescape(&p)?,
+            })),
+            Some(Tok::Wild(w)) => Query::Normalized(Box::new(Query::Wildcard {
                 field,
-                pattern: w.to_lowercase(),
+                pattern: w,
                 case_insensitive: false,
-            },
+            })),
             Some(Tok::Range {
                 lo,
                 hi,

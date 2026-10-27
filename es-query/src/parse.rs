@@ -77,6 +77,9 @@ pub enum Query {
         name: String,
         query: Box<Query>,
     },
+    /// A query_string prefix, wildcard or range whose text the field's search analyzer
+    /// normalizes; `resolve_dates` replaces it with the query it wraps, normalized.
+    Normalized(Box<Query>),
 }
 
 /// The single `{field: params}` entry of a leaf query.

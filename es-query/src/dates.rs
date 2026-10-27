@@ -86,6 +86,18 @@ pub(crate) fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, 
             boost,
             query: Box::new(resolve_dates(index, *query, now)?),
         },
+        Query::Normalized(mut query) => {
+            if let Query::Prefix { field, prefix: t }
+            | Query::Wildcard {
+                field, pattern: t, ..
+            } = &mut *query
+                && Searcher::unscored(index, &Query::MatchAll).kind(field).0 == Kind::Text
+            {
+                // the standard analyzer's normalization
+                *t = t.to_lowercase();
+            }
+            resolve_dates(index, *query, now)?
+        }
         Query::Named { name, query } => Query::Named {
             name,
             query: Box::new(resolve_dates(index, *query, now)?),
