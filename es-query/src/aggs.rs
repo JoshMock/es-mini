@@ -1440,7 +1440,8 @@ impl<'s, 'a> Collector<'s, 'a> {
                     Metric::Terms(t) => {
                         let has_values = m.is_some() || agg.missing.is_some();
                         let format = Format::of(typed.filter(|_| has_values));
-                        Some(t.buckets(format, |s| as_doc_value(&Value::from(s)), empty))
+                        let parse = |s: &str| as_doc_value(&Value::from(s));
+                        Some(t.buckets(&agg.name, format, parse, empty)?)
                     }
                     Metric::Histogram(_) => Some(histogram::buckets(Format::of(m), empty)),
                     _ => None,

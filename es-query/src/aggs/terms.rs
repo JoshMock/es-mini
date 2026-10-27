@@ -25,7 +25,7 @@ pub(super) struct Terms {
     /// Sort keys in priority order; ties then break by ascending key.
     order: Vec<(By, bool)>,
     include: Option<Include>,
-    exclude: Vec<String>,
+    exclude: Option<Include>,
     /// How an unmapped field's `missing` value is typed.
     pub(super) value_type: Option<FieldMapping>,
     /// `execution_hint: map`. ponytail: hints and modes pick only ES's profiled collector.
@@ -49,7 +49,12 @@ enum By {
 #[derive(Debug, Clone, PartialEq)]
 enum Include {
     Values(Vec<String>),
-    Partition { partition: i64, of: i64 },
+    /// A Lucene regular expression, already checked to parse.
+    Regex(String),
+    Partition {
+        partition: i64,
+        of: i64,
+    },
 }
 
 impl Terms {
@@ -65,7 +70,7 @@ impl Terms {
             shard_min_doc_count: 0,
             order: vec![(By::Count, false)],
             include: None,
-            exclude: vec![],
+            exclude: None,
             value_type: None,
             map: false,
             breadth_first: None,
@@ -107,10 +112,10 @@ impl Terms {
                 "include" => {
                     t.include = Some(match v {
                         Value::Object(o) => parse_partition(o)?,
-                        v => Include::Values(parse_values(v)?),
+                        v => parse_values(v, bad)?,
                     });
                 }
-                "exclude" => t.exclude = parse_values(v)?,
+                "exclude" => t.exclude = Some(parse_values(v, bad)?),
                 "value_type" => {
                     t.value_type = Some(match v.as_str().unwrap_or_default() {
                         "string" | "keyword" => KEYWORD.clone(),
@@ -129,7 +134,7 @@ impl Terms {
                 _ => return Err(format!("[terms] unknown field [{k}]").into()),
             }
         }
-        if matches!(t.include, Some(Include::Partition { .. })) && !t.exclude.is_empty() {
+        if matches!(t.include, Some(Include::Partition { .. })) && t.exclude.is_some() {
             return Err(QueryError::illegal(
                 "Cannot specify any excludes when using a partition-based include",
             ));
@@ -160,7 +165,7 @@ impl Terms {
 
     /// Whether `include` or `exclude` filters the terms.
     pub(super) fn has_filter(&self) -> bool {
-        self.include.is_some() || !self.exclude.is_empty()
+        self.include.is_some() || self.exclude.is_some()
     }
 
     /// Whether ES's GlobalOrdinalsStringTermsAggregator remaps global ordinals to buckets
@@ -208,33 +213,48 @@ impl Terms {
             .unwrap_or_else(|| a.0.cmp(&b.0))
     }
 
-    /// A shard's buckets of a field with `format`; `parse` reads an include/exclude value as
-    /// one of the field's doc values; `empty` is a new bucket's sub-aggregation results.
+    /// The `name` aggregation's shard buckets of a field with `format`; `parse` reads an
+    /// include/exclude value as one of the field's doc values; `empty` is a new bucket's
+    /// sub-aggregation results.
     pub(super) fn buckets(
         &self,
+        name: &str,
         format: Format,
         parse: impl Fn(&str) -> Option<Value>,
         empty: Vec<Stats>,
-    ) -> Buckets {
-        let keys = |vals: &[String]| -> BTreeSet<Key> {
-            vals.iter()
-                .filter_map(|s| Key::of(&parse(s)?, format))
-                .collect()
+    ) -> Result<Buckets, QueryError> {
+        let filter = |f: &Include| {
+            Ok(match f {
+                Include::Values(vals) => Filter::Keys(
+                    (vals.iter())
+                        .filter_map(|s| Key::of(&parse(s)?, format))
+                        .collect(),
+                ),
+                Include::Regex(p) => {
+                    let values = match format {
+                        Format::Str | Format::Unmapped => "",
+                        Format::Ip => "values for include/exclude clauses",
+                        _ => {
+                            "numeric values for include/exclude clauses used to filter numeric fields"
+                        }
+                    };
+                    if !values.is_empty() {
+                        return Err(QueryError::illegal(format!(
+                            "Aggregation [{name}] cannot support regular expression style include/exclude settings as they can only be applied to string fields. Use an array of {values}"
+                        )));
+                    }
+                    Filter::Regex(crate::regexp::compile(p).map_err(QueryError::illegal)?)
+                }
+                &Include::Partition { partition, of } => Filter::Partition { partition, of },
+            })
         };
-        Buckets {
+        Ok(Buckets {
             format,
-            include: match &self.include {
-                None => None,
-                Some(Include::Values(v)) => Some(Filter::Keys(keys(v))),
-                Some(Include::Partition { partition, of }) => Some(Filter::Partition {
-                    partition: *partition,
-                    of: *of,
-                }),
-            },
-            exclude: keys(&self.exclude),
+            include: self.include.as_ref().map(filter).transpose()?,
+            exclude: self.exclude.as_ref().map(filter).transpose()?,
             empty,
             ..Buckets::default()
-        }
+        })
     }
 
     /// Whether a shard must add zero-count buckets for its unmatched values.
@@ -366,12 +386,14 @@ fn parse_order(v: &Value, subs: &[Agg]) -> Result<Vec<(By, bool)>, QueryError> {
     }
 }
 
-fn parse_values(v: &Value) -> Result<Vec<String>, QueryError> {
+/// An include/exclude regular expression or array of values; `bad` is the error for a regular
+/// expression that does not parse.
+fn parse_values(v: &Value, bad: impl Fn() -> QueryError) -> Result<Include, QueryError> {
     match v {
-        // ponytail: no Lucene regexp engine yet; add one when a test needs regex include/exclude
-        Value::String(_) => Err(QueryError::illegal(
-            "regular expressions in [include] and [exclude] are not supported",
-        )),
+        Value::String(s) => match crate::regexp::parse(s) {
+            Ok(_) => Ok(Include::Regex(s.clone())),
+            Err(_) => Err(bad()),
+        },
         Value::Array(a) => a
             .iter()
             .map(|v| match v {
@@ -380,7 +402,8 @@ fn parse_values(v: &Value) -> Result<Vec<String>, QueryError> {
                 }
                 v => Ok(text(v)),
             })
-            .collect(),
+            .collect::<Result<_, _>>()
+            .map(Include::Values),
         _ => Err(QueryError::illegal(
             "Unrecognized token for an include/exclude",
         )),
@@ -513,6 +536,7 @@ impl Eq for Key {}
 #[derive(Debug, Clone)]
 enum Filter {
     Keys(BTreeSet<Key>),
+    Regex(crate::regexp::Automaton),
     Partition { partition: i64, of: i64 },
 }
 
@@ -546,6 +570,7 @@ impl Filter {
     fn accepts(&self, k: &Key) -> bool {
         match self {
             Filter::Keys(keys) => keys.contains(k),
+            Filter::Regex(a) => matches!(k, Key::Str(s) if a.matches(s)),
             &Filter::Partition { partition, of } => {
                 let hash = match k {
                     Key::Str(s) => i64::from(murmur3_32(s.as_bytes(), 31) as i32),
@@ -581,7 +606,7 @@ pub(super) struct Buckets {
     shards: u32,
     pub(super) format: Format,
     include: Option<Filter>,
-    exclude: BTreeSet<Key>,
+    exclude: Option<Filter>,
     /// A new bucket's sub-aggregation results.
     pub(super) empty: Vec<Stats>,
 }
@@ -590,7 +615,7 @@ impl Buckets {
     fn keys(&self, vals: Vec<Value>) -> BTreeSet<Key> {
         (vals.iter().filter_map(|v| Key::of(v, self.format)))
             .filter(|k| self.include.as_ref().is_none_or(|f| f.accepts(k)))
-            .filter(|k| !self.exclude.contains(k))
+            .filter(|k| !self.exclude.as_ref().is_some_and(|f| f.accepts(k)))
             .collect()
     }
 
@@ -849,6 +874,46 @@ mod tests {
         assert_eq!(
             buckets(json!({"field": "n", "missing": 7}))[3],
             json!({"key": 7, "doc_count": 1})
+        );
+    }
+
+    #[test]
+    fn regexp_automaton_terms_include_exclude_regexes() {
+        let keys = |params| {
+            let b = buckets(params);
+            (b.as_array().unwrap().iter())
+                .map(|b| b["key"].clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(keys(json!({"field": "k", "include": "[ab]"})), ["b", "a"]);
+        assert_eq!(keys(json!({"field": "k", "exclude": "~a"})), ["a"]);
+        assert_eq!(
+            keys(json!({"field": "k", "include": ".*", "exclude": ["b"]})),
+            ["a", "c"]
+        );
+        assert_eq!(
+            keys(json!({"field": "k", "include": ["a", "c"], "exclude": "c"})),
+            ["a"]
+        );
+        let err = |params: Value| {
+            let body = json!({"size": 0, "aggs": {"t": {"terms": params}}});
+            run(&[&index()], body).unwrap_err()
+        };
+        assert_eq!(
+            err(json!({"field": "k", "include": "(a"})),
+            "[terms] failed to parse field [include]"
+        );
+        assert_eq!(
+            err(json!({"field": "k", "include": "<x>"})),
+            "'x' not found"
+        );
+        assert_eq!(
+            err(json!({"field": "n", "include": "1"})),
+            "Aggregation [t] cannot support regular expression style include/exclude settings as they can only be applied to string fields. Use an array of numeric values for include/exclude clauses used to filter numeric fields"
+        );
+        assert_eq!(
+            err(json!({"field": "ip", "exclude": "127.*"})),
+            "Aggregation [t] cannot support regular expression style include/exclude settings as they can only be applied to string fields. Use an array of values for include/exclude clauses"
         );
     }
 
