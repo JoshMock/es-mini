@@ -501,6 +501,8 @@ struct UserFields {
     points: Vec<(i32, es_codec::points::PointValues)>,
     /// `(field number, values per doc)` of the fields mapped with `store`
     stored: Vec<(i32, Vec<Vec<String>>)>,
+    /// The mapped fields no doc has a value of
+    empty: Vec<String>,
 }
 
 /// Converts the values `f` maps to `Some(Some(_))`, leaving out those it maps to `Some(None)`
@@ -755,6 +757,10 @@ fn user_fields(
                 })
                 .collect()
         };
+        if values.iter().all(Vec::is_empty) && !matches!(mapping, M::Nested | M::Object) {
+            out.empty.push(name);
+            continue;
+        }
         let number = (meta.len() + out.fields.len()) as i32;
         let postings = |keys: Vec<Vec<Vec<u8>>>| -> Vec<TermPostings> {
             let mut m = BTreeMap::<Vec<u8>, Vec<(u32, u32)>>::new();
@@ -1358,9 +1364,14 @@ fn commit(data_dir: &Path, indices: &Indices) -> es_codec::Result<()> {
 /// Marks the segments es-mini writes, the only ones a later save reuses: Elasticsearch indexes
 /// some fields differently (`_seq_no` points) and Lucene rejects a field with two schemas, so an
 /// Elasticsearch-written index is rewritten whole on its first save. Version 2 added text
-/// positions, version 3 read dates with their mapping's format and version 4 wrote nested
-/// documents, so older segments are rewritten too.
-const WRITER: (&str, &str) = ("es-mini.writer", "4");
+/// positions, version 3 read dates with their mapping's format, version 4 wrote nested
+/// documents and version 5 lists [`EMPTY`] fields, so older segments are rewritten too.
+const WRITER: (&str, &str) = ("es-mini.writer", "5");
+
+/// The diagnostic listing (as a JSON array) the mapped fields a segment has no values of, unlike
+/// those it leaves out (mapped later, or holding values it cannot encode), which a merge must
+/// not index for its docs.
+const EMPTY: &str = "es-mini.empty_fields";
 
 // Elasticsearch 9.5.5's merge policy defaults (MergePolicyConfig) for TieredMergePolicy.
 const FLOOR_SEGMENT: u64 = 16 << 20;
@@ -1576,7 +1587,6 @@ fn write_docs(
     fields: &[es_codec::field_infos::FieldInfo],
 ) -> es_codec::Result<es_codec::SegmentCommitInfo> {
     use es_codec::{
-        segment_infos::radix36,
         segment_writer::{NewSegment, write_segment},
         terms::TermPostings,
         uid::encode_id,
@@ -1635,13 +1645,11 @@ fn write_docs(
         });
         terms.push((nested_path, paths));
     }
-    // Unique per segment of an index; the first is the `[7; 16]` earlier saves always used.
-    let mut id = [7; 16];
-    id[8..].copy_from_slice(&(0x0707_0707_0707_0707 + counter as u64).to_be_bytes());
-    let mut seg = write_segment(
+    let (name, id) = segment_name(counter);
+    let seg = write_segment(
         dir,
         &NewSegment {
-            name: &format!("_{}", radix36(counter as u64)),
+            name: &name,
             id,
             max_doc: lucene.len() as i32,
             fields: &all_fields,
@@ -1655,16 +1663,41 @@ fn write_docs(
         },
         stored,
     )?;
-    seg.info
-        .diagnostics
-        .insert(WRITER.0.into(), WRITER.1.into());
-    Ok(seg)
+    Ok(ours(seg, &user.empty))
+}
+
+/// The name and id of segment number `counter` of an index. Ids are unique per segment of an
+/// index; the first is the `[7; 16]` earlier saves always used.
+fn segment_name(counter: i64) -> (String, [u8; 16]) {
+    let mut id = [7; 16];
+    id[8..].copy_from_slice(&(0x0707_0707_0707_0707 + counter as u64).to_be_bytes());
+    (
+        format!("_{}", es_codec::segment_infos::radix36(counter as u64)),
+        id,
+    )
+}
+
+/// Marks a segment as es-mini's ([`WRITER`]), with no values of the mapped fields `empty`.
+fn ours(mut seg: es_codec::SegmentCommitInfo, empty: &[String]) -> es_codec::SegmentCommitInfo {
+    let diagnostics = &mut seg.info.diagnostics;
+    diagnostics.insert(WRITER.0.into(), WRITER.1.into());
+    diagnostics.insert(EMPTY.into(), Value::from(empty.to_vec()).to_string());
+    seg
 }
 
 /// Merges the segments of `infos` that [`find_merge`] picks into one new segment of their live
-/// documents, in the first one's place, as Lucene's `SegmentInfos.applyMergeChanges` does.
-// ponytail: holds the merged documents in memory; stream them if large merges need it
-fn merge(dir: &Path, infos: &mut SegmentInfos, mappings: &Mappings) -> es_codec::Result<()> {
+/// documents, in the first one's place, as Lucene's `SegmentInfos.applyMergeChanges` does. Like
+/// Lucene's `SegmentMerger`, it appends the segments' live docs in the merge's order, copying
+/// each format from them a field at a time, and stored fields a doc at a time. Fields a segment
+/// leaves out without listing them [`EMPTY`] are left out of the merge.
+// ponytail: holds the merged documents in memory; stream them if large merges need it. That is,
+// their index data (every field's postings, doc values, norms and points), not their sources.
+fn merge(dir: &Path, infos: &mut SegmentInfos) -> es_codec::Result<()> {
+    use es_codec::{
+        field_infos::DocValuesType as Dv,
+        segment_writer::{NewSegment, write_segment},
+        terms::TermPostings,
+    };
     let size = |s: &es_codec::SegmentCommitInfo| {
         let files = s.info.files.iter();
         let bytes = files.filter_map(|f| std::fs::metadata(dir.join(f)).ok());
@@ -1674,36 +1707,234 @@ fn merge(dir: &Path, infos: &mut SegmentInfos, mappings: &Mappings) -> es_codec:
     let Some(&first) = picked.iter().min() else {
         return Ok(());
     };
-    let mut docs = vec![];
-    for &at in &picked {
-        let r = SegmentReader::open(dir, infos.segments[at].clone())?;
-        let (live, versions, seq_nos) =
-            (r.live_docs()?, longs(&r, "_version"), longs(&r, "_seq_no"));
-        for read in r.documents_where(|d| live[d])? {
-            let (doc, fields) = read?;
-            let get = |v: &[Option<i64>]| v.get(doc).copied().flatten().unwrap_or(0) as u64;
-            let (version, seq_no) = (get(&versions), get(&seq_nos));
-            let d = DiskDoc {
-                segment: at,
-                doc,
-                version,
-                seq_no,
-            };
-            if let (Some(id), source) = id_and_source(&r, fields)? {
-                docs.push((id, document(&d, source)?));
+    let readers = (picked.iter())
+        .map(|&at| SegmentReader::open(dir, infos.segments[at].clone()))
+        .collect::<es_codec::Result<Vec<_>>>()?;
+    // Per segment, each doc's id in the merged one, `None` for deleted docs.
+    let mut max_doc = 0u32;
+    let mut maps: Vec<Vec<Option<u32>>> = vec![];
+    for r in &readers {
+        let mut next = || (max_doc, max_doc += 1).0;
+        maps.push(
+            r.live_docs()?
+                .into_iter()
+                .map(|l| l.then(&mut next))
+                .collect(),
+        );
+    }
+    let new_doc = |map: &[Option<u32>], doc: usize| map.get(doc).copied().flatten();
+    let empties: Vec<HashSet<String>> = (readers.iter())
+        .map(|r| {
+            let empty = r.seg.info.diagnostics.get(EMPTY);
+            empty
+                .and_then(|e| serde_json::from_str(e).ok())
+                .unwrap_or_default()
+        })
+        .collect();
+    let covered = |name: &str| {
+        // A segment without nested documents has no `_nested_path`.
+        name == "_nested_path"
+            || (readers.iter().zip(&empties))
+                .all(|(r, e)| r.field(name).is_ok() || e.contains(name))
+    };
+    let meta = meta_fields();
+    let mut out = UserFields::default();
+    let mut numeric = vec![];
+    for f in readers.iter().flat_map(|r| &r.fields) {
+        let name = f.name.as_str();
+        if out.fields.iter().any(|g| g.name == name) || out.empty.iter().any(|e| e == name) {
+            continue;
+        }
+        if !covered(name) {
+            continue;
+        }
+        let number = out.fields.len() as i32;
+        let mut terms = BTreeMap::<Vec<u8>, TermPostings>::new();
+        if f.index_options != IndexOptions::None {
+            for (r, map) in readers.iter().zip(&maps) {
+                if r.field(name).is_err() {
+                    continue;
+                }
+                for t in r.terms(name)? {
+                    let mut positions = t.positions.into_iter();
+                    let m = terms
+                        .entry(t.term)
+                        .or_insert_with_key(|t| TermPostings::new(t.clone(), vec![]));
+                    for (doc, freq) in t.docs {
+                        let at = positions.next();
+                        if let Some(doc) = new_doc(map, doc as usize) {
+                            m.docs.push((doc, freq));
+                            m.total_term_freq += u64::from(freq);
+                            m.positions.extend(at);
+                        }
+                    }
+                }
+            }
+            terms.retain(|_, t| !t.docs.is_empty());
+        }
+        let mut points = vec![];
+        if f.point_dimensions > 0 {
+            for (r, map) in readers.iter().zip(&maps) {
+                if r.field(name).is_ok() {
+                    let live = r.points(name)?.into_iter();
+                    points.extend(live.filter_map(|(d, v)| Some((new_doc(map, d as usize)?, v))));
+                }
             }
         }
+        let wrong = || es_codec::Error(format!("unexpected doc values type for {name}"));
+        let numbers = || {
+            concat_live(&readers, &maps, name, |r| match r.doc_values(name)? {
+                DocValues::Numbers(n) => Ok(n),
+                _ => Err(wrong()),
+            })
+        };
+        let mut dv = UserFields::default();
+        let mut dv_numeric = vec![];
+        let has_dv = match f.doc_values {
+            Dv::None => false,
+            Dv::Numeric => {
+                let mut n = numbers()?;
+                let has = n.iter().any(|v| !v.is_empty());
+                if !has {
+                    n.clear(); // as a flush writes `__soft_deletes`
+                }
+                dv_numeric.push((number, n));
+                has
+            }
+            Dv::SortedNumeric => {
+                let n = numbers()?;
+                let has = n.iter().any(|v| !v.is_empty());
+                dv.sorted_numeric.push((number, n));
+                has
+            }
+            Dv::SortedSet => {
+                let k: Vec<Vec<Vec<u8>>> =
+                    concat_live(&readers, &maps, name, |r| match r.doc_values(name)? {
+                        DocValues::Ordinals { ords, terms } => (ords.into_iter())
+                            .map(|o| {
+                                (o.into_iter())
+                                    .map(|o| terms.get(o).cloned().ok_or_else(wrong))
+                                    .collect()
+                            })
+                            .collect(),
+                        _ => Err(wrong()),
+                    })?;
+                let has = k.iter().any(|v| !v.is_empty());
+                dv.keyword.push((number, k));
+                has
+            }
+            Dv::Binary => {
+                let b = concat_live(&readers, &maps, name, |r| match r.doc_values(name)? {
+                    DocValues::Bytes(b) => Ok(b),
+                    _ => Err(wrong()),
+                })?;
+                let has = b.iter().any(Option::is_some);
+                dv.binary.push((number, b));
+                has
+            }
+            Dv::Sorted => return Err(wrong()),
+        };
+        let has = has_dv || !terms.is_empty() || !points.is_empty();
+        if !has && !meta.iter().any(|m| m.name == name) {
+            out.empty.push(f.name.clone());
+            continue;
+        }
+        numeric.extend(dv_numeric);
+        out.sorted_numeric.extend(dv.sorted_numeric);
+        out.keyword.extend(dv.keyword);
+        out.binary.extend(dv.binary);
+        if !f.omit_norms && f.index_options != IndexOptions::None {
+            let norms = concat_live(&readers, &maps, name, |r| {
+                let norms = r.norms(name)?.unwrap_or_default();
+                Ok(norms
+                    .into_iter()
+                    .map(|n| (n != 0).then_some(n as i8))
+                    .collect())
+            })?;
+            out.norms.push((number, norms));
+        }
+        if !terms.is_empty() {
+            out.terms.push((number, terms.into_values().collect()));
+        }
+        if !points.is_empty() {
+            out.points.push((number, points));
+        }
+        out.fields.push(es_codec::field_infos::FieldInfo {
+            number,
+            dv_gen: -1,
+            ..f.clone()
+        });
     }
-    docs.sort_by_key(|(_, d)| d.seq_no);
-    let docs: Vec<_> = docs.iter().map(|(id, d)| (id.as_str(), d)).collect();
-    let merged = write_docs(dir, infos.counter, &docs, mappings, &meta_fields())?;
+    // Fields no merged segment has values of
+    for name in empties.first().into_iter().flatten() {
+        if empties.iter().all(|e| e.contains(name)) && !out.empty.contains(name) {
+            out.empty.push(name.clone());
+        }
+    }
+    let numbers: HashMap<&str, i32> = (out.fields.iter())
+        .map(|f| (f.name.as_str(), f.number))
+        .collect();
+    let stored = readers.iter().zip(&maps).flat_map(|(r, map)| {
+        let docs: Box<dyn Iterator<Item = _>> = match r.documents_where(|d| map[d].is_some()) {
+            Ok(docs) => Box::new(docs),
+            Err(e) => Box::new(std::iter::once(Err(e))),
+        };
+        let numbers = &numbers;
+        docs.map(move |doc| {
+            let mut out = vec![];
+            for (n, v) in doc?.1 {
+                if let Some(&n) = numbers.get(r.field_by_number(n)?.name.as_str()) {
+                    out.push((n, v));
+                }
+            }
+            Ok(out)
+        })
+    });
+    let (name, id) = segment_name(infos.counter);
+    let seg = write_segment(
+        dir,
+        &NewSegment {
+            name: &name,
+            id,
+            max_doc: max_doc as i32,
+            fields: &out.fields,
+            numeric: &numeric,
+            sorted_numeric: &out.sorted_numeric,
+            keyword: &out.keyword,
+            binary: &out.binary,
+            norms: &out.norms,
+            terms: &out.terms,
+            points: &out.points,
+        },
+        stored,
+    )?;
     infos.counter += 1;
     let mut at = 0..;
     infos
         .segments
         .retain(|_| !picked.contains(&at.next().unwrap()));
-    infos.segments.insert(first, merged);
+    infos.segments.insert(first, ours(seg, &out.empty));
     Ok(())
+}
+
+/// Per live doc of `readers` in turn (where `maps` gives it a merged id), what `read` gives for
+/// it in its segment, or the default where the segment lacks `field`.
+fn concat_live<T: Default>(
+    readers: &[SegmentReader],
+    maps: &[Vec<Option<u32>>],
+    field: &str,
+    read: impl Fn(&SegmentReader) -> es_codec::Result<Vec<T>>,
+) -> es_codec::Result<Vec<T>> {
+    let mut out = vec![];
+    for (r, map) in readers.iter().zip(maps) {
+        let mut values = match r.field(field) {
+            Ok(_) => read(r)?,
+            Err(_) => vec![],
+        };
+        let live = (0..map.len()).filter(|&d| map[d].is_some());
+        out.extend(live.map(|d| values.get_mut(d).map(std::mem::take).unwrap_or_default()));
+    }
+    Ok(out)
 }
 
 /// Cluster metadata for `indices`, as both save paths write it.
@@ -1820,7 +2051,7 @@ fn write_shard(prev: &Path, dir: &Path, ix: &Index) -> es_codec::Result<bool> {
         )?);
         infos.counter += 1;
     }
-    merge(dir, &mut infos, &ix.mappings)?;
+    merge(dir, &mut infos)?;
     infos.generation += 1;
     infos.version += 1;
     infos.user_data = shard_user_data(
@@ -1965,6 +2196,174 @@ mod tests {
         // Twelve 1.1gb segments exceed the 9 allowed; only four fit under 5gb.
         let picked = find_merge(&[(gb * 11 / 10, 100, 0); 12]);
         assert_eq!(picked, [0, 1, 2, 3]);
+    }
+
+    /// Per live document id, every value the segments of the commit in shard directory `dir`
+    /// index for it (in each format) or store, sorted.
+    fn index_data(dir: &Path) -> BTreeMap<String, Vec<String>> {
+        let mut out = BTreeMap::<String, Vec<String>>::new();
+        for seg in SegmentInfos::read_latest(dir).unwrap().segments {
+            let r = SegmentReader::open(dir, seg).unwrap();
+            let live = r.live_docs().unwrap();
+            let mut ids = vec![String::new(); r.max_doc()];
+            for t in r.terms("_id").unwrap() {
+                t.docs
+                    .iter()
+                    .for_each(|d| ids[d.0 as usize] = decode_id(&t.term));
+            }
+            let mut add = |doc: usize, value: String| {
+                if live[doc] {
+                    out.entry(ids[doc].clone()).or_default().push(value);
+                }
+            };
+            for f in &r.fields {
+                let name = &f.name;
+                for t in r.terms(name).unwrap_or_default() {
+                    for (i, (doc, freq)) in t.docs.iter().enumerate() {
+                        let at = t.positions.get(i);
+                        add(*doc as usize, format!("{name} {:?} {freq} {at:?}", t.term));
+                    }
+                }
+                let values: Vec<String> = match r.doc_values(name) {
+                    Ok(DocValues::Numbers(n)) => n.iter().map(|v| format!("{v:?}")).collect(),
+                    Ok(DocValues::Ordinals { ords, terms }) => (ords.iter())
+                        .map(|o| format!("{:?}", o.iter().map(|&o| &terms[o]).collect::<Vec<_>>()))
+                        .collect(),
+                    Ok(DocValues::Bytes(b)) => b.iter().map(|v| format!("{v:?}")).collect(),
+                    Err(_) => vec![],
+                };
+                // docs without a value
+                let values = values
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(_, v)| v != "[]" && v != "None");
+                for (doc, v) in values {
+                    add(doc, format!("{name} dv {v}"));
+                }
+                for (doc, n) in (r.norms(name).ok().flatten().into_iter().flatten()).enumerate() {
+                    add(doc, format!("{name} norm {n}"));
+                }
+                if f.point_dimensions > 0 {
+                    for (doc, v) in r.points(name).unwrap() {
+                        add(doc as usize, format!("{name} point {v:?}"));
+                    }
+                }
+            }
+            for read in r.documents_where(|_| true).unwrap() {
+                let (doc, fields) = read.unwrap();
+                for (n, v) in fields {
+                    add(
+                        doc,
+                        format!("{} stored {v:?}", r.field_by_number(n).unwrap().name),
+                    );
+                }
+            }
+        }
+        out.values_mut().for_each(|v| v.sort());
+        out
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("esm-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn shard(dir: &Path) -> std::path::PathBuf {
+        shard_dir(dir, &read_indices(dir).unwrap()[0].uuid)
+    }
+
+    /// Like Lucene's SegmentMerger, a merge copies each format from the segments it merges (so
+    /// it never holds their documents), and indexes what a flush of the same documents does.
+    #[test]
+    fn memory_bounds_a_merge_copies_each_format_as_a_flush_would_write_it() {
+        let mappings: Mappings = serde_json::from_value(json!({"properties": {
+            "title": {"type": "text", "store": true},
+            "tag": {"type": "keyword"},
+            "n": {"type": "long"},
+            "addr": {"type": "ip"},
+            "span": {"type": "long_range"},
+            "ok": {"type": "boolean"},
+            "c": {"type": "nested", "properties": {"a": {"type": "keyword"}}},
+        }}))
+        .unwrap();
+        let (merged, flushed) = (scratch("merge-each"), scratch("merge-flush"));
+        let index = || {
+            let mappings = mappings.clone();
+            Indices::from([(
+                "i".to_owned(),
+                Index {
+                    mappings,
+                    ..Index::default()
+                },
+            )])
+        };
+        let (mut each, mut all) = (index(), index());
+        for round in 0..12 {
+            for i in 0..3 {
+                let mut doc = json!({"title": format!("doc {round} of {i} {i}"), "tag": ["t", round.to_string()], "n": round * 10 + i, "ok": i % 2 == 0, "span": {"gte": round, "lt": 99}, "c": [{"a": "x"}, {"a": i.to_string()}]});
+                // a field only some segments have values of
+                if round % 4 == 0 {
+                    doc["addr"] = json!(format!("10.0.0.{i}"));
+                }
+                for ix in [&mut each, &mut all].map(|i| i.get_mut("i").unwrap()) {
+                    ix.put(&format!("{round}-{i}"), doc.clone());
+                    // deleted docs are left out
+                    ix.put("again", json!({"tag": round.to_string()}));
+                }
+            }
+            save(&merged, &each).unwrap();
+        }
+        save(&flushed, &all).unwrap();
+        let (merged, flushed) = (shard(&merged), shard(&flushed));
+        assert!(SegmentInfos::read_latest(&merged).unwrap().segments.len() < 12);
+        let want = index_data(&flushed);
+        assert_eq!(want.len(), 37);
+        assert_eq!(index_data(&merged), want);
+    }
+
+    /// A merge copies what its segments indexed: a field mapped after a segment was written
+    /// stays out of the merge (es-mini reads it from `_source` there), as in Elasticsearch,
+    /// while a field a segment has no values of merges with those that do.
+    #[test]
+    fn memory_bounds_a_merge_indexes_no_field_some_segment_left_out() {
+        let dir = scratch("merge-unknown");
+        let mut indices = Indices::from([("i".to_owned(), Index::default())]);
+        let ix = indices.get_mut("i").unwrap();
+        ix.mappings
+            .properties
+            .insert("n".into(), crate::FieldMapping::Long);
+        for round in 0..12 {
+            let ix = indices.get_mut("i").unwrap();
+            if round == 6 {
+                ix.mappings
+                    .properties
+                    .insert("late".into(), crate::FieldMapping::Long);
+            }
+            let mut doc = json!({"late": round});
+            if round % 2 == 0 {
+                doc["n"] = json!(round);
+            }
+            ix.put(&round.to_string(), doc);
+            save(&dir, &indices).unwrap();
+        }
+        let shard = shard(&dir);
+        let infos = SegmentInfos::read_latest(&shard).unwrap();
+        let merged = (infos.segments.into_iter())
+            .map(|s| SegmentReader::open(&shard, s).unwrap())
+            .max_by_key(SegmentReader::max_doc)
+            .unwrap();
+        let rounds: Vec<i64> = (merged.terms("_id").unwrap().iter())
+            .map(|t| decode_id(&t.term).parse().unwrap())
+            .collect();
+        assert!(rounds.len() > 1 && rounds.iter().any(|&r| r >= 6));
+        assert!(merged.field("late").is_err());
+        let even = rounds.iter().filter(|&&r| r % 2 == 0).count();
+        assert_eq!(merged.points("n").unwrap().len(), even);
+        let back = open(&dir).unwrap();
+        let disk = back["i"].disk.as_ref().unwrap();
+        let late = disk.number_docs("late", |v| v.cmp(&3), false).unwrap();
+        assert!(late.contains(&disk.pos("3").unwrap()));
     }
 
     #[test]
