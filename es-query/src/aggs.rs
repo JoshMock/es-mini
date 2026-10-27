@@ -1003,8 +1003,8 @@ pub(crate) struct Stats {
     sq_delta: f64,
     min: f64,
     max: f64,
-    /// The field is a date in some index, so values also render as dates.
-    date: bool,
+    /// The format of the field, if it is a date in some index, so values also render as dates.
+    date: Option<String>,
     /// The distinct values (only for `cardinality`).
     hll: Option<Hll>,
     /// The value distribution (only for `percentiles`).
@@ -1031,7 +1031,7 @@ impl Default for Stats {
             sq_delta: 0.0,
             min: f64::INFINITY,
             max: f64::NEG_INFINITY,
-            date: false,
+            date: None,
             hll: None,
             digest: None,
             terms: None,
@@ -1076,7 +1076,7 @@ impl Stats {
         kahan(&mut self.sum_sq, &mut self.sq_delta, o.sum_sq);
         self.min = self.min.min(o.min);
         self.max = self.max.max(o.max);
-        self.date |= o.date;
+        self.date = self.date.take().or(o.date);
         self.range = self.range.take().or(o.range);
         self.top.extend(o.top);
         match (&mut self.hll, o.hll) {
@@ -1410,10 +1410,16 @@ impl<'s, 'a> Collector<'s, 'a> {
             let empty = sub.as_ref().map(|s| s.stats.clone()).unwrap_or_default();
             c.subs.push(sub);
             c.stats.push(Stats {
-                date: matches!(
-                    m,
-                    Some(FieldMapping::Date { .. } | FieldMapping::DateNanos { .. })
-                ),
+                date: match m {
+                    Some(
+                        FieldMapping::Date { format, .. } | FieldMapping::DateNanos { format, .. },
+                    ) => Some(
+                        format
+                            .clone()
+                            .unwrap_or_else(|| "strict_date_optional_time".into()),
+                    ),
+                    _ => None,
+                },
                 subs: match agg.metric.single() {
                     true => empty.clone(),
                     false => vec![],
@@ -1952,12 +1958,11 @@ fn render_counted(
         let avg = (st.count > 0).then(|| st.sum / st.count as f64);
         let min = st.min.is_finite().then_some(st.min);
         let max = st.max.is_finite().then_some(st.max);
-        let date = st.date;
+        let date = st.date.as_deref();
         let put = |body: &mut Map<String, Value>, key: &str, v: Option<f64>| {
             body.insert(key.into(), v.map_or(Value::Null, Value::from));
-            // ponytail: dates render in the default format, not a mapping's custom `format`
-            if let Some(v) = v.filter(|_| date) {
-                body.insert(format!("{key}_as_string"), iso_date(v as i64).into());
+            if let (Some(v), Some(f)) = (v, date) {
+                body.insert(format!("{key}_as_string"), date_value(f, v));
             }
         };
         // the result's type: ES's InternalTDigestPercentiles names its digest
@@ -2096,7 +2101,7 @@ fn render_counted(
             }
         }
         if let Metric::ExtendedStats { sigma } = agg.metric {
-            extended_stats(&mut body, st, sigma);
+            extended_stats(&mut body, st, sigma, date);
         }
         let key = match typed_keys {
             true => format!("{ty}#{}", agg.name),
@@ -2128,8 +2133,7 @@ fn keyed_buckets(keyed: bool, buckets: Vec<(String, Map<String, Value>)>) -> Val
 }
 
 /// The fields `extended_stats` adds to `stats`, computed like ES's InternalExtendedStats.
-// ponytail: no `_as_string` variants for date fields
-fn extended_stats(body: &mut Map<String, Value>, st: &Stats, sigma: f64) {
+fn extended_stats(body: &mut Map<String, Value>, st: &Stats, sigma: f64, date: Option<&str>) {
     let n = st.count as f64;
     // ES's `variance < 0 ? 0 : variance` keeps NaN, which `f64::max` would not
     let var = |d: f64| match (st.sum_sq - st.sum * st.sum / n) / d {
@@ -2165,6 +2169,34 @@ fn extended_stats(body: &mut Map<String, Value>, st: &Stats, sigma: f64) {
             "upper_sampling": v(s_upper), "lower_sampling": v(s_lower),
         }),
     );
+    let Some(f) = date.filter(|_| st.count > 0) else {
+        return;
+    };
+    let d = |x: f64| date_value(f, x);
+    body.insert("sum_of_squares_as_string".into(), d(st.sum_sq));
+    body.insert("variance_as_string".into(), d(pop));
+    body.insert("variance_population_as_string".into(), d(pop));
+    body.insert("variance_sampling_as_string".into(), d(samp));
+    body.insert("std_deviation_as_string".into(), d(pop.sqrt()));
+    body.insert("std_deviation_population_as_string".into(), d(pop.sqrt()));
+    body.insert("std_deviation_sampling_as_string".into(), d(samp.sqrt()));
+    body.insert(
+        "std_deviation_bounds_as_string".into(),
+        serde_json::json!({
+            "upper": d(upper), "lower": d(lower),
+            "upper_population": d(upper), "lower_population": d(lower),
+            "upper_sampling": d(s_upper), "lower_sampling": d(s_lower),
+        }),
+    );
+}
+
+/// A metric's value `x` in date format `f`, like ES's DocValueFormat.DateTime: cast to long
+/// millis, null at the long limits (where values past a long's range land).
+fn date_value(f: &str, x: f64) -> Value {
+    match x as i64 {
+        i64::MIN | i64::MAX => Value::Null,
+        t => date_string(Some(f), t).into(),
+    }
 }
 
 #[cfg(test)]
@@ -2172,6 +2204,57 @@ mod tests {
     use crate::{SearchRequest, search};
     use es_index::{FieldMapping, Index, Indices, disk};
     use serde_json::{Value, json};
+
+    #[test]
+    fn date_formats_metrics_render_dates_in_the_mapping_format() {
+        let mut ix = Index::default();
+        let date = FieldMapping::Date {
+            format: Some("yyyy/MM/dd HH:mm||epoch_millis".into()),
+            locale: None,
+            fields: Default::default(),
+        };
+        ix.mappings.properties.insert("d".into(), date);
+        ix.put("1", json!({"d": "2016/01/02 10:00"}));
+        ix.put("2", json!({"d": "2017/03/04 11:30"}));
+        ix.put("3", json!({"d": 1000}));
+        let aggs = json!({
+            "mn": {"min": {"field": "d"}},
+            "st": {"stats": {"field": "d"}},
+            "es": {"extended_stats": {"field": "d"}},
+        });
+        let r = aggs_of(&ix, json!({"size": 0, "aggs": aggs}));
+        // Elasticsearch 9.5.5's strings; values past a long's range format as null
+        assert_eq!(r["mn"]["value_as_string"], "1970/01/01 00:00");
+        let stats = [
+            ("min_as_string", "1970/01/01 00:00"),
+            ("max_as_string", "2017/03/04 11:30"),
+            ("avg_as_string", "2001/01/21 23:10"),
+            ("sum_as_string", "2063/03/05 21:30"),
+        ];
+        for (k, v) in stats {
+            assert_eq!(r["st"][k], v, "{k}");
+            assert_eq!(r["es"][k], v, "{k}");
+        }
+        let es = &r["es"];
+        assert_eq!(es["sum_of_squares_as_string"], Value::Null);
+        assert_eq!(es["variance_as_string"], Value::Null);
+        assert_eq!(es["variance_population_as_string"], Value::Null);
+        assert_eq!(es["variance_sampling_as_string"], Value::Null);
+        assert_eq!(es["std_deviation_as_string"], "1991/12/20 06:56");
+        assert_eq!(es["std_deviation_population_as_string"], "1991/12/20 06:56");
+        assert_eq!(es["std_deviation_sampling_as_string"], "1996/11/26 11:34");
+        let bounds = json!({
+            "upper": "2044/12/28 13:03", "lower": "1957/02/15 09:16",
+            "upper_population": "2044/12/28 13:03", "lower_population": "1957/02/15 09:16",
+            "upper_sampling": "2054/11/12 22:19", "lower_sampling": "1947/04/03 00:00",
+        });
+        assert_eq!(es["std_deviation_bounds_as_string"], bounds);
+        let keys: Vec<_> = es.as_object().unwrap().keys().collect();
+        assert_eq!(
+            keys.last().unwrap().as_str(),
+            "std_deviation_bounds_as_string"
+        );
+    }
 
     #[test]
     fn decimal_format_follows_java() {
