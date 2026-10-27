@@ -4,12 +4,13 @@ use crate::{
     Result, SegmentCommitInfo, SegmentInfo,
     codec_util::ID_LEN,
     compound::write_compound,
-    doc_values::write_doc_values_with,
+    doc_values::DocValuesWriter,
     field_infos::{DocValuesType, FieldInfo, IndexOptions, write_field_infos},
-    norms::write_norms,
+    norms::NormsWriter,
     output::Output,
+    points::PointsWriter,
     stored_fields::{Doc, StoredFieldsWriter},
-    terms::{TermPostings, write_terms},
+    terms::{TermPostings, TermsWriter},
 };
 use std::{collections::BTreeMap, path::Path};
 
@@ -52,116 +53,204 @@ pub fn write_segment(
     s: &NewSegment,
     stored: impl IntoIterator<Item = Result<Doc>>,
 ) -> Result<SegmentCommitInfo> {
-    // Each sub-file goes to disk as soon as it is encoded (stored fields a chunk at a time), and
-    // the compound file copies them from there, so at most one format's files are in memory.
-    let mut fdt = StoredFieldsWriter::create(&dir.join(format!("{}.fdt", s.name)), &s.id)?;
-    let mut docs = 0;
-    for doc in stored {
-        fdt.add(&doc?)?;
-        docs += 1;
+    let numbers =
+        (s.terms.iter().map(|t| ("terms", t.0))).chain(s.points.iter().map(|p| ("points", p.0)));
+    for (what, n) in numbers {
+        if !s.fields.iter().any(|f| f.number == n) {
+            return crate::err(format!("{what} for unknown field number {n}"));
+        }
     }
-    let (fdm, fdx) = fdt.finish()?;
-    if docs != s.max_doc {
-        return crate::err(format!("{docs} stored docs in a segment of {}", s.max_doc));
+    fn of<T>(list: &[(i32, T)], number: i32) -> Option<&T> {
+        list.iter().find(|e| e.0 == number).map(|e| &e.1)
     }
-    let mut names = vec![".fdt".to_string()];
-    let mut put = |name: &str, bytes: Vec<u8>| -> Result<()> {
-        let path = dir.join(format!("{}{name}", s.name));
-        std::fs::write(&path, bytes)
-            .map_err(|e| crate::Error(format!("{}: {e}", path.display())))?;
-        names.push(name.to_string());
-        Ok(())
-    };
-    put(".fnm", write_field_infos(s.fields, &s.id, ""))?;
-    put(".fdm", fdm)?;
-    put(".fdx", fdx)?;
-    let (dvm, dvd) = write_doc_values_with(
-        s.numeric,
-        s.sorted_numeric,
-        s.keyword,
-        s.binary,
-        &s.id,
-        "Lucene90_0",
-    );
-    put("_Lucene90_0.dvm", dvm)?;
-    put("_Lucene90_0.dvd", dvd)?;
-    put("_Lucene90_0.dvs", empty_skip_index(&s.id))?;
-    let term_fields = s
-        .terms
-        .iter()
-        .map(|(n, t)| match s.fields.iter().find(|f| f.number == *n) {
-            Some(f) => Ok((f, &t[..])),
-            None => crate::err(format!("terms for unknown field number {n}")),
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let dense: Vec<(i32, Vec<i8>)> = s
-        .norms
-        .iter()
-        .map(|(n, v)| (*n, v.iter().map(|x| x.unwrap_or(0)).collect()))
-        .collect();
-    let dense: Vec<_> = dense.iter().map(|(n, v)| (*n, &v[..])).collect();
-    let t = write_terms(&term_fields, &s.id, "Lucene104_0", &dense)?;
-    for (ext, bytes) in [
-        ("tim", t.tim),
-        ("tip", t.tip),
-        ("tmd", t.tmd),
-        ("doc", t.doc),
-        ("psm", t.psm),
-    ] {
-        put(&format!("_Lucene104_0.{ext}"), bytes)?;
+    let mut w = SegmentWriter::new(s.name, s.id);
+    for f in s.fields {
+        let n = f.number;
+        let doc_values = (of(s.numeric, n).map(|v| DocValuesData::Numeric(v)))
+            .or_else(|| of(s.sorted_numeric, n).map(|v| DocValuesData::SortedNumeric(v)))
+            .or_else(|| of(s.keyword, n).map(|v| DocValuesData::Keyword(v)))
+            .or_else(|| of(s.binary, n).map(|v| DocValuesData::Binary(v)));
+        let data = FieldData {
+            doc_values,
+            norms: of(s.norms, n).map(|v| &v[..]),
+            terms: of(s.terms, n).map_or(&[], |v| &v[..]),
+            points: of(s.points, n).map(|v| &v[..]),
+        };
+        w.add(f.clone(), data)?;
     }
-    if !t.pos.is_empty() {
-        put("_Lucene104_0.pos", t.pos)?;
-    }
-    let sparse: Vec<_> = s.norms.iter().map(|(n, v)| (*n, &v[..])).collect();
-    let (nvm, nvd) = write_norms(&s.id, &sparse);
-    put(".nvm", nvm)?;
-    put(".nvd", nvd)?;
-    if !s.points.is_empty() {
-        let points = (s.points.iter())
-            .map(|(n, p)| match s.fields.iter().find(|f| f.number == *n) {
-                Some(f) => Ok((*n, f.point_dimensions as usize, p.clone())),
-                None => crate::err(format!("points for unknown field number {n}")),
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let (m, i, d) = crate::points::write_points(&points, &s.id)?;
-        put(".kdm", m)?;
-        put(".kdi", i)?;
-        put(".kdd", d)?;
+    w.finish(dir, s.max_doc, stored)
+}
+
+/// One field's doc values, by type, per doc of the segment.
+pub enum DocValuesData<'a> {
+    /// At most one value per doc
+    Numeric(&'a [Vec<i64>]),
+    SortedNumeric(&'a [Vec<i64>]),
+    /// A keyword field's terms, as SORTED_SET
+    Keyword(&'a [Vec<Vec<u8>>]),
+    Binary(&'a [Option<Vec<u8>>]),
+}
+
+/// One field's data for [`SegmentWriter::add`].
+#[derive(Default)]
+pub struct FieldData<'a> {
+    pub doc_values: Option<DocValuesData<'a>>,
+    /// One norm per doc
+    pub norms: Option<&'a [Option<i8>]>,
+    pub terms: &'a [TermPostings],
+    /// Sortable value bytes per doc; a field listed with none is an error.
+    pub points: Option<&'a [(u32, Vec<u8>)]>,
+}
+
+/// Writes a segment a field at a time, so a caller need only hold one field's data. Each
+/// format's encoded bytes stay in memory until [`Self::finish`] writes them.
+pub struct SegmentWriter<'a> {
+    name: &'a str,
+    id: [u8; ID_LEN],
+    fields: Vec<FieldInfo>,
+    doc_values: DocValuesWriter,
+    terms: TermsWriter,
+    norms: NormsWriter,
+    points: Option<PointsWriter>,
+}
+
+impl<'a> SegmentWriter<'a> {
+    pub fn new(name: &'a str, id: [u8; ID_LEN]) -> Self {
+        Self {
+            name,
+            id,
+            fields: vec![],
+            doc_values: DocValuesWriter::new(&id, "Lucene90_0"),
+            terms: TermsWriter::new(&id, "Lucene104_0"),
+            norms: NormsWriter::new(&id),
+            points: None,
+        }
     }
 
-    write_compound(dir, s.name, &s.id, &names)?;
-    Ok(SegmentCommitInfo {
-        name: s.name.into(),
-        codec: "Lucene104".into(),
-        info: SegmentInfo {
-            id: s.id,
-            version: crate::segment_infos::LUCENE_VERSION,
-            min_version: Some(crate::segment_infos::LUCENE_VERSION),
-            max_doc: s.max_doc,
-            is_compound: true,
-            has_blocks: false,
-            diagnostics: BTreeMap::from([
-                ("source".into(), "flush".into()),
-                ("lucene.version".into(), "10.5.1".into()),
-            ]),
-            files: ["cfs", "cfe", "si"]
-                .map(|e| format!("{}.{e}", s.name))
-                .into(),
-            attributes: BTreeMap::from([(
-                "Lucene90StoredFieldsFormat.mode".into(),
-                "BEST_SPEED".into(),
-            )]),
-            index_sort: vec![],
-        },
-        del_gen: -1,
-        del_count: 0,
-        field_infos_gen: -1,
-        dv_gen: -1,
-        soft_del_count: 0,
-        field_infos_files: Default::default(),
-        dv_update_files: Default::default(),
-    })
+    /// Adds `field`, which must carry the `PerFieldPostingsFormat.format` = `Lucene104` and
+    /// `.suffix` = `0` attributes if indexed, with its data.
+    pub fn add(&mut self, field: FieldInfo, data: FieldData) -> Result<()> {
+        let n = field.number;
+        match data.doc_values {
+            Some(DocValuesData::Numeric(v)) => self.doc_values.numeric(n, v),
+            Some(DocValuesData::SortedNumeric(v)) => self.doc_values.sorted_numeric(n, v),
+            Some(DocValuesData::Keyword(v)) => self.doc_values.keyword(n, v),
+            Some(DocValuesData::Binary(v)) => self.doc_values.binary(n, v),
+            None => {}
+        }
+        if let Some(norms) = data.norms {
+            self.norms.add(n, norms);
+        }
+        if !data.terms.is_empty() {
+            let dense = (data.norms).map(|v| v.iter().map(|x| x.unwrap_or(0)).collect::<Vec<_>>());
+            self.terms.add(&field, data.terms, dense.as_deref())?;
+        }
+        if let Some(points) = data.points {
+            let w = self
+                .points
+                .get_or_insert_with(|| PointsWriter::new(&self.id));
+            w.add(n, field.point_dimensions as usize, points)?;
+        }
+        self.fields.push(field);
+        Ok(())
+    }
+
+    /// Writes the segment's compound file of `max_doc` docs into `dir`, as [`write_segment`].
+    pub fn finish(
+        self,
+        dir: &Path,
+        max_doc: i32,
+        stored: impl IntoIterator<Item = Result<Doc>>,
+    ) -> Result<SegmentCommitInfo> {
+        let Self {
+            name,
+            id,
+            fields,
+            doc_values,
+            terms,
+            norms,
+            points,
+        } = self;
+        // Stored fields go to disk a chunk at a time, the other formats' files here, and the
+        // compound file copies them from there.
+        let mut fdt = StoredFieldsWriter::create(&dir.join(format!("{name}.fdt")), &id)?;
+        let mut docs = 0;
+        for doc in stored {
+            fdt.add(&doc?)?;
+            docs += 1;
+        }
+        let (fdm, fdx) = fdt.finish()?;
+        if docs != max_doc {
+            return crate::err(format!("{docs} stored docs in a segment of {max_doc}"));
+        }
+        let mut names = vec![".fdt".to_string()];
+        let mut put = |ext: &str, bytes: Vec<u8>| -> Result<()> {
+            let path = dir.join(format!("{name}{ext}"));
+            std::fs::write(&path, bytes)
+                .map_err(|e| crate::Error(format!("{}: {e}", path.display())))?;
+            names.push(ext.to_string());
+            Ok(())
+        };
+        put(".fnm", write_field_infos(&fields, &id, ""))?;
+        put(".fdm", fdm)?;
+        put(".fdx", fdx)?;
+        let (dvm, dvd) = doc_values.finish();
+        put("_Lucene90_0.dvm", dvm)?;
+        put("_Lucene90_0.dvd", dvd)?;
+        put("_Lucene90_0.dvs", empty_skip_index(&id))?;
+        let t = terms.finish();
+        for (ext, bytes) in [
+            ("tim", t.tim),
+            ("tip", t.tip),
+            ("tmd", t.tmd),
+            ("doc", t.doc),
+            ("psm", t.psm),
+        ] {
+            put(&format!("_Lucene104_0.{ext}"), bytes)?;
+        }
+        if !t.pos.is_empty() {
+            put("_Lucene104_0.pos", t.pos)?;
+        }
+        let (nvm, nvd) = norms.finish();
+        put(".nvm", nvm)?;
+        put(".nvd", nvd)?;
+        if let Some(points) = points {
+            let (m, i, d) = points.finish();
+            put(".kdm", m)?;
+            put(".kdi", i)?;
+            put(".kdd", d)?;
+        }
+        write_compound(dir, name, &id, &names)?;
+        Ok(SegmentCommitInfo {
+            name: name.into(),
+            codec: "Lucene104".into(),
+            info: SegmentInfo {
+                id,
+                version: crate::segment_infos::LUCENE_VERSION,
+                min_version: Some(crate::segment_infos::LUCENE_VERSION),
+                max_doc,
+                is_compound: true,
+                has_blocks: false,
+                diagnostics: BTreeMap::from([
+                    ("source".into(), "flush".into()),
+                    ("lucene.version".into(), "10.5.1".into()),
+                ]),
+                files: ["cfs", "cfe", "si"].map(|e| format!("{name}.{e}")).into(),
+                attributes: BTreeMap::from([(
+                    "Lucene90StoredFieldsFormat.mode".into(),
+                    "BEST_SPEED".into(),
+                )]),
+                index_sort: vec![],
+            },
+            del_gen: -1,
+            del_count: 0,
+            field_infos_gen: -1,
+            dv_gen: -1,
+            soft_del_count: 0,
+            field_infos_files: Default::default(),
+            dv_update_files: Default::default(),
+        })
+    }
 }
 
 /// The metadata fields every ES 9.5.5 shard segment has, numbered 0..=5 in this order: `_id`,
@@ -329,6 +418,96 @@ mod tests {
         let r = SegmentReader::open(&dir, seg).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(r.terms("t").unwrap(), terms[0].1);
+    }
+
+    #[test]
+    fn memory_bounds_segment_writer_takes_one_field_at_a_time() {
+        let dir = std::env::temp_dir().join(format!("esm-seg-each-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut w = SegmentWriter::new("_0", [9; 16]);
+        // Formats and doc values types interleave by field, and positions start after a field
+        // without them. Each field's data is dropped once added.
+        {
+            let f = FieldInfo {
+                index_options: IndexOptions::Docs,
+                doc_values: DocValuesType::SortedSet,
+                ..field("k", 0)
+            };
+            let keyword = [vec![b"b".to_vec()], vec![b"a".to_vec()]];
+            let terms = [
+                TermPostings::new(b"a".to_vec(), vec![(1, 1)]),
+                TermPostings::new(b"b".to_vec(), vec![(0, 1)]),
+            ];
+            let doc_values = Some(DocValuesData::Keyword(&keyword));
+            let terms = &terms[..];
+            let data = FieldData {
+                doc_values,
+                terms,
+                ..Default::default()
+            };
+            w.add(f, data).unwrap();
+        }
+        {
+            let f = FieldInfo {
+                omit_norms: false,
+                index_options: IndexOptions::DocsAndFreqsAndPositions,
+                doc_values: DocValuesType::None,
+                ..field("t", 1)
+            };
+            let at = |position| crate::terms::Position {
+                position,
+                offsets: None,
+                payload: vec![],
+            };
+            let mut fox = TermPostings::new(b"fox".to_vec(), vec![(0, 1), (1, 2)]);
+            fox.positions = vec![vec![at(1)], vec![at(0), at(4)]];
+            let norms = [Some(3), Some(5)];
+            let terms = &[fox][..];
+            let data = FieldData {
+                norms: Some(&norms),
+                terms,
+                ..Default::default()
+            };
+            w.add(f, data).unwrap();
+        }
+        {
+            let f = FieldInfo {
+                index_options: IndexOptions::None,
+                doc_values: DocValuesType::SortedNumeric,
+                point_dimensions: 1,
+                point_index_dimensions: 1,
+                point_num_bytes: 8,
+                ..field("n", 2)
+            };
+            let numbers = [vec![7], vec![-2, 9]];
+            let b = crate::points::sortable_bytes;
+            let points = [(0, b(7, 8)), (1, b(-2, 8)), (1, b(9, 8))];
+            let doc_values = Some(DocValuesData::SortedNumeric(&numbers));
+            let points = Some(&points[..]);
+            let data = FieldData {
+                doc_values,
+                points,
+                ..Default::default()
+            };
+            w.add(f, data).unwrap();
+        }
+        let seg = w.finish(&dir, 2, [Ok(vec![]), Ok(vec![])]).unwrap();
+        let r = SegmentReader::open(&dir, seg).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let DocValues::Ordinals { ords, terms } = r.doc_values("k").unwrap() else {
+            panic!("k should be ordinals")
+        };
+        assert_eq!(
+            (terms, ords),
+            (vec![b"a".to_vec(), b"b".to_vec()], vec![vec![1], vec![0]])
+        );
+        assert_eq!(r.terms("k").unwrap().len(), 2);
+        let t = r.terms("t").unwrap();
+        assert_eq!(t[0].positions.len(), 2);
+        assert_eq!(r.norms("t").unwrap(), Some(vec![3, 5]));
+        let want = DocValues::Numbers(vec![vec![7], vec![-2, 9]]);
+        assert_eq!(r.doc_values("n").unwrap(), want);
+        assert_eq!(r.points("n").unwrap().len(), 3);
     }
 
     #[test]

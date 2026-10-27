@@ -8,7 +8,7 @@ mod write;
 
 pub(crate) use read::{read_docs_with_field, read_field_values};
 pub(crate) use write::write_docs_with_field;
-pub use write::{write_doc_values, write_doc_values_with};
+pub use write::{DocValuesWriter, write_doc_values, write_doc_values_with};
 
 const VERSION_MAX: i32 = 2;
 /// Doc id block index of the IndexedDISI terminator block (`NO_MORE_DOCS >>> 16`).

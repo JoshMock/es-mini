@@ -440,22 +440,44 @@ pub fn write_points(
     fields: &[(i32, usize, PointValues)],
     id: &[u8; ID_LEN],
 ) -> crate::Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
-    let (mut meta, mut index, mut data) = (Output::default(), Output::default(), Output::default());
-    meta.index_header("Lucene90PointsFormatMeta", 1, id, "");
-    index.index_header("Lucene90PointsFormatIndex", 1, id, "");
-    data.index_header("Lucene90PointsFormatData", 1, id, "");
+    let mut w = PointsWriter::new(id);
     for (number, dims, pairs) in fields {
+        w.add(*number, *dims, pairs)?;
+    }
+    Ok(w.finish())
+}
+
+/// Writes `.kdm`/`.kdi`/`.kdd` a field at a time.
+pub struct PointsWriter {
+    meta: Output,
+    index: Output,
+    data: Output,
+}
+
+impl PointsWriter {
+    pub fn new(id: &[u8; ID_LEN]) -> Self {
+        let (mut meta, mut index, mut data) =
+            (Output::default(), Output::default(), Output::default());
+        meta.index_header("Lucene90PointsFormatMeta", 1, id, "");
+        index.index_header("Lucene90PointsFormatIndex", 1, id, "");
+        data.index_header("Lucene90PointsFormatData", 1, id, "");
+        Self { meta, index, data }
+    }
+
+    /// A field of `dims` dimensions and its `(doc, value)` pairs, as [`write_points`] takes them.
+    pub fn add(&mut self, number: i32, dims: usize, pairs: &[(u32, Vec<u8>)]) -> crate::Result<()> {
+        let Self { meta, index, data } = self;
         let Some(packed) = pairs.first().map(|p| p.1.len()) else {
             return crate::err(format!("points field {number} has no values"));
         };
         // ponytail: more dimensions recompute their bounds every few splits; port that with them
-        if !(1..=2).contains(dims) || packed % dims != 0 {
+        if !(1..=2).contains(&dims) || packed % dims != 0 {
             return crate::err(format!("points field {number} has {dims} dimensions"));
         }
         if pairs.iter().any(|p| p.1.len() != packed) {
             return crate::err(format!("points field {number} has values of mixed widths"));
         }
-        let (dims, w) = (*dims, packed / dims);
+        let w = packed / dims;
         let mut points: Vec<(&[u8], u32)> = pairs.iter().map(|p| (p.1.as_slice(), p.0)).collect();
         let (mut lo, mut hi) = (points[0].0.to_vec(), points[0].0.to_vec());
         for (v, _) in &points {
@@ -477,7 +499,7 @@ pub fn write_points(
             parent_splits: vec![0; dims],
         };
         let data_start = data.0.len() as u64;
-        tree.build(&mut data, &mut points, 0, leaves, &lo, &hi);
+        tree.build(data, &mut points, 0, leaves, &lo, &hi);
         let packed_index = pack_index(&tree, 0, &mut vec![0; packed], false, 0, leaves);
         meta.bytes(&number.to_le_bytes());
         meta.header("BKD", 10);
@@ -496,12 +518,22 @@ pub fn write_points(
         meta.long(data_start as i64);
         meta.long(index.0.len() as i64);
         index.bytes(&packed_index);
+        Ok(())
     }
-    let (index, data) = (index.finish(), data.finish());
-    meta.bytes(&(-1i32).to_le_bytes());
-    meta.long(index.len() as i64);
-    meta.long(data.len() as i64);
-    Ok((meta.finish(), index, data))
+
+    /// Returns `(meta, index, data)`.
+    pub fn finish(self) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let Self {
+            mut meta,
+            index,
+            data,
+        } = self;
+        let (index, data) = (index.finish(), data.finish());
+        meta.bytes(&(-1i32).to_le_bytes());
+        meta.long(index.len() as i64);
+        meta.long(data.len() as i64);
+        (meta.finish(), index, data)
+    }
 }
 
 /// One field's tree as `BKDWriter.writeFieldNDims` builds it: leaf file pointers, and the split

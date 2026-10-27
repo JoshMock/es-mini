@@ -346,21 +346,49 @@ pub fn write_doc_values_with(
     id: &[u8; codec_util::ID_LEN],
     suffix: &str,
 ) -> (Vec<u8>, Vec<u8>) {
-    let (mut dvm, mut dvd) = (Output::default(), Output::default());
-    dvm.index_header("Lucene90DocValuesMetadata", VERSION_MAX, id, suffix);
-    dvd.index_header("Lucene90DocValuesData", VERSION_MAX, id, suffix);
-    for (number, values) in numeric {
+    let mut w = DocValuesWriter::new(id, suffix);
+    numeric.iter().for_each(|(n, v)| w.numeric(*n, v));
+    sorted_numeric
+        .iter()
+        .for_each(|(n, v)| w.sorted_numeric(*n, v));
+    keyword.iter().for_each(|(n, v)| w.keyword(*n, v));
+    binary.iter().for_each(|(n, v)| w.binary(*n, v));
+    w.finish()
+}
+
+/// Writes `.dvm`/`.dvd` a field at a time; each method takes one field's values per doc.
+pub struct DocValuesWriter {
+    dvm: Output,
+    dvd: Output,
+}
+
+impl DocValuesWriter {
+    pub fn new(id: &[u8; codec_util::ID_LEN], suffix: &str) -> Self {
+        let (mut dvm, mut dvd) = (Output::default(), Output::default());
+        dvm.index_header("Lucene90DocValuesMetadata", VERSION_MAX, id, suffix);
+        dvd.index_header("Lucene90DocValuesData", VERSION_MAX, id, suffix);
+        Self { dvm, dvd }
+    }
+
+    /// A NUMERIC field: at most one value per doc.
+    pub fn numeric(&mut self, number: i32, values: &[Vec<i64>]) {
+        let Self { dvm, dvd } = self;
         dvm.bytes(&number.to_le_bytes());
         dvm.byte(0);
         let (docs, flat) = flatten(values);
-        write_numeric_entry(&mut dvm, &mut dvd, &flat, &docs, values.len(), false);
+        write_numeric_entry(dvm, dvd, &flat, &docs, values.len(), false);
     }
-    for (number, values) in sorted_numeric {
+
+    pub fn sorted_numeric(&mut self, number: i32, values: &[Vec<i64>]) {
+        let Self { dvm, dvd } = self;
         dvm.bytes(&number.to_le_bytes());
         dvm.byte(4);
-        write_sorted_numeric_entry(&mut dvm, &mut dvd, values, false);
+        write_sorted_numeric_entry(dvm, dvd, values, false);
     }
-    for (number, values) in keyword {
+
+    /// A keyword field as SORTED_SET: its terms per doc.
+    pub fn keyword(&mut self, number: i32, values: &[Vec<Vec<u8>>]) {
+        let Self { dvm, dvd } = self;
         let mut terms: Vec<&[u8]> = values.iter().flatten().map(|v| &v[..]).collect();
         terms.sort();
         terms.dedup();
@@ -381,18 +409,24 @@ pub fn write_doc_values_with(
         if ords.iter().all(|o| o.len() <= 1) {
             dvm.byte(0); // single-valued
             let (docs, ords) = flatten(&ords);
-            write_numeric_entry(&mut dvm, &mut dvd, &ords, &docs, values.len(), true);
+            write_numeric_entry(dvm, dvd, &ords, &docs, values.len(), true);
         } else {
             dvm.byte(1);
-            write_sorted_numeric_entry(&mut dvm, &mut dvd, &ords, true);
+            write_sorted_numeric_entry(dvm, dvd, &ords, true);
         }
-        write_terms_dict(&mut dvm, &mut dvd, &terms);
+        write_terms_dict(dvm, dvd, &terms);
     }
-    for (number, values) in binary {
+
+    pub fn binary(&mut self, number: i32, values: &[Option<Vec<u8>>]) {
+        let Self { dvm, dvd } = self;
         dvm.bytes(&number.to_le_bytes());
         dvm.byte(1);
-        write_binary_entry(&mut dvm, &mut dvd, values);
+        write_binary_entry(dvm, dvd, values);
     }
-    dvm.bytes(&(-1i32).to_le_bytes());
-    (dvm.finish(), dvd.finish())
+
+    /// Returns `(.dvm, .dvd)`.
+    pub fn finish(mut self) -> (Vec<u8>, Vec<u8>) {
+        self.dvm.bytes(&(-1i32).to_le_bytes());
+        (self.dvm.finish(), self.dvd.finish())
+    }
 }

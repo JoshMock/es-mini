@@ -65,16 +65,36 @@ pub(crate) fn read_norms(r: &SegmentReader, field: &str) -> Result<Option<Vec<i6
 /// ponytail: norms are 1 byte each (Lucene's `SmallFloat` encoding yields signed bytes); add wider
 /// norms if a mapping needs them.
 pub fn write_norms(id: &[u8; ID_LEN], fields: &[(i32, &[Option<i8>])]) -> (Vec<u8>, Vec<u8>) {
-    let (mut meta, mut data) = (Output::default(), Output::default());
-    meta.index_header("Lucene90NormsMetadata", 0, id, "");
-    data.index_header("Lucene90NormsData", 0, id, "");
-    for &(number, per_doc) in fields {
+    let mut w = NormsWriter::new(id);
+    fields
+        .iter()
+        .for_each(|&(number, per_doc)| w.add(number, per_doc));
+    w.finish()
+}
+
+/// Writes `.nvm`/`.nvd` a field at a time.
+pub struct NormsWriter {
+    meta: Output,
+    data: Output,
+}
+
+impl NormsWriter {
+    pub fn new(id: &[u8; ID_LEN]) -> Self {
+        let (mut meta, mut data) = (Output::default(), Output::default());
+        meta.index_header("Lucene90NormsMetadata", 0, id, "");
+        data.index_header("Lucene90NormsData", 0, id, "");
+        Self { meta, data }
+    }
+
+    /// A field's norm per doc, `None` for docs without one.
+    pub fn add(&mut self, number: i32, per_doc: &[Option<i8>]) {
+        let Self { meta, data } = self;
         let docs: Vec<u32> = (0..per_doc.len() as u32)
             .filter(|d| per_doc[*d as usize].is_some())
             .collect();
         let norms: Vec<i8> = per_doc.iter().flatten().copied().collect();
         meta.bytes(&number.to_le_bytes());
-        write_docs_with_field(&mut meta, &mut data, &docs, per_doc.len());
+        write_docs_with_field(meta, data, &docs, per_doc.len());
         meta.bytes(&(norms.len() as i32).to_le_bytes());
         match norms.split_first() {
             Some((&first, rest)) if rest.iter().all(|&n| n == first) => {
@@ -88,8 +108,12 @@ pub fn write_norms(id: &[u8; ID_LEN], fields: &[(i32, &[Option<i8>])]) -> (Vec<u
             }
         }
     }
-    meta.bytes(&(-1i32).to_le_bytes());
-    (meta.finish(), data.finish())
+
+    /// Returns `(nvm, nvd)`.
+    pub fn finish(mut self) -> (Vec<u8>, Vec<u8>) {
+        self.meta.bytes(&(-1i32).to_le_bytes());
+        (self.meta.finish(), self.data.finish())
+    }
 }
 
 #[cfg(test)]

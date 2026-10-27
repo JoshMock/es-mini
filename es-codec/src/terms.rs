@@ -558,87 +558,130 @@ struct FieldOutputs {
     pos: crate::output::Output,
 }
 
-/// Writes the terms dictionary and postings of `fields` (docs, freqs and positions), in
-/// blocks of 25 to 48 entries like Lucene's `Lucene103BlockTreeTermsWriter`.
-///
-/// `norms` are the fields' norms per doc, for the competitive impacts of freq fields.
-///
-/// ponytail: no offsets or payloads (`.pay`); ES text fields index neither by default.
+/// Writes the terms dictionary and postings of `fields` (docs, freqs and positions) with a
+/// [`TermsWriter`]. `norms` are the fields' norms per doc, for the competitive impacts of freq
+/// fields.
 pub fn write_terms(
     fields: &[(&FieldInfo, &[TermPostings])],
     id: &[u8; codec_util::ID_LEN],
     suffix: &str,
     norms: &[(i32, &[i8])],
 ) -> crate::Result<TermFiles> {
-    use crate::output::Output;
-    let (mut tim, mut tip, mut tmd, mut doc) = (
-        Output::default(),
-        Output::default(),
-        Output::default(),
-        Output::default(),
-    );
-    tim.index_header("BlockTreeTermsDict", 0, id, suffix);
-    tip.index_header("BlockTreeTermsIndex", 0, id, suffix);
-    doc.index_header("Lucene104PostingsWriterDoc", 0, id, suffix);
-    tmd.index_header("BlockTreeTermsMeta", 0, id, suffix);
-    tmd.index_header("Lucene104PostingsWriterTerms", 0, id, suffix);
-    tmd.vint(postings::BLOCK_SIZE as i32);
-    tmd.vint(fields.len() as i32);
-    // Like Lucene, `.pos` exists when a field has positions (`FieldInfos.hasProx`).
-    let has_prox = fields
-        .iter()
-        .any(|(f, _)| f.index_options >= IndexOptions::DocsAndFreqsAndPositions);
-    let mut pos = Output::default();
-    if has_prox {
-        pos.index_header("Lucene104PostingsWriterPos", 0, id, suffix);
-    }
-    let mut files = FieldOutputs {
-        tim,
-        tip,
-        tmd,
-        doc,
-        pos,
-    };
-    let mut max = postings::ImpactMax::default();
+    let mut w = TermsWriter::new(id, suffix);
     for (info, terms) in fields {
         let field_norms = norms.iter().find(|n| n.0 == info.number).map(|n| n.1);
-        write_field(info, terms, field_norms, &mut files, &mut max)?;
+        w.add(info, terms, field_norms)?;
     }
-    let FieldOutputs {
-        tim,
-        tip,
-        mut tmd,
-        doc,
-        pos,
-    } = files;
-    // Full file lengths (footers included): `.tip` first, then `.tim`.
-    tmd.long(tip.0.len() as i64 + FOOTER_LEN);
-    tmd.long(tim.0.len() as i64 + FOOTER_LEN);
-    let doc = doc.finish();
-    let mut psm = Output::default();
-    psm.index_header("Lucene104PostingsWriterMeta", 0, id, suffix);
-    for v in [
-        max.level0_num,
-        max.level0_bytes,
-        max.level1_num,
-        max.level1_bytes,
-    ] {
-        psm.bytes(&v.to_le_bytes());
+    Ok(w.finish())
+}
+
+/// Writes the terms dictionary and postings a field at a time, in blocks of 25 to 48 entries
+/// like Lucene's `Lucene103BlockTreeTermsWriter`.
+///
+/// ponytail: no offsets or payloads (`.pay`); ES text fields index neither by default.
+pub struct TermsWriter {
+    id: [u8; codec_util::ID_LEN],
+    suffix: String,
+    /// `.tmd` holds the fields' entries until [`Self::finish`] puts the header before them.
+    files: FieldOutputs,
+    fields: i32,
+    max: postings::ImpactMax,
+}
+
+impl TermsWriter {
+    pub fn new(id: &[u8; codec_util::ID_LEN], suffix: &str) -> Self {
+        use crate::output::Output;
+        let (mut tim, mut tip, mut doc) = (Output::default(), Output::default(), Output::default());
+        tim.index_header("BlockTreeTermsDict", 0, id, suffix);
+        tip.index_header("BlockTreeTermsIndex", 0, id, suffix);
+        doc.index_header("Lucene104PostingsWriterDoc", 0, id, suffix);
+        Self {
+            id: *id,
+            suffix: suffix.into(),
+            files: FieldOutputs {
+                tim,
+                tip,
+                tmd: Output::default(),
+                doc,
+                pos: Output::default(),
+            },
+            fields: 0,
+            max: Default::default(),
+        }
     }
-    psm.long(doc.len() as i64);
-    let pos = if has_prox { pos.finish() } else { vec![] };
-    if has_prox {
-        psm.long(pos.len() as i64);
+
+    /// A field's terms, in order; `norms` are its norms per doc, for the competitive impacts of
+    /// a freq field.
+    pub fn add(
+        &mut self,
+        info: &FieldInfo,
+        terms: &[TermPostings],
+        norms: Option<&[i8]>,
+    ) -> crate::Result<()> {
+        // Like Lucene, `.pos` exists when a field has positions (`FieldInfos.hasProx`).
+        let pos = &mut self.files.pos;
+        if info.index_options >= IndexOptions::DocsAndFreqsAndPositions && pos.0.is_empty() {
+            pos.index_header("Lucene104PostingsWriterPos", 0, &self.id, &self.suffix);
+        }
+        write_field(info, terms, norms, &mut self.files, &mut self.max)?;
+        self.fields += 1;
+        Ok(())
     }
-    Ok(TermFiles {
-        tim: tim.finish(),
-        tip: tip.finish(),
-        tmd: tmd.finish(),
-        psm: psm.finish(),
-        doc,
-        pos,
-        pay: vec![],
-    })
+
+    pub fn finish(self) -> TermFiles {
+        use crate::output::Output;
+        let Self {
+            id,
+            suffix,
+            files,
+            fields,
+            max,
+        } = self;
+        let FieldOutputs {
+            tim,
+            tip,
+            tmd: entries,
+            doc,
+            pos,
+        } = files;
+        let mut tmd = Output::default();
+        tmd.index_header("BlockTreeTermsMeta", 0, &id, &suffix);
+        tmd.index_header("Lucene104PostingsWriterTerms", 0, &id, &suffix);
+        tmd.vint(postings::BLOCK_SIZE as i32);
+        tmd.vint(fields);
+        tmd.bytes(&entries.0);
+        // Full file lengths (footers included): `.tip` first, then `.tim`.
+        tmd.long(tip.0.len() as i64 + FOOTER_LEN);
+        tmd.long(tim.0.len() as i64 + FOOTER_LEN);
+        let doc = doc.finish();
+        let mut psm = Output::default();
+        psm.index_header("Lucene104PostingsWriterMeta", 0, &id, &suffix);
+        for v in [
+            max.level0_num,
+            max.level0_bytes,
+            max.level1_num,
+            max.level1_bytes,
+        ] {
+            psm.bytes(&v.to_le_bytes());
+        }
+        psm.long(doc.len() as i64);
+        let pos = if pos.0.is_empty() {
+            vec![]
+        } else {
+            let pos = pos.finish();
+            psm.long(pos.len() as i64);
+            pos
+        };
+        TermFiles {
+            tim: tim.finish(),
+            tip: tip.finish(),
+            tmd: tmd.finish(),
+            psm: psm.finish(),
+            doc,
+            pos,
+            pay: vec![],
+        }
+    }
 }
 
 const FOOTER_LEN: i64 = 16;
