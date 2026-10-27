@@ -125,31 +125,18 @@ pub fn write_compound(
     id: &[u8; ID_LEN],
     names: &[String],
 ) -> Result<()> {
-    use crate::output::Output;
+    use crate::output::{FileOutput, Output};
     use std::io::Write;
-    /// Counts and checksums what passes through to the `.cfs`.
-    struct Crc<W>(W, u32, u64);
-    impl<W: Write> Write for Crc<W> {
-        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-            let n = self.0.write(b)?;
-            self.1 = codec_util::crc32_update(self.1, &b[..n]);
-            self.2 += n as u64;
-            Ok(n)
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            self.0.flush()
-        }
-    }
     let (mut head, mut cfe) = (Output::default(), Output::default());
     head.index_header("Lucene90CompoundData", 0, id, "");
     cfe.index_header("Lucene90CompoundEntries", 0, id, "");
     cfe.vint(names.len() as i32);
     let path = dir.join(format!("{segment}.cfs"));
     let mut write = || -> std::io::Result<()> {
-        let mut cfs = Crc(std::io::BufWriter::new(File::create(&path)?), 0, 0);
+        let mut cfs = FileOutput::create(&path)?;
         cfs.write_all(&head.0)?;
         for name in names {
-            let offset = cfs.2;
+            let offset = cfs.file_pointer();
             let len = std::io::copy(
                 &mut File::open(dir.join(format!("{segment}{name}")))?,
                 &mut cfs,
@@ -158,13 +145,7 @@ pub fn write_compound(
             cfe.long(offset as i64);
             cfe.long(len as i64);
         }
-        let mut footer = Output::default();
-        footer.be_int(codec_util::FOOTER_MAGIC);
-        footer.be_int(0);
-        cfs.write_all(&footer.0)?;
-        let mut w = cfs.0;
-        w.write_all(&i64::from(cfs.1).to_be_bytes())?;
-        w.into_inner().map_err(|e| e.into_error())?.sync_all()
+        cfs.finish()?.sync_all()
     };
     write().map_err(|e| crate::Error(format!("{}: {e}", path.display())))?;
     crate::write_file_new(&dir.join(format!("{segment}.cfe")), &cfe.finish())?;

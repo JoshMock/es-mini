@@ -6,9 +6,10 @@ use crate::{
     err,
     input::{DataInput, zigzag},
     lz4,
-    output::Output,
+    output::{FileOutput, Output},
     zstd,
 };
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum StoredValue {
@@ -382,79 +383,185 @@ fn compress(out: &mut Output, data: &[u8]) {
     out.bytes(&block.0);
 }
 
-/// Returns `(.fdm, .fdt, .fdx)`. Each doc is `(field number, value)`.
-pub fn write_stored_fields(
-    docs: &[Vec<(i32, StoredValue)>],
-    id: &[u8; codec_util::ID_LEN],
-) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
-    let mut fdt = Output::default();
-    fdt.index_header("Lucene90StoredFieldsFastData", 1, id, "");
-    let (mut base, mut chunk_docs, mut chunk_ptrs) = (0, vec![], vec![]);
-    while base < docs.len() {
-        chunk_docs.push(base as i64);
-        chunk_ptrs.push(fdt.0.len() as i64);
-        let (mut data, mut counts, mut lens) = (Output::default(), vec![], vec![]);
-        while base + counts.len() < docs.len()
-            && counts.len() < MAX_DOCS_PER_CHUNK
-            && data.0.len() < CHUNK_SIZE
-        {
-            let doc = &docs[base + counts.len()];
-            let before = data.0.len();
-            doc.iter().for_each(|(n, v)| write_field(&mut data, *n, v));
-            counts.push(doc.len());
-            lens.push(data.0.len() - before);
+/// Writes stored fields a doc at a time: `.fdt` goes to disk a chunk at a time (Lucene's
+/// `Lucene90CompressingStoredFieldsWriter`), so only the chunk being filled is in memory.
+pub struct StoredFieldsWriter {
+    id: [u8; codec_util::ID_LEN],
+    fdt: FileOutput,
+    path: PathBuf,
+    /// The chunk being filled: its docs' encoded fields, field counts and lengths.
+    data: Output,
+    counts: Vec<usize>,
+    lens: Vec<usize>,
+    /// First doc and `.fdt` offset of each written chunk.
+    chunk_docs: Vec<i64>,
+    chunk_ptrs: Vec<i64>,
+}
+
+impl StoredFieldsWriter {
+    pub fn create(fdt: &Path, id: &[u8; codec_util::ID_LEN]) -> Result<Self> {
+        let mut w = Self {
+            id: *id,
+            fdt: FileOutput::create(fdt).map_err(|e| io_error(fdt, e))?,
+            path: fdt.into(),
+            data: Output::default(),
+            counts: vec![],
+            lens: vec![],
+            chunk_docs: vec![],
+            chunk_ptrs: vec![],
+        };
+        let mut header = Output::default();
+        header.index_header("Lucene90StoredFieldsFastData", 1, id, "");
+        w.write(&header.0)?;
+        Ok(w)
+    }
+
+    fn write(&mut self, bytes: &[u8]) -> Result<()> {
+        use std::io::Write;
+        (self.fdt.write_all(bytes)).map_err(|e| io_error(&self.path, e))
+    }
+
+    fn docs(&self) -> usize {
+        self.chunk_docs.last().map_or(0, |&d| d as usize) + self.counts.len()
+    }
+
+    /// Adds the next doc's `(field number, value)`s.
+    pub fn add(&mut self, doc: &[(i32, StoredValue)]) -> Result<()> {
+        let before = self.data.0.len();
+        doc.iter()
+            .for_each(|(n, v)| write_field(&mut self.data, *n, v));
+        self.counts.push(doc.len());
+        self.lens.push(self.data.0.len() - before);
+        if self.counts.len() >= MAX_DOCS_PER_CHUNK || self.data.0.len() >= CHUNK_SIZE {
+            self.flush_chunk()?;
         }
-        if data.0.len() >= 2 * CHUNK_SIZE {
+        Ok(())
+    }
+
+    fn flush_chunk(&mut self) -> Result<()> {
+        if self.data.0.len() >= 2 * CHUNK_SIZE {
             return err("stored fields chunk too large to write");
         }
-        fdt.vint(base as i32);
-        fdt.vint((counts.len() << 2) as i32);
-        if counts.len() == 1 {
-            fdt.vint(counts[0] as i32);
-            fdt.vint(lens[0] as i32);
+        let base = self.docs() - self.counts.len();
+        self.chunk_docs.push(self.docs() as i64);
+        self.chunk_ptrs.push(self.fdt.file_pointer() as i64);
+        let mut out = Output::default();
+        out.vint(base as i32);
+        out.vint((self.counts.len() << 2) as i32);
+        if self.counts.len() == 1 {
+            out.vint(self.counts[0] as i32);
+            out.vint(self.lens[0] as i32);
         } else {
-            write_ints(&mut fdt, &counts);
-            write_ints(&mut fdt, &lens);
+            write_ints(&mut out, &self.counts);
+            write_ints(&mut out, &self.lens);
         }
-        compress(&mut fdt, &data.0);
-        base += counts.len();
+        compress(&mut out, &self.data.0);
+        self.write(&out.0)?;
+        self.data.0.clear();
+        self.counts.clear();
+        self.lens.clear();
+        Ok(())
     }
-    // The doc-to-chunk and chunk-to-pointer indexes (DirectMonotonic) live in `.fdx`; `.fdm` holds
-    // their metadata. Only the final chunk is dirty (force-flushed when the segment finishes).
-    let max_pointer = fdt.0.len() as i64;
-    chunk_docs.push(docs.len() as i64);
-    chunk_ptrs.push(max_pointer);
-    let mut fdx = Output::default();
-    fdx.index_header("Lucene90FieldsIndexIdx", 0, id, "");
-    let mut fdm = Output::default();
-    fdm.index_header("Lucene90FieldsIndexMeta", 1, id, "");
-    fdm.vint(CHUNK_SIZE as i32);
-    let num_chunks = chunk_docs.len() as i32 - 1;
-    for v in [docs.len() as i32, BLOCK_SHIFT, num_chunks + 1] {
-        fdm.bytes(&v.to_le_bytes());
-    }
-    for values in [&chunk_docs, &chunk_ptrs] {
+
+    /// Writes the last chunk and the `.fdt` footer; returns `(.fdm, .fdx)`.
+    pub fn finish(mut self) -> Result<(Vec<u8>, Vec<u8>)> {
+        if !self.counts.is_empty() {
+            self.flush_chunk()?;
+        }
+        let max_doc = self.docs() as i64;
+        let max_pointer = self.fdt.file_pointer() as i64;
+        let (path, id) = (self.path, self.id);
+        self.fdt.finish().map_err(|e| io_error(&path, e))?;
+        // `chunk_docs` holds each chunk's end; the index wants each chunk's start, then max_doc.
+        let mut chunk_docs = vec![0];
+        chunk_docs.extend(&self.chunk_docs);
+        let mut chunk_ptrs = self.chunk_ptrs;
+        chunk_ptrs.push(max_pointer);
+        // The doc-to-chunk and chunk-to-pointer indexes (DirectMonotonic) live in `.fdx`; `.fdm`
+        // holds their metadata. Only the final chunk is dirty (force-flushed at finish).
+        let mut fdx = Output::default();
+        fdx.index_header("Lucene90FieldsIndexIdx", 0, &id, "");
+        let mut fdm = Output::default();
+        fdm.index_header("Lucene90FieldsIndexMeta", 1, &id, "");
+        fdm.vint(CHUNK_SIZE as i32);
+        let num_chunks = chunk_docs.len() as i32 - 1;
+        for v in [max_doc as i32, BLOCK_SHIFT, num_chunks + 1] {
+            fdm.bytes(&v.to_le_bytes());
+        }
+        for values in [&chunk_docs, &chunk_ptrs] {
+            fdm.long(fdx.0.len() as i64);
+            let packed = write_direct_monotonic(&mut fdm, values, BLOCK_SHIFT);
+            fdx.bytes(&packed);
+        }
         fdm.long(fdx.0.len() as i64);
-        let packed = write_direct_monotonic(&mut fdm, values, BLOCK_SHIFT);
-        fdx.bytes(&packed);
+        fdm.long(max_pointer);
+        fdm.vlong(num_chunks as i64);
+        fdm.vlong((num_chunks > 0) as i64);
+        fdm.vlong(
+            chunk_docs
+                .iter()
+                .rev()
+                .nth(1)
+                .map_or(0, |last| max_doc - last),
+        );
+        Ok((fdm.finish(), fdx.finish()))
     }
-    fdm.long(fdx.0.len() as i64);
-    fdm.long(max_pointer);
-    fdm.vlong(num_chunks as i64);
-    fdm.vlong((num_chunks > 0) as i64);
-    fdm.vlong(
-        chunk_docs
-            .iter()
-            .rev()
-            .nth(1)
-            .map_or(0, |last| docs.len() as i64 - last),
-    );
-    Ok((fdm.finish(), fdt.finish(), fdx.finish()))
+}
+
+fn io_error(path: &Path, e: std::io::Error) -> crate::Error {
+    crate::Error(format!("{}: {e}", path.display()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Writes `docs` through a [`StoredFieldsWriter`]; returns `(.fdm, .fdt, .fdx)`.
+    fn write_stored_fields(docs: &[Doc], id: &[u8; 16]) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+        let path = std::env::temp_dir().join(format!(
+            "esm-fdt-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let mut w = StoredFieldsWriter::create(&path, id)?;
+        docs.iter().try_for_each(|d| w.add(d))?;
+        let (fdm, fdx) = w.finish()?;
+        let fdt = crate::read_file(&path)?;
+        std::fs::remove_file(&path).unwrap();
+        Ok((fdm, fdt, fdx))
+    }
+
+    #[test]
+    fn memory_bounds_stored_fields_go_to_disk_a_chunk_at_a_time() {
+        let path = std::env::temp_dir().join(format!("esm-fdt-bound-{}", std::process::id()));
+        let id = [7u8; 16];
+        let doc = |i: usize| vec![(0, StoredValue::Bytes(vec![i as u8; 1000]))];
+        let mut w = StoredFieldsWriter::create(&path, &id).unwrap();
+        for i in 0..2000 {
+            w.add(&doc(i)).unwrap();
+            assert!(
+                w.data.0.len() < CHUNK_SIZE + 1100,
+                "doc {i} left a full chunk buffered"
+            );
+        }
+        let on_disk = std::fs::metadata(&path).unwrap().len();
+        assert!(
+            on_disk > 1_900_000,
+            "only {on_disk} bytes on disk before finish"
+        );
+        let (fdm, fdx) = w.finish().unwrap();
+        let fdt = crate::read_file(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        codec_util::check_footer(&fdt).unwrap();
+        let index = read_fields_index(&fdm, &fdx, &id, 2000).unwrap();
+        let read: Vec<Doc> = (index.chunks(&|_| true))
+            .flat_map(|(base, at, len)| {
+                let chunk = &fdt[at as usize..(at + len) as usize];
+                index.read_chunk(chunk, base, decompress_lz4).unwrap()
+            })
+            .collect();
+        assert_eq!(read, (0..2000).map(doc).collect::<Vec<_>>());
+    }
 
     #[test]
     fn write_then_read_round_trips() {

@@ -104,3 +104,51 @@ impl Output {
         self.0
     }
 }
+
+/// A file written as it goes, counting and checksumming the bytes that pass through, so a large
+/// file need not be held in memory (Lucene's `IndexOutput`).
+pub struct FileOutput {
+    file: std::io::BufWriter<std::fs::File>,
+    crc: u32,
+    len: u64,
+}
+
+impl FileOutput {
+    pub fn create(path: &std::path::Path) -> std::io::Result<Self> {
+        let file = std::io::BufWriter::new(std::fs::File::create(path)?);
+        Ok(Self {
+            file,
+            crc: 0,
+            len: 0,
+        })
+    }
+
+    /// Bytes written so far.
+    pub fn file_pointer(&self) -> u64 {
+        self.len
+    }
+
+    /// Appends the checksummed footer and returns the flushed file.
+    pub fn finish(mut self) -> std::io::Result<std::fs::File> {
+        use std::io::Write;
+        let mut footer = Output::default();
+        footer.be_int(FOOTER_MAGIC);
+        footer.be_int(0);
+        self.write_all(&footer.0)?;
+        self.file.write_all(&i64::from(self.crc).to_be_bytes())?;
+        self.file.into_inner().map_err(|e| e.into_error())
+    }
+}
+
+impl std::io::Write for FileOutput {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        let n = self.file.write(b)?;
+        self.crc = crate::codec_util::crc32_update(self.crc, &b[..n]);
+        self.len += n as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}

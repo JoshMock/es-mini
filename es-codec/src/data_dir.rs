@@ -313,7 +313,6 @@ mod tests {
                 id: [7; 16],
                 max_doc: n as i32,
                 fields: &fields,
-                stored: &stored,
                 numeric: &numeric,
                 sorted_numeric: &[],
                 keyword: &keyword,
@@ -322,6 +321,7 @@ mod tests {
                 terms: &terms,
                 points: &[],
             },
+            stored,
         )
         .unwrap();
         let max_seq = n as i64 - 1;

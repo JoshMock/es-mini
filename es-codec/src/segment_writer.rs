@@ -8,7 +8,7 @@ use crate::{
     field_infos::{DocValuesType, FieldInfo, IndexOptions, write_field_infos},
     norms::write_norms,
     output::Output,
-    stored_fields::{StoredValue, write_stored_fields},
+    stored_fields::{Doc, StoredFieldsWriter},
     terms::{TermPostings, write_terms},
 };
 use std::{collections::BTreeMap, path::Path};
@@ -27,7 +27,6 @@ pub struct NewSegment<'a> {
     pub id: [u8; ID_LEN],
     pub max_doc: i32,
     pub fields: &'a [FieldInfo],
-    pub stored: &'a [Vec<(i32, StoredValue)>],
     /// `(field number, values per doc)`, at most one per doc
     pub numeric: &'a [(i32, Vec<Vec<i64>>)],
     /// `(field number, one value per doc)` for single-valued SORTED_NUMERIC fields
@@ -45,11 +44,26 @@ pub struct NewSegment<'a> {
 }
 
 /// Writes the segment's compound file into `dir` and returns its commit info; the caller adds it
-/// to a [`crate::SegmentInfos`] and writes that (which writes the `.si`).
-pub fn write_segment(dir: &Path, s: &NewSegment) -> Result<SegmentCommitInfo> {
-    // Each sub-file goes to disk as soon as it is encoded, and the compound file copies them from
-    // there, so at most one format's files are in memory at a time.
-    let mut names = vec![];
+/// to a [`crate::SegmentInfos`] and writes that (which writes the `.si`). `stored` yields each
+/// doc's stored fields in order, so they need not all be in memory at once.
+pub fn write_segment(
+    dir: &Path,
+    s: &NewSegment,
+    stored: impl IntoIterator<Item = Doc>,
+) -> Result<SegmentCommitInfo> {
+    // Each sub-file goes to disk as soon as it is encoded (stored fields a chunk at a time), and
+    // the compound file copies them from there, so at most one format's files are in memory.
+    let mut fdt = StoredFieldsWriter::create(&dir.join(format!("{}.fdt", s.name)), &s.id)?;
+    let mut docs = 0;
+    for doc in stored {
+        fdt.add(&doc)?;
+        docs += 1;
+    }
+    let (fdm, fdx) = fdt.finish()?;
+    if docs != s.max_doc {
+        return crate::err(format!("{docs} stored docs in a segment of {}", s.max_doc));
+    }
+    let mut names = vec![".fdt".to_string()];
     let mut put = |name: &str, bytes: Vec<u8>| -> Result<()> {
         let path = dir.join(format!("{}{name}", s.name));
         std::fs::write(&path, bytes)
@@ -58,10 +72,8 @@ pub fn write_segment(dir: &Path, s: &NewSegment) -> Result<SegmentCommitInfo> {
         Ok(())
     };
     put(".fnm", write_field_infos(s.fields, &s.id, ""))?;
-    let (fdm, fdt, fdx) = write_stored_fields(s.stored, &s.id)?;
     put(".fdm", fdm)?;
     put(".fdx", fdx)?;
-    put(".fdt", fdt)?;
     let (dvm, dvd) = write_doc_values_with(
         s.numeric,
         s.sorted_numeric,
@@ -189,6 +201,7 @@ mod tests {
         SegmentInfos, SegmentReader,
         doc_values::DocValues,
         field_infos::{DocValuesType, IndexOptions},
+        stored_fields::StoredValue,
     };
 
     fn field(name: &str, number: i32) -> FieldInfo {
@@ -231,7 +244,6 @@ mod tests {
                 id: [9; 16],
                 max_doc: 5,
                 fields: &fields,
-                stored: &stored,
                 numeric: &numeric,
                 sorted_numeric: &[],
                 keyword: &keyword,
@@ -240,6 +252,7 @@ mod tests {
                 terms: &terms,
                 points: &[],
             },
+            stored.clone(),
         )
         .unwrap();
         let infos = SegmentInfos {
@@ -301,7 +314,6 @@ mod tests {
                 id: [9; 16],
                 max_doc: 2,
                 fields: &fields,
-                stored: &[vec![], vec![]],
                 numeric: &[],
                 sorted_numeric: &[],
                 keyword: &[],
@@ -310,6 +322,7 @@ mod tests {
                 terms: &terms,
                 points: &[],
             },
+            [vec![], vec![]],
         )
         .unwrap();
         let r = SegmentReader::open(&dir, seg).unwrap();
@@ -328,7 +341,6 @@ mod tests {
                     id: [9; 16],
                     max_doc: 0,
                     fields: &fields,
-                    stored: &[],
                     numeric: &[],
                     sorted_numeric: &[],
                     keyword: &[],
@@ -337,6 +349,7 @@ mod tests {
                     terms,
                     points,
                 },
+                [],
             )
         };
         assert!(write(&[], &[(0, vec![])]).is_err(), "field without points");

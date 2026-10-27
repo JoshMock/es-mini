@@ -1583,21 +1583,20 @@ fn write_docs(
     };
     let lucene = lucene_docs(mappings, docs);
     let user = user_fields(mappings, &lucene, fields);
-    let stored: Vec<_> = (lucene.iter().enumerate())
-        .map(|(doc, l)| {
-            let (id, d) = docs[l.doc];
-            let mut stored = vec![];
-            if l.path.is_empty() {
-                stored.push((0, StoredValue::Bytes(encode_id(id))));
-                stored.push((1, StoredValue::Bytes(d.source.to_string().into_bytes())));
-            }
-            for (n, values) in &user.stored {
-                let text = |v: &String| (*n, StoredValue::String(v.clone()));
-                stored.extend(values[doc].iter().map(text));
-            }
-            stored
-        })
-        .collect();
+    // Built a doc at a time as the stored fields writer asks for them.
+    let stored = (lucene.iter().enumerate()).map(|(doc, l)| {
+        let (id, d) = docs[l.doc];
+        let mut stored = vec![];
+        if l.path.is_empty() {
+            stored.push((0, StoredValue::Bytes(encode_id(id))));
+            stored.push((1, StoredValue::Bytes(d.source.to_string().into_bytes())));
+        }
+        for (n, values) in &user.stored {
+            let text = |v: &String| (*n, StoredValue::String(v.clone()));
+            stored.extend(values[doc].iter().map(text));
+        }
+        stored
+    });
     // Like DocumentParser and SeqNoFieldMapper: nested docs share their root's `_id`, `_version`
     // and `_seq_no`; only roots have a `_primary_term`, which tells Elasticsearch them apart.
     let col =
@@ -1646,7 +1645,6 @@ fn write_docs(
             id,
             max_doc: lucene.len() as i32,
             fields: &all_fields,
-            stored: &stored,
             numeric: &numeric,
             sorted_numeric: &user.sorted_numeric,
             keyword: &user.keyword,
@@ -1655,6 +1653,7 @@ fn write_docs(
             terms: &terms,
             points: &user.points,
         },
+        stored,
     )?;
     seg.info
         .diagnostics

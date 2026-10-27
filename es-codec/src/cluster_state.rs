@@ -298,7 +298,6 @@ pub fn write_state(
             id: [1; 16],
             max_doc: stored.len() as i32,
             fields: &fields,
-            stored: &stored,
             numeric: &[],
             sorted_numeric: &[],
             keyword: &[],
@@ -307,6 +306,7 @@ pub fn write_state(
             terms: &terms,
             points: &[],
         },
+        stored,
     )?;
     SegmentInfos {
         id: [2; 16],
