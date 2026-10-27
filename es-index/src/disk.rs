@@ -291,7 +291,9 @@ fn add_stats(stats: &mut TermStats, seg: &SegmentReader) {
         .iter()
         .filter(|f| f.index_options != IndexOptions::None && f.name != "_id")
     {
-        // ponytail: fields in formats the codec lacks (e.g. ES812Postings `_id`) get no stats
+        // ponytail: only Lucene104 postings are read, which Elasticsearch writes for every field
+        // but `_id` (ES812Postings, never scored); indices created with
+        // `index.use_legacy_postings_format` hold every field in ES812Postings and get no stats
         let Ok(terms) = seg.terms(&f.name) else {
             continue;
         };

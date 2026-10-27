@@ -184,3 +184,33 @@ fn disk_writer_completeness_lists_ignore_above_fields_in_ignored() {
     };
     assert_eq!(ords, [vec![0, 1], vec![], vec![0]]);
 }
+
+/// Every field Elasticsearch indexes in a default index is in Lucene104 postings, which es-mini
+/// reads for scoring statistics, except `_id` (ES812Postings), which no query scores.
+#[test]
+fn disk_writer_completeness_reads_stats_of_every_field_but_id_from_elasticsearch() {
+    use es_codec::field_infos::IndexOptions;
+    use std::collections::BTreeSet;
+    let es_dir =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/es-9.5.5/data");
+    let indices = disk::open(&es_dir).unwrap();
+    let mut checked = 0;
+    for meta in es_codec::cluster_state::read_indices(&es_dir).unwrap() {
+        let shard = es_dir.join("indices").join(&meta.uuid).join("0/index");
+        let mut indexed = BTreeSet::new();
+        for seg in SegmentInfos::read_latest(&shard).unwrap().segments {
+            let r = SegmentReader::open(&shard, seg).unwrap();
+            let fields = r
+                .fields
+                .iter()
+                .filter(|f| f.index_options != IndexOptions::None);
+            indexed.extend(fields.map(|f| f.name.clone()));
+        }
+        assert!(indexed.remove("_id"), "{}", meta.name);
+        let stats = indices[&meta.name].stats.as_ref().unwrap();
+        let with_stats: BTreeSet<_> = stats.fields.keys().cloned().collect();
+        assert_eq!(with_stats, indexed, "{}", meta.name);
+        checked += indexed.len();
+    }
+    assert!(checked > 0);
+}
