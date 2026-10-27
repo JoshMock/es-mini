@@ -8,9 +8,24 @@ async fn main() {
         .await
         .expect("bind ES_MINI_HOST:ES_MINI_PORT");
     tracing::info!("listening on {}", listener.local_addr().unwrap());
-    let app = match std::env::var("ES_MINI_DATA") {
-        Ok(dir) => es_mini::app_persisted(dir.as_ref()).expect("open ES_MINI_DATA"),
-        Err(_) => es_mini::app(),
-    };
-    axum::serve(listener, app).await.unwrap();
+    match std::env::var("ES_MINI_DATA") {
+        Ok(dir) => es_mini::serve_persisted(listener, dir.as_ref(), shutdown())
+            .await
+            .expect("serve and flush ES_MINI_DATA"),
+        Err(_) => axum::serve(listener, es_mini::app())
+            .with_graceful_shutdown(shutdown())
+            .await
+            .unwrap(),
+    }
+}
+
+/// Completes on SIGINT (Ctrl-C) or SIGTERM.
+async fn shutdown() {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut term = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = term.recv() => {}
+    }
+    tracing::info!("shutting down");
 }
