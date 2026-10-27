@@ -1020,8 +1020,8 @@ pub fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468
 }
 
-/// Epoch milliseconds of a date value: a number, or a `strict_date_optional_time` string.
-// ponytail: the mapping's `format` is ignored; numeric strings are not read as epoch_millis
+/// Epoch milliseconds of a date value: a number, or a `strict_date_optional_time` string, as
+/// ES|QL and date detection read dates (a date field's values read with [`date_millis`]).
 pub fn parse_date_millis(v: &serde_json::Value) -> Option<i64> {
     let Some(s) = v.as_str() else {
         return v.as_i64();

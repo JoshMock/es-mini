@@ -6,7 +6,7 @@ use super::Stats;
 use super::terms::{Buckets, Format};
 use crate::{MAX_BUCKETS, QueryError, int, num};
 use es_index::tz::TimeZone;
-use es_index::{civil_from_days, days_from_civil, iso_date, parse_date_millis};
+use es_index::{civil_from_days, days_from_civil, iso_date};
 use serde_json::{Map, Value};
 use std::cell::Cell;
 
@@ -186,7 +186,11 @@ impl Bounds {
                 || QueryError::x_content(format!("[double_bounds] failed to parse field [{k}]"));
             let x = match v {
                 Value::Null => None,
-                v if date => Some(parse_date_millis(v).ok_or_else(bad)? as f64),
+                // LongBounds takes numbers as millis
+                Value::Number(n) if date => Some(n.as_i64().ok_or_else(bad)? as f64),
+                // ponytail: dates parse in the default format, not the field's, which LongBounds
+                // takes; that needs bounds resolved per index, after this request-time validation
+                v if date => Some(es_index::date_millis(None, None, v).ok_or_else(bad)? as f64),
                 v => Some(num(v).ok_or_else(bad)?),
             };
             match k.as_str() {
@@ -662,6 +666,26 @@ mod tests {
             (&json!(1_451_606_400_000_i64), &json!(1))
         );
         assert_eq!(b.as_array().unwrap().len(), 1, "{b}");
+    }
+
+    #[test]
+    fn date_formats_date_bounds_read_epoch_millis_strings() {
+        // the default format's epoch_millis, as for an unmapped `value_type: date`
+        let day = json!({"field": "at", "calendar_interval": "day",
+            "extended_bounds": {"min": "1451606400000", "max": "2016-01-02"}});
+        assert_eq!(
+            date_histo(&["2016-01-02"], day).unwrap(),
+            json!([
+                ["2016-01-01T00:00:00.000Z", 0],
+                ["2016-01-02T00:00:00.000Z", 1]
+            ])
+        );
+        let mut ix = Index::default();
+        ix.put("1", json!({}));
+        let terms = json!({"t": {"terms": {"field": "u", "value_type": "date",
+            "missing": "1451606400000"}}});
+        let got = run(&[&ix], terms).unwrap();
+        assert_eq!(got["t"]["buckets"][0]["key"], 1_451_606_400_000_i64);
     }
 
     #[test]

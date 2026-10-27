@@ -341,7 +341,7 @@ impl Ranges {
         };
         let date = |v: &Value| match s.instant(field) {
             Some(instant) => instant(v),
-            None => es_index::parse_date_millis(v),
+            None => es_index::date_millis(None, None, v),
         };
         let parse = |v: &Value, open: f64| {
             match v {
@@ -1231,7 +1231,7 @@ fn doc_value(s: &Searcher, field: &str, mapping: &FieldMapping, v: &Value) -> Op
         M::Date { .. } | M::DateNanos { .. } => match s.instant(field) {
             Some(instant) => instant(v),
             // an unmapped field's `value_type`
-            None => es_index::parse_date_millis(v),
+            None => es_index::date_millis(None, None, v),
         }
         .map(Value::from),
         M::Boolean => match v {
