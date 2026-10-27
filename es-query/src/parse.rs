@@ -465,14 +465,19 @@ fn parse_kind(kind: &str, body: &Value) -> Result<Query, QueryError> {
                     ))
                 })?),
             };
+            // ES keeps the last of gt/gte (and of lt/lte) it parses
+            let last = |a: &str, b: &str| p.keys().rfind(|k| *k == a || *k == b).cloned();
+            let (lower, upper) = (last("gt", "gte"), last("lt", "lte"));
+            let bound = |b: &Option<String>, k: &str| match b.as_deref() == Some(k) {
+                true => get(k).map(Box::new),
+                false => None,
+            };
             Ok(Query::Range {
                 field: field.clone(),
-                // ES keeps the last of gt/gte (and lt/lte) parsed; here the inclusive bound wins.
-                // ponytail: preserve_order is on now, so true last-wins order is possible.
-                gt: get("gte").map_or_else(|| get("gt"), |_| None).map(Box::new),
-                gte: get("gte").map(Box::new),
-                lt: get("lte").map_or_else(|| get("lt"), |_| None).map(Box::new),
-                lte: get("lte").map(Box::new),
+                gt: bound(&lower, "gt"),
+                gte: bound(&lower, "gte"),
+                lt: bound(&upper, "lt"),
+                lte: bound(&upper, "lte"),
                 format: p.get("format").and_then(Value::as_str).map(Into::into),
                 time_zone,
             })

@@ -1324,3 +1324,13 @@ fn query_dsl_gaps_term_and_prefix_case_insensitive() {
     let r = search(&idx, &SearchRequest::parse(&req).unwrap());
     assert!(r.hits.iter().all(|h| h.score == Some(1.0)));
 }
+
+#[test]
+fn query_dsl_gaps_range_last_bound_wins() {
+    let r = |q: Value| sorted(ids(json!({"query": {"range": {"n": q}}})));
+    // n: 5, 10, 1, 7; ES keeps the last of gt/gte and of lt/lte it parses
+    assert_eq!(r(json!({"gte": 5, "gt": 5})), ["2", "4"]);
+    assert_eq!(r(json!({"gt": 5, "gte": 5})), ["1", "2", "4"]);
+    assert_eq!(r(json!({"lte": 7, "lt": 7})), ["1", "3"]);
+    assert_eq!(r(json!({"lt": 7, "lte": 7})), ["1", "3", "4"]);
+}
