@@ -1246,16 +1246,15 @@ fn doc_value(s: &Searcher, field: &str, mapping: &FieldMapping, v: &Value) -> Op
                 .then(|| t.into())
         }
         M::Ip => es_index::ip_bytes(v).map(|ip| es_index::ip_string(ip).into()),
-        // ponytail: date_range's `format` is ignored
-        M::LongRange => range(v, int),
-        M::DateRange { .. } => range(v, es_index::parse_date_millis),
+        M::LongRange => range(v, &int),
+        M::DateRange { format } => range(v, &|v| es_index::date_millis(format.as_deref(), None, v)),
         M::Text { .. } | M::TextKeyword { .. } | M::Nested | M::Object => None,
     }
 }
 
 /// A range field's value as its inclusive `[from, to]`, open ends at the type's limits, like
 /// RangeFieldMapper.
-fn range(v: &Value, parse: fn(&Value) -> Option<i64>) -> Option<Value> {
+fn range(v: &Value, parse: &dyn Fn(&Value) -> Option<i64>) -> Option<Value> {
     let o = v.as_object()?;
     let end = |k: &str| o.get(k).filter(|v| !v.is_null()).map(parse);
     let from = match (end("gte"), end("gt")) {

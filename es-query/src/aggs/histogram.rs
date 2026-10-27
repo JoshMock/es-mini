@@ -648,6 +648,22 @@ mod tests {
     }
 
     #[test]
+    fn date_formats_date_range_fields_read_values_in_their_format() {
+        let mut ix = Index::default();
+        let format = Some("yyyy/MM/dd".into());
+        (ix.mappings.properties).insert("d".into(), FieldMapping::DateRange { format });
+        ix.put("1", json!({"d": {"gte": "2016/01/01", "lt": "2016/02/01"}}));
+        let agg = json!({"date_histogram": {"field": "d", "calendar_interval": "month"}});
+        let got = run(&[&ix], json!({"h": agg})).unwrap();
+        let b = &got["h"]["buckets"];
+        assert_eq!(
+            (&b[0]["key"], &b[0]["doc_count"]),
+            (&json!(1_451_606_400_000_i64), &json!(1))
+        );
+        assert_eq!(b.as_array().unwrap().len(), 1, "{b}");
+    }
+
+    #[test]
     fn histogram_format_renders_key_as_string() {
         let got = run(
             &[&index(&[json!(1), json!(51)])],
