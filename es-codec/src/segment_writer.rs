@@ -399,6 +399,47 @@ mod tests {
     }
 
     #[test]
+    fn points_past_the_segment_are_an_error() {
+        let dir = std::env::temp_dir().join(format!("esm-seg-points-past-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fields = [FieldInfo {
+            point_dimensions: 1,
+            point_index_dimensions: 1,
+            point_num_bytes: 8,
+            ..FieldInfo::new("p", 0)
+        }];
+        let points = [(
+            0,
+            vec![
+                (0, crate::points::sortable_bytes(1, 8)),
+                (5, crate::points::sortable_bytes(2, 8)),
+            ],
+        )];
+        let seg = write_segment(
+            &dir,
+            &NewSegment {
+                name: "_0",
+                id: [9; 16],
+                max_doc: 2,
+                fields: &fields,
+                numeric: &[],
+                sorted_numeric: &[],
+                keyword: &[],
+                binary: &[],
+                norms: &[],
+                terms: &[],
+                points: &points,
+            },
+            [Ok(vec![]), Ok(vec![])],
+        )
+        .unwrap();
+        let r = SegmentReader::open(&dir, seg).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(r.point_docs("p", |_| std::cmp::Ordering::Equal).is_err());
+        assert!(r.points("p").is_err());
+    }
+
+    #[test]
     fn unwritable_input_is_an_error_not_a_panic() {
         let fields = [field("n", 0)];
         let write = |terms: &[(i32, Vec<TermPostings>)], points: &[(i32, _)]| {

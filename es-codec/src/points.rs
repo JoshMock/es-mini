@@ -116,79 +116,109 @@ fn field_meta(r: &SegmentReader, field: &str) -> Result<(FieldMeta, Vec<u8>, Vec
     }
 }
 
-/// [`SegmentReader::points`]: every leaf of `field`'s tree decoded in turn, as `BKDReader`'s
-/// `visitDocValues` reads a leaf.
+/// [`SegmentReader::points`]: every leaf of `field`'s tree decoded in turn.
 pub(crate) fn read_points(r: &SegmentReader, field: &str) -> Result<PointValues> {
     let (m, _, data) = field_meta(r, field)?;
-    let (dims, w) = (m.dims, m.width);
+    let max_doc = r.seg.info.max_doc.max(0) as u32;
     let d = &mut DataInput::new(&data);
     d.pos = m.first_leaf;
     let mut out = vec![];
     for _ in 0..m.leaves {
-        let count = d.read_len()?;
-        if count > m.max_leaf {
-            return err(format!("points leaf of {count} exceeds {}", m.max_leaf));
-        }
-        let docs = read_doc_ids(d, count)?;
-        let mut value = vec![0; dims * w];
-        let mut prefix = vec![0; dims];
-        for (k, p) in prefix.iter_mut().enumerate() {
-            *p = d.read_len()?;
-            if *p > w {
-                return err(format!("points prefix of {p} bytes in {w}-byte values"));
-            }
-            value[k * w..k * w + *p].copy_from_slice(d.read_bytes(*p)?);
-        }
-        // each dimension's bytes after its prefix (and one more in dimension `sorted`)
-        let suffixes = |d: &mut DataInput, value: &mut Vec<u8>, sorted: Option<usize>| {
-            for k in 0..dims {
-                let skip = prefix[k] + usize::from(sorted == Some(k));
-                value[k * w + skip..(k + 1) * w].copy_from_slice(d.read_bytes(w - skip)?);
-            }
-            Result::Ok(())
-        };
-        let mut values: Vec<Vec<u8>> = Vec::with_capacity(count);
-        match d.read_byte()? {
-            // all equal
-            0xff if prefix.iter().all(|&p| p == w) => values = vec![value; count],
-            0xff => return err("points leaf of equal values without a full prefix"),
-            b => {
-                // the leaf's own bounds, which a full read does not need
-                if dims > 1 {
-                    for &p in prefix.iter().filter(|&&p| p < w) {
-                        d.read_bytes(2 * (w - p))?;
-                    }
-                }
-                if b == 0xfe {
-                    // low cardinality: (run length, suffixes) per distinct value
-                    while values.len() < count {
-                        let run = d.read_len()?;
-                        suffixes(d, &mut value, None)?;
-                        values.extend(std::iter::repeat_n(value.clone(), run));
-                    }
-                } else {
-                    // runs sharing the byte after the sorted dimension's prefix
-                    let s = usize::from(b);
-                    if s >= dims || prefix[s] == w {
-                        return err(format!("bad points leaf encoding {b}"));
-                    }
-                    while values.len() < count {
-                        value[s * w + prefix[s]] = d.read_byte()?;
-                        for _ in 0..d.read_byte()? {
-                            suffixes(d, &mut value, Some(s))?;
-                            values.push(value.clone());
-                        }
-                    }
-                }
-            }
-        }
-        if values.len() != count {
-            return err("points leaf runs do not add up to its count");
-        }
-        out.extend(docs.into_iter().zip(values));
+        let docs = leaf_docs(d, m.max_leaf, max_doc)?;
+        leaf_values(d, docs.len(), m.dims, m.width, |i, v| {
+            out.push((docs[i], v.to_vec()))
+        })?;
     }
     out.sort();
     Ok(out)
+}
+
+/// The doc ids that start the leaf at `d`, checked against the tree's `max_leaf` and the
+/// segment's `max_doc`.
+fn leaf_docs(d: &mut DataInput, max_leaf: usize, max_doc: u32) -> Result<Vec<u32>> {
+    let count = d.read_len()?;
+    if count > max_leaf {
+        return err(format!("points leaf of {count} exceeds {max_leaf}"));
+    }
+    let docs = read_doc_ids(d, count)?;
+    if docs.iter().any(|&doc| doc >= max_doc) {
+        return err("points doc id past the segment");
+    }
+    Ok(docs)
+}
+
+/// Decodes the values of the leaf whose `count` doc ids were just read from `d`, as `BKDReader`'s
+/// `visitDocValues` does, calling `visit` with each one's index in the leaf and its bytes.
+fn leaf_values(
+    d: &mut DataInput,
+    count: usize,
+    dims: usize,
+    w: usize,
+    mut visit: impl FnMut(usize, &[u8]),
+) -> Result<()> {
+    let mut value = vec![0; dims * w];
+    let mut prefix = vec![0; dims];
+    for (k, p) in prefix.iter_mut().enumerate() {
+        *p = d.read_len()?;
+        if *p > w {
+            return err(format!("points prefix of {p} bytes in {w}-byte values"));
+        }
+        value[k * w..k * w + *p].copy_from_slice(d.read_bytes(*p)?);
+    }
+    // each dimension's bytes after its prefix (and one more in dimension `sorted`)
+    let suffixes = |d: &mut DataInput, value: &mut Vec<u8>, sorted: Option<usize>| {
+        for k in 0..dims {
+            let skip = prefix[k] + usize::from(sorted == Some(k));
+            value[k * w + skip..(k + 1) * w].copy_from_slice(d.read_bytes(w - skip)?);
+        }
+        Result::Ok(())
+    };
+    let mut n = 0;
+    match d.read_byte()? {
+        // all equal
+        0xff if prefix.iter().all(|&p| p == w) => {
+            (0..count).for_each(|i| visit(i, &value));
+            n = count;
+        }
+        0xff => return err("points leaf of equal values without a full prefix"),
+        b => {
+            // the leaf's own bounds, which decoding its values does not need
+            if dims > 1 {
+                for &p in prefix.iter().filter(|&&p| p < w) {
+                    d.read_bytes(2 * (w - p))?;
+                }
+            }
+            if b == 0xfe {
+                // low cardinality: (run length, suffixes) per distinct value
+                while n < count {
+                    let run = d.read_len()?;
+                    suffixes(d, &mut value, None)?;
+                    (n..n.saturating_add(run).min(count)).for_each(|i| visit(i, &value));
+                    n = n.saturating_add(run);
+                }
+            } else {
+                // runs sharing the byte after the sorted dimension's prefix
+                let s = usize::from(b);
+                if s >= dims || prefix[s] == w {
+                    return err(format!("bad points leaf encoding {b}"));
+                }
+                while n < count {
+                    value[s * w + prefix[s]] = d.read_byte()?;
+                    for _ in 0..d.read_byte()? {
+                        suffixes(d, &mut value, Some(s))?;
+                        if n < count {
+                            visit(n, &value);
+                        }
+                        n += 1;
+                    }
+                }
+            }
+        }
+    }
+    if n != count {
+        return err("points leaf runs do not add up to its count");
+    }
+    Ok(())
 }
 
 /// A one-dimensional BKD tree: `BKDReader`'s packed index (`.kdi`) over leaves in `.kdd`.
@@ -265,70 +295,16 @@ impl<F: Fn(i64) -> Ordering> Tree<'_, F> {
     fn leaf(&self, fp: u64, all: bool, out: &mut Vec<u32>) -> Result<()> {
         let r = &mut DataInput::new(self.data);
         r.pos = usize::try_from(fp).or_else(|_| err("bad leaf pointer"))?;
-        let count = r.read_len()?;
-        if count > self.max_leaf {
-            return err(format!("points leaf of {count} exceeds {}", self.max_leaf));
-        }
-        let docs = read_doc_ids(r, count)?;
-        if docs.iter().any(|d| *d >= self.max_doc) {
-            return err("points doc id past the segment");
-        }
+        let docs = leaf_docs(r, self.max_leaf, self.max_doc)?;
         if all {
             out.extend(docs);
             return Ok(());
         }
-        let w = self.width;
-        let prefix = r.read_len()?;
-        let mut value = r.read_bytes(prefix)?.to_vec();
-        value.resize(w, 0);
-        let keep = |v: &[u8]| (self.place)(decode(v)) == Ordering::Equal;
-        let mut i = 0;
-        match r.read_byte()? {
-            // all equal
-            0xff if prefix == w => {
-                if keep(&value) {
-                    out.extend(docs);
-                }
-                i = count;
+        leaf_values(r, docs.len(), 1, self.width, |i, v| {
+            if (self.place)(decode(v)) == Ordering::Equal {
+                out.push(docs[i]);
             }
-            // low cardinality: (run length, suffix) per distinct value
-            0xfe if prefix < w => {
-                while i < count {
-                    let run = r.read_len()?;
-                    value[prefix..].copy_from_slice(r.read_bytes(w - prefix)?);
-                    let Some(run_docs) = docs.get(i..i.saturating_add(run)) else {
-                        break;
-                    };
-                    if keep(&value) {
-                        out.extend(run_docs);
-                    }
-                    i += run;
-                }
-            }
-            // high cardinality: runs sharing the first byte after the prefix
-            0 if prefix < w => {
-                while i < count {
-                    value[prefix] = r.read_byte()?;
-                    let run = usize::from(r.read_byte()?);
-                    for doc in docs.iter().skip(i).take(run) {
-                        value[prefix + 1..].copy_from_slice(r.read_bytes(w - prefix - 1)?);
-                        if keep(&value) {
-                            out.push(*doc);
-                        }
-                    }
-                    i += run;
-                }
-            }
-            b => {
-                return err(format!(
-                    "bad points leaf encoding {b} after a {prefix}-byte prefix"
-                ));
-            }
-        }
-        if i != count {
-            return err("points leaf runs do not add up to its count");
-        }
-        Ok(())
+        })
     }
 }
 
