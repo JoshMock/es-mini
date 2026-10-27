@@ -17,13 +17,19 @@ pub(crate) fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, 
             .map(|c| resolve_dates(index, c, now))
             .collect()
     };
-    let date = |field: &str| {
+    let ranged = |field: &str| {
         matches!(
             index.mappings.field(field),
-            Some(FieldMapping::Date { .. } | FieldMapping::DateNanos { .. })
+            Some(
+                FieldMapping::Date { .. }
+                    | FieldMapping::DateNanos { .. }
+                    | FieldMapping::LongRange
+                    | FieldMapping::DateRange { .. }
+            )
         )
     };
-    // a term on a date field is the range from the instant to the instant rounded up
+    // a term on a date field is the range from the instant to the instant rounded up, and on a
+    // range field the ranges that hold the value
     let term = |field: String, v: Value| {
         let range = Query::Range {
             field,
@@ -33,15 +39,20 @@ pub(crate) fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, 
             lte: Some(Box::new(v)),
             format: None,
             time_zone: None,
+            relation: Relation::Intersects,
         };
         resolve_dates(index, range, now)
     };
+    let ip = |field: &str| matches!(index.mappings.field(field), Some(FieldMapping::Ip));
     Ok(match q {
-        Query::Term { field, value } if date(&field) => term(field, value)?,
+        Query::Term { field, value } if ip(&field) => ranges::ip_term(field, &value)?,
+        Query::Term { field, value } if ranged(&field) => term(field, value)?,
+        // non-text fields read a match query as a term query
         Query::Match { field, query, .. } | Query::MatchPhrase { field, query, .. }
-            if date(&field) =>
+            if ranged(&field) || ip(&field) =>
         {
-            term(field, query.into())?
+            let value = query.into();
+            resolve_dates(index, Query::Term { field, value }, now)?
         }
         Query::MatchPhrasePrefix {
             field,
@@ -189,21 +200,37 @@ pub(crate) fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, 
             lte,
             format,
             time_zone,
+            relation,
         } => {
-            let (Some(FieldMapping::Date {
-                format: f, locale, ..
-            })
-            | Some(FieldMapping::DateNanos { format: f, locale })) = index.mappings.field(&field)
-            else {
-                return Ok(Query::Range {
-                    field,
-                    gt,
-                    gte,
-                    lt,
-                    lte,
-                    format,
-                    time_zone,
-                });
+            let mapping = index.mappings.field(&field);
+            let (f, locale) = match mapping {
+                Some(
+                    FieldMapping::Date { format, locale, .. }
+                    | FieldMapping::DateNanos { format, locale },
+                ) => (format, locale.as_deref()),
+                Some(FieldMapping::DateRange { format }) => (format, None),
+                Some(FieldMapping::Ip | FieldMapping::LongRange) => {
+                    let ip = matches!(mapping, Some(FieldMapping::Ip));
+                    let bounds = [gt, gte, lt, lte];
+                    return ranges::range(
+                        ip,
+                        field,
+                        bounds.each_ref().map(|b| b.as_deref()),
+                        relation,
+                    );
+                }
+                _ => {
+                    return Ok(Query::Range {
+                        field,
+                        gt,
+                        gte,
+                        lt,
+                        lte,
+                        format,
+                        time_zone,
+                        relation,
+                    });
+                }
             };
             let number = [&gt, &gte, &lt, &lte]
                 .iter()
@@ -214,14 +241,7 @@ pub(crate) fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, 
             let tz = time_zone.unwrap_or(es_index::tz::TimeZone::UTC);
             let millis = |b: Option<Box<Value>>, round_up| {
                 let parse = |b: Box<Value>| {
-                    es_index::date_math::parse(
-                        &text(&b),
-                        format,
-                        locale.as_deref(),
-                        &tz,
-                        round_up,
-                        now,
-                    )
+                    es_index::date_math::parse(&text(&b), format, locale, &tz, round_up, now)
                 };
                 b.map(parse).transpose().map_err(|msg| QueryError {
                     kind: match msg.ends_with(es_index::date_math::TOO_FAR) {
@@ -232,8 +252,23 @@ pub(crate) fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, 
                 })
             };
             // parse_query keeps one of `gt` and `gte`, and of `lt` and `lte`
-            let lo = millis(gte, false)?.or(millis(gt, true)?.map(|t| t.saturating_add(1)));
-            let hi = millis(lte, true)?.or(millis(lt, false)?.map(|t| t.saturating_sub(1)));
+            let [gt, gte, lt, lte] = [
+                millis(gt, true)?,
+                millis(gte, false)?,
+                millis(lt, false)?,
+                millis(lte, true)?,
+            ];
+            if let Some(FieldMapping::DateRange { .. }) = mapping {
+                let bounds = [gt, gte, lt, lte].map(|b| b.map(Value::from));
+                return ranges::range(
+                    false,
+                    field,
+                    bounds.each_ref().map(Option::as_ref),
+                    relation,
+                );
+            }
+            let lo = gte.or(gt.map(|t| t.saturating_add(1)));
+            let hi = lte.or(lt.map(|t| t.saturating_sub(1)));
             Query::Range {
                 field,
                 gt: None,
@@ -242,6 +277,7 @@ pub(crate) fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, 
                 lte: hi.map(|t| Box::new(Value::from(t))),
                 format: None,
                 time_zone: None,
+                relation,
             }
         }
         Query::Prefix { ref field, .. } | Query::Wildcard { ref field, .. } => {

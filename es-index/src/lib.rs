@@ -1041,7 +1041,7 @@ pub fn date_millis(format: Option<&str>, locale: Option<&str>, v: &Value) -> Opt
 
 /// [`date_millis`] of a value without an offset of its own in time zone `tz`, missing fields
 /// rounded up with `round_up` like ES's round-up parsers.
-pub(crate) fn date_millis_in(
+pub fn date_millis_in(
     format: Option<&str>,
     locale: Option<&str>,
     v: &Value,

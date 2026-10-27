@@ -16,6 +16,7 @@ mod hll;
 mod hll_tables;
 mod parse;
 mod query_string;
+mod ranges;
 mod regexp;
 mod request;
 mod tdigest;
@@ -23,7 +24,7 @@ mod tdigest;
 use dates::{now_millis, resolve_dates};
 pub use es_index::date_millis;
 use es_index::json_num as num;
-pub use parse::{Query, parse_query};
+pub use parse::{Query, Relation, parse_query};
 pub use query_string::parse_query_string;
 pub use request::{ErrorKind, MAX_BUCKETS, QueryError, SearchRequest, SortField};
 
@@ -86,10 +87,10 @@ fn resolve(index: &Index, field: &str, sample: impl Fn(&str) -> Option<Value>) -
         // terms, ranges and sorts read dates as instants, and prefix and wildcard queries refuse
         // them (see `resolve_dates`, `sort_values`)
         Some(FieldMapping::Date { .. } | FieldMapping::DateNanos { .. }) => Kind::Keyword,
-        // ponytail: ips match as their JSON strings; no CIDR or address normalization in queries
-        Some(FieldMapping::Ip) => Kind::Keyword,
-        // ponytail: queries never match range fields; add intersects/within/contains relations
-        Some(FieldMapping::LongRange | FieldMapping::DateRange { .. }) => Kind::Keyword,
+        // terms and ranges read them as intervals (see `ranges`)
+        Some(FieldMapping::Ip | FieldMapping::LongRange | FieldMapping::DateRange { .. }) => {
+            Kind::Keyword
+        }
         Some(m) if m.is_numeric() => Kind::Number,
         Some(_) => {
             unreachable!("every FieldMapping is text, keyword, boolean, date, ip, range or numeric")
@@ -812,6 +813,19 @@ impl<'a> Searcher<'a> {
                 };
                 (values(&d.source, path).into_iter())
                     .any(|v| in_range(bounds, |b| cmp(v, b)))
+                    .then_some(1.0)
+            }
+            Query::Interval {
+                field,
+                from,
+                to,
+                relation,
+            } => {
+                let (_, path) = self.kind(field);
+                let mapping = self.index.mappings.field(field);
+                (values(&d.source, path).into_iter())
+                    .filter_map(|v| ranges::doc_interval(mapping, v))
+                    .any(|doc| ranges::holds(*relation, doc, (*from, *to)))
                     .then_some(1.0)
             }
             Query::Bool {

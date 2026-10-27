@@ -1252,21 +1252,9 @@ fn doc_value(s: &Searcher, field: &str, mapping: &FieldMapping, v: &Value) -> Op
     }
 }
 
-/// A range field's value as its inclusive `[from, to]`, open ends at the type's limits, like
-/// RangeFieldMapper.
+/// A range field's value as its inclusive `[from, to]` (see [`crate::ranges::range_ends`]).
 fn range(v: &Value, parse: &dyn Fn(&Value) -> Option<i64>) -> Option<Value> {
-    let o = v.as_object()?;
-    let end = |k: &str| o.get(k).filter(|v| !v.is_null()).map(parse);
-    let from = match (end("gte"), end("gt")) {
-        (Some(x), _) => x?,
-        (_, Some(x)) => x?.checked_add(1)?,
-        _ => i64::MIN,
-    };
-    let to = match (end("lte"), end("lt")) {
-        (Some(x), _) => x?,
-        (_, Some(x)) => x?.checked_sub(1)?,
-        _ => i64::MAX,
-    };
+    let (from, to) = crate::ranges::range_ends(v, &|v, _| parse(v))?;
     Some(Value::from(vec![from, to]))
 }
 

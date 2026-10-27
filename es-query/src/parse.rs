@@ -53,6 +53,16 @@ pub enum Query {
         format: Option<String>,
         /// The time zone of date bounds without an offset.
         time_zone: Option<TimeZone>,
+        /// How a range field's ranges must relate to the bounds; other fields ignore it.
+        relation: Relation,
+    },
+    /// A term or range query on an ip or range field, resolved by `resolve_dates` to the
+    /// inclusive `[from, to]` of sortable keys (see `crate::ranges`).
+    Interval {
+        field: String,
+        from: u128,
+        to: u128,
+        relation: Relation,
     },
     Bool {
         must: Vec<Query>,
@@ -89,6 +99,17 @@ pub enum Query {
         query: Box<Query>,
         tie_breaker: f64,
     },
+}
+
+/// RangeQueryBuilder's allowed ShapeRelations: how a document's range relates to the query's.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub enum Relation {
+    #[default]
+    Intersects,
+    /// The document's range lies within the query's.
+    Within,
+    /// The document's range contains the query's.
+    Contains,
 }
 
 impl Query {
@@ -518,6 +539,18 @@ fn parse_kind(kind: &str, body: &Value) -> Result<Query, QueryError> {
                     ))
                 })?),
             };
+            let relation = match p.get("relation").map(text) {
+                None => Relation::Intersects,
+                Some(r) => match r.to_lowercase().as_str() {
+                    "intersects" => Relation::Intersects,
+                    "within" => Relation::Within,
+                    "contains" => Relation::Contains,
+                    "disjoint" => {
+                        return Err(format!("[range] query does not support relation [{r}]").into());
+                    }
+                    _ => return Err(format!("{r} is not a valid relation").into()),
+                },
+            };
             // ES keeps the last of gt/gte (and of lt/lte) it parses
             let last = |a: &str, b: &str| p.keys().rfind(|k| *k == a || *k == b).cloned();
             let (lower, upper) = (last("gt", "gte"), last("lt", "lte"));
@@ -533,6 +566,7 @@ fn parse_kind(kind: &str, body: &Value) -> Result<Query, QueryError> {
                 lte: bound(&upper, "lte"),
                 format: p.get("format").and_then(Value::as_str).map(Into::into),
                 time_zone,
+                relation,
             })
         }
         "bool" => {
