@@ -1297,3 +1297,30 @@ fn mapping_validation_queries_on_an_empty_object_match_nothing() {
         assert!(search(&i, &req).hits.is_empty(), "{q}");
     }
 }
+
+#[test]
+fn query_dsl_gaps_term_and_prefix_case_insensitive() {
+    let q = |q: Value| sorted(ids(json!({ "query": q })));
+    let term = |v: Value| q(json!({"term": {"tag": v}}));
+    assert_eq!(
+        term(json!({"value": "PET", "case_insensitive": true})),
+        ["3", "4"]
+    );
+    assert_eq!(
+        term(json!({"value": "pet", "case_insensitive": false})),
+        ["3"]
+    );
+    // the value is a literal, not a pattern
+    assert!(term(json!({"value": "p*", "case_insensitive": true})).is_empty());
+    let prefix = |v: Value| q(json!({"prefix": {"tag": v}}));
+    assert_eq!(
+        prefix(json!({"value": "PE", "case_insensitive": true})),
+        ["3", "4"]
+    );
+    assert_eq!(prefix(json!({"value": "Pe"})), ["4"]);
+    // ES scores a case-insensitive term as a constant-score automaton query
+    let idx = index();
+    let req = json!({"query": {"term": {"tag": {"value": "Pet", "case_insensitive": true}}}});
+    let r = search(&idx, &SearchRequest::parse(&req).unwrap());
+    assert!(r.hits.iter().all(|h| h.score == Some(1.0)));
+}

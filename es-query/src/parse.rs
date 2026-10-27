@@ -109,6 +109,20 @@ const MATCH_KEYS: &[&str] = &[
     "_name",
 ];
 
+fn case_insensitive(o: &serde_json::Map<String, Value>) -> bool {
+    o.get("case_insensitive").and_then(Value::as_bool) == Some(true)
+}
+
+/// A literal as a wildcard pattern that matches only itself.
+fn wildcard_escape(s: &str) -> String {
+    s.chars()
+        .flat_map(|c| match c {
+            '*' | '?' | '\\' => vec!['\\', c],
+            c => vec![c],
+        })
+        .collect()
+}
+
 /// ES rejects parameters a query does not know: `[kind] query does not support [k]`.
 fn check_keys(
     kind: &str,
@@ -297,36 +311,59 @@ fn parse_kind(kind: &str, body: &Value) -> Result<Query, QueryError> {
         }
         "term" => {
             let (field, p) = single_field(kind, body)?;
-            let value = match p {
+            let (value, case_insensitive) = match p {
                 Value::Object(o) => {
                     check_keys("term", o, &["value", "boost", "_name", "case_insensitive"])?;
-                    o.get("value").ok_or("[term] requires value")?.clone()
+                    let v = o.get("value").ok_or("[term] requires value")?;
+                    (v.clone(), case_insensitive(o))
                 }
-                v => v.clone(),
+                v => (v.clone(), false),
             };
-            Ok(Query::Term {
-                field: field.clone(),
-                value,
+            Ok(match case_insensitive {
+                // ES's case-insensitive term is a constant-score automaton query, as a wildcard's
+                true => Query::Wildcard {
+                    field: field.clone(),
+                    pattern: wildcard_escape(&text(&value)),
+                    case_insensitive,
+                },
+                false => Query::Term {
+                    field: field.clone(),
+                    value,
+                },
             })
         }
         "prefix" => {
             let (field, p) = single_field(kind, body)?;
-            let prefix = match p {
+            let (prefix, case_insensitive) = match p {
                 Value::Object(o) => {
                     check_keys(
                         "prefix",
                         o,
-                        &["value", "prefix", "boost", "_name", "rewrite"],
+                        &[
+                            "value",
+                            "prefix",
+                            "boost",
+                            "_name",
+                            "rewrite",
+                            "case_insensitive",
+                        ],
                     )?;
                     let v = o.get("value").or_else(|| o.get("prefix"));
-                    text(v.ok_or("[prefix] query requires a value")?)
+                    let v = text(v.ok_or("[prefix] query requires a value")?);
+                    (v, case_insensitive(o))
                 }
-                v => text(v),
+                v => (text(v), false),
             };
-            // ponytail: no case_insensitive
-            Ok(Query::Prefix {
-                field: field.clone(),
-                prefix,
+            Ok(match case_insensitive {
+                true => Query::Wildcard {
+                    field: field.clone(),
+                    pattern: wildcard_escape(&prefix) + "*",
+                    case_insensitive,
+                },
+                false => Query::Prefix {
+                    field: field.clone(),
+                    prefix,
+                },
             })
         }
         "wildcard" => {
@@ -348,7 +385,7 @@ fn parse_kind(kind: &str, body: &Value) -> Result<Query, QueryError> {
                     let v = o.get("value").or_else(|| o.get("wildcard"));
                     (
                         text(v.ok_or("[wildcard] query requires a value")?),
-                        o.get("case_insensitive").and_then(Value::as_bool) == Some(true),
+                        case_insensitive(o),
                     )
                 }
                 v => (text(v), false),
