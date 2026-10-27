@@ -1981,3 +1981,29 @@ fn esql_es_semantics_invalid_rlike_patterns() {
         );
     }
 }
+
+/// Like Java's `Double.parseDouble`, string conversions read hexadecimal floats.
+#[test]
+fn esql_es_semantics_hexadecimal_floats() {
+    let r = q(
+        "ROW a = TO_DOUBLE(\"0x1p3\"), b = TO_DOUBLE(\"0x1.8p1\"), c = TO_DOUBLE(\"0x10\"), \
+               d = TO_DOUBLE(\"0X1P-2d\"), e = TO_DOUBLE(\"-0x1p3\"), f = TO_DOUBLE(\"0x.8p1\"), \
+               g = TO_INTEGER(\"0x1p3\"), h = TO_LONG(\"0x1p3\"), \
+               i = TO_DOUBLE(\"0x1.fffffffffffff8p0\"), j = TO_DOUBLE(\"0x1.00000000000008000001p0\")",
+    );
+    assert_eq!(
+        r.values,
+        [[
+            json!(8.0),
+            json!(3.0),
+            Value::Null,
+            json!(0.25),
+            json!(-8.0),
+            json!(1.0),
+            json!(8),
+            json!(8),
+            json!(2.0),
+            json!(1.0000000000000002)
+        ]]
+    );
+}

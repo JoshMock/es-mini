@@ -1796,12 +1796,44 @@ fn string_fn(f: &str, args: &[Value]) -> Option<Value> {
 }
 
 /// Java's `Double.parseDouble`, refusing what Elasticsearch's `StringUtils.parseDouble` does.
-// ponytail: no hexadecimal floats
 fn parse_double(s: &str) -> Option<f64> {
     let s = s.trim_matches(|c| c <= ' ');
     let s = s.strip_suffix(['d', 'D', 'f', 'F']).unwrap_or(s);
-    let x: f64 = s.parse().ok()?;
+    let (negative, unsigned) = match s.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, s.strip_prefix('+').unwrap_or(s)),
+    };
+    let x = match unsigned.strip_prefix("0x").or(unsigned.strip_prefix("0X")) {
+        Some(hex) => parse_hex_double(hex).map(|x| if negative { -x } else { x })?,
+        None => s.parse().ok()?,
+    };
     x.is_finite().then_some(x)
+}
+
+/// A Java hexadecimal float after its `0x`: hex digits with an optional point, then a binary
+/// exponent (`1.8p1` is 3), rounded to the nearest double.
+// ponytail: a subnormal result may round twice (scaling after rounding to 53 bits)
+fn parse_hex_double(s: &str) -> Option<f64> {
+    let (digits, exp) = s.split_once(['p', 'P'])?;
+    let (int, frac) = digits.split_once('.').unwrap_or((digits, ""));
+    if int.is_empty() && frac.is_empty() || exp.is_empty() {
+        return None;
+    }
+    let exp = exp.parse::<i64>().ok()?.clamp(-5000, 5000) as i32;
+    // The first 61+ bits, with any nonzero digit past them folded into the lowest bit so that
+    // converting to f64 rounds like the exact value.
+    let (mut mantissa, mut exp) = (0u64, exp - 4 * frac.len() as i32);
+    for d in int.chars().chain(frac.chars()) {
+        let d = u64::from(d.to_digit(16)?);
+        if mantissa >> 60 == 0 {
+            mantissa = mantissa << 4 | d;
+        } else {
+            mantissa |= (d != 0) as u64;
+            exp += 4;
+        }
+    }
+    let half = exp / 2;
+    Some(mantissa as f64 * 2f64.powi(half) * 2f64.powi(exp - half))
 }
 
 /// Java's `Math.round`: halves round up.
