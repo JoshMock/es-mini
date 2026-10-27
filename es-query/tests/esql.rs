@@ -1215,7 +1215,7 @@ fn rlike_matches_lucene_regular_expressions() {
     );
     assert!(matches!(
         run(&indices(), r#"FROM people | WHERE name RLIKE "(a""#),
-        Err(EsqlError::Verification(_))
+        Err(EsqlError::Parse(_))
     ));
 }
 
@@ -1953,4 +1953,31 @@ fn esql_es_semantics_overflowing_long_sum_is_null() {
     let indices = BTreeMap::from([("i".to_owned(), i)]);
     let r = run(&indices, "FROM i | STATS s = SUM(v), m = MAX(v)").unwrap();
     assert_eq!(r.values, [[Value::Null, json!(i64::MAX)]]);
+}
+
+/// Elasticsearch 9.5.5 fails an invalid RLIKE pattern while parsing, with Lucene's reason.
+#[test]
+fn esql_es_semantics_invalid_rlike_patterns() {
+    let err = |q: &str| match run(&indices(), q) {
+        Err(EsqlError::Parse(m)) => m,
+        other => panic!("{q}: {other:?}"),
+    };
+    for (p, reason) in [
+        ("[a", "expected ']' at position 2"),
+        ("a{2", "expected '}' at position 3"),
+        ("(a", "expected ')' at position 2"),
+        ("a\\\\", "unexpected end-of-string"),
+        ("a{3,2}", "invalid repetition range(out of order): 3..2"),
+        ("<1-a>", "interval syntax error at position 4"),
+        ("a)", "end-of-string expected at position 1"),
+        ("\\\\p", "invalid character class \\112"),
+    ] {
+        let shown = p.replace("\\\\", "\\");
+        assert_eq!(
+            err(&format!(
+                "ROW a = \"x\" | WHERE a RLIKE \"{p}\" | WHERE nope"
+            )),
+            format!("line 1:21: Invalid regex pattern for RLIKE [{shown}]: [{reason}]")
+        );
+    }
 }

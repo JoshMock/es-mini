@@ -710,6 +710,10 @@ impl Parser<'_> {
             let Some(Tok::Str(p)) = self.peek().cloned() else {
                 return self.mismatched("QUOTED_STRING");
             };
+            if rlike && let Err(reason) = crate::regexp::compile(&p) {
+                let msg = format!("Invalid regex pattern for RLIKE [{p}]: [{reason}]");
+                return Err(parse_error(self.toks[start].1, &msg));
+            }
             self.pos += 1;
             self.follow = AFTER_LITERAL;
             let e = Expr::Like(Box::new(left), p, rlike, self.span(start));
@@ -2115,13 +2119,8 @@ fn resolve(
             resolve(x, src, types, bad)?;
             None
         }
-        Expr::Like(x, p, rlike, _) => {
+        Expr::Like(x, ..) => {
             let t = resolve(x, src, types, bad)?;
-            // ponytail: not Elasticsearch's message, which names what is wrong
-            if *rlike && crate::regexp::compile(p).is_err() {
-                bad.push((span(e).0, format!("Invalid regex pattern for RLIKE [{p}]")));
-                return None;
-            }
             (!matches!(t.as_str(), "keyword" | "text" | "null")).then(|| {
                 format!(
                     "argument of [{}] must be [string], found value [{}] type [{t}]",

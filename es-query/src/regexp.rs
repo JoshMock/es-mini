@@ -526,7 +526,8 @@ impl Parser {
             'S' => gaps(SPACE),
             'w' => WORD.to_vec(),
             'W' => gaps(WORD),
-            c => return Err(format!("invalid character class \\{c}")),
+            // Lucene appends the code point: `\p` is "invalid character class \112".
+            c => return Err(format!("invalid character class \\{}", c as u32)),
         })
     }
 
