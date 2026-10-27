@@ -101,6 +101,7 @@ pub async fn create(
     let body = parse_body(&body)?;
     let mut index = Index::default();
     index.settings.record_creation(&name);
+    check_setting_lists(&body["settings"])?;
     index.settings.merge(&body["settings"]);
     // ponytail: only this setting's value is validated on create
     let limit = "index.mapping.array_objects.limit";
@@ -474,6 +475,7 @@ fn put_settings_on(
     )?;
     let body = parse_body(&body)?;
     let settings = body.get("settings").unwrap_or(&body);
+    check_setting_lists(settings)?;
     // Non-dynamic keys in the request, with their new values and whether they are final.
     let mut skipped = Vec::new();
     // Registered settings the request sets, with their new values.
@@ -600,6 +602,15 @@ pub async fn get_mapping(
         .map(|n| (n.clone(), json!({"mappings": indices[n].mappings})))
         .collect();
     Ok(Json(Value::Object(out)))
+}
+
+/// Refuses settings whose lists hold objects, nulls or lists, as Settings.fromXContent does.
+// ponytail: keys render in request order; Elasticsearch renders them in HashMap order
+fn check_setting_lists(settings: &Value) -> Result<(), AppError> {
+    match es_index::setting_lists_ok(settings) {
+        true => Ok(()),
+        false => Err(AppError::SettingsLists(settings.to_string())),
+    }
 }
 
 /// `PUT|POST /{index}/_mapping`: adds fields and updates the parameters of existing ones.

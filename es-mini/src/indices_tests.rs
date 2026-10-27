@@ -524,3 +524,34 @@ async fn mapping_validation_put_mapping_fills_an_empty_object() {
     let e = json!({"properties": {"x": {"type": "long"}}});
     assert_eq!(r, json!({"idx": {"mappings": {"properties": {"e": e}}}}));
 }
+
+#[tokio::test]
+async fn mapping_validation_objects_and_nulls_inside_setting_lists_fail() {
+    let app = app();
+    // Elasticsearch 9.5.5's response, for create and update alike.
+    let refused = |source: &str| {
+        let reason = format!("Failed to load settings from [{source}]");
+        json!({"error": {
+            "root_cause": [{"type": "settings_exception", "reason": reason}],
+            "type": "settings_exception", "reason": reason,
+            "caused_by": {"type": "illegal_state_exception",
+                "reason": "only value lists are allowed in serialized settings"}
+        }, "status": 500})
+    };
+    let body = json!({"settings": {"index": {"foo": [1, {"a": 1}]}}});
+    let (s, r) = call(&app, Method::PUT, "/s1", Some(body)).await;
+    assert_eq!(s, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(r, refused(r#"{"index":{"foo":[1,{"a":1}]}}"#));
+    call(&app, Method::PUT, "/x", None).await;
+    for (body, source) in [
+        (json!({"index": {"foo": [{}]}}), r#"{"index":{"foo":[{}]}}"#),
+        (
+            json!({"settings": {"index.foo": [null]}}),
+            r#"{"index.foo":[null]}"#,
+        ),
+        (json!({"index.foo": [[1]]}), r#"{"index.foo":[[1]]}"#),
+    ] {
+        let (s, r) = call(&app, Method::PUT, "/x/_settings", Some(body)).await;
+        assert_eq!((s, r), (StatusCode::INTERNAL_SERVER_ERROR, refused(source)));
+    }
+}

@@ -144,9 +144,19 @@ fn insert_setting(map: &mut serde_json::Map<String, Value>, prefix: &str, key: &
     }
 }
 
+/// Whether Settings.fromXContent accepts every list in `json`: lists hold only strings, numbers
+/// and booleans.
+pub fn setting_lists_ok(json: &Value) -> bool {
+    match json {
+        Value::Object(m) => m.values().all(setting_lists_ok),
+        Value::Array(items) => (items.iter())
+            .all(|v| matches!(v, Value::String(_) | Value::Number(_) | Value::Bool(_))),
+        _ => true,
+    }
+}
+
 /// A settings value as Settings.fromXContent stores it: arrays stay lists of strings, other
-/// values become strings.
-// ponytail: ES fails on objects and nulls inside lists; they are stringified here
+/// values become strings. Lists are checked with [`setting_lists_ok`] first.
 pub fn setting_value(v: &Value) -> Value {
     match v {
         Value::Array(items) => Value::Array(items.iter().map(setting_value).collect()),

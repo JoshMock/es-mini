@@ -48,6 +48,8 @@ pub enum AppError {
     TooManyBuckets(String),
     /// A scroll or point-in-time id whose context expired or was freed.
     SearchContextMissing(u64),
+    /// Settings (given as JSON) with a list holding more than strings, numbers and booleans.
+    SettingsLists(String),
 }
 
 impl AppError {
@@ -68,6 +70,21 @@ impl AppError {
                             "type": "too_many_buckets_exception",
                             "reason": reason,
                             "max_buckets": es_query::MAX_BUCKETS,
+                        },
+                    }),
+                );
+            }
+            Self::SettingsLists(source) => {
+                let reason = format!("Failed to load settings from [{source}]");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    json!({
+                        "root_cause": [{"type": "settings_exception", "reason": reason}],
+                        "type": "settings_exception",
+                        "reason": reason,
+                        "caused_by": {
+                            "type": "illegal_state_exception",
+                            "reason": "only value lists are allowed in serialized settings",
                         },
                     }),
                 );
