@@ -147,7 +147,7 @@ fn instant_string(t: i128) -> String {
 }
 
 /// Local millis `l` plus `n` months, the day clamped to the month's last, like `plusMonths`.
-fn add_months(l: i64, n: i64) -> i64 {
+pub fn add_months(l: i64, n: i64) -> i64 {
     let (days, ms) = (l.div_euclid(DAY), l.rem_euclid(DAY));
     let (y, m, d) = civil_from_days(days);
     let m0 = m - 1 + n;

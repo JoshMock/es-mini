@@ -2334,3 +2334,53 @@ fn esql_es_semantics_decimal_exponents() {
          type [double]"
     );
 }
+
+#[test]
+fn esql_conversions_date_math_adds_and_subtracts_time_spans() {
+    let r = q(
+        r#"ROW d = TO_DATETIME("2024-01-31T10:00:00Z") | EVAL a = d + 1 month, b = d - 1 year, c = 2 hours + d, w = d - 1 week, q = d + 1 quarter, s = d + 90 seconds, n = d + null, o = d + 9223372036854775807 ms, y = d + 2000000000 years | DROP d"#,
+    );
+    assert!(
+        r.columns.iter().all(|c| c.r#type == "date"),
+        "{:?}",
+        r.columns
+    );
+    assert_eq!(
+        r.values,
+        [[
+            json!("2024-02-29T10:00:00.000Z"),
+            json!("2023-01-31T10:00:00.000Z"),
+            json!("2024-01-31T12:00:00.000Z"),
+            json!("2024-01-24T10:00:00.000Z"),
+            json!("2024-04-30T10:00:00.000Z"),
+            json!("2024-01-31T10:01:30.000Z"),
+            Value::Null,
+            Value::Null,
+            Value::Null
+        ]]
+    );
+    for (query, problem) in [
+        (
+            "ROW d = TO_DATETIME(0) | EVAL x = 1 day - d",
+            "line 1:35: [-] arguments are in unsupported order: cannot subtract a [DATETIME] value \
+             [d] from a [DATE_PERIOD] amount [1 day]",
+        ),
+        (
+            "ROW d = TO_DATETIME(0) | EVAL x = d + 1",
+            "line 1:35: [+] has arguments with incompatible types [datetime] and [integer]",
+        ),
+        (
+            "ROW d = TO_DATETIME(0) | EVAL x = d + d",
+            "line 1:35: [+] has arguments with incompatible types [datetime] and [datetime]",
+        ),
+        (
+            "ROW d = TO_DATETIME(0) | EVAL x = d + (1 hour + 1 day)",
+            "line 1:40: [+] has arguments with incompatible types [time_duration] and [date_period]",
+        ),
+    ] {
+        match run(&indices(), query) {
+            Err(EsqlError::Verification(m)) => assert_eq!(m, format!("Found 1 problem\n{problem}")),
+            other => panic!("{query}: {other:?}"),
+        }
+    }
+}

@@ -304,7 +304,8 @@ enum Expr {
     IsNull(Box<Expr>, bool, Span),
     /// `x LIKE "pattern"`, or `x RLIKE "pattern"` when the flag is set.
     Like(Box<Expr>, String, bool, Span),
-    /// `+ - * / %`, with the numeric type `resolve` gives it, which `eval` computes in.
+    /// `+ - * / %`, with the numeric type `resolve` gives it, which `eval` computes in, or
+    /// `date` for a date plus or minus a time span.
     Arith(
         &'static str,
         Box<Expr>,
@@ -1176,6 +1177,14 @@ fn eval(e: &Expr, row: &Row) -> Option<Value> {
             (Some(false), Some(false)) => Some(false.into()),
             _ => None,
         },
+        Expr::Arith(op, a, b, t, _) if t.get() == Some(&"date") => match (&**a, &**b) {
+            (d, Expr::Interval(n, unit, _)) => {
+                date_plus(&eval(d, row)?, n.checked_mul(op_sign(op))?, unit)
+            }
+            (Expr::Interval(n, unit, _), d) => date_plus(&eval(d, row)?, *n, unit),
+            // A null operand.
+            _ => None,
+        },
         Expr::Arith(op, a, b, t, _) => arith(op, t.get().copied()?, &eval(a, row)?, &eval(b, row)?),
         // Like Java's `Math.negateExact`, null on overflow; null for a multi-value too.
         Expr::Neg(x, t, _) => {
@@ -1268,6 +1277,38 @@ fn eval(e: &Expr, row: &Row) -> Option<Value> {
             Some(r.into())
         }
     }
+}
+
+fn op_sign(op: &str) -> i64 {
+    if op == "-" { -1 } else { 1 }
+}
+
+/// Date `v` plus `n` of time span `unit` in UTC, like Java's `ZonedDateTime.plus`: months clamp
+/// the day to the month's last. Null where the result is out of range.
+fn date_plus(v: &Value, n: i64, unit: &str) -> Option<Value> {
+    let t = es_index::parse_date_millis(v)?;
+    // Past 290 million years the millis overflow, as `asMillis` would.
+    let months = |m: i64| {
+        let n = n.checked_mul(m).filter(|n| n.abs() <= 12 * 290_000_000)?;
+        Some(es_index::date_math::add_months(t, n))
+    };
+    let t = match unit {
+        "month" => months(1),
+        "quarter" => months(3),
+        "year" => months(12),
+        _ => {
+            let ms: i64 = match unit {
+                "millisecond" => 1,
+                "second" => 1000,
+                "minute" => 60_000,
+                "hour" => 3_600_000,
+                "day" => 86_400_000,
+                _ => 7 * 86_400_000,
+            };
+            n.checked_mul(ms).and_then(|d| t.checked_add(d))
+        }
+    }?;
+    Some(es_index::iso_date(t).into())
 }
 
 /// `a op b` computed in type `t`, like Elasticsearch's evaluators: null on overflow, division by
@@ -2066,6 +2107,11 @@ fn metadata_type(field: &str) -> Option<&'static str> {
     }
 }
 
+/// Elasticsearch's name for ES|QL type `t` in messages: dates are `datetime`.
+fn es_name(t: &str) -> &str {
+    if t == "date" { "datetime" } else { t }
+}
+
 /// The ES|QL type of a literal; a list has its first item's type.
 fn literal_type(v: &Value) -> &'static str {
     match v {
@@ -2099,27 +2145,61 @@ fn resolve(
             let (ta, tb) = (resolve(a, src, types, bad), resolve(b, src, types, bad));
             let (ta, tb) = (ta?, tb?);
             let numeric = |t: &str| NUMERIC.contains(&t);
-            let date = |t: &str| t == "datetime" || t == "date_nanos";
-            // ponytail: no date math (it needs time span literals) or dense_vector operands
+            let date = |t: &str| t == "date" || t == "date_nanos";
+            let temporal = |t: &str| t == "date_period" || t == "time_duration";
+            // ponytail: no dense_vector operands; es-mini maps no dense_vector fields
             let accepted = match *op {
                 "+" | "-" => "date_nanos, datetime, numeric or dense_vector",
                 "*" | "/" => "numeric or dense_vector",
                 _ => "numeric",
             };
             let input = |x: &Expr, t: &str| {
-                let ok = numeric(t) || t == "null" || accepted.contains(',') && date(t);
-                (!ok).then(|| format!("[{accepted}], found value [{}] type [{t}]", text(x)))
+                let ok =
+                    numeric(t) || t == "null" || accepted.contains(',') && (date(t) || temporal(t));
+                (!ok).then(|| {
+                    format!(
+                        "[{accepted}], found value [{}] type [{}]",
+                        text(x),
+                        es_name(t)
+                    )
+                })
             };
+            // Elasticsearch's `DateTimeArithmeticOperation.checkCompatibility`.
             let incompatible = match (ta.as_str(), tb.as_str()) {
                 ("null", _) | (_, "null") => false,
-                (x, y) if date(x) || date(y) => true,
+                (x, y) if date(x) && temporal(y) || temporal(x) && date(y) => false,
+                (x, y) if temporal(x) && x == y => false,
+                (x, y) if date(x) || date(y) || temporal(x) || temporal(y) => true,
                 (x, y) => (x == "unsigned_long") != (y == "unsigned_long"),
             };
+            // The type of a date or time span operation, `commonType`'s pick.
+            let dated = [&ta, &tb]
+                .into_iter()
+                .find(|t| date(t))
+                .or_else(|| [&ta, &tb].into_iter().find(|t| temporal(t)));
             let problem = match (input(a, &ta), input(b, &tb)) {
                 (Some(found), _) => format!("first argument of [{}] must be {found}", text(e)),
                 (_, Some(found)) => format!("second argument of [{}] must be {found}", text(e)),
-                _ if incompatible => {
-                    format!("[{op}] has arguments with incompatible types [{ta}] and [{tb}]")
+                _ if incompatible => format!(
+                    "[{op}] has arguments with incompatible types [{}] and [{}]",
+                    es_name(&ta),
+                    es_name(&tb)
+                ),
+                // Elasticsearch's `Sub.resolveType`.
+                _ if *op == "-" && tb == "date" => format!(
+                    "[-] arguments are in unsupported order: cannot subtract a [DATETIME] value \
+                     [{}] from a [{}] amount [{}]",
+                    text(b),
+                    ta.to_ascii_uppercase(),
+                    text(a)
+                ),
+                // ponytail: date_nanos and folding two time spans are not computed
+                _ if dated.is_some_and(|t| t != "date") => {
+                    format!("[{}] is not supported by es-mini", text(e))
+                }
+                _ if dated.is_some() => {
+                    let _ = t.set("date");
+                    return Some("date".into());
                 }
                 _ => {
                     // Elasticsearch's `commonType` for the types that get this far.
