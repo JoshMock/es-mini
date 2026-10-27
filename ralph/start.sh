@@ -10,4 +10,4 @@ cd "$(dirname "$0")"
 systemctl --user reset-failed ralph 2>/dev/null || true
 exec systemd-run --user --unit ralph -p Restart=on-failure -p RestartSec=60 -p WorkingDirectory="$PWD" \
   -E PATH="$PATH" -E HOME="$HOME" \
-  -- nono run --profile pi-es-mini -- env CARGO_HOME=/tmp/esm-cargo CARGO_TARGET_DIR=/tmp/esm-target ./overnight.sh "$@"
+  -- nono run --profile pi-es-mini -- env CARGO_HOME=/tmp/esm-cargo CARGO_TARGET_DIR=/tmp/esm-target CARGO_INCREMENTAL=0 ./overnight.sh "$@"
