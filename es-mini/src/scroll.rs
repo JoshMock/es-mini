@@ -126,26 +126,33 @@ fn encode(id: u64) -> String {
     format!("esmini-scroll-{id}")
 }
 
+// Ids es-mini issued are checked first: some lengths of them are not valid base64.
 fn decode(id: &str) -> Result<u64, AppError> {
-    let error = AppError::IllegalArgument("Cannot parse scroll id".into());
-    if let Some(e) = base64_error(id) {
-        let cause = json!({"type": "illegal_argument_exception", "reason": e});
-        return Err(AppError::Caused(Box::new(error), cause));
-    }
-    id.strip_prefix("esmini-scroll-")
+    if let Some(n) = id
+        .strip_prefix("esmini-scroll-")
         .and_then(|n| n.parse().ok())
-        .ok_or(error)
+    {
+        return Ok(n);
+    }
+    let error = AppError::IllegalArgument("Cannot parse scroll id".into());
+    Err(match base64_error(id) {
+        Some(e) => {
+            let cause = json!({"type": "illegal_argument_exception", "reason": e});
+            AppError::Caused(Box::new(error), cause)
+        }
+        None => error,
+    })
 }
 
 fn decode_pit(id: &str) -> Result<u64, AppError> {
-    if let Some(e) = base64_error(id) {
-        return Err(AppError::IllegalArgument(e));
+    if let Some(n) = id.strip_prefix("esmini-pit-").and_then(|n| n.parse().ok()) {
+        return Ok(n);
     }
-    id.strip_prefix("esmini-pit-")
-        .and_then(|n| n.parse().ok())
-        // ponytail: ES reads a base64 id on and fails on what it holds; es-mini, whose ids are
-        // not ES's, gives this message for any base64 id it did not issue
-        .ok_or_else(|| AppError::IllegalArgument(format!("invalid id: [{id}]")))
+    // ponytail: ES reads a base64 id on and fails on what it holds; es-mini, whose ids are
+    // not ES's, gives this message for any base64 id it did not issue
+    Err(AppError::IllegalArgument(
+        base64_error(id).unwrap_or_else(|| format!("invalid id: [{id}]")),
+    ))
 }
 
 /// The error Java's URL-safe `Base64` decoder throws for `id` (read as ISO-8859-1 bytes),
@@ -390,6 +397,19 @@ pub async fn clear(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Ids es-mini issued decode even where they are not valid base64 (17-character scroll ids).
+    #[test]
+    fn issued_ids_decode_at_every_length() {
+        for n in 1..2000 {
+            assert_eq!(decode(&encode(n)).ok(), Some(n), "scroll {n}");
+            assert_eq!(
+                decode_pit(&format!("esmini-pit-{n}")).ok(),
+                Some(n),
+                "pit {n}"
+            );
+        }
+    }
 
     #[test]
     fn memory_bounds_scroll_keeps_its_snapshot_not_its_hits() {
