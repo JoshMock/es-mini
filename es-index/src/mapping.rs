@@ -62,7 +62,8 @@ pub enum FieldMapping {
         format: Option<String>,
     },
     /// Marks an object path as `nested`; its subfields are the entries under `path.`.
-    // ponytail: nested objects are not indexed as separate documents, so nested queries and
+    // ponytail: es-mini searches nested objects as part of their root document (only segments
+    // on disk hold them as separate documents, for Elasticsearch), so nested queries and
     // aggregations are unsupported; the mapping only round-trips and keeps nested objects out of hit counts
     Nested,
 }
