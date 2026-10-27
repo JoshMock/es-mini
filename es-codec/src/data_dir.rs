@@ -321,7 +321,7 @@ mod tests {
                 terms: &terms,
                 points: &[],
             },
-            stored,
+            stored.into_iter().map(Ok),
         )
         .unwrap();
         let max_seq = n as i64 - 1;

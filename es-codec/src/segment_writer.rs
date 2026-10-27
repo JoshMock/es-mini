@@ -45,18 +45,19 @@ pub struct NewSegment<'a> {
 
 /// Writes the segment's compound file into `dir` and returns its commit info; the caller adds it
 /// to a [`crate::SegmentInfos`] and writes that (which writes the `.si`). `stored` yields each
-/// doc's stored fields in order, so they need not all be in memory at once.
+/// doc's stored fields in order (or the error reading them), so they need not all be in memory
+/// at once.
 pub fn write_segment(
     dir: &Path,
     s: &NewSegment,
-    stored: impl IntoIterator<Item = Doc>,
+    stored: impl IntoIterator<Item = Result<Doc>>,
 ) -> Result<SegmentCommitInfo> {
     // Each sub-file goes to disk as soon as it is encoded (stored fields a chunk at a time), and
     // the compound file copies them from there, so at most one format's files are in memory.
     let mut fdt = StoredFieldsWriter::create(&dir.join(format!("{}.fdt", s.name)), &s.id)?;
     let mut docs = 0;
     for doc in stored {
-        fdt.add(&doc)?;
+        fdt.add(&doc?)?;
         docs += 1;
     }
     let (fdm, fdx) = fdt.finish()?;
@@ -252,7 +253,7 @@ mod tests {
                 terms: &terms,
                 points: &[],
             },
-            stored.clone(),
+            stored.iter().cloned().map(Ok),
         )
         .unwrap();
         let infos = SegmentInfos {
@@ -322,12 +323,79 @@ mod tests {
                 terms: &terms,
                 points: &[],
             },
-            [vec![], vec![]],
+            [Ok(vec![]), Ok(vec![])],
         )
         .unwrap();
         let r = SegmentReader::open(&dir, seg).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(r.terms("t").unwrap(), terms[0].1);
+    }
+
+    #[test]
+    fn points_read_back_leaf_by_leaf() {
+        let dir = std::env::temp_dir().join(format!("esm-seg-points-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let point = |dims: i32, w: i32, number| FieldInfo {
+            point_dimensions: dims,
+            point_index_dimensions: dims,
+            point_num_bytes: w,
+            ..FieldInfo::new(&format!("p{number}"), number)
+        };
+        let fields = [
+            point(1, 8, 0),
+            point(2, 8, 1),
+            point(1, 4, 2),
+            point(1, 2, 3),
+        ];
+        let b = crate::points::sortable_bytes;
+        let n = 1500u32;
+        // spread and repeated values (high and low cardinality leaves), two per doc in places,
+        // equal values (leaves of one value), and ranges in two dimensions
+        let spread: crate::points::PointValues = (0..n)
+            .flat_map(|d| {
+                let v = i64::from(d) * 7919 % 100_003 - 50_000;
+                let extra = (d % 3 == 0).then(|| (d, b(i64::from(d % 5), 8)));
+                std::iter::once((d, b(v, 8))).chain(extra)
+            })
+            .collect();
+        let ranges = (0..n)
+            .map(|d| {
+                (
+                    d,
+                    [b(i64::from(d), 8), b(i64::from(d % 40) * 1000, 8)].concat(),
+                )
+            })
+            .collect();
+        let equal = (0..n).map(|d| (d, b(42, 4))).collect();
+        let half = (0..n)
+            .step_by(2)
+            .map(|d| (d, b(i64::from(d % 9), 2)))
+            .collect();
+        let points = [(0, spread), (1, ranges), (2, equal), (3, half)];
+        let seg = write_segment(
+            &dir,
+            &NewSegment {
+                name: "_0",
+                id: [9; 16],
+                max_doc: n as i32,
+                fields: &fields,
+                numeric: &[],
+                sorted_numeric: &[],
+                keyword: &[],
+                binary: &[],
+                norms: &[],
+                terms: &[],
+                points: &points,
+            },
+            (0..n).map(|_| Ok(vec![])),
+        )
+        .unwrap();
+        let r = SegmentReader::open(&dir, seg).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        for (number, mut want) in points {
+            want.sort();
+            assert_eq!(r.points(&format!("p{number}")).unwrap(), want, "p{number}");
+        }
     }
 
     #[test]

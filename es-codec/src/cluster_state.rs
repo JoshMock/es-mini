@@ -306,7 +306,7 @@ pub fn write_state(
             terms: &terms,
             points: &[],
         },
-        stored,
+        stored.into_iter().map(Ok),
     )?;
     SegmentInfos {
         id: [2; 16],

@@ -1595,7 +1595,7 @@ fn write_docs(
             let text = |v: &String| (*n, StoredValue::String(v.clone()));
             stored.extend(values[doc].iter().map(text));
         }
-        stored
+        Ok(stored)
     });
     // Like DocumentParser and SeqNoFieldMapper: nested docs share their root's `_id`, `_version`
     // and `_seq_no`; only roots have a `_primary_term`, which tells Elasticsearch them apart.

@@ -134,6 +134,11 @@ impl SegmentReader {
         points::read_point_docs(self, field, place)
     }
 
+    /// Every point of `field`, `(doc, value)` sorted, read leaf by leaf.
+    pub fn points(&self, field: &str) -> Result<points::PointValues> {
+        points::read_points(self, field)
+    }
+
     /// A field's doc values, from the field's latest doc values generation.
     pub fn doc_values(&self, field: &str) -> Result<doc_values::DocValues> {
         doc_values::read_field_values(self, field)

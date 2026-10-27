@@ -29,6 +29,45 @@ pub(crate) fn read_point_docs(
     if (info.point_dimensions, info.point_index_dimensions) != (1, 1) {
         return err(format!("{field} has no one-dimensional points"));
     }
+    let (m, index, data) = field_meta(r, field)?;
+    let width = m.width;
+    if !(1..=8).contains(&width) {
+        return err(format!("{field} has {width}-byte points"));
+    }
+    let Some(index) = index.get(m.index.clone()) else {
+        return err(format!("points index of {field} extends past its file"));
+    };
+    let tree = Tree {
+        index,
+        data: &data,
+        leaves: m.leaves,
+        max_leaf: m.max_leaf,
+        max_doc: r.seg.info.max_doc.max(0) as u32,
+        width,
+        place,
+    };
+    let mut out = Vec::new();
+    tree.node(1, 0, 0, &vec![0; width], (&m.lo, &m.hi), &mut out)?;
+    Ok(out)
+}
+
+/// One field's entry in `.kdm`.
+struct FieldMeta {
+    dims: usize,
+    max_leaf: usize,
+    width: usize,
+    leaves: usize,
+    lo: Vec<u8>,
+    hi: Vec<u8>,
+    /// `.kdi` range of the packed index
+    index: std::ops::Range<usize>,
+    /// `.kdd` offset of the first leaf; the leaves follow it in order
+    first_leaf: usize,
+}
+
+/// `field`'s meta entry, and the `.kdi` and `.kdd` files, checked.
+fn field_meta(r: &SegmentReader, field: &str) -> Result<(FieldMeta, Vec<u8>, Vec<u8>)> {
+    let info = r.field(field)?;
     let (meta, index, data) = (
         r.cfs_file(".kdm")?,
         r.cfs_file(".kdi")?,
@@ -54,35 +93,102 @@ pub(crate) fn read_point_docs(
         let max_leaf = m.read_len()?;
         let width = m.read_len()?;
         let leaves = m.read_len()?;
-        let lo = m.read_bytes(dims * width)?;
-        let hi = m.read_bytes(dims * width)?;
+        let lo = m.read_bytes(dims * width)?.to_vec();
+        let hi = m.read_bytes(dims * width)?.to_vec();
         m.read_vlong()?; // point count
         m.read_vint()?; // doc count
         let len = m.read_len()?;
-        m.read_long()?; // first leaf
+        let first_leaf = usize::try_from(m.read_long()?).or_else(|_| err("negative first leaf"))?;
         let start = usize::try_from(m.read_long()?).or_else(|_| err("negative index start"))?;
-        if number != info.number {
-            continue;
+        if number == info.number {
+            let meta = FieldMeta {
+                dims,
+                max_leaf,
+                width,
+                leaves,
+                lo,
+                hi,
+                index: start..start.saturating_add(len),
+                first_leaf,
+            };
+            return Ok((meta, index, data));
         }
-        if !(1..=8).contains(&width) {
-            return err(format!("{field} has {width}-byte points"));
-        }
-        let Some(index) = index.get(start..start.saturating_add(len)) else {
-            return err(format!("points index of {field} extends past its file"));
-        };
-        let tree = Tree {
-            index,
-            data: &data,
-            leaves,
-            max_leaf,
-            max_doc: r.seg.info.max_doc.max(0) as u32,
-            width,
-            place,
-        };
-        let mut out = Vec::new();
-        tree.node(1, 0, 0, &vec![0; width], (lo, hi), &mut out)?;
-        return Ok(out);
     }
+}
+
+/// [`SegmentReader::points`]: every leaf of `field`'s tree decoded in turn, as `BKDReader`'s
+/// `visitDocValues` reads a leaf.
+pub(crate) fn read_points(r: &SegmentReader, field: &str) -> Result<PointValues> {
+    let (m, _, data) = field_meta(r, field)?;
+    let (dims, w) = (m.dims, m.width);
+    let d = &mut DataInput::new(&data);
+    d.pos = m.first_leaf;
+    let mut out = vec![];
+    for _ in 0..m.leaves {
+        let count = d.read_len()?;
+        if count > m.max_leaf {
+            return err(format!("points leaf of {count} exceeds {}", m.max_leaf));
+        }
+        let docs = read_doc_ids(d, count)?;
+        let mut value = vec![0; dims * w];
+        let mut prefix = vec![0; dims];
+        for (k, p) in prefix.iter_mut().enumerate() {
+            *p = d.read_len()?;
+            if *p > w {
+                return err(format!("points prefix of {p} bytes in {w}-byte values"));
+            }
+            value[k * w..k * w + *p].copy_from_slice(d.read_bytes(*p)?);
+        }
+        // each dimension's bytes after its prefix (and one more in dimension `sorted`)
+        let suffixes = |d: &mut DataInput, value: &mut Vec<u8>, sorted: Option<usize>| {
+            for k in 0..dims {
+                let skip = prefix[k] + usize::from(sorted == Some(k));
+                value[k * w + skip..(k + 1) * w].copy_from_slice(d.read_bytes(w - skip)?);
+            }
+            Result::Ok(())
+        };
+        let mut values: Vec<Vec<u8>> = Vec::with_capacity(count);
+        match d.read_byte()? {
+            // all equal
+            0xff if prefix.iter().all(|&p| p == w) => values = vec![value; count],
+            0xff => return err("points leaf of equal values without a full prefix"),
+            b => {
+                // the leaf's own bounds, which a full read does not need
+                if dims > 1 {
+                    for &p in prefix.iter().filter(|&&p| p < w) {
+                        d.read_bytes(2 * (w - p))?;
+                    }
+                }
+                if b == 0xfe {
+                    // low cardinality: (run length, suffixes) per distinct value
+                    while values.len() < count {
+                        let run = d.read_len()?;
+                        suffixes(d, &mut value, None)?;
+                        values.extend(std::iter::repeat_n(value.clone(), run));
+                    }
+                } else {
+                    // runs sharing the byte after the sorted dimension's prefix
+                    let s = usize::from(b);
+                    if s >= dims || prefix[s] == w {
+                        return err(format!("bad points leaf encoding {b}"));
+                    }
+                    while values.len() < count {
+                        value[s * w + prefix[s]] = d.read_byte()?;
+                        for _ in 0..d.read_byte()? {
+                            suffixes(d, &mut value, Some(s))?;
+                            values.push(value.clone());
+                        }
+                    }
+                }
+            }
+        }
+        if values.len() != count {
+            return err("points leaf runs do not add up to its count");
+        }
+        out.extend(docs.into_iter().zip(values));
+    }
+    out.sort();
+    Ok(out)
 }
 
 /// A one-dimensional BKD tree: `BKDReader`'s packed index (`.kdi`) over leaves in `.kdd`.
