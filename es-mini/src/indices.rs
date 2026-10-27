@@ -683,7 +683,7 @@ pub async fn stats(
         &params,
     )?;
     let indices = shared.lock(&names);
-    let section = |docs: usize, (hits, misses, bytes): (u64, u64, usize)| {
+    let section = |docs: usize, (hits, misses, evictions, bytes): (u64, u64, u64, usize)| {
         let mut s = Map::new();
         if wanted("docs") {
             s.insert("docs".into(), json!({"count": docs, "deleted": 0}));
@@ -698,12 +698,12 @@ pub async fn stats(
         if wanted("request_cache") {
             s.insert(
                 "request_cache".into(),
-                json!({"memory_size_in_bytes": bytes, "evictions": 0, "hit_count": hits, "miss_count": misses}),
+                json!({"memory_size_in_bytes": bytes, "evictions": evictions, "hit_count": hits, "miss_count": misses}),
             );
         }
         Value::Object(s)
     };
-    let (mut total, mut cache_total) = (0, (0, 0, 0));
+    let (mut total, mut cache_total) = (0, (0, 0, 0, 0));
     let mut per_index = Map::new();
     for n in &names {
         let docs = indices[n].docs().count();
@@ -713,6 +713,7 @@ pub async fn stats(
             cache_total.0 + cache.0,
             cache_total.1 + cache.1,
             cache_total.2 + cache.2,
+            cache_total.3 + cache.3,
         );
         let s = section(docs, cache);
         per_index.insert(n.clone(), json!({"primaries": s, "total": s}));

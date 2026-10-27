@@ -267,16 +267,27 @@ pub struct Index {
     request_cache: std::sync::Mutex<RequestCache>,
 }
 
+/// The request cache's cap, `indices.requests.cache.size`: Elasticsearch's default of 1% of
+/// the heap, for a 1 GiB heap.
+// ponytail: each index is capped on its own, where ES caps all of a node's together; es-mini
+// has no heap or node settings to size it from
+pub const REQUEST_CACHE_BYTES: usize = (1 << 30) / 100;
+
 /// Elasticsearch's shard request cache (see [`Index::cached`]).
 #[derive(Debug, Default)]
 struct RequestCache {
     hits: u64,
     misses: u64,
+    evictions: u64,
     /// Serialized size of the keys and entries.
     bytes: usize,
     /// The visible sequence number and mappings the entries were computed against.
     reader: Option<(u64, Mappings)>,
-    entries: HashMap<String, Value>,
+    /// Entries with the tick of their last use.
+    entries: HashMap<String, (Value, u64)>,
+    /// Keys by the tick of their last use, least recent first.
+    recency: BTreeMap<u64, String>,
+    tick: u64,
 }
 
 impl Index {
@@ -461,8 +472,8 @@ impl Index {
     }
 
     /// The result of `compute` for `key`, reused until the visible documents or the mappings
-    /// change, like Elasticsearch's shard request cache.
-    // ponytail: unbounded until the next change; ES caps the cache at 1% of the heap
+    /// change, like Elasticsearch's shard request cache. Past [`REQUEST_CACHE_BYTES`] it evicts
+    /// the least recently used entries.
     pub fn cached<E>(
         &self,
         key: String,
@@ -487,9 +498,15 @@ impl Index {
             {
                 c.reader = Some((visible, self.mappings.clone()));
                 c.entries.clear();
+                c.recency.clear();
                 c.bytes = 0;
             }
-            if let Some(v) = c.entries.get(&key).cloned() {
+            c.tick += 1;
+            let tick = c.tick;
+            if let Some((v, used)) = c.entries.get_mut(&key) {
+                let (v, last) = (v.clone(), std::mem::replace(used, tick));
+                c.recency.remove(&last);
+                c.recency.insert(tick, key);
                 c.hits += 1;
                 return Ok(v);
             }
@@ -502,19 +519,35 @@ impl Index {
             .as_ref()
             .is_some_and(|r| r.0 == visible && r.1 == self.mappings)
         {
+            c.tick += 1;
+            let tick = c.tick;
             c.bytes += key.len() + v.to_string().len();
-            c.entries.insert(key, v.clone());
+            c.recency.insert(tick, key.clone());
+            // another search may have computed it at the same time
+            if let Some((old, last)) = c.entries.insert(key.clone(), (v.clone(), tick)) {
+                c.recency.remove(&last);
+                c.bytes -= key.len() + old.to_string().len();
+            }
+            while c.bytes > REQUEST_CACHE_BYTES {
+                let Some((_, k)) = c.recency.pop_first() else {
+                    break;
+                };
+                let (old, _) = c.entries.remove(&k).expect("recency lists cached keys");
+                c.bytes -= k.len() + old.to_string().len();
+                c.evictions += 1;
+            }
         }
         Ok(v)
     }
 
-    /// The request cache's (hit count, miss count, size of its entries in bytes).
-    pub fn request_cache_stats(&self) -> (u64, u64, usize) {
+    /// The request cache's (hit count, miss count, eviction count, size of its entries in
+    /// bytes).
+    pub fn request_cache_stats(&self) -> (u64, u64, u64, usize) {
         let c = self
             .request_cache
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        (c.hits, c.misses, c.bytes)
+        (c.hits, c.misses, c.evictions, c.bytes)
     }
 
     /// Makes all writes so far visible to search.
@@ -1253,9 +1286,34 @@ mod tests {
         assert_eq!(search(&ix, "a"), json!(3));
         ix.mappings.source = Some(json!({"enabled": false}));
         assert_eq!(search(&ix, "a"), json!(4));
-        let (hits, misses, bytes) = ix.request_cache_stats();
-        assert_eq!((hits, misses), (1, 4));
+        let (hits, misses, evictions, bytes) = ix.request_cache_stats();
+        assert_eq!((hits, misses, evictions), (1, 4, 0));
         assert!(bytes > 0);
+    }
+
+    #[test]
+    fn memory_bounds_request_cache_evicts_least_recently_used_entries_past_its_cap() {
+        let ix = Index::default();
+        let mut runs = 0;
+        let mut search = |key: &str| {
+            ix.cached(key.into(), || {
+                runs += 1;
+                // three entries fit
+                Ok::<_, ()>(json!("x".repeat(REQUEST_CACHE_BYTES / 3 - 16)))
+            })
+            .unwrap();
+            runs
+        };
+        for key in ["a", "b", "c"] {
+            search(key);
+        }
+        assert_eq!(search("a"), 3, "a is cached and now the most recently used");
+        assert_eq!(search("d"), 4, "evicts b, the least recently used");
+        let (hits, misses, evictions, bytes) = ix.request_cache_stats();
+        assert_eq!((hits, misses, evictions), (1, 4, 1));
+        assert!(bytes <= REQUEST_CACHE_BYTES);
+        assert_eq!(search("a"), 4);
+        assert_eq!(search("b"), 5);
     }
 
     #[test]
