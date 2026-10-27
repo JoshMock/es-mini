@@ -1,5 +1,5 @@
-//! Search contexts that expire: a `?scroll=` search keeps the rest of its hits, and a point in
-//! time keeps a snapshot of its indices, in memory.
+//! Search contexts that expire: a `?scroll=` search and a point in time keep a snapshot of
+//! their indices (see [`es_index::Index::snapshot`]).
 
 use crate::{AppState, error::AppError, indices::parse_body};
 use axum::{
@@ -9,17 +9,19 @@ use axum::{
     http::{StatusCode, Uri},
 };
 use serde_json::{Value, json};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// A search's remaining hits, rendered when it ran, so later writes do not change them.
-// ponytail: hits are materialized up front; memory grows with the match count of open scrolls
+/// A search's snapshot, which each page searches again, so later writes do not change it.
+// ponytail: a page reruns the query, costing a search of the hits before it, and reads `now`
+// again where ES fixes it when the scroll opens
 struct Scroll {
     /// The first response, without hits, as the template of every page.
     template: Value,
-    rest: VecDeque<Value>,
-    size: usize,
+    targets: Snapshot,
+    /// The search without aggregations, from the next page.
+    req: es_query::SearchRequest,
     expires: Instant,
 }
 
@@ -72,28 +74,51 @@ pub(crate) fn keep_alive(v: &str) -> Result<Duration, AppError> {
     })
 }
 
-/// Keeps every hit of `resp` after the first `size` in a new scroll context, and returns the
-/// first page with its `_scroll_id`.
-pub(crate) fn open(contexts: &Contexts, mut resp: Value, size: usize, keep: Duration) -> Value {
-    let mut rest: VecDeque<Value> = resp["hits"]["hits"]
-        .take()
-        .as_array_mut()
-        .map_or_else(VecDeque::new, |a| std::mem::take(a).into());
+/// Opens a scroll context over `targets` for the pages of `req` after `resp`, its first, and
+/// returns that page with its `_scroll_id`.
+pub(crate) fn open(
+    contexts: &Contexts,
+    mut resp: Value,
+    targets: Snapshot,
+    mut req: es_query::SearchRequest,
+    keep: Duration,
+) -> Value {
+    let mut template = resp.clone();
+    template["hits"]["hits"] = json!([]);
+    req.from += req.size;
+    req.aggs.clear();
+    req.pipelines.clear();
+    req.profile = false;
     let mut store = contexts.lock().expect("lock poisoned");
     let id = store.next_id();
-    let page = rest.drain(..size.min(rest.len())).collect::<Vec<_>>();
     store.live().insert(
         id,
         Scroll {
-            template: resp.clone(),
-            rest,
-            size,
+            template,
+            targets,
+            req,
             expires: Instant::now() + keep,
         },
     );
-    resp["hits"]["hits"] = page.into();
     resp["_scroll_id"] = encode(id).into();
     resp
+}
+
+/// The snapshots of the indices `name` resolves to, for a point in time or a scroll.
+pub(crate) fn snapshot(
+    state: &AppState,
+    name: &str,
+    params: &HashMap<String, String>,
+) -> Result<Snapshot, AppError> {
+    let shared = state.read();
+    let resolved = crate::indices::data_targets(&*shared, name, params)?;
+    let indices = shared.lock(resolved.iter().map(|t| &t.index));
+    Ok(Arc::new(
+        resolved
+            .into_iter()
+            .map(|t| (t.index.clone(), indices[&t.index].snapshot(), t.filter))
+            .collect(),
+    ))
 }
 
 // ponytail: ids are opaque to clients, so a prefixed counter stands in for ES's base64 encoding
@@ -139,22 +164,14 @@ pub async fn open_pit(
         .get("keep_alive")
         .ok_or_else(|| AppError::ActionRequestValidation("[keep_alive] is not specified".into()))?;
     let keep = keep_alive(keep)?;
-    let targets: Vec<_> = {
-        let shared = state.read();
-        let resolved = crate::indices::data_targets(&*shared, &name, &params)?;
-        let indices = shared.lock(resolved.iter().map(|t| &t.index));
-        resolved
-            .into_iter()
-            .map(|t| (t.index.clone(), indices[&t.index].snapshot(), t.filter))
-            .collect()
-    };
+    let targets = snapshot(&state, &name, &params)?;
     let n = targets.len();
     let mut store = contexts.lock().expect("lock poisoned");
     let id = store.next_id();
     store.live_pits().insert(
         id,
         Pit {
-            targets: Arc::new(targets),
+            targets,
             expires: Instant::now() + keep,
         },
     );
@@ -248,22 +265,34 @@ pub async fn next(
             "scrollId is missing".into(),
         ));
     };
-    let n = decode(id)?;
     let keep = scroll.as_deref().map(keep_alive).transpose()?;
-    let mut store = contexts.lock().expect("lock poisoned");
-    let s = store
-        .live()
-        .get_mut(&n)
-        .ok_or(AppError::SearchContextMissing(n))?;
-    if let Some(keep) = keep {
-        s.expires = Instant::now() + keep;
-    }
-    let mut resp = s.template.clone();
-    let size = s.size.min(s.rest.len());
-    resp["hits"]["hits"] = s.rest.drain(..size).collect::<Vec<_>>().into();
+    let mut resp = page(&contexts, decode(id)?, keep)?;
     resp["took"] = (start.elapsed().as_millis() as u64).into();
     resp["_scroll_id"] = id.clone().into();
     Ok(Json(resp))
+}
+
+/// The next page of scroll `n`, renewing its keep-alive with `keep`.
+fn page(contexts: &Contexts, n: u64, keep: Option<Duration>) -> Result<Value, AppError> {
+    let (mut resp, targets, req) = {
+        let mut store = contexts.lock().expect("lock poisoned");
+        let s = store
+            .live()
+            .get_mut(&n)
+            .ok_or(AppError::SearchContextMissing(n))?;
+        if let Some(keep) = keep {
+            s.expires = Instant::now() + keep;
+        }
+        let req = s.req.clone();
+        s.req.from += s.req.size;
+        (s.template.clone(), s.targets.clone(), req)
+    };
+    let targets: Vec<_> = (targets.iter())
+        .map(|(n, i, f)| (n.as_str(), i, f.as_ref()))
+        .collect();
+    let r = es_query::search_many(&targets, &req)?;
+    resp["hits"]["hits"] = crate::search::render_hits(&r.hits).into();
+    Ok(resp)
 }
 
 /// `DELETE /_search/scroll`: frees the given contexts, or all of them for `_all`.
@@ -296,4 +325,33 @@ pub async fn clear(
         StatusCode::OK
     };
     Ok((status, Json(json!({"succeeded": true, "num_freed": freed}))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn memory_bounds_scroll_keeps_its_snapshot_not_its_hits() {
+        let mut ix = es_index::Index::default();
+        for n in 0..5 {
+            ix.put(&n.to_string(), json!({"n": n}));
+        }
+        let targets: Snapshot = Arc::new(vec![("i".into(), ix.snapshot(), None)]);
+        let req = es_query::SearchRequest::parse(&json!({"size": 2, "sort": ["n"]})).unwrap();
+        let contexts = Contexts::default();
+        let first = json!({"hits": {"hits": ["first page"]}});
+        let first = open(&contexts, first, targets, req, Duration::from_secs(60));
+        assert_eq!(first["_scroll_id"], "esmini-scroll-1");
+        let template = contexts.lock().unwrap().scrolls[&1].template.clone();
+        assert_eq!(template["hits"]["hits"], json!([]));
+        ix.delete("2");
+        let ids = |r: Value| -> Vec<Value> {
+            let hits = r["hits"]["hits"].as_array().unwrap().iter();
+            hits.map(|h| h["_id"].clone()).collect()
+        };
+        assert_eq!(ids(page(&contexts, 1, None).unwrap()), ["2", "3"]);
+        assert_eq!(ids(page(&contexts, 1, None).unwrap()), ["4"]);
+        assert!(ids(page(&contexts, 1, None).unwrap()).is_empty());
+    }
 }

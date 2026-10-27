@@ -213,7 +213,11 @@ pub async fn search(
             "using [from] is not allowed in a scroll context".into(),
         ));
     }
-    let snapshot = pit.map(|p| crate::scroll::pit(&contexts, &p)).transpose()?;
+    let snapshot = match pit {
+        Some(p) => Some(crate::scroll::pit(&contexts, &p)?),
+        None if scroll.is_some() => Some(crate::scroll::snapshot(&state, &name, &params)?),
+        None => None,
+    };
     let (shared, indices, resolved);
     let targets = match &snapshot {
         Some(s) => s
@@ -242,9 +246,6 @@ pub async fn search(
     }
     es_query::check_sortable(&targets, &req)?;
     let page = req.size;
-    if scroll.is_some() {
-        req.size = usize::MAX;
-    }
     // Like Elasticsearch's IndicesService.canCache; the key is the request after terms lookups.
     // ponytail: only single-index searches are cached; ES caches each shard's result
     let cache = match (
@@ -261,24 +262,7 @@ pub async fn search(
     };
     let respond = || -> Result<Value, AppError> {
         let r = es_query::search_many(&targets, &req)?;
-        let hits: Vec<Value> = r
-            .hits
-            .iter()
-            .map(|h| {
-                let mut hit =
-                    json!({"_index": h.index, "_id": h.id, "_score": h.score, "_source": h.doc.source});
-                if !h.sort.is_empty() {
-                    hit["sort"] = h.sort.clone().into();
-                }
-                if !h.matched_queries.is_empty() {
-                    hit["matched_queries"] = h.matched_queries.clone().into();
-                }
-                if !h.fields.is_empty() {
-                    hit["fields"] = h.fields.clone().into();
-                }
-                hit
-            })
-            .collect();
+        let hits = render_hits(&r.hits);
         let as_int = params
             .get("rest_total_hits_as_int")
             .is_some_and(|v| v == "true");
@@ -359,10 +343,30 @@ pub async fn search(
     if let Some(p) = &pit_id {
         resp["pit_id"] = p.clone();
     }
-    Ok(Json(match scroll {
-        Some(keep) => crate::scroll::open(&contexts, resp, page, keep),
-        None => resp,
+    Ok(Json(match (scroll, snapshot) {
+        (Some(keep), Some(snapshot)) => crate::scroll::open(&contexts, resp, snapshot, req, keep),
+        _ => resp,
     }))
+}
+
+/// The `hits.hits` of a search response.
+pub(crate) fn render_hits(hits: &[es_query::Hit]) -> Vec<Value> {
+    hits.iter()
+        .map(|h| {
+            let mut hit =
+                json!({"_index": h.index, "_id": h.id, "_score": h.score, "_source": h.doc.source});
+            if !h.sort.is_empty() {
+                hit["sort"] = h.sort.clone().into();
+            }
+            if !h.matched_queries.is_empty() {
+                hit["matched_queries"] = h.matched_queries.clone().into();
+            }
+            if !h.fields.is_empty() {
+                hit["fields"] = h.fields.clone().into();
+            }
+            hit
+        })
+        .collect()
 }
 
 pub async fn search_template_all(
