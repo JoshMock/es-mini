@@ -1981,9 +1981,38 @@ fn java_round(x: f64) -> f64 {
     if x - r >= 0.5 { r + 1.0 } else { r }
 }
 
+fn iso_date_value(millis: i64) -> Value {
+    es_index::iso_date(millis).into()
+}
+
+/// Epoch nanos `n` as ES's `strict_date_optional_time_nanos`: 3 to 9 fraction digits.
+fn iso_nanos(n: i64) -> String {
+    let millis = es_index::iso_date(n.div_euclid(1_000_000));
+    let fraction = format!("{:09}", n.rem_euclid(1_000_000_000));
+    let fraction = fraction.trim_end_matches('0');
+    format!("{}.{fraction:0<3}Z", &millis[..millis.len() - 5])
+}
+
 /// Function `f` (upper-case, one of `CONVERSIONS`) of a single value of type `t`, like
 /// Elasticsearch's convert evaluators: `None` where they fail (and warn).
 fn convert(f: &str, t: &str, v: &Value) -> Option<Value> {
+    let nanos = || es_index::disk::date_nanos(None, None, v).flatten();
+    // Dates and date_nanos convert as their epoch long, but for their strings.
+    let long: Value = match (f, t) {
+        ("TO_STRING", "date") => return es_index::parse_date_millis(v).map(iso_date_value),
+        ("TO_STRING", "date_nanos") => return nanos().map(|n| iso_nanos(n).into()),
+        ("TO_STRING", "ip") => return es_index::ip_bytes(v).map(|b| es_index::ip_string(b).into()),
+        // Truncated to millis, like `DateUtils.toMilliSeconds`.
+        ("TO_DATETIME", "date_nanos") => return nanos().map(|n| iso_date_value(n / 1_000_000)),
+        (_, "date") => es_index::parse_date_millis(v)?.into(),
+        (_, "date_nanos") => nanos()?.into(),
+        _ => v.clone(),
+    };
+    let (t, v) = if t.starts_with("date") {
+        ("long", &long)
+    } else {
+        (t, v)
+    };
     let num = || match t {
         "double" => v.as_f64().map(Ok),
         _ => v
@@ -1992,9 +2021,9 @@ fn convert(f: &str, t: &str, v: &Value) -> Option<Value> {
             .or_else(|| v.as_u64().map(|u| Ok(u as f64))),
     };
     match (f, v) {
-        ("TO_DATETIME", _) => {
-            es_index::parse_date_millis(v).map(|ms| es_index::iso_date(ms).into())
-        }
+        ("TO_DATETIME", Value::String(_)) => es_index::parse_date_millis(v).map(iso_date_value),
+        // Numbers are epoch millis, read like TO_LONG reads them.
+        ("TO_DATETIME", _) => convert("TO_LONG", t, v)?.as_i64().map(iso_date_value),
         ("TO_STRING", Value::String(_)) | ("TO_BOOLEAN", Value::Bool(_)) => Some(v.clone()),
         ("TO_STRING", Value::Bool(b)) => Some(b.to_string().into()),
         ("TO_STRING", _) => match num()? {
@@ -2302,17 +2331,51 @@ fn resolve(
                 return None;
             };
             let ta = resolve(arg, src, types, bad)?;
-            // ponytail: dates, ips, versions and the like are not converted yet, nor booleans,
-            // doubles and unsigned longs to dates
-            let Some(&ta) = ["null", "boolean", "keyword", "text"]
+            // The types each conversion takes (of those es-mini has) and how ES lists all it
+            // takes; es-mini lacks a version type, so TO_VERSION and TO_IP do not exist here.
+            let (takes, accepted): (&[&str], _) = match name {
+                "TO_STRING" => (&["boolean", "date", "date_nanos", "ip"], None),
+                "TO_DATETIME" => (
+                    &["date", "date_nanos"],
+                    Some("date_nanos or datetime or numeric or string"),
+                ),
+                "TO_INTEGER" => (
+                    &["boolean", "date"],
+                    Some("boolean or counter_integer or datetime or numeric or string"),
+                ),
+                "TO_LONG" => (
+                    &["boolean", "date", "date_nanos"],
+                    Some(
+                        "boolean or counter_integer or counter_long or date_nanos or datetime \
+                         or geohash or geohex or geotile or numeric or string",
+                    ),
+                ),
+                "TO_DOUBLE" => (
+                    &["boolean", "date"],
+                    Some(
+                        "boolean or counter_double or counter_integer or counter_long or \
+                         datetime or numeric or string",
+                    ),
+                ),
+                _ => (&["boolean"], Some("boolean or numeric or string")),
+            };
+            let Some(&ta) = ["null", "keyword", "text"]
                 .iter()
                 .chain(&NUMERIC)
+                .chain(takes)
                 .find(|n| **n == ta)
-                .filter(|t| {
-                    name != "TO_DATETIME" || !matches!(**t, "boolean" | "double" | "unsigned_long")
-                })
             else {
-                bad.push((*at, format!("[{f}] of [{ta}] is not supported by es-mini")));
+                let reason = match accepted {
+                    Some(a) => format!(
+                        "argument of [{}] must be [{a}], found value [{}] type [{}]",
+                        text(e),
+                        text(arg),
+                        es_name(&ta)
+                    ),
+                    // ponytail: ES's list of what TO_STRING takes is not spelled out here
+                    None => format!("[{f}] of [{ta}] is not supported by es-mini"),
+                };
+                bad.push((*at, reason));
                 return None;
             };
             let _ = t.set((name, ta));

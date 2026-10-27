@@ -2410,3 +2410,78 @@ fn esql_conversions_count_distinct_hashes_ips_and_dates_as_values() {
     .unwrap();
     assert_eq!(r.values, [[json!(2), json!(2)]]);
 }
+
+#[test]
+fn esql_conversions_convert_dates_ips_and_numbers_to_dates() {
+    let mut i = Index::default();
+    for (f, t) in [("d", "date"), ("n", "date_nanos"), ("ip", "ip")] {
+        let m: FieldMapping = serde_json::from_value(json!({ "type": t })).unwrap();
+        i.mappings.properties.insert(f.into(), m);
+    }
+    i.put(
+        "1",
+        json!({"d": "2024-01-02T03:04:05.678Z", "n": "2024-01-02T03:04:05.123456700Z",
+               "ip": "::ffff:10.0.0.1"}),
+    );
+    let indices = BTreeMap::from([("t".to_owned(), i)]);
+    let r = run(
+        &indices,
+        "FROM t | EVAL a = TO_STRING(d), b = TO_LONG(d), c = TO_DOUBLE(d), e = TO_INTEGER(d), \
+         f = TO_STRING(n), g = TO_LONG(n), h = TO_DATETIME(n), j = TO_STRING(ip), \
+         k = TO_DATETIME(1.5), l = TO_DATETIME(18446744073709551615), m = TO_DATETIME(d) \
+         | DROP d, n, ip",
+    )
+    .unwrap();
+    assert_eq!(
+        r.values,
+        [[
+            json!("2024-01-02T03:04:05.678Z"),
+            json!(1_704_164_645_678i64),
+            json!(1_704_164_645_678.0),
+            Value::Null,
+            json!("2024-01-02T03:04:05.1234567Z"),
+            json!(1_704_164_645_123_456_700i64),
+            json!("2024-01-02T03:04:05.123Z"),
+            json!("10.0.0.1"),
+            json!("1970-01-01T00:00:00.002Z"),
+            Value::Null,
+            json!("2024-01-02T03:04:05.678Z"),
+        ]]
+    );
+    let types: Vec<&str> = r.columns.iter().map(|c| c.r#type.as_str()).collect();
+    assert_eq!(types[..4], ["keyword", "long", "double", "integer"]);
+    for (query, problem) in [
+        (
+            "ROW a = TO_DATETIME(true)",
+            "line 1:9: argument of [TO_DATETIME(true)] must be [date_nanos or datetime or \
+             numeric or string], found value [true] type [boolean]",
+        ),
+        (
+            "FROM t | EVAL a = TO_BOOLEAN(d)",
+            "line 1:19: argument of [TO_BOOLEAN(d)] must be [boolean or numeric or string], \
+             found value [d] type [datetime]",
+        ),
+        (
+            "FROM t | EVAL a = TO_INTEGER(n)",
+            "line 1:19: argument of [TO_INTEGER(n)] must be [boolean or counter_integer or \
+             datetime or numeric or string], found value [n] type [date_nanos]",
+        ),
+        (
+            "FROM t | EVAL a = TO_DOUBLE(ip)",
+            "line 1:19: argument of [TO_DOUBLE(ip)] must be [boolean or counter_double or \
+             counter_integer or counter_long or datetime or numeric or string], found value \
+             [ip] type [ip]",
+        ),
+        (
+            "FROM t | EVAL a = TO_LONG(ip)",
+            "line 1:19: argument of [TO_LONG(ip)] must be [boolean or counter_integer or \
+             counter_long or date_nanos or datetime or geohash or geohex or geotile or numeric \
+             or string], found value [ip] type [ip]",
+        ),
+    ] {
+        match run(&indices, query) {
+            Err(EsqlError::Verification(m)) => assert_eq!(m, format!("Found 1 problem\n{problem}")),
+            other => panic!("{query}: {other:?}"),
+        }
+    }
+}
