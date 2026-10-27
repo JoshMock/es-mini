@@ -1326,6 +1326,20 @@ fn query_dsl_gaps_term_and_prefix_case_insensitive() {
 }
 
 #[test]
+fn query_dsl_gaps_case_insensitive_term_on_id_matches_ids() {
+    let mut idx = Index::default();
+    idx.put("Ab", json!({}));
+    idx.put("cd", json!({}));
+    let hits = |v: &str| {
+        let q = json!({"query": {"term": {"_id": {"value": v, "case_insensitive": true}}}});
+        let r = search(&idx, &SearchRequest::parse(&q).unwrap());
+        r.hits.iter().map(|h| h.id.to_owned()).collect::<Vec<_>>()
+    };
+    assert_eq!(hits("Ab"), ["Ab"]);
+    assert_eq!(hits("aB"), ["Ab"]);
+}
+
+#[test]
 fn query_dsl_gaps_range_last_bound_wins() {
     let r = |q: Value| sorted(ids(json!({"query": {"range": {"n": q}}})));
     // n: 5, 10, 1, 7; ES keeps the last of gt/gte and of lt/lte it parses

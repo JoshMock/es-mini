@@ -764,14 +764,20 @@ impl<'a> Searcher<'a> {
                 pattern,
                 case_insensitive,
             } => {
-                let (kind, path) = self.kind(field);
                 let fold = |s: &str| match case_insensitive {
                     true => s.to_lowercase().chars().collect::<Vec<_>>(),
                     false => s.chars().collect(),
                 };
                 let pat = fold(pattern);
-                terms(kind, &values(&d.source, path))
-                    .iter()
+                // a case-insensitive `_id` term (see `parse_kind`) matches the document's id
+                let vals = match field.as_str() {
+                    "_id" => vec![id.to_owned()],
+                    _ => {
+                        let (kind, path) = self.kind(field);
+                        terms(kind, &values(&d.source, path))
+                    }
+                };
+                vals.iter()
                     .any(|t| wildcard_match(&pat, &fold(t)))
                     .then_some(1.0)
             }
