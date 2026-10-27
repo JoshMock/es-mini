@@ -9,3 +9,10 @@ bool|POST|/bench/_search|{"query":{"bool":{"must":{"match":{"title":"dog"}},"fil
 count|POST|/bench/_count|{"query":{"term":{"published":true}}}
 esql|POST|/_query|{"query":"FROM bench | WHERE views > 50000 | SORT views DESC | KEEP tag, views | LIMIT 10"}
 index_doc|PUT|/bench/_doc/bench-write|{"title":"benchmark write","tag":"tag1","views":1}
+terms_agg|POST|/bench/_search|{"size":0,"aggs":{"tags":{"terms":{"field":"tag","size":10},"aggs":{"avg_rating":{"avg":{"field":"rating"}}}}}}
+date_histogram|POST|/bench/_search|{"size":0,"aggs":{"months":{"date_histogram":{"field":"date","calendar_interval":"month"},"aggs":{"max_views":{"max":{"field":"views"}}}}}}
+range_agg|POST|/bench/_search|{"size":0,"aggs":{"views":{"range":{"field":"views","ranges":[{"to":1000},{"from":1000,"to":50000},{"from":50000}]}}}}
+stats_agg|POST|/bench/_search|{"size":0,"query":{"term":{"published":true}},"aggs":{"rating":{"stats":{"field":"rating"}},"tags":{"cardinality":{"field":"tag"}}}}
+match_phrase|POST|/bench/_search|{"query":{"match_phrase":{"title":"quick fox"}}}
+esql_stats|POST|/_query|{"query":"FROM bench | STATS c = COUNT(*), a = AVG(views) BY tag | SORT tag | LIMIT 50"}
+esql_eval|POST|/_query|{"query":"FROM bench | EVAL r2 = rating * 2 | WHERE r2 > 9 | SORT r2 DESC | KEEP tag, r2 | LIMIT 10"}
