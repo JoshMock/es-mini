@@ -2096,3 +2096,24 @@ fn esql_es_semantics_round_overflow() {
         ]]
     );
 }
+
+/// Like Elasticsearch 9.5.5, CONCAT past 1MB fails the query (400 `esql_client_exception`).
+#[test]
+fn esql_es_semantics_concat_is_capped_at_1mb() {
+    let s = "a".repeat(524_288);
+    let r = q(&format!(
+        "ROW s = \"{s}\" | EVAL n = LENGTH(CONCAT(s, s)) | KEEP n"
+    ));
+    assert_eq!(r.values, [[json!(1_048_576)]]);
+    assert_eq!(
+        run(
+            &indices(),
+            &format!("ROW s = \"{s}\" | EVAL n = LENGTH(CONCAT(s, s, \"é\"))")
+        ),
+        Err(EsqlError::Failed {
+            status: 400,
+            kind: "esql_client_exception",
+            reason: "concatenating more than [1048576] bytes is not supported".into()
+        })
+    );
+}

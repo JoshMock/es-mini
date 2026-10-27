@@ -1803,13 +1803,13 @@ fn string_fn(f: &str, args: &[Value]) -> Option<Value> {
     let s = args[0].as_str()?;
     match f {
         "TRIM" => return Some(s.trim_matches(java_whitespace).into()),
-        // ponytail: no 1MB cap on the result, which fails the query in ES
         "CONCAT" => {
-            return args
-                .iter()
-                .map(Value::as_str)
-                .collect::<Option<String>>()
-                .map(Value::from);
+            let out = args.iter().map(Value::as_str).collect::<Option<String>>()?;
+            if out.len() > 1 << 20 {
+                let reason = "concatenating more than [1048576] bytes is not supported";
+                return fail(400, "esql_client_exception", reason.into());
+            }
+            return Some(out.into());
         }
         "LENGTH" => return Some(s.chars().count().into()),
         "TO_LOWER" => return Some(s.to_lowercase().into()),
