@@ -1942,3 +1942,15 @@ fn esql_es_semantics_rename_parse_errors() {
         assert_eq!(err(q), format!("line {msg}"), "{q}");
     }
 }
+
+/// Like Elasticsearch 9.5.5 (which also warns), an overflowing long SUM is null.
+#[test]
+fn esql_es_semantics_overflowing_long_sum_is_null() {
+    let mut i = Index::default();
+    i.mappings.properties.insert("v".into(), FieldMapping::Long);
+    i.put("1", json!({"v": i64::MAX}));
+    i.put("2", json!({"v": 1}));
+    let indices = BTreeMap::from([("i".to_owned(), i)]);
+    let r = run(&indices, "FROM i | STATS s = SUM(v), m = MAX(v)").unwrap();
+    assert_eq!(r.values, [[Value::Null, json!(i64::MAX)]]);
+}

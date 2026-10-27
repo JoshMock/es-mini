@@ -2638,7 +2638,7 @@ fn run_at(
                                 _ => Value::Array(distinct),
                             }
                         }
-                        // ponytail: an overflowing long sum is null, where ES fails the query
+                        // An overflowing long sum is null, like ES (which also warns).
                         "SUM" if types[name] == "long" => all
                             .iter()
                             .try_fold(0i64, |s, v| s.checked_add(v.as_i64()?))
