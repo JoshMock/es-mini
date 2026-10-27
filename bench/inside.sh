@@ -7,8 +7,13 @@ H='content-type: application/json'
 for s in "${SERVERS[@]}"; do
   until curl -sf "http://$s:9200/" >/dev/null; do sleep 1; done
   curl -sf -X PUT "http://$s:9200/bench" -H "$H" --data-binary @/bench/mapping.json >/dev/null
-  curl -sf -X POST "http://$s:9200/bench/_bulk?refresh=true" -H 'content-type: application/x-ndjson' \
-    --data-binary @/tmp/data.ndjson -o /dev/null
+  # Chunked (2 lines per doc): es-mini rejects bulk bodies over 2 MB, Elasticsearch allows 100 MB.
+  rm -rf /tmp/chunks; mkdir /tmp/chunks; split -l 4000 /tmp/data.ndjson /tmp/chunks/c
+  for c in /tmp/chunks/c*; do
+    curl -sf -X POST "http://$s:9200/bench/_bulk" -H 'content-type: application/x-ndjson' \
+      --data-binary "@$c" -o /dev/null
+  done
+  curl -sf -X POST "http://$s:9200/bench/_refresh" >/dev/null
   echo "$s: $(curl -s "http://$s:9200/bench/_count")"
 done
 mkdir -p /tmp/bodies
