@@ -153,14 +153,7 @@ impl Mappings {
         self.properties.extend(new);
         let props = &self.properties;
         let filled: Vec<String> = (props.iter())
-            .filter(|(p, m)| {
-                let child = format!("{p}.");
-                **m == FieldMapping::Object
-                    && props
-                        .range(child.clone()..)
-                        .next()
-                        .is_some_and(|(c, _)| c.starts_with(&child))
-            })
+            .filter(|(p, m)| **m == FieldMapping::Object && maps_under(props, p))
             .map(|(p, _)| p.clone())
             .collect();
         for p in filled {
@@ -185,12 +178,7 @@ impl Mappings {
             Some(FieldMapping::Nested) => Some(Kind::Nested),
             Some(FieldMapping::Object) => Some(Kind::Object),
             Some(_) => Some(Kind::Leaf),
-            None => {
-                let child = format!("{p}.");
-                (props.range(child.clone()..).next())
-                    .is_some_and(|(c, _)| c.starts_with(&child))
-                    .then_some(Kind::Object)
-            }
+            None => maps_under(props, p).then_some(Kind::Object),
         };
         let mut paths = std::collections::BTreeSet::new();
         for path in new.properties.keys() {
@@ -360,12 +348,14 @@ impl Index {
 
     /// Whether the mappings or `added` hold a field under `path.`.
     fn has_subfields(&self, path: &str, added: &BTreeMap<String, FieldMapping>) -> bool {
-        let child = format!("{path}.");
-        let under = |m: &BTreeMap<String, FieldMapping>| {
-            (m.range(child.clone()..).next()).is_some_and(|(p, _)| p.starts_with(&child))
-        };
-        under(&self.mappings.properties) || under(added)
+        maps_under(&self.mappings.properties, path) || maps_under(added, path)
     }
+}
+
+/// Whether `props` holds a field under `path.`.
+fn maps_under(props: &BTreeMap<String, FieldMapping>, path: &str) -> bool {
+    let child = format!("{path}.");
+    (props.range(child.clone()..).next()).is_some_and(|(p, _)| p.starts_with(&child))
 }
 
 /// `new` merged into the field `old` at `path` (see [`Mappings::merged`]).
