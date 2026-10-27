@@ -59,31 +59,30 @@ pub const MAX_BUCKETS: usize = 65_536;
 pub struct QueryError {
     pub kind: ErrorKind,
     pub msg: String,
+    /// When the search failed on every index: each index's failure; the first gives `kind`
+    /// and `msg`.
+    pub shards: Vec<(String, QueryError)>,
 }
 
 impl QueryError {
+    pub fn new(kind: ErrorKind, msg: impl Into<String>) -> Self {
+        let (msg, shards) = (msg.into(), vec![]);
+        Self { kind, msg, shards }
+    }
+
     pub fn illegal(msg: impl Into<String>) -> Self {
-        Self {
-            kind: ErrorKind::IllegalArgument,
-            msg: msg.into(),
-        }
+        Self::new(ErrorKind::IllegalArgument, msg)
     }
 
     pub fn x_content(msg: impl Into<String>) -> Self {
-        Self {
-            kind: ErrorKind::XContentParse,
-            msg: msg.into(),
-        }
+        Self::new(ErrorKind::XContentParse, msg)
     }
 }
 
 /// A bare message is a `parsing_exception`.
 impl From<String> for QueryError {
     fn from(msg: String) -> Self {
-        Self {
-            kind: ErrorKind::Parsing,
-            msg,
-        }
+        Self::new(ErrorKind::Parsing, msg)
     }
 }
 

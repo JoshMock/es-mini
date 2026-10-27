@@ -492,10 +492,7 @@ pub fn parse_query_string(q: &str, df: &str, and: bool) -> Result<Query, QueryEr
     if q.trim().is_empty() {
         return Ok(match_none());
     }
-    let err = |e: String| QueryError {
-        kind: ErrorKind::Parse,
-        msg: format!("Cannot parse '{q}': {e}"),
-    };
+    let err = |e: String| QueryError::new(ErrorKind::Parse, format!("Cannot parse '{q}': {e}"));
     let mut p = Parser {
         toks: lex(q).map_err(err)?,
         at: 0,

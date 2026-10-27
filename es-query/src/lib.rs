@@ -1385,7 +1385,13 @@ pub fn search_many<'a>(
     let mut profile = req.profile.then(Vec::new);
     let mut failures = Vec::new();
     for (pos, (name, index, filter)) in targets.iter().enumerate() {
-        let query = with_filter(index, &req.query, *filter, now)?;
+        let query = match with_filter(index, &req.query, *filter, now) {
+            Ok(q) => q,
+            Err(e) => {
+                failures.push((*name, e));
+                continue;
+            }
+        };
         let mut s = Searcher::unscored(index, &query);
         s.runtime_source = req.runtime_source.clone();
         if by_score || !req.aggs.is_empty() {
@@ -1401,7 +1407,13 @@ pub fn search_many<'a>(
             None => s.candidates(&query, false),
         };
         s.in_memory = s.memory_candidates(&query);
-        let index_aggs = aggs::resolve_dates(&req.aggs, index, now)?;
+        let index_aggs = match aggs::resolve_dates(&req.aggs, index, now) {
+            Ok(a) => a,
+            Err(e) => {
+                failures.push((*name, e));
+                continue;
+            }
+        };
         let mut collector = match aggs::Collector::new(&index_aggs, &s, name, req.profile) {
             Ok(c) => c,
             Err(e) => {
@@ -1438,8 +1450,12 @@ pub fn search_many<'a>(
             .then(a.seq_no.cmp(&b.seq_no))
     });
     if !failures.is_empty() && failures.len() == targets.len() {
-        // ponytail: ES wraps this in an all-shards-failed search_phase_execution_exception
-        return Err(failures.swap_remove(0).1);
+        let shards = (failures.iter()).map(|(n, e)| (n.to_string(), e.clone()));
+        let shards = shards.collect();
+        return Err(QueryError {
+            shards,
+            ..failures.swap_remove(0).1
+        });
     }
     // Elasticsearch collects no top docs for size 0, so it reports no max_score.
     let max_score = (by_score && req.size > 0)
@@ -1486,6 +1502,8 @@ pub fn count_many(targets: &[Target], q: &Query) -> Result<usize, QueryError> {
     let now = now_millis();
     let mut n = 0;
     for (_, index, filter) in targets {
+        // ponytail: an index the query fails on fails the whole count, unwrapped; ES counts the
+        // others, like search_many
         let q = with_filter(index, q, *filter, now)?;
         let mut s = Searcher::unscored(index, &q);
         let (disk, memory) = index.live();

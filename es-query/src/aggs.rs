@@ -1926,12 +1926,12 @@ pub(crate) fn render(
 fn consume_buckets(buckets: &Cell<usize>, n: usize) -> Result<(), QueryError> {
     buckets.set(buckets.get() + n);
     match buckets.get() > MAX_BUCKETS {
-        true => Err(QueryError {
-            kind: crate::ErrorKind::TooManyBuckets,
-            msg: format!(
+        true => Err(QueryError::new(
+            crate::ErrorKind::TooManyBuckets,
+            format!(
                 "Trying to create too many buckets. Must be less than or equal to: [{MAX_BUCKETS}] but this number of buckets was exceeded. This limit can be set by changing the [search.max_buckets] cluster level setting."
             ),
-        }),
+        )),
         false => Ok(()),
     }
 }

@@ -133,9 +133,11 @@ fn sub_agg<'a>(bucket: &'a Value, name: &str) -> Option<&'a Value> {
 /// The value at a bucket path (`_count`, `_key`, or `agg>agg.metric`) of a rendered bucket:
 /// `None` when missing, a number, or a `_key` string.
 pub(super) fn bucket_value(bucket: &Value, path: &str) -> Result<Option<Value>, QueryError> {
-    let no_agg = || QueryError {
-        kind: ErrorKind::Validation,
-        msg: format!("No aggregation found for path [{path}]"),
+    let no_agg = || {
+        QueryError::new(
+            ErrorKind::Validation,
+            format!("No aggregation found for path [{path}]"),
+        )
     };
     let not_number = || {
         QueryError::illegal(format!(

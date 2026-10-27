@@ -310,11 +310,8 @@ pub async fn search(
             let s = &mut resp["_shards"];
             s["successful"] = (targets.len() - r.failures.len()).into();
             s["failed"] = r.failures.len().into();
-            let failures = r.failures.iter().map(|(index, e)| {
-                let (_, mut reason) = AppError::from(e.clone()).parts();
-                reason.as_object_mut().unwrap().remove("root_cause");
-                json!({"shard": 0, "index": index, "node": crate::nodes::NODE_ID, "reason": reason})
-            });
+            let failures = (r.failures.iter())
+                .map(|(index, e)| crate::error::shard_failure(index, e.clone()).2);
             s["failures"] = failures.collect();
         }
         if let Some(a) = r.aggregations {

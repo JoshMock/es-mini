@@ -48,6 +48,8 @@ pub enum AppError {
     TooManyBuckets(String),
     /// A scroll or point-in-time id whose context expired or was freed.
     SearchContextMissing(u64),
+    /// A search that failed on every index: each index's failure.
+    AllShardsFailed(Vec<(String, es_query::QueryError)>),
     /// Settings (given as JSON) with a list holding more than strings, numbers and booleans.
     SettingsLists(String),
 }
@@ -86,6 +88,26 @@ impl AppError {
                             "type": "illegal_state_exception",
                             "reason": "only value lists are allowed in serialized settings",
                         },
+                    }),
+                );
+            }
+            Self::AllShardsFailed(shards) => {
+                let (mut status, mut root_cause, mut failed_shards) = (None, vec![], vec![]);
+                for (index, e) in shards {
+                    let (s, causes, failure) = shard_failure(&index, e);
+                    status.get_or_insert(s);
+                    root_cause.extend(causes);
+                    failed_shards.push(failure);
+                }
+                return (
+                    status.unwrap_or(StatusCode::BAD_REQUEST),
+                    json!({
+                        "root_cause": root_cause,
+                        "type": "search_phase_execution_exception",
+                        "reason": "all shards failed",
+                        "phase": "query",
+                        "grouped": true,
+                        "failed_shards": failed_shards,
                     }),
                 );
             }
@@ -223,6 +245,22 @@ impl AppError {
     }
 }
 
+/// A failed shard of `index` as a search response lists it: the status, root causes, and the
+/// failure entry.
+pub(crate) fn shard_failure(
+    index: &str,
+    e: es_query::QueryError,
+) -> (StatusCode, Vec<Value>, Value) {
+    let (status, mut reason) = AppError::from(e).parts();
+    let causes = match reason.as_object_mut().and_then(|o| o.remove("root_cause")) {
+        Some(Value::Array(c)) => c,
+        _ => vec![],
+    };
+    let failure =
+        json!({"shard": 0, "index": index, "node": crate::nodes::NODE_ID, "reason": reason});
+    (status, causes, failure)
+}
+
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, error) = self.parts();
@@ -256,13 +294,17 @@ impl From<es_index::aliases::ResolveError> for AppError {
 
 impl From<es_query::QueryError> for AppError {
     fn from(e: es_query::QueryError) -> Self {
+        if !e.shards.is_empty() {
+            return Self::AllShardsFailed(e.shards);
+        }
         match e.kind {
             es_query::ErrorKind::Parsing => Self::ParsingException(e.msg),
             es_query::ErrorKind::IllegalArgument => Self::IllegalArgument(e.msg),
             es_query::ErrorKind::XContentParse => Self::XContentParse(e.msg),
             es_query::ErrorKind::Validation => Self::ActionRequestValidation(e.msg),
             es_query::ErrorKind::TooManyBuckets => Self::TooManyBuckets(e.msg),
-            // ponytail: ES wraps it in an all-shards-failed search_phase_execution_exception
+            // ponytail: query_string syntax errors fail while the request is parsed, before any
+            // index, so they miss ES's all-shards-failed query_shard_exception wrapper
             es_query::ErrorKind::Parse => Self::Parse(e.msg),
         }
     }

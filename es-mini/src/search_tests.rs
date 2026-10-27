@@ -526,3 +526,45 @@ async fn search_response_keys_in_es_order() {
         ["took", "timed_out", "_shards", "hits", "aggregations"]
     );
 }
+
+/// Elasticsearch 9.5.5's response to a range query whose date bound fails on every index
+/// (each shard reason there also has a `caused_by`, which es-mini leaves out).
+#[tokio::test]
+async fn error_shapes_search_failing_on_every_index_is_a_search_phase_exception() {
+    let app = app();
+    for index in ["t", "u"] {
+        let mappings = json!({"mappings": {"properties": {"d": {"type": "date"}}}});
+        call(&app, Method::PUT, &format!("/{index}"), Some(mappings)).await;
+    }
+    let query = json!({"query": {"range": {"d": {"gte": "foo"}}}});
+    let (s, r) = call(&app, Method::POST, "/t,u/_search", Some(query)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let f = "strict_date_optional_time||epoch_millis";
+    let reason = format!("failed to parse date field [foo] with format [{f}]");
+    let cause = json!({"type": "parse_exception", "reason": format!("{reason}: [{reason}]")});
+    let shard = |index: &str| json!({"shard": 0, "index": index, "node": crate::nodes::NODE_ID, "reason": cause});
+    assert_eq!(
+        r["error"],
+        json!({
+            "root_cause": [cause, cause],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [shard("t"), shard("u")],
+        })
+    );
+    // an index the bound does not fail on still answers
+    call(
+        &app,
+        Method::PUT,
+        "/k",
+        Some(json!({"mappings": {"properties": {"d": {"type": "keyword"}}}})),
+    )
+    .await;
+    let query = json!({"query": {"range": {"d": {"gte": "foo"}}}});
+    let (s, r) = call(&app, Method::POST, "/t,k/_search", Some(query)).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(r["_shards"]["failed"], 1);
+    assert_eq!(r["_shards"]["failures"][0], shard("t"));
+}

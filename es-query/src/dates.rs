@@ -240,12 +240,12 @@ pub(crate) fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, 
                 let parse = |b: Box<Value>| {
                     es_index::date_math::parse(&text(&b), format, locale, &tz, round_up, now)
                 };
-                b.map(parse).transpose().map_err(|msg| QueryError {
-                    kind: match msg.ends_with(es_index::date_math::TOO_FAR) {
+                b.map(parse).transpose().map_err(|msg| {
+                    let kind = match msg.ends_with(es_index::date_math::TOO_FAR) {
                         true => ErrorKind::IllegalArgument,
                         false => ErrorKind::Parse,
-                    },
-                    msg,
+                    };
+                    QueryError::new(kind, msg)
                 })
             };
             // parse_query keeps one of `gt` and `gte`, and of `lt` and `lte`
