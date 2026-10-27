@@ -45,7 +45,7 @@ const SUITES: Record<string, Suite> = {
   goals: {
     kind: "goal",
     list: "ralph/goals.txt",
-    frozen: [],
+    frozen: ["ralph/ponytail-ledger.md", "ralph/ledger-check.sh"],
     howTo: () =>
       "Read z_old/EXECUTION.md for the task's full definition of done. Make one coherent, verified step " +
       "of progress per iteration (it is fine if the goal needs several iterations). Delete the goal's line " +
@@ -81,6 +81,8 @@ const GOAL_MODELS: Record<string, string> = Object.fromEntries(
       "terms-dict-floor-blocks", "postings-positions", "pfor-exceptions", "doc-values-encodings",
       "unsupported-codecs", "index-sorting", "date-semantics", "per-index-locks",
       "esql-parity-harness", "esql-eval-functions", "esql-stats",
+      "disk-writer-completeness", "write-failure-handling", "memory-bounds", "date-formats",
+      "esql-es-semantics", "regexp-automaton",
     ],
     [`${OPUS}:medium`]: [
       "api-field-caps", "api-by-query", "api-scroll-pit", "api-search-template", "aggs-terms",
@@ -88,11 +90,12 @@ const GOAL_MODELS: Record<string, string> = Object.fromEntries(
       "stale-commit-files", "flush-on-shutdown", "range-from-doc-values-memory",
       "disk-float-ranges", "real-deflate", "unreadable-segments", "nested-dynamic-mapping",
       "missing-queries", "settings-validation", "refresh-interval", "multi-index-esql-types",
-      "esql-errors-grammar", "esql-source-commands",
+      "esql-errors-grammar", "esql-source-commands", "mapping-validation", "query-dsl-gaps",
+      "ip-and-range-fields", "error-shapes", "esql-conversions", "aggs-gaps",
     ],
     [`${SONNET}:medium`]: [
       "api-node-stubs", "constant-score-boost", "auto-id-format", "alias-date-math",
-      "tidy-review-refactors", "perf-small-ceilings",
+      "tidy-review-refactors", "perf-small-ceilings", "settings-validation-2", "api-gaps",
     ],
     [`${SONNET}:low`]: ["docs-translog-agents", "test-scratch-cleanup"],
   }).flatMap(([spec, ids]) => ids.map((id) => [id, spec])),
