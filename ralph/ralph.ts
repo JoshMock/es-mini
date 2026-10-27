@@ -96,6 +96,7 @@ const GOAL_MODELS: Record<string, string> = Object.fromEntries(
     [`${SONNET}:medium`]: [
       "api-node-stubs", "constant-score-boost", "auto-id-format", "alias-date-math",
       "tidy-review-refactors", "perf-small-ceilings", "settings-validation-2", "api-gaps",
+      "bench-demo", "readme-current",
     ],
     [`${SONNET}:low`]: ["docs-translog-agents", "test-scratch-cleanup"],
   }).flatMap(([spec, ids]) => ids.map((id) => [id, spec])),
