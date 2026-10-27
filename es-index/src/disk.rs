@@ -452,7 +452,7 @@ pub fn norm_len(norm: i8) -> u32 {
 /// arrays of scalars. Field numbers start at 6, after the metadata fields.
 // ponytail: nested objects, and fields holding values Elasticsearch would truncate or reject but
 // es-mini matches as they are (integer fractions or out-of-range values, `date_nanos` before
-// 1970), are left out of the segment; only Elasticsearch notices, as es-mini reads `_source`
+// 1970, objects at a text or keyword leaf), are left out of the segment; only Elasticsearch notices, as es-mini reads `_source`
 // where a segment lacks a field. Nested objects need child documents written before their parent;
 // the rest need es-mini to truncate or reject those values at index time, as Elasticsearch does.
 #[derive(Default)]
@@ -600,7 +600,7 @@ fn user_fields(
         let mut point_width = 0;
         let (index_options, doc_values, omit_norms) = match mapping {
             M::Text { .. } | M::TextKeyword { .. } => {
-                let Some(texts) = typed(&values, &|v| Some(scalar_text(v))) else {
+                let Some(texts) = typed(&values, &|v| scalar_text(v).map(Some)) else {
                     continue;
                 };
                 let mut m = BTreeMap::<Vec<u8>, Vec<(u32, Vec<u32>)>>::new();
@@ -657,7 +657,7 @@ fn user_fields(
                     }
                 }
                 let Some(keys) = typed(&values, &|v| {
-                    Some(scalar_text(v).filter(|s| fits(s)).map(String::into_bytes))
+                    scalar_text(v).map(|s| fits(&s).then(|| s.into_bytes()))
                 }) else {
                     continue;
                 };

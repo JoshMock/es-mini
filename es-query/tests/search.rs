@@ -1234,3 +1234,45 @@ fn match_on_a_keyword_splitting_queries_on_whitespace_matches_any_word() {
         ["1"]
     );
 }
+
+/// es-mini matches objects at a text or keyword leaf (Elasticsearch rejects them), so disk
+/// saves keep such a field out of the segment instead of dropping those values.
+#[test]
+fn an_opened_index_matches_objects_at_text_and_keyword_leaves_like_memory() {
+    let mapped = || {
+        let mut i = Index::default();
+        let p = &mut i.mappings.properties;
+        p.insert("t".into(), FieldMapping::Text { store: false });
+        let keyword = FieldMapping::Keyword {
+            ignore_above: None,
+            split_queries_on_whitespace: false,
+        };
+        p.insert("k".into(), keyword);
+        i.put("1", json!({"t": "five", "k": "five"}));
+        i.put(
+            "2",
+            json!({"t": {"a": "five"}, "k": [{"a": "five"}, "six"]}),
+        );
+        i
+    };
+    let memory = mapped();
+    let dir = std::env::temp_dir().join(format!("esq-leaf-objects-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    es_index::disk::save(&dir, &es_index::Indices::from([("idx".into(), mapped())])).unwrap();
+    let opened = es_index::disk::open(&dir).unwrap().remove("idx").unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    let run = |idx: &Index, body: &Value| {
+        let r = search(idx, &SearchRequest::parse(body).unwrap());
+        let mut hits: Vec<_> = (r.hits.iter())
+            .map(|h| (h.id.to_owned(), h.score))
+            .collect();
+        hits.sort_by(|a, b| a.0.cmp(&b.0));
+        (hits, r.aggregations)
+    };
+    for body in [
+        json!({"query": {"match": {"t": "five"}}}),
+        json!({"size": 0, "aggs": {"k": {"terms": {"field": "k"}}}}),
+    ] {
+        assert_eq!(run(&opened, &body), run(&memory, &body), "{body}");
+    }
+}
