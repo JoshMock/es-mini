@@ -210,7 +210,16 @@ fn persisted(dir: &std::path::Path) -> Result<(Router, AppState), String> {
                 }
                 let saved = {
                     let dir = dir.clone();
-                    tokio::task::spawn_blocking(move || group.persist(&dir, &state)).await
+                    tokio::task::spawn_blocking(move || {
+                        // The fsync runs without the indices lock, so other writes apply meanwhile.
+                        group.persist(|| {
+                            let begun = es_index::disk::begin_persist(&dir, &mut state.write());
+                            begun
+                                .and_then(es_index::disk::Pending::finish)
+                                .map_err(|e| e.0)
+                        })
+                    })
+                    .await
                 };
                 match saved.unwrap_or_else(|e| Err(e.to_string())) {
                     Ok(()) => res,
@@ -241,41 +250,32 @@ struct Group {
 
 #[derive(Default)]
 struct Rounds {
-    started: u64,
-    finished: u64,
     running: bool,
-    /// The last round that failed, and why.
-    failed: (u64, String),
+    /// The result of the round that writes arriving now wait for; it starts once the running
+    /// one finishes.
+    next: Arc<std::sync::OnceLock<Result<(), String>>>,
 }
 
 impl Group {
-    /// Returns once a round that began after this call made the caller's writes durable.
-    fn persist(&self, dir: &std::path::Path, state: &Store) -> Result<(), String> {
+    /// Returns once a round that began after this call made the caller's writes durable, with
+    /// that round's result. `save` runs the round if this caller is the one to start it.
+    fn persist(&self, save: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
         let mut r = self.rounds.lock().expect("lock poisoned");
-        let mine = r.started + 1;
-        while r.finished < mine {
-            if r.running {
-                r = self.done.wait(r).expect("lock poisoned");
-                continue;
-            }
-            (r.running, r.started) = (true, mine);
-            drop(r);
-            // The fsync runs without the indices lock, so other writes apply meanwhile.
-            let begun = es_index::disk::begin_persist(dir, &mut state.write());
-            let saved = begun.and_then(es_index::disk::Pending::finish);
-            r = self.rounds.lock().expect("lock poisoned");
-            (r.running, r.finished) = (false, mine);
-            if let Err(e) = saved {
-                r.failed = (mine, e.0);
-            }
-            self.done.notify_all();
+        let mine = r.next.clone();
+        while r.running {
+            r = self.done.wait(r).expect("lock poisoned");
         }
-        // ponytail: only the last failure is kept, so a later round's failure also fails a write
-        // whose round succeeded (never the reverse); keep per-round results if that matters
-        match &r.failed {
-            (round, e) if *round >= mine => Err(e.clone()),
-            _ => Ok(()),
+        if let Some(saved) = mine.get() {
+            return saved.clone();
         }
+        r.running = true;
+        r.next = Arc::default();
+        drop(r);
+        let saved = save();
+        mine.set(saved.clone()).expect("one caller runs each round");
+        self.rounds.lock().expect("lock poisoned").running = false;
+        self.done.notify_all();
+        saved
     }
 }
 
@@ -293,7 +293,7 @@ fn spawn_syncer(dir: std::path::PathBuf, state: std::sync::Weak<Store>) {
                 continue;
             }
             last = Instant::now();
-            // The fsync runs without the indices lock, as in `Group::persist`.
+            // The fsync runs without the indices lock, as for write requests.
             let begun = es_index::disk::begin_sync(&dir, &mut state.write());
             if let Err(e) = begun.and_then(es_index::disk::Pending::finish) {
                 tracing::error!("syncing {}: {e}", dir.display());
@@ -561,6 +561,60 @@ mod field_caps_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Waits until `n` callers wait for the group's next round.
+    fn joined(group: &Group, n: usize) {
+        while Arc::strong_count(&group.rounds.lock().unwrap().next) < n + 1 {
+            std::thread::yield_now();
+        }
+    }
+
+    /// Writers that waited for a successful round succeed even when a later round fails before
+    /// they wake.
+    #[test]
+    fn write_failure_handling_rounds_report_their_own_result() {
+        let group = Arc::new(Group::default());
+        let (started, running) = std::sync::mpsc::channel();
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        let first = {
+            let g = group.clone();
+            std::thread::spawn(move || {
+                g.persist(|| {
+                    started.send(()).unwrap();
+                    blocked.recv().unwrap();
+                    Ok(())
+                })
+            })
+        };
+        running.recv().unwrap();
+        // Round 2's writers; the one running it lets round 3's writers arrive, then succeeds.
+        let later = Arc::new(std::sync::Mutex::new(vec![]));
+        let second: Vec<_> = (0..32)
+            .map(|_| {
+                let (g, later) = (group.clone(), later.clone());
+                std::thread::spawn(move || {
+                    g.persist(|| {
+                        for _ in 0..4 {
+                            let g2 = g.clone();
+                            let h = std::thread::spawn(move || g2.persist(|| Err("full".into())));
+                            later.lock().unwrap().push(h);
+                        }
+                        joined(&g, 4);
+                        Ok(())
+                    })
+                })
+            })
+            .collect();
+        joined(&group, 32);
+        release.send(()).unwrap();
+        assert_eq!(first.join().unwrap(), Ok(()));
+        for h in second {
+            assert_eq!(h.join().unwrap(), Ok(()));
+        }
+        for h in std::mem::take(&mut *later.lock().unwrap()) {
+            assert_eq!(h.join().unwrap(), Err("full".into()));
+        }
+    }
 
     #[tokio::test]
     async fn serves_info_and_health_over_http() {
