@@ -738,7 +738,7 @@ impl<'a> Searcher<'a> {
                 let freq = match slop {
                     _ if lists.iter().any(Vec::is_empty) => return None,
                     0 => exact_phrase_freq(&lists),
-                    _ => sloppy_phrase_freq(&lists, slop),
+                    _ => sloppy_phrase_freq(&terms, &lists, slop),
                 };
                 if freq == 0.0 {
                     return None;
@@ -1558,13 +1558,68 @@ fn exact_phrase_freq(lists: &[Vec<u32>]) -> f64 {
 
 /// The summed `1 / (1 + match length)` of the phrase's matches within `slop`: Lucene's
 /// SloppyPhraseMatcher, with each term's positions moved back by its place in the phrase.
-// ponytail: no repeated-term handling (Lucene's rptGroups), so a term repeated in a sloppy
-// phrase may match one position twice
-fn sloppy_phrase_freq(lists: &[Vec<u32>], slop: u32) -> f64 {
-    let mut cur = vec![0; lists.len()];
-    let pos = |cur: &[usize], i: usize| i64::from(lists[i][cur[i]]) - i as i64;
-    let mut end = (0..lists.len()).map(|i| pos(&cur, i)).max().unwrap_or(0);
-    let mut queue: Vec<usize> = (0..lists.len()).collect();
+/// `terms` are each place's terms; places sharing a term repeat each other, and never sit on
+/// one position together.
+fn sloppy_phrase_freq(terms: &[Vec<String>], lists: &[Vec<u32>], slop: u32) -> f64 {
+    let n = lists.len();
+    let mut cur = vec![0; n];
+    let tp = |cur: &[usize], i: usize| i64::from(lists[i][cur[i]]);
+    let pos = |cur: &[usize], i: usize| tp(cur, i) - i as i64;
+    // moves place `i` on; false once its positions run out
+    let advance = |cur: &mut [usize], end: &mut i64, i: usize| {
+        cur[i] += 1;
+        let more = cur[i] < lists[i].len();
+        if more {
+            *end = (*end).max(pos(cur, i));
+        }
+        more
+    };
+    let lesser = |cur: &[usize], a: usize, b: usize| {
+        if (pos(cur, b), b) < (pos(cur, a), a) {
+            b
+        } else {
+            a
+        }
+    };
+    let groups = repeat_groups(terms);
+    let group = |i: usize| groups.iter().find(|g| g.contains(&i));
+    let collide = |cur: &[usize], i: usize| {
+        let g = group(i)?;
+        g.iter()
+            .copied()
+            .find(|&j| j != i && tp(cur, j) == tp(cur, i))
+    };
+    let mut end = i64::MIN;
+    // advanceRepeatGroups: move repeats off each other's first positions
+    for g in &groups {
+        let mut k = 0;
+        while k < g.len() {
+            let mut incr = 1;
+            while let Some(j) = collide(&cur, g[k]) {
+                let pp = lesser(&cur, g[k], j);
+                if !advance(&mut cur, &mut end, pp) {
+                    return 0.0;
+                }
+                if g.iter().position(|&x| x == pp) < Some(k) {
+                    incr = 0;
+                    break;
+                }
+            }
+            k += incr;
+        }
+    }
+    end = end.max((0..n).map(|i| pos(&cur, i)).max().unwrap_or(0));
+    // advanceRpts: after `i` moves, move the lesser of any two repeats on one position
+    let advance_rpts = |cur: &mut [usize], end: &mut i64, mut i: usize| {
+        while let Some(j) = collide(cur, i) {
+            i = lesser(cur, i, j);
+            if !advance(cur, end, i) {
+                return false;
+            }
+        }
+        true
+    };
+    let mut queue: Vec<usize> = (0..n).collect();
     // the queue is ordered by position, then by place in the phrase
     let pop = |queue: &mut Vec<usize>, cur: &[usize]| {
         let k = (0..queue.len()).min_by_key(|&k| (pos(cur, queue[k]), queue[k]))?;
@@ -1577,14 +1632,12 @@ fn sloppy_phrase_freq(lists: &[Vec<u32>], slop: u32) -> f64 {
         let mut next = top(&queue, &cur).unwrap_or(i64::MAX);
         let mut len = end - pos(&cur, pp);
         loop {
-            cur[pp] += 1;
-            if cur[pp] == lists[pp].len() {
+            if !advance(&mut cur, &mut end, pp) || !advance_rpts(&mut cur, &mut end, pp) {
                 if len <= slop {
                     freq += 1.0 / (1.0 + len as f32);
                 }
                 break 'matches;
             }
-            end = end.max(pos(&cur, pp));
             if pos(&cur, pp) > next {
                 queue.push(pp);
                 if len <= slop {
@@ -1600,6 +1653,29 @@ fn sloppy_phrase_freq(lists: &[Vec<u32>], slop: u32) -> f64 {
         }
     }
     f64::from(freq)
+}
+
+/// The places of a phrase that share a term, transitively, each in phrase order: Lucene's
+/// SloppyPhraseMatcher rptGroups.
+fn repeat_groups(terms: &[Vec<String>]) -> Vec<Vec<usize>> {
+    let all = || terms.iter().flatten();
+    let repeats = |i: usize| {
+        terms[i]
+            .iter()
+            .filter(|t| all().filter(|u| u == t).count() > 1)
+    };
+    let shared = |i: usize, j: usize| repeats(i).any(|t| terms[j].contains(t));
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for i in (0..terms.len()).filter(|&i| repeats(i).next().is_some()) {
+        let (mut joined, rest): (Vec<_>, Vec<_>) = groups
+            .into_iter()
+            .partition(|g| g.iter().any(|&j| shared(i, j)));
+        let mut g: Vec<usize> = joined.drain(..).flatten().chain([i]).collect();
+        g.sort_unstable();
+        groups = rest;
+        groups.push(g);
+    }
+    groups
 }
 
 /// Terms a match query looks up: analyzed for text fields, verbatim otherwise.

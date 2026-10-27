@@ -1505,3 +1505,30 @@ fn query_dsl_gaps_simple_query_string_field_boosts() {
         );
     }
 }
+
+/// Lucene's SloppyPhraseMatcher keeps a repeated phrase term off positions its repeats hold.
+#[test]
+fn query_dsl_gaps_sloppy_phrase_repeated_terms() {
+    let mut idx = index();
+    idx.put("5", json!({"title": "quick brown quick"}));
+    let hits = |slop: u32| {
+        let q =
+            json!({"query": {"match_phrase": {"title": {"query": "quick quick", "slop": slop}}}});
+        let r = search(&idx, &SearchRequest::parse(&q).unwrap());
+        let mut v: Vec<_> = (r.hits.iter())
+            .map(|h| (h.id.to_owned(), h.score.unwrap()))
+            .collect();
+        v.sort_by(|a, b| a.0.cmp(&b.0));
+        v
+    };
+    // one "quick" (document 1) cannot stand for both
+    let two = hits(2);
+    assert_eq!(
+        two.iter().map(|h| h.0.as_str()).collect::<Vec<_>>(),
+        ["2", "5"]
+    );
+    assert!(hits(0).iter().all(|h| h.0 == "2"));
+    // positions 0 and 2 match one apart, no further
+    assert_eq!(hits(1).len(), 2);
+    assert!(two[1].1 < two[0].1, "{two:?}");
+}
