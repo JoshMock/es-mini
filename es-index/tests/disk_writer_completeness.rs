@@ -378,3 +378,52 @@ fn disk_writer_completeness_reads_back_segments_with_nested_documents() {
     assert_eq!(live, [false, false, false, false, true]);
     assert_eq!(ix.get("1").unwrap().source, json!({"t": "z"}));
 }
+
+#[test]
+fn ip_and_range_fields_writes_every_range_type_as_elasticsearch_does() {
+    use es_codec::{doc_values::DocValues, field_infos::DocValuesType};
+    let mut idx = Index::default();
+    idx.mappings = serde_json::from_value(json!({"properties": {
+        "i": {"type": "integer_range"}, "f": {"type": "float_range"},
+        "x": {"type": "double_range"}, "ip": {"type": "ip_range"},
+    }}))
+    .unwrap();
+    idx.put(
+        "1",
+        json!({"i": {"gte": -1, "lt": 5}, "f": {"gt": 1.0}, "x": {"lte": -2.0}, "ip": "10.0.0.0/30"}),
+    );
+    let (_root, r) = saved_segment("more-ranges", idx);
+    for (f, width) in [("i", 4), ("f", 4), ("x", 8), ("ip", 16)] {
+        let info = r.field(f).unwrap();
+        assert_eq!(
+            (info.point_dimensions, info.point_num_bytes),
+            (2, width),
+            "{f}"
+        );
+        assert_eq!(info.doc_values, DocValuesType::Binary);
+    }
+    let points = |f: &str| r.points(f).unwrap()[0].1.clone();
+    // IntRange: the sortable ints of 4 (lt 5) and -1
+    assert_eq!(points("i"), [0x7f, 0xff, 0xff, 0xff, 0x80, 0, 0, 4]);
+    // FloatRange: Math.nextUp(1.0f) up to +Infinity
+    assert_eq!(points("f"), [0xbf, 0x80, 0, 1, 0xff, 0x80, 0, 0]);
+    // InetAddressRange: the block's first and last address, IPv4-mapped
+    let v4 = |last| [[0; 10].as_slice(), &[0xff, 0xff, 10, 0, 0, last]].concat();
+    assert_eq!(points("ip"), [v4(0), v4(3)].concat());
+    let bytes = |f: &str| match r.doc_values(f).unwrap() {
+        DocValues::Bytes(b) => b[0].clone().unwrap(),
+        _ => panic!("range doc values are binary"),
+    };
+    // integers encode like longs (encodeLong of -1 and 4)
+    assert_eq!(bytes("i"), [1, 0x7f, 0x84]);
+    assert_eq!(bytes("f"), [[1].as_slice(), &points("f")].concat());
+    // -Infinity up to -2.0, as sortable longs
+    let want = [
+        [1].as_slice(),
+        &[0, 0x0f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+        &[0x3f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+    ]
+    .concat();
+    assert_eq!(bytes("x"), want);
+    assert_eq!(bytes("ip"), [[1].as_slice(), &v4(0), &v4(3)].concat());
+}

@@ -88,9 +88,7 @@ fn resolve(index: &Index, field: &str, sample: impl Fn(&str) -> Option<Value>) -
         // them (see `resolve_dates`, `sort_values`)
         Some(FieldMapping::Date { .. } | FieldMapping::DateNanos { .. }) => Kind::Keyword,
         // terms and ranges read them as intervals (see `ranges`)
-        Some(FieldMapping::Ip | FieldMapping::LongRange | FieldMapping::DateRange { .. }) => {
-            Kind::Keyword
-        }
+        Some(m) if m.is_range() || matches!(m, FieldMapping::Ip) => Kind::Keyword,
         Some(m) if m.is_numeric() => Kind::Number,
         Some(_) => {
             unreachable!("every FieldMapping is text, keyword, boolean, date, ip, range or numeric")

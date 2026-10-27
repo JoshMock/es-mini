@@ -1246,16 +1246,21 @@ fn doc_value(s: &Searcher, field: &str, mapping: &FieldMapping, v: &Value) -> Op
                 .then(|| t.into())
         }
         M::Ip => es_index::ip_bytes(v).map(|ip| es_index::ip_string(ip).into()),
-        M::LongRange => range(v, &int),
-        M::DateRange { format } => range(v, &|v| es_index::date_millis(format.as_deref(), None, v)),
+        // ponytail: ip ranges are not aggregated
+        M::IpRange => None,
+        M::LongRange | M::IntegerRange | M::DateRange { .. } => {
+            let (from, to) = mapping.range_keys(v).flatten()?;
+            let n = es_index::mapping::key_long;
+            Some(Value::from(vec![n(from), n(to)]))
+        }
+        // infinite ends as the largest finite doubles, which JSON can hold
+        M::FloatRange | M::DoubleRange => {
+            let (from, to) = mapping.range_keys(v).flatten()?;
+            let n = |k| mapping.range_number(k).clamp(f64::MIN, f64::MAX);
+            Some(Value::from(vec![n(from), n(to)]))
+        }
         M::Text { .. } | M::TextKeyword { .. } | M::Nested | M::Object => None,
     }
-}
-
-/// A range field's value as its inclusive `[from, to]` (see [`crate::ranges::range_ends`]).
-fn range(v: &Value, parse: &dyn Fn(&Value) -> Option<i64>) -> Option<Value> {
-    let (from, to) = crate::ranges::range_ends(v, &|v, _| parse(v))?;
-    Some(Value::from(vec![from, to]))
 }
 
 /// ES's ValuesSourceType of a field: every number is `numeric`.

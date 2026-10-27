@@ -130,3 +130,87 @@ fn ip_and_range_fields_range_fields_answer_term_and_range_queries_by_relation() 
         "Range query `from` value (3) is greater than `to` value (2)"
     );
 }
+
+fn more_ranges() -> Index {
+    let mut i = Index::default();
+    i.mappings = serde_json::from_value(json!({"properties": {
+        "i": {"type": "integer_range"}, "f": {"type": "float_range"},
+        "x": {"type": "double_range"}, "ip": {"type": "ip_range"},
+    }}))
+    .unwrap();
+    i.put(
+        "a",
+        json!({"i": {"gte": 10, "lte": 20}, "f": {"gte": 1.5, "lt": 2.5},
+            "x": {"gt": 0.1, "lte": 0.3}, "ip": "10.0.0.0/8"}),
+    );
+    i.put(
+        "b",
+        json!({"i": {"gt": 20}, "f": {"lte": 1.5}, "x": {"gte": 1e300},
+            "ip": {"gte": "::ffff:192.168.0.1", "lt": "192.168.0.10"}}),
+    );
+    i
+}
+
+#[test]
+fn ip_and_range_fields_integer_float_double_and_ip_ranges_map_and_match() {
+    let i = more_ranges();
+    let mapped: Value = serde_json::to_value(&i.mappings).unwrap();
+    assert_eq!(mapped["properties"]["ip"]["type"], "ip_range");
+    let q = |q: Value| ids(&i, q).unwrap();
+    let none = Vec::<String>::new();
+    assert_eq!(q(json!({"term": {"i": 20}})), ["a"]);
+    assert_eq!(q(json!({"term": {"i": 21}})), ["b"]);
+    assert_eq!(q(json!({"term": {"i": 2147483647}})), ["b"]);
+    assert_eq!(
+        q(json!({"range": {"i": {"gte": 15, "lte": 30, "relation": "within"}}})),
+        none
+    );
+    assert_eq!(
+        q(json!({"range": {"i": {"gte": 15, "lte": 30, "relation": "intersects"}}})),
+        ["a", "b"]
+    );
+    // floats compare at float precision: 1.5 sits in both, 2.5 in neither
+    assert_eq!(q(json!({"term": {"f": 1.5}})), ["a", "b"]);
+    assert_eq!(q(json!({"term": {"f": 2.5}})), none);
+    assert_eq!(q(json!({"term": {"f": -1e30}})), ["b"]);
+    assert_eq!(
+        q(json!({"range": {"f": {"gt": 1.5, "lt": 3, "relation": "contains"}}})),
+        none
+    );
+    assert_eq!(
+        q(json!({"range": {"f": {"gte": 1.5, "lt": 2.5, "relation": "contains"}}})),
+        ["a"]
+    );
+    assert_eq!(q(json!({"term": {"x": 0.1}})), none);
+    assert_eq!(q(json!({"term": {"x": 0.3}})), ["a"]);
+    assert_eq!(q(json!({"range": {"x": {"gte": 1e301}}})), ["b"]);
+    // a CIDR string is the block's range, and addresses normalize
+    assert_eq!(q(json!({"term": {"ip": "10.255.255.255"}})), ["a"]);
+    assert_eq!(q(json!({"term": {"ip": "192.168.0.9"}})), ["b"]);
+    assert_eq!(q(json!({"term": {"ip": "192.168.0.10"}})), none);
+    assert_eq!(
+        q(
+            json!({"range": {"ip": {"gte": "10.0.0.0", "lte": "10.255.255.255", "relation": "within"}}})
+        ),
+        ["a"]
+    );
+    assert_eq!(
+        q(
+            json!({"range": {"ip": {"gte": "::ffff:192.168.0.2", "lte": "192.168.0.3", "relation": "contains"}}})
+        ),
+        ["b"]
+    );
+    let err = |q: Value| ids(&i, q).unwrap_err();
+    assert_eq!(
+        err(json!({"range": {"f": {"gte": 3, "lte": 2}}})),
+        "Range query `from` value (3.0) is greater than `to` value (2.0)"
+    );
+    assert_eq!(
+        err(json!({"range": {"ip": {"gte": "10.0.0.2", "lte": "10.0.0.1"}}})),
+        "Range query `from` value (/10.0.0.2) is greater than `to` value (/10.0.0.1)"
+    );
+    assert_eq!(
+        err(json!({"term": {"i": 2147483648_i64}})),
+        "Value [2147483648] is out of range for an integer"
+    );
+}

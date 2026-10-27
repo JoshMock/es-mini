@@ -56,8 +56,13 @@ pub enum FieldMapping {
     },
     Ip,
     /// A `{gte, gt, lte, lt}` object of longs; aggregations count it in every bucket it overlaps.
-    // ponytail: only the range types the YAML tests map; add integer/float/double/ip_range alike
+    /// Range fields read as intervals of sortable keys (see [`FieldMapping::range_keys`]).
     LongRange,
+    IntegerRange,
+    FloatRange,
+    DoubleRange,
+    /// A `{gte, gt, lte, lt}` object of addresses, or a CIDR block.
+    IpRange,
     DateRange {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         format: Option<String>,
@@ -85,7 +90,12 @@ impl FieldMapping {
             Self::Date { .. } => "date",
             Self::DateNanos { .. } => "date_nanos",
             Self::Ip => "ip",
-            Self::LongRange | Self::DateRange { .. } => "unsupported",
+            Self::LongRange
+            | Self::IntegerRange
+            | Self::FloatRange
+            | Self::DoubleRange
+            | Self::IpRange
+            | Self::DateRange { .. } => "unsupported",
             Self::Nested => "nested",
             Self::Object => "object",
         }
@@ -115,6 +125,164 @@ impl FieldMapping {
     pub fn is_numeric(&self) -> bool {
         matches!(self.type_name(), "long" | "integer" | "double")
     }
+
+    /// Whether this maps a range field.
+    pub fn is_range(&self) -> bool {
+        matches!(
+            self,
+            Self::LongRange
+                | Self::IntegerRange
+                | Self::FloatRange
+                | Self::DoubleRange
+                | Self::IpRange
+                | Self::DateRange { .. }
+        )
+    }
+
+    /// The smallest and largest keys of a range field's type (RangeType.minValue and maxValue).
+    pub fn range_limits(&self) -> (u128, u128) {
+        match self {
+            Self::IntegerRange => (long_key(i32::MIN.into()), long_key(i32::MAX.into())),
+            Self::FloatRange => {
+                let key = |f: f32| long_key(sortable_int(f).into());
+                (key(f32::NEG_INFINITY), key(f32::INFINITY))
+            }
+            Self::DoubleRange => {
+                let key = |f: f64| long_key(sortable_long(f));
+                (key(f64::NEG_INFINITY), key(f64::INFINITY))
+            }
+            Self::IpRange | Self::Ip => (0, u128::MAX),
+            _ => (long_key(i64::MIN), long_key(i64::MAX)),
+        }
+    }
+
+    /// A range field's bound as a key (a `gt` or `lte` date rounds up when `round_up`):
+    /// `Some(None)` if malformed (Elasticsearch rejects the document), `None` if es-mini's
+    /// encoding cannot hold it (a fraction or overflow of an integer type).
+    pub fn range_bound(&self, v: &Value, round_up: bool) -> Option<Option<u128>> {
+        let n = match self {
+            Self::IntegerRange => crate::disk::integer(v, i32::MIN.into(), i32::MAX.into())?,
+            Self::LongRange => crate::disk::integer(v, i64::MIN, i64::MAX)?,
+            Self::FloatRange => (crate::json_num(v).map(|f| f as f32))
+                .filter(|f| f.is_finite())
+                .map(|f| sortable_int(f).into()),
+            Self::DoubleRange => (crate::json_num(v).filter(|f| f.is_finite())).map(sortable_long),
+            Self::DateRange { format } => crate::date_millis_in(
+                format.as_deref(),
+                None,
+                v,
+                &crate::tz::TimeZone::UTC,
+                round_up,
+            ),
+            _ => return Some(crate::ip_bytes(v).map(u128::from_be_bytes)),
+        };
+        Some(n.map(long_key))
+    }
+
+    /// The number a key of a numeric range field holds.
+    pub fn range_number(&self, k: u128) -> f64 {
+        let n = key_long(k);
+        match self {
+            Self::FloatRange => {
+                let b = n as i32;
+                f32::from_bits((b ^ ((b >> 31) & i32::MAX)) as u32).into()
+            }
+            Self::DoubleRange => f64::from_bits((n ^ ((n >> 63) & i64::MAX)) as u64),
+            _ => n as f64,
+        }
+    }
+
+    /// A range field's value as RangeFieldMapper parses it: the inclusive `[from, to]` of its
+    /// keys, an open end at the type's limit. Malformed (`Some(None)`) if not an object or (for
+    /// `ip_range`) a CIDR block; `None` for an unknown key or `from > to` (Elasticsearch
+    /// rejects those documents too) or a bound es-mini cannot hold.
+    pub fn range_keys(&self, v: &Value) -> Option<Option<(u128, u128)>> {
+        if let (Self::IpRange, Value::String(s)) = (self, v) {
+            return Some(cidr(s).ok());
+        }
+        let Some(o) = v.as_object() else {
+            return Some(None);
+        };
+        let (mut from, mut to, mut include_from, mut include_to) = (None, None, true, true);
+        for (k, x) in o {
+            let (bound, include, up) = match k.as_str() {
+                "gt" | "gte" => (&mut from, &mut include_from, true),
+                "lt" | "lte" => (&mut to, &mut include_to, false),
+                _ => return None,
+            };
+            *include = k.ends_with('e');
+            if !x.is_null() {
+                // `from` rounds up when excluded, `to` when included
+                let Some(n) = self.range_bound(x, *include != up)? else {
+                    return Some(None);
+                };
+                *bound = Some(match (*include, up) {
+                    (true, _) => n,
+                    (false, true) => n.checked_add(1)?,
+                    (false, false) => n.checked_sub(1)?,
+                });
+            }
+        }
+        let (min, max) = self.range_limits();
+        let from = from.unwrap_or(min + u128::from(!include_from));
+        let to = to.unwrap_or(max - u128::from(!include_to));
+        (from <= to).then_some(Some((from, to)))
+    }
+}
+
+/// A long as a key that orders like it.
+pub fn long_key(n: i64) -> u128 {
+    u128::from(n as u64 ^ 1 << 63)
+}
+
+/// The long a key of [`long_key`] holds.
+pub fn key_long(k: u128) -> i64 {
+    (k as u64 ^ 1 << 63) as i64
+}
+
+/// Lucene's `NumericUtils.doubleToSortableLong`, its own inverse.
+pub fn sortable_long(f: f64) -> i64 {
+    let b = f.to_bits() as i64;
+    b ^ ((b >> 63) & i64::MAX)
+}
+
+/// Lucene's `NumericUtils.floatToSortableInt`, its own inverse.
+pub fn sortable_int(f: f32) -> i32 {
+    let b = f.to_bits() as i32;
+    b ^ ((b >> 31) & i32::MAX)
+}
+
+/// The first and last address of a CIDR block as keys, like InetAddresses.parseIpRangeFromCidr,
+/// or its error message.
+pub fn cidr(t: &str) -> Result<(u128, u128), String> {
+    let Some((addr, prefix)) = t
+        .split_once('/')
+        .filter(|(_, p)| !p.is_empty() && !p.contains('/'))
+    else {
+        return Err(format!("Expected [ip/prefix] but was [{t}]"));
+    };
+    let k = crate::ip_bytes(&Value::from(addr))
+        .map(u128::from_be_bytes)
+        .ok_or_else(|| format!("'{addr}' is not an IP string literal."))?;
+    // Java parses an IPv4-mapped address as IPv4
+    let v4 = k >> 32 == 0xffff;
+    if v4 && addr.contains(':') {
+        return Err(format!(
+            "CIDR notation is not allowed with IPv6-mapped IPv4 address [{addr} as it introduces ambiguity as to whether the prefix length should be interpreted as a v4 prefix length or a v6 prefix length"
+        ));
+    }
+    let len: i32 = (prefix.parse()).map_err(|_| format!("For input string: \"{prefix}\""))?;
+    let bits = if v4 { 32 } else { 128 };
+    if !(0..=bits).contains(&len) {
+        return Err(format!(
+            "Illegal prefix length [{len}] in [{t}]. Must be 0-32 for IPv4 ranges, 0-128 for IPv6 ranges"
+        ));
+    }
+    // an IPv4 prefix covers the 96 mapping bits too
+    let host = u128::MAX
+        .checked_shr((128 - bits + len) as u32)
+        .unwrap_or(0);
+    Ok((k & !host, k | host))
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -268,7 +436,7 @@ impl Index {
         let mapping = match v {
             Value::Object(o) => {
                 match get(path) {
-                    Some(FieldMapping::LongRange | FieldMapping::DateRange { .. }) => return Ok(()),
+                    Some(m) if m.is_range() => return Ok(()),
                     Some(m) if !m.is_object() => return leaf_error(path, v),
                     None if o.is_empty() && !self.has_subfields(path, added) => {
                         added.insert(path.to_owned(), FieldMapping::Object);

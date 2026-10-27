@@ -433,11 +433,15 @@ impl Format {
         use FieldMapping as M;
         match m {
             None => Format::Unmapped,
-            Some(M::Long | M::Integer | M::Short | M::Byte | M::LongRange) => Format::Long,
-            Some(M::Double | M::Float | M::HalfFloat) => Format::Double,
+            Some(M::Long | M::Integer | M::Short | M::Byte | M::LongRange | M::IntegerRange) => {
+                Format::Long
+            }
+            Some(M::Double | M::Float | M::HalfFloat | M::FloatRange | M::DoubleRange) => {
+                Format::Double
+            }
             Some(M::Boolean) => Format::Bool,
             Some(M::Date { .. } | M::DateNanos { .. } | M::DateRange { .. }) => Format::Date,
-            Some(M::Ip) => Format::Ip,
+            Some(M::Ip | M::IpRange) => Format::Ip,
             Some(
                 M::Keyword { .. } | M::Text { .. } | M::TextKeyword { .. } | M::Nested | M::Object,
             ) => Format::Str,

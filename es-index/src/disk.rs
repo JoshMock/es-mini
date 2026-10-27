@@ -535,7 +535,7 @@ fn scalar_text(v: &Value) -> Option<String> {
 
 /// A number, or a string holding one, as an integer in `min..=max`; `None` if it has a fraction or
 /// is out of range (Elasticsearch truncates or rejects it, where es-mini matches it as is).
-fn integer(v: &Value, min: i64, max: i64) -> Option<Option<i64>> {
+pub(crate) fn integer(v: &Value, min: i64, max: i64) -> Option<Option<i64>> {
     let Some(f) = crate::json_num(v) else {
         return Some(None);
     };
@@ -573,44 +573,29 @@ pub fn date_nanos(format: Option<&str>, locale: Option<&str>, v: &Value) -> Opti
     (nanos >= 0).then_some(Some(nanos))
 }
 
-/// `(from, to, include_from, include_to)` of a range field's value.
-type Range = (i64, i64, bool, bool);
-
-/// A range field's value as RangeFieldMapper parses it, its bounds parsed by `end` (rounding up a `gt` or `lte` date) and made inclusive,
-/// an open end at the long limits. Malformed if not an object (ES rejects the document); `None` for
-/// an unknown key, an overflowing bound or `from > to` (ES rejects those too; es-mini ignores them).
-fn range(v: &Value, end: &dyn Fn(&Value, bool) -> Option<Option<i64>>) -> Option<Option<Range>> {
-    let Some(o) = v.as_object() else {
-        return Some(None);
-    };
-    let (mut from, mut to, mut include_from, mut include_to) = (None, None, true, true);
-    for (k, x) in o {
-        let (bound, include, step) = match k.as_str() {
-            "gt" | "gte" => (&mut from, &mut include_from, 1),
-            "lt" | "lte" => (&mut to, &mut include_to, -1),
-            _ => return None,
-        };
-        *include = k.ends_with('e');
-        if !x.is_null() {
-            // `from` rounds up when excluded, `to` when included
-            let Some(n) = end(x, *include == (step < 0))? else {
-                return Some(None);
-            };
-            *bound = Some(if *include { n } else { n.checked_add(step)? });
-        }
+/// A range key's point bytes in a `width`-byte dimension: a long's sortable bytes, or an
+/// address's 16 bytes.
+fn key_bytes(k: u128, width: usize) -> Vec<u8> {
+    match width {
+        16 => k.to_be_bytes().to_vec(),
+        _ => es_codec::points::sortable_bytes(crate::mapping::key_long(k), width),
     }
-    let from = from.unwrap_or(i64::MIN + i64::from(!include_from));
-    let to = to.unwrap_or(i64::MAX - i64::from(!include_to));
-    (from <= to).then_some(Some((from, to, include_from, include_to)))
 }
 
-/// `BinaryRangeUtil.encodeLongRanges` of a doc's sorted ranges: their count, then each bound as
-/// a sign bit, 4 bits of length and the value's significant bytes (negatives inverted).
-fn encode_ranges(ranges: &[Range]) -> Vec<u8> {
+/// BinaryRangeUtil's encoding of a doc's sorted ranges of keys: their count, then each bound
+/// as the point bytes of `width` (`encodeIPRanges`, `encodeFloatRanges`, `encodeDoubleRanges`),
+/// or for longs (`width` 0, `encodeLongRanges`) a sign bit, 4 bits of length and the value's
+/// significant bytes (negatives inverted).
+fn encode_ranges(ranges: &[(u128, u128)], width: usize) -> Vec<u8> {
     let mut out = es_codec::output::Output::default();
     out.vint(ranges.len() as i32);
-    for &(from, to, ..) in ranges {
-        for n in [from, to] {
+    for &(from, to) in ranges {
+        for k in [from, to] {
+            if width > 0 {
+                out.bytes(&key_bytes(k, width));
+                continue;
+            }
+            let n = crate::mapping::key_long(k);
             let (l, negative) = if n < 0 {
                 (!n as u64, true)
             } else {
@@ -854,42 +839,50 @@ fn user_fields(
                 out.keyword.push((number, keys));
                 (IndexOptions::Docs, DocValuesType::SortedSet, true)
             }
-            M::LongRange | M::DateRange { .. } => {
-                // Like ES: a two-dimensional LongRange point per range, and binary doc values of
+            m @ (M::LongRange
+            | M::IntegerRange
+            | M::FloatRange
+            | M::DoubleRange
+            | M::IpRange
+            | M::DateRange { .. }) => {
+                // Like ES: a two-dimensional range point per range, and binary doc values of
                 // the doc's distinct ranges.
-                let end = |v: &Value, round_up: bool| match mapping {
-                    M::DateRange { format } => Some(crate::date_millis_in(
-                        format.as_deref(),
-                        None,
-                        v,
-                        &crate::tz::TimeZone::UTC,
-                        round_up,
-                    )),
-                    _ => integer(v, i64::MIN, i64::MAX),
-                };
-                let Some(mut ranges) = typed(&values, &|v| range(v, &end)) else {
+                let Some(mut ranges) = typed(&values, &|v| m.range_keys(v)) else {
                     continue;
+                };
+                let width = match m {
+                    M::IntegerRange | M::FloatRange => 4,
+                    M::IpRange => 16,
+                    _ => 8,
                 };
                 out.points.push((
                     number,
                     (ranges.iter().enumerate())
                         .flat_map(|(doc, rs)| {
                             rs.iter().map(move |r| {
-                                let bytes = |n| es_codec::points::sortable_bytes(n, 8);
-                                (doc as u32, [bytes(r.0), bytes(r.1)].concat())
+                                (
+                                    doc as u32,
+                                    [key_bytes(r.0, width), key_bytes(r.1, width)].concat(),
+                                )
                             })
                         })
                         .collect(),
                 ));
-                (point_width, point_dims) = (8, 2);
+                (point_width, point_dims) = (width as i32, 2);
+                // ponytail: ip ranges are sorted where ES writes its HashSet's order; readers
+                // do not depend on it
                 ranges.iter_mut().for_each(|rs| {
                     rs.sort();
                     rs.dedup();
                 });
+                let long = matches!(m, M::LongRange | M::IntegerRange | M::DateRange { .. });
                 out.binary.push((
                     number,
                     (ranges.iter())
-                        .map(|rs| (!rs.is_empty()).then(|| encode_ranges(rs)))
+                        .map(|rs| {
+                            (!rs.is_empty())
+                                .then(|| encode_ranges(rs, if long { 0 } else { width }))
+                        })
                         .collect(),
                 ));
                 (IndexOptions::None, DocValuesType::Binary, false)
@@ -950,14 +943,8 @@ fn user_fields(
             | M::Date { .. }
             | M::DateNanos { .. } => {
                 // Doc values are the sortable longs ES stores; points are their big-endian bytes.
-                let sortable_long = |f: f64| {
-                    let b = f.to_bits() as i64;
-                    b ^ ((b >> 63) & i64::MAX)
-                };
-                let sortable_int = |f: f32| {
-                    let b = f.to_bits() as i32;
-                    i64::from(b ^ ((b >> 31) & i32::MAX))
-                };
+                let sortable_long = crate::mapping::sortable_long;
+                let sortable_int = |f| i64::from(crate::mapping::sortable_int(f));
                 // Like ES, numeric strings are numbers, and values that do not fit the type
                 // finitely are malformed.
                 let float = |v: &Value| crate::json_num(v).map(|f| f as f32);

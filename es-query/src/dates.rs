@@ -18,15 +18,13 @@ pub(crate) fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, 
             .collect()
     };
     let ranged = |field: &str| {
-        matches!(
-            index.mappings.field(field),
-            Some(
-                FieldMapping::Date { .. }
-                    | FieldMapping::DateNanos { .. }
-                    | FieldMapping::LongRange
-                    | FieldMapping::DateRange { .. }
-            )
-        )
+        index.mappings.field(field).is_some_and(|m| {
+            m.is_range()
+                || matches!(
+                    m,
+                    FieldMapping::Date { .. } | FieldMapping::DateNanos { .. }
+                )
+        })
     };
     // a term on a date field is the range from the instant to the instant rounded up, and on a
     // range field the ranges that hold the value
@@ -209,11 +207,10 @@ pub(crate) fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, 
                     | FieldMapping::DateNanos { format, locale },
                 ) => (format, locale.as_deref()),
                 Some(FieldMapping::DateRange { format }) => (format, None),
-                Some(FieldMapping::Ip | FieldMapping::LongRange) => {
-                    let ip = matches!(mapping, Some(FieldMapping::Ip));
+                Some(m) if m.is_range() || matches!(m, FieldMapping::Ip) => {
                     let bounds = [gt, gte, lt, lte];
                     return ranges::range(
-                        ip,
+                        m,
                         field,
                         bounds.each_ref().map(|b| b.as_deref()),
                         relation,
@@ -258,14 +255,9 @@ pub(crate) fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, 
                 millis(lt, false)?,
                 millis(lte, true)?,
             ];
-            if let Some(FieldMapping::DateRange { .. }) = mapping {
+            if let Some(m @ FieldMapping::DateRange { .. }) = mapping {
                 let bounds = [gt, gte, lt, lte].map(|b| b.map(Value::from));
-                return ranges::range(
-                    false,
-                    field,
-                    bounds.each_ref().map(Option::as_ref),
-                    relation,
-                );
+                return ranges::range(m, field, bounds.each_ref().map(Option::as_ref), relation);
             }
             let lo = gte.or(gt.map(|t| t.saturating_add(1)));
             let hi = lte.or(lt.map(|t| t.saturating_sub(1)));

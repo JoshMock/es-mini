@@ -1,14 +1,11 @@
 //! Term and range queries on ip and range fields, as inclusive intervals of sortable keys: an
-//! ip's 16-byte encoding, or a long with its sign bit flipped, both read as a big-endian u128.
+//! ip's 16-byte encoding, or a long (or a float's or double's sortable bits) with its sign bit
+//! flipped, both read as a big-endian u128 (see [`FieldMapping::range_keys`]).
 
 use crate::{Query, QueryError, Relation, int, text};
 use es_index::FieldMapping;
+use es_index::mapping::{key_long, long_key, sortable_int, sortable_long};
 use serde_json::Value;
-
-/// A long as a key that orders like it.
-fn long_key(n: i64) -> u128 {
-    u128::from(n as u64 ^ 1 << 63)
-}
 
 fn ip_key(v: &Value) -> Result<u128, QueryError> {
     let ip = es_index::ip_bytes(&Value::String(text(v)));
@@ -19,81 +16,85 @@ fn ip_key(v: &Value) -> Result<u128, QueryError> {
 /// IpFieldMapper.termQuery: an address, or the addresses of a CIDR block (InetAddresses.parseCidr).
 pub(crate) fn ip_term(field: String, v: &Value) -> Result<Query, QueryError> {
     let t = text(v);
-    let interval = |from, to| Query::Interval {
+    let (from, to) = match t.contains('/') {
+        true => es_index::mapping::cidr(&t).map_err(QueryError::illegal)?,
+        false => (ip_key(v)?, ip_key(v)?),
+    };
+    Ok(Query::Interval {
         field,
         from,
         to,
         relation: Relation::Intersects,
-    };
-    if !t.contains('/') {
-        let k = ip_key(v)?;
-        return Ok(interval(k, k));
-    }
-    let Some((addr, prefix)) = t
-        .split_once('/')
-        .filter(|(_, p)| !p.is_empty() && !p.contains('/'))
-    else {
-        return Err(QueryError::illegal(format!(
-            "Expected [ip/prefix] but was [{t}]"
-        )));
-    };
-    let k = ip_key(&Value::from(addr))?;
-    // Java parses an IPv4-mapped address as IPv4
-    let v4 = k >> 32 == 0xffff;
-    if v4 && addr.contains(':') {
-        return Err(QueryError::illegal(format!(
-            "CIDR notation is not allowed with IPv6-mapped IPv4 address [{addr} as it introduces ambiguity as to whether the prefix length should be interpreted as a v4 prefix length or a v6 prefix length"
-        )));
-    }
-    let len: i32 = (prefix.parse())
-        .map_err(|_| QueryError::illegal(format!("For input string: \"{prefix}\"")))?;
-    let bits = if v4 { 32 } else { 128 };
-    if !(0..=bits).contains(&len) {
-        return Err(QueryError::illegal(format!(
-            "Illegal prefix length [{len}] in [{t}]. Must be 0-32 for IPv4 ranges, 0-128 for IPv6 ranges"
-        )));
-    }
-    // InetAddressPoint.newPrefixQuery: an IPv4 prefix covers the 96 mapping bits too
-    let host = u128::MAX
-        .checked_shr((128 - bits + len) as u32)
-        .unwrap_or(0);
-    Ok(interval(k & !host, k | host))
+    })
 }
 
-/// A range query's `[gt, gte, lt, lte]` on an ip field (`ip`), or on a long or date range field
-/// once its bounds are epoch millis.
+/// A range query bound on a field `m` maps, as a key, like RangeType.parseValue.
+fn key(m: &FieldMapping, v: &Value) -> Result<u128, QueryError> {
+    let bad = || QueryError::illegal(format!("For input string: \"{}\"", text(v)));
+    let num = || es_index::json_num(v).ok_or_else(bad);
+    match m {
+        FieldMapping::Ip | FieldMapping::IpRange => ip_key(v),
+        FieldMapping::FloatRange => Ok(long_key(sortable_int(num()? as f32).into())),
+        FieldMapping::DoubleRange => Ok(long_key(sortable_long(num()?))),
+        FieldMapping::IntegerRange => {
+            let n = int(v).ok_or_else(bad)?;
+            match i32::try_from(n) {
+                Ok(n) => Ok(long_key(n.into())),
+                Err(_) => Err(QueryError::illegal(format!(
+                    "Value [{}] is out of range for an integer",
+                    text(v)
+                ))),
+            }
+        }
+        _ => int(v).map(long_key).ok_or_else(bad),
+    }
+}
+
+/// A key as Java's `toString` of the value it holds, which range errors show.
+fn show(m: &FieldMapping, k: u128) -> String {
+    match m {
+        FieldMapping::IpRange => {
+            let ip = std::net::Ipv6Addr::from(k);
+            match ip.to_ipv4_mapped() {
+                Some(v4) => format!("/{v4}"),
+                // Inet6Address names all eight groups
+                None => format!("/{}", ip.segments().map(|g| format!("{g:x}")).join(":")),
+            }
+        }
+        // the float's shortest digits, as Float.toString picks
+        FieldMapping::FloatRange => {
+            let f = (m.range_number(k) as f32).to_string();
+            crate::aggs::java_double(f.parse().unwrap_or(f64::NAN))
+        }
+        FieldMapping::DoubleRange => crate::aggs::java_double(m.range_number(k)),
+        _ => key_long(k).to_string(),
+    }
+}
+
+/// A range query's `[gt, gte, lt, lte]` on an ip or range field `m` maps, date bounds already
+/// epoch millis.
 pub(crate) fn range(
-    ip: bool,
+    m: &FieldMapping,
     field: String,
     [gt, gte, lt, lte]: [Option<&Value>; 4],
     relation: Relation,
 ) -> Result<Query, QueryError> {
-    let long = |v: &Value| {
-        int(v)
-            .map(long_key)
-            .ok_or_else(|| QueryError::illegal(format!("For input string: \"{}\"", text(v))))
-    };
-    let key = |v: &Value| if ip { ip_key(v) } else { long(v) };
-    let (min, max) = match ip {
-        true => (0, u128::MAX),
-        false => (long_key(i64::MIN), long_key(i64::MAX)),
-    };
+    let (min, max) = m.range_limits();
     let bound = |inclusive: Option<&Value>, exclusive: Option<&Value>| {
         Ok::<_, QueryError>(match (inclusive, exclusive) {
-            (Some(v), _) => Some((key(v)?, true)),
-            (_, Some(v)) => Some((key(v)?, false)),
+            (Some(v), _) => Some((key(m, v)?, true)),
+            (_, Some(v)) => Some((key(m, v)?, false)),
             _ => None,
         })
     };
     let (lower, upper) = (bound(gte, gt)?, bound(lte, lt)?);
     let (from, to) = (lower.map_or(min, |b| b.0), upper.map_or(max, |b| b.0));
     // RangeType.createQuery; a plain ip field's range does not check
-    if from > to && !ip {
-        let show = |k: u128| (k as u64 ^ 1 << 63) as i64;
+    if from > to && m.is_range() {
         return Err(QueryError::illegal(format!(
             "Range query `from` value ({}) is greater than `to` value ({})",
-            show(from),
-            show(to)
+            show(m, from),
+            show(m, to)
         )));
     }
     // an exclusive bound past the type's limits leaves an empty interval, which matches nothing
@@ -112,42 +113,11 @@ pub(crate) fn range(
     })
 }
 
-/// The inclusive `[from, to]` of a range field's value, its bounds parsed by `parse` (rounding
-/// up a `gt` or `lte` date when asked) and open ends at the long limits, like RangeFieldMapper.
-pub(crate) fn range_ends(
-    v: &Value,
-    parse: &dyn Fn(&Value, bool) -> Option<i64>,
-) -> Option<(i64, i64)> {
-    let o = v.as_object()?;
-    let end = |k: &str| {
-        o.get(k)
-            .filter(|v| !v.is_null())
-            .map(|v| parse(v, k == "gt" || k == "lte"))
-    };
-    let from = match (end("gte"), end("gt")) {
-        (Some(x), _) => x?,
-        (_, Some(x)) => x?.checked_add(1)?,
-        _ => i64::MIN,
-    };
-    let to = match (end("lte"), end("lt")) {
-        (Some(x), _) => x?,
-        (_, Some(x)) => x?.checked_sub(1)?,
-        _ => i64::MAX,
-    };
-    Some((from, to))
-}
-
 /// A document value's interval of keys: an ip's single address, or a range field's range.
 pub(crate) fn doc_interval(mapping: Option<&FieldMapping>, v: &Value) -> Option<(u128, u128)> {
-    let longs = |(a, b)| (long_key(a), long_key(b));
     match mapping? {
         FieldMapping::Ip => ip_key(v).ok().map(|k| (k, k)),
-        FieldMapping::LongRange => range_ends(v, &|v, _| int(v)).map(longs),
-        FieldMapping::DateRange { format } => range_ends(v, &|v, round_up| {
-            let utc = es_index::tz::TimeZone::UTC;
-            es_index::date_millis_in(format.as_deref(), None, v, &utc, round_up)
-        })
-        .map(longs),
+        m if m.is_range() => m.range_keys(v).flatten(),
         _ => None,
     }
 }
