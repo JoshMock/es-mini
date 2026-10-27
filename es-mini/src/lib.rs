@@ -214,8 +214,7 @@ fn persisted(dir: &std::path::Path) -> Result<(Router, AppState), String> {
                 };
                 match saved.unwrap_or_else(|e| Err(e.to_string())) {
                     Ok(()) => res,
-                    // ponytail: the change stays applied in memory but its translog operations are
-                    // dropped, so only the next flush persists it; put them back to retry sooner
+                    // The change stays applied in memory; the next write or sync retries its log.
                     Err(e) => {
                         tracing::error!("saving {}: {e}", dir.display());
                         AppError::Io(format!(

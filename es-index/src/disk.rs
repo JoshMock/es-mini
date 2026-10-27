@@ -1097,14 +1097,24 @@ pub fn recover(data_dir: &Path) -> es_codec::Result<()> {
 /// rewritten: a save writes one new segment of the documents changed since the last save, and
 /// may merge a few similar-size segments into one, like Lucene's `TieredMergePolicy`.
 pub fn save(data_dir: &Path, indices: &Indices) -> es_codec::Result<()> {
-    let _one_at_a_time = SAVING
+    let mut saving = SAVING
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    commit(data_dir, indices)
+    commit(data_dir, indices)?;
+    forget_retries(&mut saving, data_dir);
+    Ok(())
 }
 
-/// Serializes saves and persists process-wide.
-static SAVING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// Serializes saves and persists process-wide, and keeps the operations of failed translog
+/// appends, by translog directory, for the next persist or sync to log first.
+static SAVING: std::sync::Mutex<Retries> = std::sync::Mutex::new(Retries::new());
+
+type Retries = std::collections::BTreeMap<std::path::PathBuf, Vec<es_codec::translog::Op>>;
+
+/// A commit holds every write, so no translog operation under `data_dir` is left to retry.
+fn forget_retries(retries: &mut Retries, data_dir: &Path) {
+    retries.retain(|dir, _| !dir.starts_with(data_dir));
+}
 
 /// Elasticsearch's `index.translog.flush_threshold_size`: [`persist`] commits segments (a flush)
 /// once a shard's translog outgrows it, bounding how much a restart replays.
@@ -1150,17 +1160,29 @@ pub struct Pending {
         std::path::PathBuf,
         es_codec::translog::TranslogCheckpoint,
         Vec<u8>,
+        Vec<es_codec::translog::Op>,
     )>,
-    _one_at_a_time: std::sync::MutexGuard<'static, ()>,
+    saving: std::sync::MutexGuard<'static, Retries>,
 }
 
 impl Pending {
-    /// Appends and fsyncs the taken writes to their translogs.
-    pub fn finish(self) -> es_codec::Result<()> {
-        for (dir, cp, bytes) in &self.appends {
+    /// Appends and fsyncs the taken writes to their translogs. Those not appended when one
+    /// fails are logged first by the next persist or sync.
+    pub fn finish(mut self) -> es_codec::Result<()> {
+        while let Some((dir, cp, bytes, _)) = self.appends.first() {
             append(dir, cp, bytes)?;
+            self.appends.remove(0);
         }
         Ok(())
+    }
+}
+
+impl Drop for Pending {
+    /// Keeps the operations not appended (a failed append or flush) for a retry.
+    fn drop(&mut self) {
+        for (dir, _, _, ops) in self.appends.drain(..) {
+            self.saving.insert(dir, ops);
+        }
     }
 }
 
@@ -1187,7 +1209,7 @@ pub fn sync_interval(indices: &crate::aliases::Map<impl std::borrow::Borrow<Inde
 fn log(data_dir: &Path, indices: &mut Indices, all: bool) -> es_codec::Result<Pending> {
     let mut pending = Pending {
         appends: vec![],
-        _one_at_a_time: SAVING
+        saving: SAVING
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner),
     };
@@ -1215,11 +1237,10 @@ fn log(data_dir: &Path, indices: &mut Indices, all: bool) -> es_codec::Result<Pe
         for ((dir, cp), ix) in logs.into_iter().zip(indices.values_mut()) {
             let deferred =
                 ix.settings.get(crate::index_settings::TRANSLOG_DURABILITY) == Some("async");
-            let ops = if all || !deferred {
-                ix.take_unlogged()
-            } else {
-                vec![]
-            };
+            let mut ops = pending.saving.remove(&dir).unwrap_or_default();
+            if all || !deferred {
+                ops.extend(ix.take_unlogged());
+            }
             // The checkpoint is rewritten on every append, so its age is the shard's idle time.
             let idle = || {
                 std::fs::metadata(dir.join("translog.ckp"))
@@ -1235,17 +1256,18 @@ fn log(data_dir: &Path, indices: &mut Indices, all: bool) -> es_codec::Result<Pe
             flush |= (cp.offset as u64 + bytes.len() as u64) > flush_threshold(ix);
             pending
                 .appends
-                .push((dir, advance(cp, &ops, bytes.len()), bytes));
+                .push((dir, advance(cp, &ops, bytes.len()), bytes, ops));
         }
     }
     if flush {
         commit(data_dir, indices)?;
+        pending.appends.clear();
+        forget_retries(&mut pending.saving, data_dir);
         // ponytail: rereads every term of every index; cache per segment if commits get slow
         for (meta, ix) in metas.iter().zip(indices.values_mut()) {
             drop(ix.take_unlogged());
             ix.committed(commit_stats(&shard_dir(data_dir, &meta.uuid))?);
         }
-        pending.appends.clear();
     }
     Ok(pending)
 }

@@ -277,3 +277,55 @@ fn replacing_a_committed_document_counts_it_once() {
     // The deleted "fox" in the segment, and "cat" in memory.
     assert_eq!((s.docs, s.total_terms, s.doc_freq["fox"]), (2.0, 2.0, 1.0));
 }
+
+/// A failed append keeps its operations, so the next persist logs them without waiting for a
+/// flush.
+#[test]
+fn write_failure_handling_failed_appends_are_retried() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = scratch("retry");
+    let mut indices = created();
+    disk::persist(&dir, &mut indices).unwrap();
+    let first = ckp(&dir).generation;
+    let tlog = shard(&dir).join(format!("translog/translog-{first}.tlog"));
+    indices.get_mut("idx").unwrap().put("2", json!({}));
+    std::fs::set_permissions(&tlog, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let failed = disk::persist(&dir, &mut indices);
+    std::fs::set_permissions(&tlog, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(failed.is_err());
+    indices.get_mut("idx").unwrap().put("3", json!({}));
+    disk::persist(&dir, &mut indices).unwrap();
+    // Logged in order, not flushed.
+    let cp = ckp(&dir);
+    assert_eq!((cp.generation, cp.num_ops), (first, 2));
+    let back = disk::open(&dir).unwrap();
+    assert!(back["idx"].get("2").is_some());
+    assert!(back["idx"].get("3").is_some());
+}
+
+/// A flush that fails after taking the writes to log keeps them for the next persist too.
+#[test]
+fn write_failure_handling_failed_flushes_keep_their_operations() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = scratch("retry-flush");
+    let mut indices = created();
+    let ix = indices.get_mut("idx").unwrap();
+    ix.settings
+        .merge(&json!({"index.translog.flush_threshold_size": "1kb"}));
+    disk::persist(&dir, &mut indices).unwrap();
+    let first = ckp(&dir).generation;
+    let big = "x".repeat(1024);
+    indices
+        .get_mut("idx")
+        .unwrap()
+        .put("big", json!({ "s": big }));
+    let segments = shard(&dir).join("index");
+    std::fs::set_permissions(&segments, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let failed = disk::persist(&dir, &mut indices);
+    std::fs::set_permissions(&segments, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(failed.is_err());
+    // Retried, the operation still outgrows the threshold, so the next persist flushes it.
+    disk::persist(&dir, &mut indices).unwrap();
+    assert!(ckp(&dir).generation > first, "no flush");
+    assert!(disk::open(&dir).unwrap()["idx"].get("big").is_some());
+}
