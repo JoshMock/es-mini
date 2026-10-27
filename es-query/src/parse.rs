@@ -112,6 +112,17 @@ const MATCH_KEYS: &[&str] = &[
     "_name",
 ];
 
+/// A `field^boost` name and its boost (1 without one), as ES's `parseFieldsAndWeights`.
+fn field_boost(f: &str) -> Result<(&str, f64), String> {
+    match f.split_once('^') {
+        None => Ok((f, 1.0)),
+        Some((f, b)) => match b.parse::<f32>() {
+            Ok(b) => Ok((f, b.into())),
+            Err(_) => Err(format!("For input string: \"{b}\"")),
+        },
+    }
+}
+
 fn case_insensitive(o: &serde_json::Map<String, Value>) -> bool {
     o.get("case_insensitive").and_then(Value::as_bool) == Some(true)
 }
@@ -543,8 +554,7 @@ fn parse_kind(kind: &str, body: &Value) -> Result<Query, QueryError> {
             )?;
             o.get("query")
                 .ok_or("No text specified for multi_match query")?;
-            // ponytail: no cross_fields or bool_prefix types, field boosts, field patterns or
-            // default `*` fields
+            // ponytail: no cross_fields or bool_prefix types, field patterns or default `*` fields
             let (field_kind, params, tie) = match o.get("type").and_then(Value::as_str) {
                 None | Some("best_fields") => ("match", &["query", "operator"][..], 0.0),
                 Some("most_fields") => ("match", &["query", "operator"][..], 1.0),
@@ -573,8 +583,16 @@ fn parse_kind(kind: &str, body: &Value) -> Result<Query, QueryError> {
                 .collect();
             let mut queries = (fields.iter())
                 .map(|f| match f.as_str() {
-                    Some(f) if !f.contains(['^', '*']) => {
-                        parse_kind(field_kind, &serde_json::json!({ f: p }))
+                    Some(f) if !f.contains('*') => {
+                        let (f, boost) = field_boost(f)?;
+                        let query = parse_kind(field_kind, &serde_json::json!({ f: p }))?;
+                        Ok::<_, QueryError>(match boost == 1.0 {
+                            true => query,
+                            false => Query::Boosted {
+                                boost,
+                                query: Box::new(query),
+                            },
+                        })
                     }
                     _ => Err(format!("[multi_match] field [{f}] is not supported").into()),
                 })

@@ -1441,3 +1441,30 @@ fn query_dsl_gaps_ranges_on_text_compare_terms() {
     assert_eq!(qs("title:>=RAB"), ["1", "2"]);
     assert_eq!(qs("tag:[P TO Q]"), ["4"]);
 }
+
+#[test]
+fn query_dsl_gaps_multi_match_field_boosts() {
+    let idx = index();
+    let scores = |q: Value| {
+        let r = search(&idx, &SearchRequest::parse(&json!({ "query": q })).unwrap());
+        let mut s: Vec<_> = (r.hits.iter())
+            .map(|h| (h.id.to_owned(), h.score.unwrap()))
+            .collect();
+        s.sort_by(|a, b| a.0.cmp(&b.0));
+        s
+    };
+    let base = scores(json!({"match": {"title": "quick"}}));
+    let triple: Vec<_> = base.iter().map(|(id, s)| (id.clone(), s * 3.0)).collect();
+    let mm = |fields: Value, want: &[(String, f32)]| {
+        let got = scores(json!({"multi_match": {"query": "quick", "fields": fields}}));
+        assert_eq!(got.len(), want.len());
+        for ((id, s), (wid, w)) in got.iter().zip(want) {
+            assert!(id == wid && (s - w).abs() < 1e-5, "{got:?} vs {want:?}");
+        }
+    };
+    mm(json!(["title^3"]), &triple);
+    mm(json!(["title^3", "tag"]), &triple);
+    mm(json!(["title^1"]), &base);
+    let err = parse_query(&json!({"multi_match": {"query": "q", "fields": ["title^x"]}}));
+    assert!(err.is_err());
+}
