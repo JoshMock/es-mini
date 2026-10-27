@@ -40,4 +40,9 @@ count 1 '{"match_phrase":{"m":{"query":"cat red","slop":100}}}'
 # Dynamic object fields, written under their dotted paths.
 count 1 '{"term":{"o.n":5}}'
 count 1 '{"match":{"o.s":"x"}}'
+# Text mapped with `store` comes back from the Lucene stored field, not `_source`.
+got=$(req POST /f/_search '{"stored_fields":["st"],"query":{"ids":{"values":["1"]}}}' |
+  python3 -c 'import json,sys;print(json.load(sys.stdin)["hits"]["hits"][0].get("fields"))')
+want="{'st': ['one two', 'three']}"
+if [ "$got" = "$want" ]; then echo "ok   stored_fields st"; else echo "FAIL stored_fields st: want $want, got $got"; fail=1; fi
 exit $fail

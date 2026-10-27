@@ -459,6 +459,8 @@ struct UserFields {
     norms: Vec<(i32, Vec<Option<i8>>)>,
     terms: Vec<(i32, Vec<es_codec::terms::TermPostings>)>,
     points: Vec<(i32, es_codec::points::PointValues)>,
+    /// `(field number, values per doc)` of the fields mapped with `store`
+    stored: Vec<(i32, Vec<Vec<String>>)>,
 }
 
 /// Converts every value, or `None` if any cannot be.
@@ -533,6 +535,9 @@ fn user_fields(
                 }
                 if m.is_empty() {
                     continue;
+                }
+                if matches!(mapping, M::Text { store: true }) {
+                    out.stored.push((number, texts));
                 }
                 out.norms.push((
                     number,
@@ -1212,13 +1217,18 @@ fn write_docs(
         terms::TermPostings,
         uid::encode_id,
     };
-    let stored: Vec<_> = docs
-        .iter()
-        .map(|(id, d)| {
-            vec![
+    let user = user_fields(mappings, docs, fields);
+    let stored: Vec<_> = (docs.iter().enumerate())
+        .map(|(doc, (id, d))| {
+            let mut stored = vec![
                 (0, StoredValue::Bytes(encode_id(id))),
                 (1, StoredValue::Bytes(d.source.to_string().into_bytes())),
-            ]
+            ];
+            for (n, values) in &user.stored {
+                let text = |v: &String| (*n, StoredValue::String(v.clone()));
+                stored.extend(values[doc].iter().map(text));
+            }
+            stored
         })
         .collect();
     let col = |f: fn(&Document) -> u64| docs.iter().map(|(_, d)| vec![f(d) as i64]).collect();
@@ -1235,7 +1245,6 @@ fn write_docs(
         .collect();
     ids.sort();
     let ids = TermPostings::from_sorted(ids);
-    let user = user_fields(mappings, docs, fields);
     let mut all_fields = fields.to_vec();
     all_fields.extend(user.fields);
     let mut terms = vec![(0, ids)];
