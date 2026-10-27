@@ -1,5 +1,5 @@
 //! Lucene 10 BKD points (`.kdm`/`.kdi`/`.kdd`): a reader of one-dimensional trees that narrows a
-//! range by walking them, and their writer (`BKDWriter` for one dimension).
+//! range by walking them, and a writer of one- and two-dimensional trees (`BKDWriter`).
 
 use crate::{
     Result, SegmentReader,
@@ -350,52 +350,70 @@ pub type PointValues = Vec<(u32, Vec<u8>)>;
 /// Points per leaf (`BKDConfig.DEFAULT_MAX_POINTS_IN_LEAF_NODE`).
 const LEAF: usize = 512;
 
-/// `(meta, index, data)` files, as Lucene's `OneDimensionBKDWriter` writes them. `fields` is
-/// `(field number, (doc, value) pairs)`; every value in a field has the same width, and a doc
-/// may have none or several, but a field has at least one.
+/// `(meta, index, data)` files, as Lucene's `BKDWriter` flushes them. `fields` is
+/// `(field number, dimensions, (doc, value) pairs)`: a value is its dimensions' sortable bytes
+/// side by side, all values of a field have the same width, and a doc may have none or several,
+/// but a field has at least one. One or two dimensions, all indexed.
 pub fn write_points(
-    fields: &[(i32, PointValues)],
+    fields: &[(i32, usize, PointValues)],
     id: &[u8; ID_LEN],
 ) -> crate::Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
     let (mut meta, mut index, mut data) = (Output::default(), Output::default(), Output::default());
     meta.index_header("Lucene90PointsFormatMeta", 1, id, "");
     index.index_header("Lucene90PointsFormatIndex", 1, id, "");
     data.index_header("Lucene90PointsFormatData", 1, id, "");
-    for (number, pairs) in fields {
-        let Some(width) = pairs.first().map(|p| p.1.len()) else {
+    for (number, dims, pairs) in fields {
+        let Some(packed) = pairs.first().map(|p| p.1.len()) else {
             return crate::err(format!("points field {number} has no values"));
         };
-        if pairs.iter().any(|p| p.1.len() != width) {
+        // ponytail: more dimensions recompute their bounds every few splits; port that with them
+        if !(1..=2).contains(dims) || packed % dims != 0 {
+            return crate::err(format!("points field {number} has {dims} dimensions"));
+        }
+        if pairs.iter().any(|p| p.1.len() != packed) {
             return crate::err(format!("points field {number} has values of mixed widths"));
         }
-        // by value, then doc; pairs are in doc order
-        let mut sorted: Vec<(&[u8], u32)> = pairs.iter().map(|p| (p.1.as_slice(), p.0)).collect();
-        sorted.sort();
-        let data_start = data.0.len() as u64;
-        let mut fps = Vec::new();
-        for leaf in sorted.chunks(LEAF) {
-            fps.push(data.0.len() as u64);
-            write_leaf(&mut data, leaf, width);
+        let (dims, w) = (*dims, packed / dims);
+        let mut points: Vec<(&[u8], u32)> = pairs.iter().map(|p| (p.1.as_slice(), p.0)).collect();
+        let (mut lo, mut hi) = (points[0].0.to_vec(), points[0].0.to_vec());
+        for (v, _) in &points {
+            for r in (0..dims).map(|d| d * w..(d + 1) * w) {
+                if v[r.clone()] < lo[r.clone()] {
+                    lo[r.clone()].copy_from_slice(&v[r.clone()]);
+                }
+                if v[r.clone()] > hi[r.clone()] {
+                    hi[r.clone()].copy_from_slice(&v[r]);
+                }
+            }
         }
-        let splits: Vec<&[u8]> = sorted.chunks(LEAF).skip(1).map(|l| l[0].0).collect();
-        let packed = pack_index(&fps, &splits, 0, &mut vec![0; width], false, 0, fps.len());
+        let leaves = points.len().div_ceil(LEAF);
+        let mut tree = Bkd {
+            dims,
+            w,
+            fps: vec![0; leaves],
+            splits: vec![(0, &[][..]); leaves - 1],
+            parent_splits: vec![0; dims],
+        };
+        let data_start = data.0.len() as u64;
+        tree.build(&mut data, &mut points, 0, leaves, &lo, &hi);
+        let packed_index = pack_index(&tree, 0, &mut vec![0; packed], false, 0, leaves);
         meta.bytes(&number.to_le_bytes());
         meta.header("BKD", 10);
-        meta.vint(1);
-        meta.vint(1);
+        meta.vint(dims as i32);
+        meta.vint(dims as i32);
         meta.vint(LEAF as i32);
-        meta.vint(width as i32);
-        meta.vint(fps.len() as i32);
-        meta.bytes(sorted[0].0);
-        meta.bytes(sorted[sorted.len() - 1].0);
-        meta.vlong(sorted.len() as i64);
+        meta.vint(w as i32);
+        meta.vint(leaves as i32);
+        meta.bytes(&lo);
+        meta.bytes(&hi);
+        meta.vlong(pairs.len() as i64);
         let mut docs: Vec<u32> = pairs.iter().map(|p| p.0).collect();
         docs.dedup(); // pairs are in doc order
         meta.vint(docs.len() as i32);
-        meta.vint(packed.len() as i32);
+        meta.vint(packed_index.len() as i32);
         meta.long(data_start as i64);
         meta.long(index.0.len() as i64);
-        index.bytes(&packed);
+        index.bytes(&packed_index);
     }
     let (index, data) = (index.finish(), data.finish());
     meta.bytes(&(-1i32).to_le_bytes());
@@ -404,35 +422,162 @@ pub fn write_points(
     Ok((meta.finish(), index, data))
 }
 
-/// `OneDimensionBKDWriter.writeLeafBlock`: doc ids, the common prefix, then the values all
-/// equal, by distinct value (low cardinality), or by runs of their first differing byte,
-/// whichever is smaller.
-fn write_leaf(out: &mut Output, leaf: &[(&[u8], u32)], w: usize) {
+/// One field's tree as `BKDWriter.writeFieldNDims` builds it: leaf file pointers, and the split
+/// dimension and value of each inner node, by the leaf it ends after.
+struct Bkd<'a> {
+    dims: usize,
+    w: usize,
+    fps: Vec<u64>,
+    splits: Vec<(usize, &'a [u8])>,
+    /// How often each dimension split the ancestors of the node being built
+    parent_splits: Vec<usize>,
+}
+
+impl<'a> Bkd<'a> {
+    /// `BKDWriter.build`: writes `n` leaves from leaf `off` of `pts`, whose values lie in
+    /// `lo..=hi`. An inner node splits the dimension `split` picks, leaving `left_leaves(n)` full
+    /// leaves of the smallest values (then lowest docs) on the left, so one dimension makes
+    /// consecutive leaves of the sorted values.
+    // ponytail: Lucene's selector and sorter order points equal in the split (or leaf sort)
+    // dimension and doc arbitrarily; here the other dimension breaks the tie, so such points can
+    // sit on another side of a split or in another order than in Lucene (the tree reads the same)
+    fn build(
+        &mut self,
+        data: &mut Output,
+        pts: &mut [(&'a [u8], u32)],
+        off: usize,
+        n: usize,
+        lo: &[u8],
+        hi: &[u8],
+    ) {
+        if n == 1 {
+            self.fps[off] = data.0.len() as u64;
+            write_leaf(data, pts, self.dims, self.w);
+            return;
+        }
+        let dim = self.split(lo, hi);
+        let r = dim * self.w..(dim + 1) * self.w;
+        let left = left_leaves(n);
+        let mid = left * LEAF;
+        pts.select_nth_unstable_by(mid, |a, b| by_dim(a, b, &r));
+        let value: &'a [u8] = pts[mid].0;
+        let split = &value[r.clone()];
+        self.splits[off + left - 1] = (dim, split);
+        let (mut left_hi, mut right_lo) = (hi.to_vec(), lo.to_vec());
+        left_hi[r.clone()].copy_from_slice(split);
+        right_lo[r].copy_from_slice(split);
+        self.parent_splits[dim] += 1;
+        let (l, rt) = pts.split_at_mut(mid);
+        self.build(data, l, off, left, lo, &left_hi);
+        self.build(data, rt, off + left, n - left, &right_lo, hi);
+        self.parent_splits[dim] -= 1;
+    }
+
+    /// `BKDWriter.split`: a dimension split less than half as often as another (unless all its
+    /// values are equal), else the one whose values span the most.
+    fn split(&self, lo: &[u8], hi: &[u8]) -> usize {
+        let w = self.w;
+        let most = self.parent_splits.iter().max().copied().unwrap_or(0);
+        let dim = |d: usize| d * w..(d + 1) * w;
+        if let Some(d) =
+            (0..self.dims).find(|&d| self.parent_splits[d] < most / 2 && lo[dim(d)] != hi[dim(d)])
+        {
+            return d;
+        }
+        // big-endian `hi - lo`
+        let span = |d: usize| {
+            let (mut out, mut borrow) = (vec![0u8; w], 0i16);
+            for i in (0..w).rev() {
+                let x = i16::from(hi[d * w + i]) - i16::from(lo[d * w + i]) - borrow;
+                borrow = i16::from(x < 0);
+                out[i] = x.rem_euclid(256) as u8;
+            }
+            out
+        };
+        (1..self.dims).fold(0, |best, d| if span(d) > span(best) { d } else { best })
+    }
+}
+
+/// Orders points by the bytes of dimension `r`, then doc, then the whole value.
+fn by_dim(a: &(&[u8], u32), b: &(&[u8], u32), r: &std::ops::Range<usize>) -> Ordering {
+    (&a.0[r.clone()], a.1, a.0).cmp(&(&b.0[r.clone()], b.1, b.0))
+}
+
+/// A leaf as `BKDWriter.build` (and `OneDimensionBKDWriter.writeLeafBlock`) writes it: doc ids,
+/// each dimension's common prefix, then the values all equal, by distinct value (low
+/// cardinality), or by runs of their first differing byte in the sorted dimension, whichever is
+/// smaller. Points sort by the dimension whose first byte after its prefix takes the fewest
+/// values.
+fn write_leaf(out: &mut Output, leaf: &mut [(&[u8], u32)], dims: usize, w: usize) {
+    let dim = |d: usize| d * w..(d + 1) * w;
+    let first = leaf[0].0;
+    let prefix: Vec<usize> = (0..dims)
+        .map(|d| {
+            (leaf[1..].iter())
+                .map(|p| (first[dim(d)].iter().zip(&p.0[dim(d)])).take_while(|(a, b)| a == b))
+                .map(Iterator::count)
+                .fold(w, usize::min)
+        })
+        .collect();
+    let mut sorted = (0, usize::MAX);
+    for d in (0..dims).filter(|&d| prefix[d] < w) {
+        // like Lucene, the first value's byte is not counted
+        let mut used = [false; 256];
+        leaf[1..]
+            .iter()
+            .for_each(|p| used[p.0[d * w + prefix[d]] as usize] = true);
+        let n = used.iter().filter(|u| **u).count();
+        if n < sorted.1 {
+            sorted = (d, n);
+        }
+    }
+    let sorted = sorted.0;
+    leaf.sort_by(|a, b| by_dim(a, b, &dim(sorted)));
     out.vint(leaf.len() as i32);
     write_doc_ids(out, &leaf.iter().map(|p| p.1).collect::<Vec<_>>());
-    let (first, last) = (leaf[0].0, leaf[leaf.len() - 1].0);
-    let prefix = first.iter().zip(last).take_while(|(a, b)| a == b).count();
-    out.vint(prefix as i32);
-    out.bytes(&first[..prefix]);
-    if prefix == w {
+    for (d, &p) in prefix.iter().enumerate() {
+        out.vint(p as i32);
+        out.bytes(&leaf[0].0[d * w..d * w + p]);
+    }
+    let packed = dims * w;
+    let prefix_sum: usize = prefix.iter().sum();
+    if prefix_sum == packed {
         out.byte(0xff);
         return;
     }
+    // each dimension's bytes after `prefix` (plus `extra` in the sorted dimension)
+    let suffixes = |out: &mut Output, v: &[u8], extra: usize| {
+        for d in 0..dims {
+            let skip = prefix[d] + if d == sorted { extra } else { 0 };
+            out.bytes(&v[d * w + skip..(d + 1) * w]);
+        }
+    };
+    // the leaf's own bounds of each dimension, after the prefix
+    let bounds = |out: &mut Output| {
+        if dims == 1 {
+            return;
+        }
+        for d in (0..dims).filter(|&d| prefix[d] < w) {
+            let r = d * w + prefix[d]..(d + 1) * w;
+            let values = leaf.iter().map(|p| &p.0[r.clone()]);
+            out.bytes(values.clone().min().unwrap_or_default());
+            out.bytes(values.max().unwrap_or_default());
+        }
+    };
     let distinct = 1 + leaf.windows(2).filter(|p| p[0].0 != p[1].0).count();
-    // runs of at most 255 values sharing the byte after the prefix
+    // runs of at most 255 values sharing the byte after the sorted dimension's prefix
+    let at = sorted * w + prefix[sorted];
     let runs = |out: Option<&mut Output>| {
         let (mut i, mut n, mut out) = (0, 0, out);
         while i < leaf.len() {
-            let b = leaf[i].0[prefix];
+            let b = leaf[i].0[at];
             let run = (leaf[i..].iter().take(255))
-                .take_while(|p| p.0[prefix] == b)
+                .take_while(|p| p.0[at] == b)
                 .count();
             if let Some(out) = out.as_deref_mut() {
                 out.byte(b);
                 out.byte(run as u8);
-                leaf[i..i + run]
-                    .iter()
-                    .for_each(|p| out.bytes(&p.0[prefix + 1..]));
+                leaf[i..i + run].iter().for_each(|p| suffixes(out, p.0, 1));
             }
             (i, n) = (i + run, n + 1);
         }
@@ -442,18 +587,20 @@ fn write_leaf(out: &mut Output, leaf: &[(&[u8], u32)], w: usize) {
         (0, 1)
     } else {
         (
-            leaf.len() * (w - prefix - 1) + 2 * runs(None),
-            distinct * (w - prefix + 1),
+            leaf.len() * (packed - prefix_sum - 1) + 2 * runs(None),
+            distinct * (packed - prefix_sum + 1),
         )
     };
     if low <= high {
         out.byte(0xfe);
+        bounds(out);
         for group in leaf.chunk_by(|a, b| a.0 == b.0) {
             out.vint(group.len() as i32);
-            out.bytes(&group[0].0[prefix..]);
+            suffixes(out, group[0].0, 0);
         }
     } else {
-        out.byte(0);
+        out.byte(sorted as u8);
+        bounds(out);
         runs(Some(out));
     }
 }
@@ -541,19 +688,18 @@ fn left_leaves(n: usize) -> usize {
     full / 2 + (n - full).min(full / 2)
 }
 
-/// `BKDWriter.recursePackIndex` for one dimension: the packed index of `n` leaves from `off`,
-/// whose leaf file pointers are `fps` and split values `splits` (the first value of each leaf
-/// but the first). `last` is the nearest ancestor's split value, `min_fp` the leftmost leaf of
-/// the parent; a left child (`negative`) stores neither its pointer nor a positive delta.
+/// `BKDWriter.recursePackIndex`: the packed index of `n` leaves of `tree` from `off`. `last`
+/// holds each dimension's nearest ancestor split value, `min_fp` the leftmost leaf of the parent;
+/// a left child (`negative`) stores neither its pointer nor a positive delta.
 fn pack_index(
-    fps: &[u64],
-    splits: &[&[u8]],
+    tree: &Bkd,
     min_fp: u64,
     last: &mut [u8],
     negative: bool,
     off: usize,
     n: usize,
 ) -> Vec<u8> {
+    let fps = &tree.fps;
     let mut out = Output::default();
     if !negative {
         out.vlong((fps[off] - min_fp) as i64);
@@ -562,30 +708,29 @@ fn pack_index(
         return out.0;
     }
     let left = left_leaves(n);
-    let split = splits[off + left - 1];
+    let (dim, split) = tree.splits[off + left - 1];
     let w = split.len();
-    let prefix = split
-        .iter()
-        .zip(last.iter())
+    let last_dim = &mut last[dim * w..(dim + 1) * w];
+    let prefix = (split.iter().zip(last_dim.iter()))
         .take_while(|(a, b)| a == b)
         .count();
     let delta = if prefix < w {
-        (i32::from(split[prefix]) - i32::from(last[prefix])).abs()
+        (i32::from(split[prefix]) - i32::from(last_dim[prefix])).abs()
     } else {
         0
     };
-    out.vint(delta * (w as i32 + 1) + prefix as i32);
+    out.vint((delta * (w as i32 + 1) + prefix as i32) * tree.dims as i32 + dim as i32);
     if prefix + 1 < w {
         out.bytes(&split[prefix + 1..]);
     }
     let saved = last.to_vec();
-    last[prefix..].copy_from_slice(&split[prefix..]);
-    let left_bytes = pack_index(fps, splits, fps[off], last, true, off, left);
+    last[dim * w + prefix..(dim + 1) * w].copy_from_slice(&split[prefix..]);
+    let left_bytes = pack_index(tree, fps[off], last, true, off, left);
     if left > 1 {
         out.vint(left_bytes.len() as i32);
     }
     out.bytes(&left_bytes);
-    let right = pack_index(fps, splits, fps[off], last, false, off + left, n - left);
+    let right = pack_index(tree, fps[off], last, false, off + left, n - left);
     out.bytes(&right);
     last.copy_from_slice(&saved);
     out.0
@@ -659,7 +804,7 @@ mod tests {
                     .enumerate()
                     .flat_map(|(d, v)| v.iter().map(move |n| (d as u32, sortable_bytes(*n, 8))))
                     .collect();
-                let (m, i, d) = write_points(&[(f.number, pairs)], &seg.info.id).unwrap();
+                let (m, i, d) = write_points(&[(f.number, 1, pairs)], &seg.info.id).unwrap();
                 let name = |ext: &str| {
                     r.cfs
                         .names()

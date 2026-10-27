@@ -85,7 +85,13 @@ pub fn write_segment(dir: &Path, s: &NewSegment) -> Result<SegmentCommitInfo> {
         ("_Lucene90_0.dvs".into(), empty_skip_index(&s.id)),
     ];
     if !s.points.is_empty() {
-        let (m, i, d) = crate::points::write_points(s.points, &s.id)?;
+        let points = (s.points.iter())
+            .map(|(n, p)| match s.fields.iter().find(|f| f.number == *n) {
+                Some(f) => Ok((*n, f.point_dimensions as usize, p.clone())),
+                None => crate::err(format!("points for unknown field number {n}")),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let (m, i, d) = crate::points::write_points(&points, &s.id)?;
         files.extend([(".kdm".into(), m), (".kdi".into(), i), (".kdd".into(), d)]);
     }
     for (ext, bytes) in [

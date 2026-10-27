@@ -1,5 +1,5 @@
-//! Multi-leaf BKD trees written by real Lucene 10.5.1: see tests/gen/GenPoints.java, regenerate
-//! with tests/gen/gen_docker.sh Points points.
+//! Multi-leaf BKD trees written by real Lucene 10.5.1: see tests/gen/GenPoints.java and
+//! GenRanges.java, regenerate with tests/gen/gen_docker.sh Points points (or Ranges ranges).
 
 mod common;
 
@@ -106,7 +106,50 @@ fn written_trees_match_lucene() {
             let pairs = (expected(name).into_iter())
                 .map(|(d, v)| (d, sortable_bytes(v, width)))
                 .collect();
-            (f.number, pairs)
+            (f.number, 1, pairs)
+        })
+        .collect();
+    let (meta, index, data) = write_points(&fields, &r.seg.info.id).unwrap();
+    for (ext, ours) in [(".kdm", meta), (".kdi", index), (".kdd", data)] {
+        let real = r.cfs.file(ext).unwrap().unwrap();
+        let at = (real.iter().zip(&ours)).position(|(a, b)| a != b);
+        assert!(
+            at.is_none() && real.len() == ours.len(),
+            "{ext} differs at {at:?}"
+        );
+    }
+}
+
+/// `(doc, from, to)` of every LongRange tests/gen/GenRanges.java wrote for `field`.
+fn expected_ranges(field: &str) -> Vec<(u32, i64, i64)> {
+    (0..3000)
+        .flat_map(|d: i64| {
+            let ranges = match field {
+                "wide" => vec![((d - 1500) * 1_000_003, (d - 1500) * 1_000_003 + d * 7)],
+                "few" if d % 3 == 0 => vec![(d % 5, d % 5 + 10), (-1, d % 7)],
+                "same" if d % 100 == 0 => vec![(3, 9)],
+                _ => vec![],
+            };
+            ranges.into_iter().map(move |(f, t)| (d as u32, f, t))
+        })
+        .collect()
+}
+
+/// es-codec writes the same two-dimensional trees as Lucene's flush for the same ranges.
+#[test]
+fn written_range_trees_match_lucene() {
+    use es_codec::points::{sortable_bytes, write_points};
+    let r = common::open("ranges");
+    // in the order Lucene's flush wrote them (its field hash table's)
+    let fields: Vec<_> = ["few", "wide", "same"]
+        .iter()
+        .map(|name| {
+            let f = r.field(name).unwrap();
+            assert_eq!((f.point_dimensions, f.point_num_bytes), (2, 8));
+            let pairs = (expected_ranges(name).into_iter())
+                .map(|(d, from, to)| (d, [sortable_bytes(from, 8), sortable_bytes(to, 8)].concat()))
+                .collect();
+            (f.number, 2, pairs)
         })
         .collect();
     let (meta, index, data) = write_points(&fields, &r.seg.info.id).unwrap();
