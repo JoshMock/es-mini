@@ -667,7 +667,7 @@ fn user_fields(
                 (IndexOptions::Docs, DocValuesType::SortedSet, true)
             }
             // ponytail: ranges are not indexed on disk; their `_source` is kept
-            // `nested` holds objects, which never reach this match
+            // `nested` objects are left out too (see `UserFields`)
             M::LongRange | M::DateRange { .. } | M::Nested => continue,
             M::Ip => {
                 // Like ES: points and sorted-set doc values of the 16-byte encoding, no postings.
