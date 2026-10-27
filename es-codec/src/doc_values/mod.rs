@@ -84,7 +84,7 @@ mod tests {
         let id = [5u8; 16];
         let v = vec![10, -3, 25, 7];
         let per_doc = v.iter().map(|x| vec![*x]).collect();
-        let (m, d) = write_doc_values_with(&[], &[(2, per_doc)], &[], &id, "Lucene90_0");
+        let (m, d) = write_doc_values_with(&[], &[(2, per_doc)], &[], &[], &id, "Lucene90_0");
         let got = decode(&m, &d, (&id, 4), "Lucene90_0", 2, &|_| Ok(false)).unwrap();
         assert_eq!(
             got,
@@ -105,7 +105,7 @@ mod tests {
         let far: Vec<Vec<i64>> = tail.collect();
         for per_doc in [small, sparse, dense_block, far] {
             let (m, d) =
-                write_doc_values_with(&[], &[(2, per_doc.clone())], &[], &id, "Lucene90_0");
+                write_doc_values_with(&[], &[(2, per_doc.clone())], &[], &[], &id, "Lucene90_0");
             let got = decode(
                 &m,
                 &d,

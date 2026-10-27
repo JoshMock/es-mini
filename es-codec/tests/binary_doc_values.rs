@@ -32,3 +32,33 @@ fn reads_binary_doc_values() {
         assert_eq!(got, want, "{field}");
     }
 }
+
+/// es-codec writes the same `.dvm`/`.dvd` bytes as Lucene for the same binary values.
+#[test]
+fn written_binary_doc_values_match_lucene() {
+    let seg = common::open("binary-doc-values");
+    let mut fields: Vec<_> = ["fixed", "sparse_fixed", "varlen", "dense_varlen"]
+        .iter()
+        .map(|f| {
+            let number = seg.field(f).unwrap().number;
+            (number, (0..DOCS).map(|d| value(f, d)).collect::<Vec<_>>())
+        })
+        .collect();
+    fields.sort_by_key(|f| f.0); // a merge writes fields in number order
+    let (dvm, dvd) = es_codec::doc_values::write_doc_values_with(
+        &[],
+        &[],
+        &[],
+        &fields,
+        &seg.seg.info.id,
+        "Lucene90_0",
+    );
+    for (ext, ours) in [("_Lucene90_0.dvm", dvm), ("_Lucene90_0.dvd", dvd)] {
+        let real = seg.cfs.file(ext).unwrap().unwrap();
+        let at = (real.iter().zip(&ours)).position(|(a, b)| a != b);
+        assert!(
+            at.is_none() && real.len() == ours.len(),
+            "{ext} differs at {at:?}"
+        );
+    }
+}

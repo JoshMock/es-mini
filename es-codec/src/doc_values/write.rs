@@ -293,6 +293,36 @@ fn write_terms_dict(dvm: &mut Output, dvd: &mut Output, terms: &[&[u8]]) {
     dvd.bytes(&index_addr);
 }
 
+/// `Lucene90DocValuesConsumer.addBinaryField`: the values back to back, the docs with one, and
+/// (if their lengths differ) each value's `DirectMonotonic` start.
+fn write_binary_entry(dvm: &mut Output, dvd: &mut Output, per_doc: &[Option<Vec<u8>>]) {
+    let start = dvd.0.len();
+    dvm.long(start as i64);
+    let values: Vec<&[u8]> = per_doc.iter().flatten().map(Vec::as_slice).collect();
+    values.iter().for_each(|v| dvd.bytes(v));
+    dvm.long((dvd.0.len() - start) as i64);
+    let docs: Vec<u32> = (0..per_doc.len() as u32)
+        .filter(|d| per_doc[*d as usize].is_some())
+        .collect();
+    write_docs_with_field(dvm, dvd, &docs, per_doc.len());
+    let lens = values.iter().map(|v| v.len() as i32);
+    let (min, max) = (lens.clone().min(), lens.max().unwrap_or(0));
+    dvm.bytes(&(docs.len() as i32).to_le_bytes());
+    dvm.bytes(&min.unwrap_or(i32::MAX).to_le_bytes());
+    dvm.bytes(&max.to_le_bytes());
+    if min.is_some_and(|min| max > min) {
+        let mut starts = vec![0i64];
+        for v in &values {
+            starts.push(starts[starts.len() - 1] + v.len() as i64);
+        }
+        dvm.long(dvd.0.len() as i64);
+        dvm.vint(DIRECT_MONOTONIC_BLOCK_SHIFT);
+        let packed = write_direct_monotonic(dvm, &starts, DIRECT_MONOTONIC_BLOCK_SHIFT);
+        dvd.bytes(&packed);
+        dvm.long(packed.len() as i64);
+    }
+}
+
 /// Returns `(.dvm, .dvd)` for `numeric` fields (`(field number, values per doc)`; a doc has at
 /// most one) and `keyword` fields as SORTED_SET (`(field number, terms per doc)`; a doc may have
 /// none or several).
@@ -302,15 +332,17 @@ pub fn write_doc_values(
     id: &[u8; codec_util::ID_LEN],
     suffix: &str,
 ) -> (Vec<u8>, Vec<u8>) {
-    write_doc_values_with(numeric, &[], keyword, id, suffix)
+    write_doc_values_with(numeric, &[], keyword, &[], id, suffix)
 }
 
 /// Like [`write_doc_values`], plus `sorted_numeric` fields (what ES uses for `long`, `double`,
-/// `boolean`, ...): `(field number, values per doc)`.
+/// `boolean`, ...): `(field number, values per doc)`, and `binary` fields (`(field number, value
+/// per doc)`).
 pub fn write_doc_values_with(
     numeric: &[(i32, Vec<Vec<i64>>)],
     sorted_numeric: &[(i32, Vec<Vec<i64>>)],
     keyword: &[(i32, Vec<Vec<Vec<u8>>>)],
+    binary: &[(i32, Vec<Option<Vec<u8>>>)],
     id: &[u8; codec_util::ID_LEN],
     suffix: &str,
 ) -> (Vec<u8>, Vec<u8>) {
@@ -355,6 +387,11 @@ pub fn write_doc_values_with(
             write_sorted_numeric_entry(&mut dvm, &mut dvd, &ords, true);
         }
         write_terms_dict(&mut dvm, &mut dvd, &terms);
+    }
+    for (number, values) in binary {
+        dvm.bytes(&number.to_le_bytes());
+        dvm.byte(1);
+        write_binary_entry(&mut dvm, &mut dvd, values);
     }
     dvm.bytes(&(-1i32).to_le_bytes());
     (dvm.finish(), dvd.finish())

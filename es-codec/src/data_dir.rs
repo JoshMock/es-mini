@@ -317,6 +317,7 @@ mod tests {
                 numeric: &numeric,
                 sorted_numeric: &[],
                 keyword: &keyword,
+                binary: &[],
                 norms: &[(6, lengths.into_iter().map(Some).collect())],
                 terms: &terms,
                 points: &[],

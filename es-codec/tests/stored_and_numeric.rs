@@ -138,7 +138,8 @@ fn writes_numeric_doc_values_like_lucene() {
     // Lucene's merge wrote the NUMERIC fields in this order.
     let numeric = ["head", "varying", "half"].map(field);
     let id = seg.seg.info.id;
-    let (dvm, dvd) = write_doc_values_with(&numeric, &[field("multi")], &[], &id, "Lucene90_0");
+    let (dvm, dvd) =
+        write_doc_values_with(&numeric, &[field("multi")], &[], &[], &id, "Lucene90_0");
     let lucene = |ext| seg.cfs.file(ext).unwrap().unwrap();
     assert_eq!(dvm, lucene("_Lucene90_0.dvm"));
     let want = lucene("_Lucene90_0.dvd");

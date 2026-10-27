@@ -34,6 +34,8 @@ pub struct NewSegment<'a> {
     pub sorted_numeric: &'a [(i32, Vec<Vec<i64>>)],
     /// `(field number, terms per doc)` for keyword fields
     pub keyword: &'a [(i32, Vec<Vec<Vec<u8>>>)],
+    /// `(field number, value per doc)` for BINARY fields
+    pub binary: &'a [(i32, Vec<Option<Vec<u8>>>)],
     /// `(field number, one norm per doc)`
     pub norms: &'a [(i32, Vec<Option<i8>>)],
     /// `(field number, terms)`
@@ -46,8 +48,14 @@ pub struct NewSegment<'a> {
 /// to a [`crate::SegmentInfos`] and writes that (which writes the `.si`).
 pub fn write_segment(dir: &Path, s: &NewSegment) -> Result<SegmentCommitInfo> {
     let (fdm, fdt, fdx) = write_stored_fields(s.stored, &s.id)?;
-    let (dvm, dvd) =
-        write_doc_values_with(s.numeric, s.sorted_numeric, s.keyword, &s.id, "Lucene90_0");
+    let (dvm, dvd) = write_doc_values_with(
+        s.numeric,
+        s.sorted_numeric,
+        s.keyword,
+        s.binary,
+        &s.id,
+        "Lucene90_0",
+    );
     let term_fields = s
         .terms
         .iter()
@@ -211,6 +219,7 @@ mod tests {
                 numeric: &numeric,
                 sorted_numeric: &[],
                 keyword: &keyword,
+                binary: &[],
                 norms: &[],
                 terms: &terms,
                 points: &[],
@@ -280,6 +289,7 @@ mod tests {
                 numeric: &[],
                 sorted_numeric: &[],
                 keyword: &[],
+                binary: &[],
                 norms: &[],
                 terms: &terms,
                 points: &[],
@@ -306,6 +316,7 @@ mod tests {
                     numeric: &[],
                     sorted_numeric: &[],
                     keyword: &[],
+                    binary: &[],
                     norms: &[],
                     terms,
                     points,

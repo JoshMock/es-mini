@@ -302,6 +302,7 @@ pub fn write_state(
             numeric: &[],
             sorted_numeric: &[],
             keyword: &[],
+            binary: &[],
             norms: &[],
             terms: &terms,
             points: &[],
