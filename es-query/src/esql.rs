@@ -174,19 +174,30 @@ fn lex(src: &str) -> Result<(Vec<Token>, Pos), EsqlError> {
             || c == '.' && src[i + 1..].starts_with(|d: char| d.is_ascii_digit())
         {
             let int_end = digits(i);
-            let e = match src[int_end..].starts_with('.') {
+            let mut e = match src[int_end..].starts_with('.') {
                 true => digits(int_end + 1),
                 false => int_end,
             };
+            // An exponent: `e`, an optional sign, and digits.
+            let exp = src[e..]
+                .strip_prefix(['e', 'E'])
+                .map(|x| x.strip_prefix(['+', '-']).unwrap_or(x));
+            if exp.is_some_and(|x| x.starts_with(|d: char| d.is_ascii_digit())) {
+                e = digits(src.len() - exp.unwrap_or_default().len());
+            }
             end = Some(e);
             let s = &src[i..e];
-            let n = match s.contains('.') {
+            let n = match s.contains(['.', 'e', 'E']) {
                 true => s.parse::<f64>().ok().map(Value::from),
                 false => (s.parse::<i64>().ok().map(Value::from))
                     .or_else(|| s.parse::<u64>().ok().map(Value::from))
                     .or_else(|| s.parse::<f64>().ok().map(Value::from)),
             };
-            Tok::Num(n.ok_or_else(|| unrecognized(e))?)
+            match n.ok_or_else(|| unrecognized(e))? {
+                // An infinite double.
+                Value::Null => return Err(parse_error(at, &format!("Number [{s}] is too large"))),
+                n => Tok::Num(n),
+            }
         } else if c.is_alphabetic() || "_@".contains(c) || patterns && c == '*' {
             let mut s = String::new();
             while let Some(&(_, c)) = it

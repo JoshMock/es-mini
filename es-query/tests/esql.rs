@@ -2295,3 +2295,42 @@ fn esql_es_semantics_date_extract_parts() {
     let r = q("FROM people | EVAL a = DATE_EXTRACT(name, TO_DATETIME(0)) | KEEP a | LIMIT 1");
     assert_eq!(r.values, [[Value::Null]]);
 }
+
+/// Like Elasticsearch 9.5.5's `DECIMAL_LITERAL`, a number may have an exponent; a number too
+/// large for a double is a parse error.
+#[test]
+fn esql_es_semantics_decimal_exponents() {
+    let r = q(
+        "ROW a = 1e5, b = 1.5E-3, c = .5e2, d = 1.e2, e = 2e+3, f = -1e2 \
+               | EVAL g = a * 1e-5",
+    );
+    let types: Vec<&str> = r.columns.iter().map(|c| c.r#type.as_str()).collect();
+    assert_eq!(types, ["double"; 7]);
+    assert_eq!(
+        r.values,
+        [[100000.0, 0.0015, 50.0, 100.0, 2000.0, -100.0, 1.0].map(|n| json!(n))]
+    );
+    let err = |q: &str| match run(&indices(), q) {
+        Err(EsqlError::Parse(m)) => m,
+        other => panic!("{q}: {other:?}"),
+    };
+    assert_eq!(
+        err("ROW a = 1e400"),
+        "line 1:9: Number [1e400] is too large"
+    );
+    let big = format!("1{}.0", "0".repeat(400));
+    assert_eq!(
+        err(&format!("ROW a = {big}")),
+        format!("line 1:9: Number [{big}] is too large")
+    );
+    assert_eq!(err("ROW a = 1e"), "line 1:9: Unexpected temporal unit: 'e'");
+    assert_eq!(
+        err("ROW a = 1e1days"),
+        "line 1:12: extraneous input 'days' expecting <EOF>"
+    );
+    assert_eq!(
+        err("ROW a = 1 | LIMIT 1e1"),
+        "line 1:13: value of [LIMIT 1e1] must be a non negative integer, found value [1e1] \
+         type [double]"
+    );
+}
