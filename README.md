@@ -30,12 +30,12 @@ Single node, no security; binds `127.0.0.1` unless `ES_MINI_HOST` says otherwise
   Writes are fsynced to a translog and replayed on start; segments are committed on flush, so
   Elasticsearch and es-mini can take turns on one directory.
 - **Speed:** vs Elasticsearch 9.5.5 on 100,000 documents, es-mini is about 1.1-1.4x faster on
-  document get/index, match and aggregations, and 2.5-12x slower on `match_all`, `count`, and
-  ES|QL; see [bench/RESULTS.md](bench/RESULTS.md).
+  document get/index, match and aggregations, 1.3-2.5x slower on `term`, `range` and `bool`, and
+  3-12x slower on `match_all`, `count` and ES|QL; see [bench/RESULTS.md](bench/RESULTS.md).
 
 Out of scope: multi-node clusters, `_cat`, ILM, vector storage, async search, scripting (Painless),
-runtime fields, ingest pipelines, highlighting, suggesters, percolator, geo queries, nested/join
-fields (see `z_old/PLAN.md`).
+runtime fields, ingest pipelines, highlighting, suggesters, percolator, geo queries, `nested`
+queries, join fields (see `z_old/PLAN.md`).
 
 ## Build and run
 
