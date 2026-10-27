@@ -61,25 +61,9 @@ async fn auto_id() {
     assert_eq!((s, &r["result"]), (StatusCode::CREATED, &json!("created")));
     let id = r["_id"].as_str().unwrap();
     assert_eq!(id.len(), 20);
-    let bytes = |id: &str| {
-        let b: Vec<u8> = id
-            .bytes()
-            .map(|c| {
-                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
-                    .iter()
-                    .position(|a| *a == c)
-                    .expect("url-safe base64") as u8
-            })
-            .collect();
-        // 20 sextets: byte 0 is the low sequence byte, which counts up by one per id
-        (b[0] << 2) | (b[1] >> 4)
-    };
     let (_, r2) = call(&app, Method::POST, "/idx/_doc", Some(json!({"a": 1}))).await;
     assert_ne!(r2["_id"], r["_id"]);
-    assert_eq!(
-        bytes(r2["_id"].as_str().unwrap()),
-        bytes(id).wrapping_add(1)
-    );
+    // The sequence counting up is checked in es-index/tests/auto_id.rs, alone in its process.
     let (s, _) = call(&app, Method::GET, &format!("/idx/_doc/{id}"), None).await;
     assert_eq!(s, StatusCode::OK);
 }
