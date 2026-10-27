@@ -334,6 +334,8 @@ struct Parser<'a> {
     parens: usize,
     /// The tokens that may follow what was parsed last.
     follow: &'static str,
+    /// The query's start time in epoch millis, which every `NOW()` reads.
+    now: i64,
 }
 
 impl Parser<'_> {
@@ -906,6 +908,10 @@ impl Parser<'_> {
                         &format!("error building [{name}]: {msg}"),
                     ));
                 }
+                // `NOW()` carries the query's start time, fixed once per query like ES.
+                if w.eq_ignore_ascii_case("now") {
+                    args.push(Expr::Lit(self.now.into(), span.clone()));
+                }
                 self.follow = AFTER_LITERAL;
                 return Ok(Expr::Call(w, args, OnceCell::new(), self.span(start)));
             }
@@ -1178,8 +1184,7 @@ fn eval(e: &Expr, row: &Row) -> Option<Value> {
                     | "STARTS_WITH" | "ENDS_WITH" => string_fn(f, &args),
                     "MV_COUNT" | "MV_MIN" | "MV_MAX" => mv_fn(f, &args[0]),
                     "DATE_EXTRACT" | "DATE_FORMAT" => date_fn(f, &args),
-                    // ponytail: read per row; ES fixes `now` once per query
-                    "NOW" => Some(es_index::iso_date(crate::dates::now_millis()).into()),
+                    "NOW" => Some(es_index::iso_date(args[0].as_i64()?).into()),
                     _ => math_fn(f, t, &args),
                 };
             }
@@ -2214,6 +2219,15 @@ pub fn run(
     indices: &aliases::Map<impl aliases::IndexMeta + std::borrow::Borrow<Index>>,
     query: &str,
 ) -> Result<Response, EsqlError> {
+    run_at(indices, query, crate::dates::now_millis())
+}
+
+/// `run` with `now` (epoch millis) as the query's start time.
+fn run_at(
+    indices: &aliases::Map<impl aliases::IndexMeta + std::borrow::Borrow<Index>>,
+    query: &str,
+    now: i64,
+) -> Result<Response, EsqlError> {
     let (toks, eof) = lex(query)?;
     let (source, cmds) = Parser {
         src: query,
@@ -2223,6 +2237,7 @@ pub fn run(
         operand: 0,
         parens: 0,
         follow: "<EOF>",
+        now,
     }
     .query()?;
     let (source, cmds) = match source {
@@ -3048,5 +3063,23 @@ fn pushable(e: &Expr) -> bool {
         Expr::Not(x, _) | Expr::IsNull(x, ..) | Expr::Like(x, ..) => pushable(x),
         Expr::And(a, b, _) | Expr::Or(a, b, _) => pushable(a) && pushable(b),
         Expr::Field(..) | Expr::Lit(..) | Expr::Interval(..) => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Like Elasticsearch, NOW() is the query's start time on every row.
+    #[test]
+    fn esql_es_semantics_now_is_fixed_once_per_query() {
+        let mut i = Index::default();
+        for id in ["1", "2", "3"] {
+            i.put(id, serde_json::json!({"n": 1}));
+        }
+        let indices = BTreeMap::from([("i".to_owned(), i)]);
+        let r = run_at(&indices, "FROM i | EVAL t = NOW() | KEEP t", 1000).unwrap();
+        let t = Value::from("1970-01-01T00:00:01.000Z");
+        assert_eq!(r.values, vec![vec![t]; 3]);
     }
 }
