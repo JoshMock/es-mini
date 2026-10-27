@@ -83,8 +83,8 @@ fn resolve(index: &Index, field: &str, sample: impl Fn(&str) -> Option<Value>) -
         Some(FieldMapping::Text { .. } | FieldMapping::TextKeyword { .. }) => Kind::Text,
         Some(FieldMapping::Keyword { .. }) => Kind::Keyword,
         Some(FieldMapping::Boolean) => Kind::Bool,
-        // terms, ranges and sorts read dates as instants (see `resolve_dates`, `sort_values`);
-        // ponytail: prefix and wildcard queries match their JSON strings
+        // terms, ranges and sorts read dates as instants, and prefix and wildcard queries refuse
+        // them (see `resolve_dates`, `sort_values`)
         Some(FieldMapping::Date { .. } | FieldMapping::DateNanos { .. }) => Kind::Keyword,
         // ponytail: ips match as their JSON strings; no CIDR or address normalization in queries
         Some(FieldMapping::Ip) => Kind::Keyword,

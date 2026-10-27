@@ -1334,3 +1334,31 @@ fn query_dsl_gaps_range_last_bound_wins() {
     assert_eq!(r(json!({"lte": 7, "lt": 7})), ["1", "3"]);
     assert_eq!(r(json!({"lt": 7, "lte": 7})), ["1", "3", "4"]);
 }
+
+#[test]
+fn query_dsl_gaps_prefix_and_wildcard_need_keyword_or_text() {
+    let mut i = index();
+    let date = FieldMapping::Date {
+        format: None,
+        locale: None,
+        fields: Default::default(),
+    };
+    i.mappings.properties.insert("d".into(), date);
+    i.put("5", json!({"d": "2020-01-01"}));
+    let run = |q: Value| {
+        let req = SearchRequest::parse(&json!({ "query": q })).unwrap();
+        es_query::search_many(&[("", &i, None)], &req).map(|r| r.total)
+    };
+    let err = run(json!({"prefix": {"d": "2020"}})).unwrap_err();
+    assert_eq!(
+        err.msg,
+        "Can only use prefix queries on keyword, text and wildcard fields - not on [d] which is of type [date]"
+    );
+    let err = run(json!({"wildcard": {"n": "1*"}})).unwrap_err();
+    assert_eq!(
+        err.msg,
+        "Can only use wildcard queries on keyword, text and wildcard fields - not on [n] which is of type [long]"
+    );
+    assert_eq!(run(json!({"prefix": {"tag": "pe"}})).unwrap(), 1);
+    assert_eq!(run(json!({"wildcard": {"title": "do?"}})).unwrap(), 2);
+}

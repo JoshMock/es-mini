@@ -321,6 +321,7 @@ fn parse_kind(kind: &str, body: &Value) -> Result<Query, QueryError> {
             };
             Ok(match case_insensitive {
                 // ES's case-insensitive term is a constant-score automaton query, as a wildcard's
+                // ponytail: on other than keyword or text fields it fails with the wildcard's error
                 true => Query::Wildcard {
                     field: field.clone(),
                     pattern: wildcard_escape(&text(&value)),

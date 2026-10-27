@@ -52,13 +52,7 @@ pub(crate) fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, 
         } => {
             let (kind, path) = Searcher::unscored(index, &Query::MatchAll).kind(&field);
             if kind != Kind::Text {
-                // ponytail: unmapped fields are named by the kind they resolve to
-                let name = match (index.mappings.field(&field), kind) {
-                    (Some(m), _) => m.type_name(),
-                    (None, Kind::Number) => "long",
-                    (None, Kind::Bool) => "boolean",
-                    (None, _) => "keyword",
-                };
+                let name = type_name(index, &field, kind);
                 return Err(QueryError::illegal(format!(
                     "Can only use phrase prefix queries on text fields - not on [{field}] which is of type [{name}]"
                 )));
@@ -166,6 +160,41 @@ pub(crate) fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, 
                 time_zone: None,
             }
         }
+        Query::Prefix { ref field, .. } | Query::Wildcard { ref field, .. } => {
+            let kind = Searcher::unscored(index, &Query::MatchAll).kind(field).0;
+            let mapping = index.mappings.field(field).filter(|m| !m.is_object());
+            let ok = match mapping {
+                Some(m) => matches!(
+                    m,
+                    FieldMapping::Text { .. }
+                        | FieldMapping::TextKeyword { .. }
+                        | FieldMapping::Keyword { .. }
+                ),
+                None => matches!(kind, Kind::Text | Kind::Keyword),
+            };
+            if !ok {
+                let what = match q {
+                    Query::Prefix { .. } => "prefix",
+                    _ => "wildcard",
+                };
+                let name = type_name(index, field, kind);
+                return Err(QueryError::illegal(format!(
+                    "Can only use {what} queries on keyword, text and wildcard fields - not on [{field}] which is of type [{name}]"
+                )));
+            }
+            q
+        }
         q => q,
     })
+}
+
+/// A field's type as ES names it in errors.
+fn type_name(index: &Index, field: &str, kind: Kind) -> &'static str {
+    // ponytail: unmapped fields are named by the kind they resolve to
+    match (index.mappings.field(field), kind) {
+        (Some(m), _) => m.type_name(),
+        (None, Kind::Number) => "long",
+        (None, Kind::Bool) => "boolean",
+        (None, _) => "keyword",
+    }
 }
