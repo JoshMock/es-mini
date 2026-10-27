@@ -47,7 +47,21 @@ pub struct NewSegment<'a> {
 /// Writes the segment's compound file into `dir` and returns its commit info; the caller adds it
 /// to a [`crate::SegmentInfos`] and writes that (which writes the `.si`).
 pub fn write_segment(dir: &Path, s: &NewSegment) -> Result<SegmentCommitInfo> {
+    // Each sub-file goes to disk as soon as it is encoded, and the compound file copies them from
+    // there, so at most one format's files are in memory at a time.
+    let mut names = vec![];
+    let mut put = |name: &str, bytes: Vec<u8>| -> Result<()> {
+        let path = dir.join(format!("{}{name}", s.name));
+        std::fs::write(&path, bytes)
+            .map_err(|e| crate::Error(format!("{}: {e}", path.display())))?;
+        names.push(name.to_string());
+        Ok(())
+    };
+    put(".fnm", write_field_infos(s.fields, &s.id, ""))?;
     let (fdm, fdt, fdx) = write_stored_fields(s.stored, &s.id)?;
+    put(".fdm", fdm)?;
+    put(".fdx", fdx)?;
+    put(".fdt", fdt)?;
     let (dvm, dvd) = write_doc_values_with(
         s.numeric,
         s.sorted_numeric,
@@ -56,6 +70,9 @@ pub fn write_segment(dir: &Path, s: &NewSegment) -> Result<SegmentCommitInfo> {
         &s.id,
         "Lucene90_0",
     );
+    put("_Lucene90_0.dvm", dvm)?;
+    put("_Lucene90_0.dvd", dvd)?;
+    put("_Lucene90_0.dvs", empty_skip_index(&s.id))?;
     let term_fields = s
         .terms
         .iter()
@@ -71,19 +88,22 @@ pub fn write_segment(dir: &Path, s: &NewSegment) -> Result<SegmentCommitInfo> {
         .collect();
     let dense: Vec<_> = dense.iter().map(|(n, v)| (*n, &v[..])).collect();
     let t = write_terms(&term_fields, &s.id, "Lucene104_0", &dense)?;
+    for (ext, bytes) in [
+        ("tim", t.tim),
+        ("tip", t.tip),
+        ("tmd", t.tmd),
+        ("doc", t.doc),
+        ("psm", t.psm),
+    ] {
+        put(&format!("_Lucene104_0.{ext}"), bytes)?;
+    }
+    if !t.pos.is_empty() {
+        put("_Lucene104_0.pos", t.pos)?;
+    }
     let sparse: Vec<_> = s.norms.iter().map(|(n, v)| (*n, &v[..])).collect();
     let (nvm, nvd) = write_norms(&s.id, &sparse);
-    let mut files = vec![
-        (".nvm".to_string(), nvm),
-        (".nvd".into(), nvd),
-        (".fnm".into(), write_field_infos(s.fields, &s.id, "")),
-        (".fdm".into(), fdm),
-        (".fdx".into(), fdx),
-        (".fdt".into(), fdt),
-        ("_Lucene90_0.dvm".into(), dvm),
-        ("_Lucene90_0.dvd".into(), dvd),
-        ("_Lucene90_0.dvs".into(), empty_skip_index(&s.id)),
-    ];
+    put(".nvm", nvm)?;
+    put(".nvd", nvd)?;
     if !s.points.is_empty() {
         let points = (s.points.iter())
             .map(|(n, p)| match s.fields.iter().find(|f| f.number == *n) {
@@ -92,22 +112,12 @@ pub fn write_segment(dir: &Path, s: &NewSegment) -> Result<SegmentCommitInfo> {
             })
             .collect::<Result<Vec<_>>>()?;
         let (m, i, d) = crate::points::write_points(&points, &s.id)?;
-        files.extend([(".kdm".into(), m), (".kdi".into(), i), (".kdd".into(), d)]);
-    }
-    for (ext, bytes) in [
-        ("tim", t.tim),
-        ("tip", t.tip),
-        ("tmd", t.tmd),
-        ("doc", t.doc),
-        ("psm", t.psm),
-    ] {
-        files.push((format!("_Lucene104_0.{ext}"), bytes));
-    }
-    if !t.pos.is_empty() {
-        files.push(("_Lucene104_0.pos".into(), t.pos));
+        put(".kdm", m)?;
+        put(".kdi", i)?;
+        put(".kdd", d)?;
     }
 
-    write_compound(dir, s.name, &s.id, &files)?;
+    write_compound(dir, s.name, &s.id, &names)?;
     Ok(SegmentCommitInfo {
         name: s.name.into(),
         codec: "Lucene104".into(),

@@ -116,28 +116,61 @@ impl CompoundFile {
     }
 }
 
-/// Writes `<segment>.cfs` and `<segment>.cfe` from `(name without segment prefix, file bytes)`
-/// pairs (inverse of [`CompoundFile::open`]).
+/// Writes `<segment>.cfs` and `<segment>.cfe` from the sub-files `<segment><name>` in `dir`
+/// (inverse of [`CompoundFile::open`]), copying them a buffer at a time and then deleting them,
+/// as Lucene90CompoundFormat does, so no sub-file is held in memory.
 pub fn write_compound(
     dir: &Path,
     segment: &str,
     id: &[u8; ID_LEN],
-    files: &[(String, Vec<u8>)],
+    names: &[String],
 ) -> Result<()> {
     use crate::output::Output;
-    let (mut cfs, mut cfe) = (Output::default(), Output::default());
-    cfs.index_header("Lucene90CompoundData", 0, id, "");
-    cfe.index_header("Lucene90CompoundEntries", 0, id, "");
-    cfe.vint(files.len() as i32);
-    for (name, bytes) in files {
-        cfe.string(name);
-        cfe.long(cfs.0.len() as i64);
-        cfe.long(bytes.len() as i64);
-        cfs.bytes(bytes);
+    use std::io::Write;
+    /// Counts and checksums what passes through to the `.cfs`.
+    struct Crc<W>(W, u32, u64);
+    impl<W: Write> Write for Crc<W> {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            let n = self.0.write(b)?;
+            self.1 = codec_util::crc32_update(self.1, &b[..n]);
+            self.2 += n as u64;
+            Ok(n)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.0.flush()
+        }
     }
-    for (ext, out) in [("cfs", cfs), ("cfe", cfe)] {
-        let path = dir.join(format!("{segment}.{ext}"));
-        crate::write_file_new(&path, &out.finish())?;
+    let (mut head, mut cfe) = (Output::default(), Output::default());
+    head.index_header("Lucene90CompoundData", 0, id, "");
+    cfe.index_header("Lucene90CompoundEntries", 0, id, "");
+    cfe.vint(names.len() as i32);
+    let path = dir.join(format!("{segment}.cfs"));
+    let mut write = || -> std::io::Result<()> {
+        let mut cfs = Crc(std::io::BufWriter::new(File::create(&path)?), 0, 0);
+        cfs.write_all(&head.0)?;
+        for name in names {
+            let offset = cfs.2;
+            let len = std::io::copy(
+                &mut File::open(dir.join(format!("{segment}{name}")))?,
+                &mut cfs,
+            )?;
+            cfe.string(name);
+            cfe.long(offset as i64);
+            cfe.long(len as i64);
+        }
+        let mut footer = Output::default();
+        footer.be_int(codec_util::FOOTER_MAGIC);
+        footer.be_int(0);
+        cfs.write_all(&footer.0)?;
+        let mut w = cfs.0;
+        w.write_all(&i64::from(cfs.1).to_be_bytes())?;
+        w.into_inner().map_err(|e| e.into_error())?.sync_all()
+    };
+    write().map_err(|e| crate::Error(format!("{}: {e}", path.display())))?;
+    crate::write_file_new(&dir.join(format!("{segment}.cfe")), &cfe.finish())?;
+    for name in names {
+        // A leftover is deleted by the next commit, as an unreferenced file.
+        let _ = std::fs::remove_file(dir.join(format!("{segment}{name}")));
     }
     Ok(())
 }
@@ -150,12 +183,13 @@ mod tests {
     fn reads_sub_files_and_slices_from_disk() {
         let dir = std::env::temp_dir().join(format!("esm-cfs-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let files = [
-            (".a".to_string(), b"hello".to_vec()),
-            (".b".into(), b"world!".to_vec()),
-        ];
-        write_compound(&dir, "_0", &[3; ID_LEN], &files).unwrap();
+        std::fs::write(dir.join("_0.a"), b"hello").unwrap();
+        std::fs::write(dir.join("_0.b"), b"world!").unwrap();
+        write_compound(&dir, "_0", &[3; ID_LEN], &[".a".into(), ".b".into()]).unwrap();
         let cfs = CompoundFile::open(&dir, "_0", &[3; ID_LEN]).unwrap();
+        cfs.verify().unwrap();
+        assert!(!dir.join("_0.a").exists() && !dir.join("_0.b").exists());
+        assert_eq!(cfs.file(".a").unwrap().unwrap(), b"hello");
         assert_eq!(cfs.file(".b").unwrap().unwrap(), b"world!");
         assert_eq!(cfs.slice(".b", 1, 3).unwrap().unwrap(), b"orl");
         assert!(cfs.slice(".a", 3, 3).is_err());
