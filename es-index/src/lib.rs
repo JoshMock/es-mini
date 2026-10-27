@@ -1074,9 +1074,16 @@ pub(crate) fn date_instant_in(
         }),
         // ponytail: formats es-mini lacks (week-based fields, see date_pattern) parse as
         // strict_date_optional_time
-        f => date_pattern::DateFormat::new(f)
-            .or_else(|| date_pattern::DateFormat::new("strict_date_optional_time"))?
-            .parse_wide(v.as_str()?, locale.unwrap_or(""), tz, round_up),
+        f => {
+            // a number parses as its text, as in ES (1000 is the year 1000)
+            let s = match v {
+                Value::Number(n) => n.to_string(),
+                v => v.as_str()?.to_owned(),
+            };
+            date_pattern::DateFormat::new(f)
+                .or_else(|| date_pattern::DateFormat::new("strict_date_optional_time"))?
+                .parse_wide(&s, locale.unwrap_or(""), tz, round_up)
+        }
     })
 }
 
@@ -1302,6 +1309,20 @@ mod tests {
             Some(at("2021-05-01T23:59:59.999Z"))
         );
         assert_eq!(up("MMMM d", "May 3"), Some(at("1970-05-03T23:59:59.999Z")));
+    }
+
+    #[test]
+    fn date_formats_numbers_parse_as_their_text() {
+        // a number's text parses like a string: Elasticsearch 9.5.5 indexes 1000 as the year
+        // 1000, unless the format reads it only as epoch millis
+        let year_1000 = -30_610_224_000_000;
+        assert_eq!(date_millis(None, None, &json!(1000)), Some(year_1000));
+        assert_eq!(date_millis(None, None, &json!("1000")), Some(year_1000));
+        let f = Some("yyyy/MM/dd HH:mm||epoch_millis");
+        assert_eq!(date_millis(f, None, &json!(1000)), Some(1000));
+        let millis = 1_451_606_400_000;
+        assert_eq!(date_millis(None, None, &json!(millis)), Some(millis));
+        assert_eq!(date_millis(Some("yyyy"), None, &json!(2016)), Some(millis));
     }
 
     #[test]
