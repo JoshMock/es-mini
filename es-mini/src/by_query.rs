@@ -5,7 +5,7 @@ use axum::{
     Json,
     body::Bytes,
     extract::{Path, Query, State},
-    http::Uri,
+    http::{StatusCode, Uri},
 };
 use es_query::SearchRequest;
 use serde_json::{Value, json};
@@ -49,7 +49,7 @@ pub async fn update_by_query(
     uri: Uri,
     params: Query<HashMap<String, String>>,
     body: Bytes,
-) -> Result<Json<Value>, AppError> {
+) -> Result<(StatusCode, Json<Value>), AppError> {
     by_query(state, name, uri, params, body, false)
 }
 
@@ -59,7 +59,7 @@ pub async fn delete_by_query(
     uri: Uri,
     params: Query<HashMap<String, String>>,
     body: Bytes,
-) -> Result<Json<Value>, AppError> {
+) -> Result<(StatusCode, Json<Value>), AppError> {
     by_query(state, name, uri, params, body, true)
 }
 
@@ -72,7 +72,7 @@ fn by_query(
     Query(params): Query<HashMap<String, String>>,
     body: Bytes,
     delete: bool,
-) -> Result<Json<Value>, AppError> {
+) -> Result<(StatusCode, Json<Value>), AppError> {
     params::check(&uri, &params, &PARAMS)?;
     if params
         .get("wait_for_completion")
@@ -133,11 +133,24 @@ fn by_query(
     let mut indices = state.write();
     let resolved = crate::indices::data_targets(&indices, &name, &params)?;
     let targets = crate::search::targets(&indices, &resolved);
-    let hits: Vec<(String, String, Value)> = es_query::search_many(&targets, &req)?
-        .hits
-        .into_iter()
-        .map(|h| (h.index.to_owned(), h.id.to_owned(), h.doc.source.clone()))
-        .collect();
+    let r = es_query::search_many(&targets, &req)?;
+    // Like ES, a failed shard aborts before any write; the response has the highest status.
+    let (mut status, mut failures) = (StatusCode::OK, vec![]);
+    for (index, e) in &r.failures {
+        let (s, _, f) = crate::error::shard_failure(index, e.clone());
+        status = status.max(s);
+        let (node, code) = (crate::nodes::NODE_ID, s.as_u16());
+        let reason = &f["reason"];
+        failures.push(
+            json!({"index": index, "shard": 0, "node": node, "status": code, "reason": reason}),
+        );
+    }
+    let hits: Vec<(String, String, Value)> = match failures.is_empty() {
+        true => (r.hits.into_iter())
+            .map(|h| (h.index.to_owned(), h.id.to_owned(), h.doc.source.clone()))
+            .collect(),
+        false => vec![],
+    };
     for (index, id, source) in &hits {
         let index = indices.get_mut(index).expect("searched index exists");
         match delete {
@@ -170,10 +183,10 @@ fn by_query(
         "throttled_millis": 0,
         "requests_per_second": -1.0,
         "throttled_until_millis": 0,
-        "failures": []
+        "failures": failures
     });
     if !delete {
         resp["updated"] = total.into();
     }
-    Ok(Json(resp))
+    Ok((status, Json(resp)))
 }

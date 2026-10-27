@@ -170,3 +170,32 @@ async fn by_query_missing_index_is_404() {
     let (s, r) = call(&app, Method::POST, "/nope/_delete_by_query", None).await;
     assert_eq!(s, StatusCode::NOT_FOUND, "{r}");
 }
+
+/// Like Elasticsearch 9.5.5, a query failing on one index aborts before any write, reporting
+/// the shard failure with its status.
+#[tokio::test]
+async fn by_query_writes_nothing_when_an_index_fails() {
+    let app = app();
+    for (index, t) in [("t", "date"), ("k", "keyword")] {
+        let mappings = json!({"mappings": {"properties": {"d": {"type": t}}}});
+        call(&app, Method::PUT, &format!("/{index}"), Some(mappings)).await;
+        let doc = Some(json!({"d": "2024"}));
+        call(&app, Method::PUT, &format!("/{index}/_doc/1?refresh"), doc).await;
+    }
+    let query = Some(json!({"query": {"range": {"d": {"gte": "foo"}}}}));
+    let (s, r) = call(&app, Method::POST, "/t,k/_delete_by_query", query).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{r}");
+    assert_eq!(
+        (r["total"].clone(), r["deleted"].clone()),
+        (json!(0), json!(0))
+    );
+    let f = "strict_date_optional_time||epoch_millis";
+    let reason = format!("failed to parse date field [foo] with format [{f}]");
+    let cause = json!({"type": "parse_exception", "reason": format!("{reason}: [{reason}]")});
+    assert_eq!(
+        r["failures"],
+        json!([{"index": "t", "shard": 0, "node": crate::nodes::NODE_ID, "status": 400, "reason": cause}])
+    );
+    let (_, r) = call(&app, Method::GET, "/k/_doc/1", None).await;
+    assert_eq!(r["found"], true, "{r}");
+}
