@@ -4,7 +4,7 @@
 use super::{Agg, Stats};
 use crate::hll::mix64;
 use crate::{QueryError, int};
-use es_index::{FieldMapping, ip_bytes, ip_string, iso_date, postings::text};
+use es_index::{FieldMapping, ip_bytes, ip_string, postings::text};
 use serde_json::{Map, Value};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -270,6 +270,7 @@ impl Terms {
         &self,
         b: &mut Buckets,
         body: &mut Map<String, Value>,
+        date: Option<&str>,
         mut sub: impl FnMut(&mut [Stats], &mut Map<String, Value>) -> Result<(), QueryError>,
     ) -> Result<&'static str, QueryError> {
         let mut v: Vec<(Key, Bucket)> = (std::mem::take(&mut b.counts).into_iter())
@@ -297,7 +298,7 @@ impl Terms {
                     out.insert("key_as_string".into(), (*x != 0).to_string().into());
                 }
                 (Key::Long(x), Format::Date) => {
-                    out.insert("key_as_string".into(), iso_date(*x).into());
+                    out.insert("key_as_string".into(), super::date_string(date, *x).into());
                 }
                 _ => {}
             }

@@ -1979,12 +1979,12 @@ fn render_counted(
         match &agg.metric {
             Metric::Terms(t) => {
                 if let Some(b) = &mut st.terms {
-                    ty = t.render(b, &mut body, sub)?;
+                    ty = t.render(b, &mut body, date, sub)?;
                 }
             }
             Metric::Histogram(h) => {
                 if let Some(b) = &mut st.terms {
-                    h.render(b, &mut body, buckets, sub)?;
+                    h.render(b, &mut body, buckets, date, sub)?;
                 }
             }
             Metric::Filter(_) | Metric::Missing | Metric::Nested(_) | Metric::Global => {
@@ -2253,6 +2253,28 @@ mod tests {
             keys.last().unwrap().as_str(),
             "std_deviation_bounds_as_string"
         );
+    }
+
+    #[test]
+    fn date_formats_bucket_keys_render_in_the_mapping_format() {
+        let mut ix = Index::default();
+        let date = FieldMapping::Date {
+            format: Some("yyyy/MM/dd||epoch_millis".into()),
+            locale: None,
+            fields: Default::default(),
+        };
+        ix.mappings.properties.insert("d".into(), date);
+        ix.put("1", json!({"d": "2016/01/02"}));
+        let aggs = json!({
+            "t": {"terms": {"field": "d"}},
+            "h": {"date_histogram": {"field": "d", "calendar_interval": "day"}},
+            "f": {"date_histogram": {"field": "d", "calendar_interval": "day",
+                "format": "yyyy"}},
+        });
+        let r = aggs_of(&ix, json!({"size": 0, "aggs": aggs}));
+        assert_eq!(r["t"]["buckets"][0]["key_as_string"], "2016/01/02");
+        assert_eq!(r["h"]["buckets"][0]["key_as_string"], "2016/01/02");
+        assert_eq!(r["f"]["buckets"][0]["key_as_string"], "2016");
     }
 
     #[test]

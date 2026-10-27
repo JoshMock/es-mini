@@ -423,6 +423,7 @@ impl Histogram {
         b: &mut Buckets,
         body: &mut Map<String, Value>,
         buckets: &Cell<usize>,
+        date: Option<&str>,
         mut sub: impl FnMut(&mut [Stats], &mut Map<String, Value>) -> Result<(), QueryError>,
     ) -> Result<(), QueryError> {
         let mut v: Vec<(f64, u64, Vec<Stats>)> = std::mem::take(&mut b.counts)
@@ -481,7 +482,7 @@ impl Histogram {
             let key_as_string = match (b.format, &self.format) {
                 (Format::Date, _) => {
                     let (t, tz) = (key as i64, self.time_zone.as_ref());
-                    let pattern = self.format.as_deref();
+                    let pattern = self.format.as_deref().or(date);
                     let utc = &es_index::tz::TimeZone::UTC;
                     Some(
                         match pattern.and_then(|p| es_index::format_date(p, t, tz.unwrap_or(utc))) {
