@@ -45,6 +45,12 @@ count 1 '{"term":{"o.s.keyword":"x"}}'
 count 1 '{"term":{"lg":"abc"}}'
 count 0 '{"term":{"lg":"abcd"}}'
 count 1 '{"exists":{"field":"lg"}}'
+# Values of another JSON type, coerced as Elasticsearch does.
+count 1 '{"term":{"ck":"42"}}'
+count 1 '{"term":{"ck":"true"}}'
+count 1 '{"term":{"cn":7}}'
+count 1 '{"range":{"cn":{"gte":8}}}'
+count 1 '{"term":{"cb":true}}'
 # Text mapped with `store` comes back from the Lucene stored field, not `_source`.
 got=$(req POST /f/_search '{"stored_fields":["st"],"query":{"ids":{"values":["1"]}}}' |
   python3 -c 'import json,sys;print(json.load(sys.stdin)["hits"]["hits"][0].get("fields"))')

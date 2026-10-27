@@ -449,8 +449,9 @@ pub fn norm_len(norm: i8) -> u32 {
 /// Index data for one shard segment, built from the mapped fields whose values are scalars or
 /// arrays of scalars. Field numbers start at 6, after the metadata fields.
 // ponytail: fields the writer cannot encode yet are left out of the segment, which only
-// Elasticsearch notices (es-mini reads `_source` where a segment lacks a field): values of the
-// wrong type or nested objects, and `date_nanos`. `_ignored` does not list ignore_above fields.
+// Elasticsearch notices (es-mini reads `_source` where a segment lacks a field): integer fields
+// holding fractions or out-of-range values (ES truncates or rejects them, es-mini matches them as
+// they are), nested objects, and `date_nanos`. `_ignored` does not list ignore_above fields.
 #[derive(Default)]
 struct UserFields {
     fields: Vec<es_codec::field_infos::FieldInfo>,
@@ -463,12 +464,44 @@ struct UserFields {
     stored: Vec<(i32, Vec<Vec<String>>)>,
 }
 
-/// Converts every value, or `None` if any cannot be.
-fn typed<T>(values: &[Vec<&Value>], f: &dyn Fn(&Value) -> Option<T>) -> Option<Vec<Vec<T>>> {
-    values
-        .iter()
-        .map(|vs| vs.iter().map(|v| f(v)).collect())
-        .collect()
+/// Converts the values `f` maps to `Some(Some(_))`, leaving out those it maps to `Some(None)`
+/// (malformed: Elasticsearch rejects their documents, and es-mini never matches them). `None`
+/// if `f` maps any to `None` (es-mini matches it, but the field cannot hold it), or no value is
+/// left.
+fn typed<T>(
+    values: &[Vec<&Value>],
+    f: &dyn Fn(&Value) -> Option<Option<T>>,
+) -> Option<Vec<Vec<T>>> {
+    let out: Vec<Vec<T>> = (values.iter())
+        .map(|vs| {
+            Some(
+                vs.iter()
+                    .map(|v| f(v))
+                    .collect::<Option<Vec<_>>>()?
+                    .into_iter()
+                    .flatten()
+                    .collect(),
+            )
+        })
+        .collect::<Option<_>>()?;
+    out.iter().any(|v| !v.is_empty()).then_some(out)
+}
+
+/// A scalar as the string Elasticsearch indexes for a text or keyword field (`5` → "5").
+fn scalar_text(v: &Value) -> Option<String> {
+    (!v.is_object()).then(|| crate::postings::text(v))
+}
+
+/// A number, or a string holding one, as an integer in `min..=max`; `None` if it has a fraction or
+/// is out of range (Elasticsearch truncates or rejects it, where es-mini matches it as is).
+fn integer(v: &Value, min: i64, max: i64) -> Option<Option<i64>> {
+    let Some(f) = crate::json_num(v) else {
+        return Some(None);
+    };
+    let n = (v.as_i64())
+        .or_else(|| v.as_str()?.parse().ok())
+        .or_else(|| (f.fract() == 0.0 && f.abs() < 2f64.powi(63)).then_some(f as i64))?;
+    (min..=max).contains(&n).then_some(Some(n))
 }
 
 fn user_fields(
@@ -492,10 +525,6 @@ fn user_fields(
             .iter()
             .map(|(_, d)| crate::postings::values(&d.source, path))
             .collect();
-        let flat = || values.iter().flatten();
-        if flat().next().is_none() || flat().any(|v| v.is_array() || v.is_object()) {
-            continue;
-        }
         let number = (meta.len() + out.fields.len()) as i32;
         let postings = |keys: Vec<Vec<Vec<u8>>>| -> Vec<TermPostings> {
             let mut m = BTreeMap::<Vec<u8>, Vec<(u32, u32)>>::new();
@@ -523,7 +552,7 @@ fn user_fields(
         let mut point_width = 0;
         let (index_options, doc_values, omit_norms) = match mapping {
             M::Text { .. } | M::TextKeyword { .. } => {
-                let Some(texts) = typed(&values, &|v| v.as_str().map(str::to_owned)) else {
+                let Some(texts) = typed(&values, &|v| Some(scalar_text(v))) else {
                     continue;
                 };
                 let mut m = BTreeMap::<Vec<u8>, Vec<(u32, Vec<u32>)>>::new();
@@ -575,18 +604,11 @@ fn user_fields(
                 let fits =
                     |s: &str| ignore_above.is_none_or(|n| s.encode_utf16().count() <= n as usize);
                 let Some(keys) = typed(&values, &|v| {
-                    v.as_str().map(|s| fits(s).then(|| s.as_bytes().to_vec()))
+                    Some(scalar_text(v).filter(|s| fits(s)).map(String::into_bytes))
                 }) else {
                     continue;
                 };
-                let keys = dedup(
-                    keys.into_iter()
-                        .map(|k| k.into_iter().flatten().collect())
-                        .collect(),
-                );
-                if keys.iter().all(Vec::is_empty) {
-                    continue;
-                }
+                let keys = dedup(keys);
                 out.terms.push((number, postings(keys.clone())));
                 out.keyword.push((number, keys));
                 (IndexOptions::Docs, DocValuesType::SortedSet, true)
@@ -596,7 +618,7 @@ fn user_fields(
             M::DateNanos { .. } | M::LongRange | M::DateRange { .. } | M::Nested => continue,
             M::Ip => {
                 // Like ES: points and sorted-set doc values of the 16-byte encoding, no postings.
-                let Some(ips) = typed(&values, &crate::ip_bytes) else {
+                let Some(ips) = typed(&values, &|v| Some(crate::ip_bytes(v))) else {
                     continue;
                 };
                 out.points.push((
@@ -613,7 +635,9 @@ fn user_fields(
                 (IndexOptions::None, DocValuesType::SortedSet, true)
             }
             M::Boolean => {
-                let Some(bools) = typed(&values, &|v| v.as_bool()) else {
+                let Some(bools) = typed(&values, &|v| {
+                    Some(v.as_bool().or_else(|| v.as_str()?.parse().ok()))
+                }) else {
                     continue;
                 };
                 let keys = dedup(
@@ -653,26 +677,46 @@ fn user_fields(
                     let b = f.to_bits() as i32;
                     i64::from(b ^ ((b >> 31) & i32::MAX))
                 };
+                // Like ES, numeric strings are numbers, and values that do not fit the type
+                // finitely are malformed.
+                let float = |v: &Value| crate::json_num(v).map(|f| f as f32);
+                let int = |min, max| typed(&values, &move |v| integer(v, min, max));
                 let (width, nums) = match mapping {
-                    M::Long => (8, typed(&values, &|v| v.as_i64())),
-                    M::Double => (8, typed(&values, &|v| v.as_f64().map(sortable_long))),
+                    M::Long => (8, int(i64::MIN, i64::MAX)),
+                    M::Integer => (4, int(i32::MIN.into(), i32::MAX.into())),
+                    M::Short => (4, int(i16::MIN.into(), i16::MAX.into())),
+                    M::Byte => (4, int(i8::MIN.into(), i8::MAX.into())),
+                    M::Double => (
+                        8,
+                        typed(&values, &|v| {
+                            Some(
+                                crate::json_num(v)
+                                    .filter(|f| f.is_finite())
+                                    .map(sortable_long),
+                            )
+                        }),
+                    ),
                     M::Float => (
                         4,
-                        typed(&values, &|v| v.as_f64().map(|f| sortable_int(f as f32))),
+                        typed(&values, &|v| {
+                            Some(float(v).filter(|f| f.is_finite()).map(sortable_int))
+                        }),
                     ),
                     M::HalfFloat => (
                         2,
                         typed(&values, &|v| {
-                            v.as_f64().map(|f| crate::half_float_sortable(f as f32))
+                            let finite =
+                                |f: &f32| crate::half_float(crate::half_float_bits(*f)).is_finite();
+                            Some(float(v).filter(finite).map(crate::half_float_sortable))
                         }),
                     ),
                     M::Date { format, locale, .. } => (
                         8,
                         typed(&values, &|v| {
-                            crate::date_millis(format.as_deref(), locale.as_deref(), v)
+                            Some(crate::date_millis(format.as_deref(), locale.as_deref(), v))
                         }),
                     ),
-                    _ => (4, typed(&values, &|v| v.as_i64())),
+                    _ => continue,
                 };
                 let Some(nums) = nums else {
                     continue;

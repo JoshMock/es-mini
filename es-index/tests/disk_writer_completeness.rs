@@ -74,3 +74,48 @@ fn disk_writer_completeness_writes_multi_fields_and_honors_ignore_above() {
     assert_eq!(ords, [vec![1], vec![0]]);
     assert!(r.terms("s").is_ok());
 }
+
+#[test]
+fn disk_writer_completeness_coerces_scalars_and_skips_malformed_values() {
+    use es_codec::doc_values::DocValues;
+    let mut idx = Index::default();
+    let props = &mut idx.mappings.properties;
+    let keyword = FieldMapping::Keyword {
+        ignore_above: None,
+        split_queries_on_whitespace: false,
+    };
+    props.insert("k".into(), keyword);
+    props.insert("t".into(), FieldMapping::Text { store: false });
+    props.insert("n".into(), FieldMapping::Long);
+    props.insert("b".into(), FieldMapping::Boolean);
+    props.insert("i".into(), FieldMapping::Integer);
+    // Elasticsearch indexes numbers and booleans as strings, and strings holding numbers or
+    // booleans as those; it rejects documents with malformed values, which es-mini keeps but
+    // never matches, so the segment leaves those values out.
+    idx.put(
+        "1",
+        json!({"k": [42, true], "t": 7, "n": ["10", "abc", {"x": 1}], "b": "true", "i": 1.5}),
+    );
+    idx.put("2", json!({"k": "x", "n": 3, "b": false, "i": 2}));
+    let (_root, r) = saved_segment("coerce", idx);
+    let terms = |f: &str| -> Vec<_> {
+        (r.terms(f).unwrap().into_iter())
+            .map(|t| (String::from_utf8(t.term).unwrap(), t.docs))
+            .collect()
+    };
+    let one = |d| vec![(d, 1)];
+    let want = [("42", one(0)), ("true", one(0)), ("x", one(1))];
+    assert_eq!(terms("k"), want.map(|(t, d)| (t.to_owned(), d)));
+    assert_eq!(terms("t"), [("7".to_owned(), one(0))]);
+    assert_eq!(
+        terms("b"),
+        [("F".to_owned(), one(1)), ("T".to_owned(), one(0))]
+    );
+    let Ok(DocValues::Numbers(n)) = r.doc_values("n") else {
+        panic!("longs are sorted numerics");
+    };
+    assert_eq!(n, [vec![10], vec![3]]);
+    // An integer with a fraction would need truncating, as Elasticsearch does, where es-mini
+    // matches the fraction, so the field stays out of the segment.
+    assert!(r.field("i").is_err());
+}
