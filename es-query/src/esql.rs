@@ -1559,25 +1559,47 @@ fn span_type(unit: &str) -> &'static str {
     }
 }
 
-/// `DATE_TRUNC(n unit, date)` in UTC, like Elasticsearch's `DateTrunc.createRounding`: a single
-/// calendar week, month, quarter or year rounds to its start, anything else to a fixed interval
-/// since the epoch.
-// ponytail: several months, quarters or years, and a zero or negative span, are null where ES
-// rounds or fails the query
+/// `DATE_TRUNC(n unit, date)` in UTC, like Elasticsearch's `DateTrunc.createRounding`: a week
+/// is 7 days and a quarter 3 months, as in ES's literals. One day, week, month, quarter (3
+/// months) or year rounds to its calendar start; several months or years to intervals counted
+/// from year 1 (`DateUtils.roundIntervalMonthOfYear`); anything else to a fixed interval since
+/// the epoch.
+// ponytail: a zero or negative span is null, where ES fails the query
 fn date_trunc(n: i64, unit: &str, v: &Value) -> Option<Value> {
     const DAY: i64 = 86_400_000;
     let t = es_index::parse_date_millis(v)?;
+    let (n, unit) = match unit {
+        "week" => (n.checked_mul(7)?, "day"),
+        "quarter" => (n.checked_mul(3)?, "month"),
+        _ => (n, unit),
+    };
+    let calendar = match (unit, n) {
+        ("day", 7) => Some("week"),
+        ("month", 3) => Some("quarter"),
+        ("month" | "year", 1) => Some(unit),
+        _ => None,
+    };
+    if let Some(unit) = calendar {
+        let start = crate::aggs::histogram::Unit::parse(unit)?.round(t, false);
+        return Some(es_index::iso_date(start).into());
+    }
+    let months = match unit {
+        "month" => Some(n),
+        "year" => n.checked_mul(12),
+        _ => None,
+    };
+    if let Some(months) = months.filter(|m| *m > 0) {
+        let (y, m, _) = es_index::civil_from_days(t.div_euclid(DAY));
+        let first = ((y - 1) * 12 + m - 1).div_euclid(months) * months;
+        let days = es_index::days_from_civil(first.div_euclid(12) + 1, first.rem_euclid(12) + 1, 1);
+        return Some(es_index::iso_date(days * DAY).into());
+    }
     let ms = match unit {
         "millisecond" => 1,
         "second" => 1000,
         "minute" => 60_000,
         "hour" => 3_600_000,
         "day" => DAY,
-        "week" if n != 1 => 7 * DAY,
-        _ if n == 1 => {
-            let start = crate::aggs::histogram::Unit::parse(unit)?.round(t, false);
-            return Some(es_index::iso_date(start).into());
-        }
         _ => return None,
     };
     let interval = n.checked_mul(ms).filter(|i| *i > 0)?;

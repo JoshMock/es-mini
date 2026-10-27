@@ -2007,3 +2007,29 @@ fn esql_es_semantics_hexadecimal_floats() {
         ]]
     );
 }
+
+/// Like Elasticsearch 9.5.5's `DateTrunc.createRounding`: several months, quarters or years
+/// round to intervals counted from year 1, and 7 days is a calendar week.
+#[test]
+fn esql_es_semantics_date_trunc_multiple_calendar_units() {
+    let r = q(
+        "ROW d = TO_DATETIME(\"2024-05-17T10:11:12Z\") | EVAL a = DATE_TRUNC(3 months, d), \
+               b = DATE_TRUNC(2 years, d), c = DATE_TRUNC(2 quarters, d), e = DATE_TRUNC(2 weeks, d), \
+               f = DATE_TRUNC(5 years, TO_DATETIME(\"1965-03-01T00:00:00Z\")), \
+               g = DATE_TRUNC(7 months, TO_DATETIME(\"1969-12-31T00:00:00Z\")), \
+               h = DATE_TRUNC(7 days, d) | DROP d",
+    );
+    let dates = [
+        "2024-04-01",
+        "2023-01-01",
+        "2024-01-01",
+        "2024-05-09",
+        "1961-01-01",
+        "1969-10-01",
+        "2024-05-13",
+    ];
+    assert_eq!(
+        r.values,
+        [dates.map(|d| json!(format!("{d}T00:00:00.000Z")))]
+    );
+}
