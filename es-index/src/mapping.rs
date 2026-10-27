@@ -6,7 +6,8 @@ use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 
 /// MVP leaf field types; objects live in [`Mappings::properties`] as dotted paths (`nested`
-/// objects as a [`FieldMapping::Nested`] entry at their path).
+/// objects as a [`FieldMapping::Nested`] entry at their path, objects without subfields as a
+/// [`FieldMapping::Object`] entry).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum FieldMapping {
@@ -66,6 +67,8 @@ pub enum FieldMapping {
     // on disk hold them as separate documents, for Elasticsearch), so nested queries and
     // aggregations are unsupported; the mapping only round-trips and keeps nested objects out of hit counts
     Nested,
+    /// An object with no subfields; one with subfields is only the entries under `path.`.
+    Object,
 }
 
 impl FieldMapping {
@@ -84,6 +87,7 @@ impl FieldMapping {
             Self::Ip => "ip",
             Self::LongRange | Self::DateRange { .. } => "unsupported",
             Self::Nested => "nested",
+            Self::Object => "object",
         }
     }
 
@@ -101,6 +105,11 @@ impl FieldMapping {
             Self::TextKeyword { fields } | Self::Date { fields, .. } => Some(fields),
             _ => None,
         }
+    }
+
+    /// Whether this maps an object (`object` or `nested`) rather than a leaf.
+    pub fn is_object(&self) -> bool {
+        matches!(self, Self::Nested | Self::Object)
     }
 
     pub fn is_numeric(&self) -> bool {
@@ -138,6 +147,27 @@ impl Mappings {
         })
     }
 
+    /// Adds `new` fields, replacing those at the same paths; an empty object that gains
+    /// subfields stops being an entry of its own.
+    pub fn extend(&mut self, new: BTreeMap<String, FieldMapping>) {
+        self.properties.extend(new);
+        let props = &self.properties;
+        let filled: Vec<String> = (props.iter())
+            .filter(|(p, m)| {
+                let child = format!("{p}.");
+                **m == FieldMapping::Object
+                    && props
+                        .range(child.clone()..)
+                        .next()
+                        .is_some_and(|(c, _)| c.starts_with(&child))
+            })
+            .map(|(p, _)| p.clone())
+            .collect();
+        for p in filled {
+            self.properties.remove(&p);
+        }
+    }
+
     /// False when the mapping sets `_source.enabled` to `false`.
     pub fn source_enabled(&self) -> bool {
         self.source.as_ref().is_none_or(|s| s["enabled"] != false)
@@ -154,7 +184,7 @@ impl Index {
         for (k, v) in source.as_object().into_iter().flatten() {
             self.map_value(id, k, k, v, &mut added)?;
         }
-        self.mappings.properties.extend(added);
+        self.mappings.extend(added);
         Ok(())
     }
 
@@ -179,17 +209,19 @@ impl Index {
         };
         // A dotted key (`a.b`) whose prefix is a leaf gives that leaf an object.
         for (i, _) in path.match_indices('.') {
-            if get(&path[..i]).is_some_and(|m| *m != FieldMapping::Nested) {
+            if get(&path[..i]).is_some_and(|m| !m.is_object()) {
                 let preview = (path[i + 1..].rsplit('.')).fold(v.clone(), |v, k| json!({ k: v }));
                 return leaf_error(&path[..i], &preview);
             }
         }
         let mapping = match v {
-            // ponytail: empty objects map nothing; ES maps them as `{"type": "object"}`
             Value::Object(o) => {
                 match get(path) {
                     Some(FieldMapping::LongRange | FieldMapping::DateRange { .. }) => return Ok(()),
-                    Some(m) if *m != FieldMapping::Nested => return leaf_error(path, v),
+                    Some(m) if !m.is_object() => return leaf_error(path, v),
+                    None if o.is_empty() && !self.has_subfields(path, added) => {
+                        added.insert(path.to_owned(), FieldMapping::Object);
+                    }
                     _ => {}
                 }
                 for (k, x) in o {
@@ -205,15 +237,8 @@ impl Index {
                 return Ok(());
             }
             Value::Null => return Ok(()),
-            _ if get(path) == Some(&FieldMapping::Nested) || {
-                let child = format!("{path}.");
-                let under = |m: &BTreeMap<String, FieldMapping>| {
-                    m.range(child.clone()..)
-                        .next()
-                        .is_some_and(|(p, _)| p.starts_with(&child))
-                };
-                under(props) || under(added)
-            } =>
+            _ if get(path).is_some_and(FieldMapping::is_object)
+                || self.has_subfields(path, added) =>
             {
                 return Err(format!(
                     "object mapping for [{path}] tried to parse field [{}] as object, but found a concrete value",
@@ -268,6 +293,15 @@ impl Index {
         };
         added.insert(path.to_owned(), mapping);
         Ok(())
+    }
+
+    /// Whether the mappings or `added` hold a field under `path.`.
+    fn has_subfields(&self, path: &str, added: &BTreeMap<String, FieldMapping>) -> bool {
+        let child = format!("{path}.");
+        let under = |m: &BTreeMap<String, FieldMapping>| {
+            (m.range(child.clone()..).next()).is_some_and(|(p, _)| p.starts_with(&child))
+        };
+        under(&self.mappings.properties) || under(added)
     }
 }
 
@@ -339,12 +373,15 @@ fn flatten<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeMap<String, FieldMapp
                 out.insert(path.clone(), FieldMapping::Nested);
             }
             if v.is_object() && (nested || v.get("type").is_none_or(|t| t == "object")) {
-                // ponytail: an object without properties maps nothing (see map_value)
-                let sub = match v["properties"].take() {
+                let sub: Map<String, Value> = match v["properties"].take() {
                     Value::Null => Map::new(),
                     p => serde_json::from_value(p)?,
                 };
-                walk(&format!("{path}."), sub, out)?;
+                if sub.is_empty() && !nested {
+                    out.insert(path, FieldMapping::Object);
+                } else {
+                    walk(&format!("{path}."), sub, out)?;
+                }
             } else {
                 out.insert(path, serde_json::from_value(v)?);
             }

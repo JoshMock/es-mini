@@ -636,12 +636,8 @@ pub async fn put_mapping(
         }
     }
     for n in names {
-        let props = &mut indices
-            .get_mut(&n)
-            .expect("resolved index exists")
-            .mappings
-            .properties;
-        props.extend(new.properties.clone());
+        (indices.get_mut(&n).expect("resolved index exists").mappings)
+            .extend(new.properties.clone());
     }
     Ok(Json(json!({"acknowledged": true})))
 }

@@ -170,3 +170,19 @@ async fn field_caps_body_types_and_errors() {
         "can't specify a request body and [fields] request parameter, either specify a request body or the [fields] request parameter"
     );
 }
+
+#[tokio::test]
+async fn mapping_validation_empty_objects_are_left_out() {
+    let app = app();
+    let m = json!({"mappings": {"properties": {"e": {"type": "object"}}}});
+    call(&app, Method::PUT, "/o", Some(m)).await;
+    // Elasticsearch 9.5.5 leaves empty objects out.
+    let (_, r) = call(
+        &app,
+        Method::GET,
+        "/o/_field_caps?fields=*&filters=-metadata",
+        None,
+    )
+    .await;
+    assert_eq!(r, json!({"indices": ["o"], "fields": {}}));
+}

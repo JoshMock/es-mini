@@ -437,9 +437,9 @@ impl Format {
             Some(M::Boolean) => Format::Bool,
             Some(M::Date { .. } | M::DateNanos { .. } | M::DateRange { .. }) => Format::Date,
             Some(M::Ip) => Format::Ip,
-            Some(M::Keyword { .. } | M::Text { .. } | M::TextKeyword { .. } | M::Nested) => {
-                Format::Str
-            }
+            Some(
+                M::Keyword { .. } | M::Text { .. } | M::TextKeyword { .. } | M::Nested | M::Object,
+            ) => Format::Str,
         }
     }
 }

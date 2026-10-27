@@ -870,6 +870,9 @@ fn columns<'a>(
         .map(|(c, t)| (c, (t.clone(), t)))
         .collect();
     for (name, m) in &index.mappings.properties {
+        if *m == FieldMapping::Object {
+            continue;
+        }
         cols.insert(name.clone(), types_of(m));
         cols.remove(&format!("{name}.keyword"));
         for (sub, sm) in m.fields().into_iter().flatten() {

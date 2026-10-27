@@ -889,7 +889,7 @@ fn user_fields(
                 (IndexOptions::None, DocValuesType::Binary, false)
             }
             // The path of nested documents (see `lucene_docs`), not a field
-            M::Nested => continue,
+            M::Nested | M::Object => continue,
             M::Ip => {
                 // Like ES: points and sorted-set doc values of the 16-byte encoding, no postings.
                 let Some(ips) = typed(&values, &|v| Some(crate::ip_bytes(v))) else {

@@ -1461,6 +1461,7 @@ mod tests {
             serde_json::to_value(&i.mappings).unwrap(),
             json!({"properties": {
                 "arr": {"properties": {"x": {"type": "long"}, "y": {"type": "boolean"}}},
+                "e": {"type": "object"},
                 "o": {"properties": {
                     "a": {"type": "long"},
                     "b": {"properties": {"c": {"type": "boolean"}}}
@@ -1566,6 +1567,34 @@ mod tests {
             let t = i.mappings.properties[&format!("f{n}")].mapping_type();
             assert_eq!(t, if float { "float" } else { "text" }, "{s}");
         }
+    }
+
+    #[test]
+    fn mapping_validation_empty_objects_map_as_objects() {
+        let mut i = Index::default();
+        i.map_dynamic("1", &json!({"e": {}, "a": [{}], "o": {"p": {}}}))
+            .unwrap();
+        let empty = json!({"type": "object"});
+        let expected = json!({"properties": {
+            "a": empty, "e": empty, "o": {"properties": {"p": empty}}
+        }});
+        assert_eq!(serde_json::to_value(&i.mappings).unwrap(), expected);
+        let err =
+            "object mapping for [e] tried to parse field [e] as object, but found a concrete value";
+        assert_eq!(i.map_dynamic("2", &json!({"e": 1})), Err(err.into()));
+        // A subfield makes the object's type implicit again.
+        i.map_dynamic("3", &json!({"e": {"x": 1}, "o.p": {}}))
+            .unwrap();
+        let expected = json!({"properties": {
+            "a": empty, "e": {"properties": {"x": {"type": "long"}}},
+            "o": {"properties": {"p": empty}}
+        }});
+        assert_eq!(serde_json::to_value(&i.mappings).unwrap(), expected);
+        // Mappings without properties read back as empty objects.
+        let raw = json!({"properties": {"t": empty, "u": {}, "v": {"properties": {}}}});
+        let m: Mappings = serde_json::from_value(raw).unwrap();
+        let expected = json!({"properties": {"t": empty, "u": empty, "v": empty}});
+        assert_eq!(serde_json::to_value(&m).unwrap(), expected);
     }
 
     #[test]

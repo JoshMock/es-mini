@@ -78,7 +78,8 @@ fn source_path<'f>(index: &Index, field: &'f str) -> &'f str {
 }
 
 fn resolve(index: &Index, field: &str, sample: impl Fn(&str) -> Option<Value>) -> Kind {
-    match index.mappings.properties.get(field) {
+    // Object paths hold no values of their own, so they read like unmapped fields.
+    match (index.mappings.properties.get(field)).filter(|m| !m.is_object()) {
         Some(FieldMapping::Text { .. } | FieldMapping::TextKeyword { .. }) => Kind::Text,
         Some(FieldMapping::Keyword { .. }) => Kind::Keyword,
         Some(FieldMapping::Boolean) => Kind::Bool,

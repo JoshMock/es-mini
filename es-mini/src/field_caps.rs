@@ -159,7 +159,11 @@ fn fields(index: &Index, filters: &[&str]) -> Vec<(String, String, bool, bool, b
     if !filters.contains(&"-metadata") {
         out.extend(METADATA.map(|(f, t, s, a)| (f.to_owned(), t.to_owned(), true, s, a)));
     }
+    // Like Elasticsearch, objects without subfields are not reported.
     for (name, m) in &index.mappings.properties {
+        if *m == FieldMapping::Object {
+            continue;
+        }
         out.push(mapped(name.clone(), m));
         if let FieldMapping::TextKeyword { fields } = m
             && !filters.contains(&"-multifield")

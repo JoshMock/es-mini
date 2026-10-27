@@ -1249,7 +1249,7 @@ fn doc_value(s: &Searcher, field: &str, mapping: &FieldMapping, v: &Value) -> Op
         // ponytail: date_range's `format` is ignored
         M::LongRange => range(v, int),
         M::DateRange { .. } => range(v, es_index::parse_date_millis),
-        M::Text { .. } | M::TextKeyword { .. } | M::Nested => None,
+        M::Text { .. } | M::TextKeyword { .. } | M::Nested | M::Object => None,
     }
 }
 

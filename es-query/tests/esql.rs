@@ -1659,3 +1659,13 @@ fn stats_by_bucket() {
         Err(EsqlError::Verification(m)) if m.contains("function expects exactly")
     ));
 }
+
+#[test]
+fn mapping_validation_empty_objects_are_not_columns() {
+    let mut i = Index::default();
+    let doc = json!({"e": {}, "n": 1});
+    i.map_dynamic("1", &doc).unwrap();
+    i.put("1", doc);
+    let r = run(&BTreeMap::from([("i".to_owned(), i)]), "FROM i").unwrap();
+    assert_eq!(col_names(&r), ["n"]);
+}

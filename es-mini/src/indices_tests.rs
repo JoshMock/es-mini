@@ -506,3 +506,21 @@ async fn put_mapping_adds_and_updates_fields() {
     assert_eq!(s, StatusCode::BAD_REQUEST);
     assert_eq!(r["error"]["type"], "illegal_argument_exception");
 }
+
+#[tokio::test]
+async fn mapping_validation_put_mapping_fills_an_empty_object() {
+    let app = app();
+    let m = json!({"mappings": {"properties": {"e": {"type": "object"}}}});
+    call(&app, Method::PUT, "/idx", Some(m)).await;
+    let (_, r) = call(&app, Method::GET, "/idx/_mapping", None).await;
+    assert_eq!(
+        r,
+        json!({"idx": {"mappings": {"properties": {"e": {"type": "object"}}}}})
+    );
+    let add = json!({"properties": {"e": {"properties": {"x": {"type": "long"}}}}});
+    let (s, _) = call(&app, Method::PUT, "/idx/_mapping", Some(add)).await;
+    assert_eq!(s, StatusCode::OK);
+    let (_, r) = call(&app, Method::GET, "/idx/_mapping", None).await;
+    let e = json!({"properties": {"x": {"type": "long"}}});
+    assert_eq!(r, json!({"idx": {"mappings": {"properties": {"e": e}}}}));
+}
