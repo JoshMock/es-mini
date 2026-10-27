@@ -1644,7 +1644,6 @@ fn bucket_problem(ts: &[String], e: &Expr, src: &str) -> Option<String> {
 /// `BUCKET(x, ...)` of one row: a date rounded down like `DATE_TRUNC`, or a number rounded down
 /// to a multiple of the span as a double. With a target bucket count and a range, the span is
 /// picked like Elasticsearch's `Bucket`.
-// ponytail: allowed outside STATS ... BY, where ES refuses it
 fn bucket(args: &[Expr], date: bool, row: &Row) -> Option<Value> {
     let x = eval(&args[0], row)?;
     let fold = |e: &Expr| eval(e, &Row::new());
@@ -1849,22 +1848,44 @@ fn convert(f: &str, t: &str, v: &Value) -> Option<Value> {
     }
 }
 
-fn fields(e: &Expr, out: &mut Vec<Name>) {
+/// Calls `f` on `e` and on each expression in it, outermost first.
+fn walk<'e>(e: &'e Expr, f: &mut impl FnMut(&'e Expr)) {
+    f(e);
     match e {
-        Expr::Call(_, args, ..) => args.iter().for_each(|a| fields(a, out)),
-        Expr::Field(f, (at, _)) => out.push((f.clone(), *at)),
-        Expr::Lit(..) | Expr::Interval(..) => {}
-        Expr::Not(x, _) | Expr::IsNull(x, ..) | Expr::Neg(x, ..) | Expr::Like(x, ..) => {
-            fields(x, out)
-        }
+        Expr::Call(_, args, ..) => args.iter().for_each(|a| walk(a, f)),
+        Expr::Field(..) | Expr::Lit(..) | Expr::Interval(..) => {}
+        Expr::Not(x, _) | Expr::IsNull(x, ..) | Expr::Neg(x, ..) | Expr::Like(x, ..) => walk(x, f),
         Expr::Cmp(_, a, b, _)
         | Expr::And(a, b, _)
         | Expr::Or(a, b, _)
         | Expr::Arith(_, a, b, ..) => {
-            fields(a, out);
-            fields(b, out);
+            walk(a, f);
+            walk(b, f);
         }
     }
+}
+
+fn fields(e: &Expr, out: &mut Vec<Name>) {
+    walk(e, &mut |e| {
+        if let Expr::Field(f, (at, _)) = e {
+            out.push((f.clone(), *at));
+        }
+    });
+}
+
+/// A problem for each grouping function (`BUCKET`) in `e`, which only STATS may use.
+fn grouping_outside_stats(e: &Expr, src: &str, bad: &mut Vec<(Pos, String)>) {
+    walk(e, &mut |e| {
+        if let Expr::Call(f, _, _, (at, r)) = e
+            && f.eq_ignore_ascii_case("BUCKET")
+        {
+            let msg = format!(
+                "cannot use grouping function [{}] outside of a STATS or LIMIT BY command",
+                &src[r.clone()]
+            );
+            bad.push((*at, msg));
+        }
+    });
 }
 
 fn names(e: &Expr) -> Vec<String> {
@@ -2272,6 +2293,9 @@ pub fn run(
                         format!("Condition expression needs to be boolean, found [{found}]");
                     bad.push((span(e).0, problem));
                 }
+                if bad.is_empty() {
+                    grouping_outside_stats(e, query, &mut bad);
+                }
                 bad
             }
             Command::Eval(named) => {
@@ -2294,6 +2318,9 @@ pub fn run(
                     cols.push(name.clone());
                     types.insert(name.clone(), t);
                     conflicts.remove(name);
+                }
+                if bad.is_empty() {
+                    (named.iter()).for_each(|(_, e)| grouping_outside_stats(e, query, &mut bad));
                 }
                 bad
             }

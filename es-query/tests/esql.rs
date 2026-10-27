@@ -1819,3 +1819,44 @@ fn esql_es_semantics_asterisk_multiplies_in_expressions() {
     let r = q("FROM people | STATS c = COUNT(*)");
     assert_eq!(r.values, [[json!(3)]]);
 }
+
+/// Elasticsearch 9.5.5 allows BUCKET only in STATS.
+#[test]
+fn esql_es_semantics_bucket_only_in_stats() {
+    let err = |q: &str| match run(&indices(), q) {
+        Err(EsqlError::Verification(m)) => m,
+        other => panic!("{q}: {other:?}"),
+    };
+    let outside = |at: &str, call: &str| {
+        format!(
+            "\nline 1:{at}: cannot use grouping function [{call}] outside of a STATS or LIMIT BY \
+             command"
+        )
+    };
+    assert_eq!(
+        err("ROW a = 5 | EVAL b = BUCKET(a, 2), c = BUCKET(a, 3)"),
+        format!(
+            "Found 2 problems{}{}",
+            outside("22", "BUCKET(a, 2)"),
+            outside("40", "BUCKET(a, 3)")
+        )
+    );
+    for (q, at) in [
+        ("ROW a = 5 | WHERE BUCKET(a, 2) > 0", "19"),
+        ("ROW a = BUCKET(5, 2)", "9"),
+        ("ROW a = 5 | EVAL b = ABS(BUCKET(a, 2))", "26"),
+    ] {
+        let call = &q[q.find("BUCKET").unwrap()..][..12];
+        assert_eq!(
+            err(q),
+            format!("Found 1 problem{}", outside(at, call)),
+            "{q}"
+        );
+    }
+    assert_eq!(
+        err("ROW a = 5 | EVAL b = BUCKET(nope, 2)"),
+        "Found 1 problem\nline 1:29: Unknown column [nope]"
+    );
+    let r = q("ROW a = 5 | STATS c = COUNT(*) BY b = BUCKET(a, 2) + 1");
+    assert_eq!(r.values, [[json!(1), json!(5.0)]]);
+}
