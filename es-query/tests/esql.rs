@@ -205,7 +205,7 @@ fn from_aliases_and_multiple_sources_with_filters() {
 #[test]
 fn text_with_keyword_subfield_keeps_both_columns() {
     let mut i = Index::default();
-    i.map_dynamic(&json!({"t": "Hello"}));
+    i.map_dynamic("1", &json!({"t": "Hello"})).unwrap();
     i.put("1", json!({"t": "Hello"}));
     let all = BTreeMap::from([("idx".to_owned(), i)]);
     let r = run(&all, "FROM idx | KEEP t, t.keyword").unwrap();

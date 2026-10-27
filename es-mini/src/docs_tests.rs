@@ -201,6 +201,28 @@ async fn rejected_document_adds_no_dynamic_mappings() {
 }
 
 #[tokio::test]
+async fn mapping_validation_object_for_a_leaf_rejects_the_document() {
+    let app = app();
+    call(&app, Method::PUT, "/idx/_doc/1", Some(json!({"a": 1}))).await;
+    let (s, r) = call(
+        &app,
+        Method::PUT,
+        "/idx/_doc/2",
+        Some(json!({"a": {"b": 1}})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(r["error"]["type"], "document_parsing_exception");
+    assert_eq!(
+        r["error"]["reason"],
+        "failed to parse field [a] of type [long] in document with id '2'. \
+         Preview of field's value: '{b=1}'"
+    );
+    let (s, _) = call(&app, Method::GET, "/idx/_doc/2", None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn object_fields_map_dynamically_and_are_searchable() {
     let app = app();
     let doc = json!({"o": {"n": 5, "t": "Hi there"}});

@@ -145,23 +145,81 @@ impl Mappings {
 
 impl Index {
     /// Adds dynamic mappings for fields of `source` not yet mapped, object fields under their
-    /// dotted paths.
-    pub fn map_dynamic(&mut self, source: &Value) {
-        if let Some(obj) = source.as_object() {
-            obj.iter().for_each(|(k, v)| self.map_value(k, v));
+    /// dotted paths. A document giving an object to a leaf field, or a value to an object field,
+    /// maps nothing and fails with Elasticsearch's `document_parsing_exception` reason (without
+    /// its `[line:column]` prefix).
+    pub fn map_dynamic(&mut self, id: &str, source: &Value) -> Result<(), String> {
+        let mut added = BTreeMap::new();
+        for (k, v) in source.as_object().into_iter().flatten() {
+            self.map_value(id, k, k, v, &mut added)?;
         }
+        self.mappings.properties.extend(added);
+        Ok(())
     }
 
-    fn map_value(&mut self, path: &str, v: &Value) {
+    /// Maps `v` at `path` into `added`; `name` is the JSON key it came from (`null` in arrays).
+    fn map_value(
+        &self,
+        id: &str,
+        path: &str,
+        name: &str,
+        v: &Value,
+        added: &mut BTreeMap<String, FieldMapping>,
+    ) -> Result<(), String> {
+        let props = &self.mappings.properties;
+        let get = |p: &str| added.get(p).or_else(|| props.get(p));
+        let leaf_error = |field: &str, preview: &Value| {
+            Err(format!(
+                "failed to parse field [{field}] of type [{}] in document with id '{id}'. \
+                 Preview of field's value: '{}'",
+                get(field).map_or_else(String::new, FieldMapping::mapping_type),
+                crate::setting_string(preview)
+            ))
+        };
+        // A dotted key (`a.b`) whose prefix is a leaf gives that leaf an object.
+        for (i, _) in path.match_indices('.') {
+            if get(&path[..i]).is_some_and(|m| *m != FieldMapping::Nested) {
+                let preview = (path[i + 1..].rsplit('.')).fold(v.clone(), |v, k| json!({ k: v }));
+                return leaf_error(&path[..i], &preview);
+            }
+        }
         let mapping = match v {
             // ponytail: empty objects map nothing; ES maps them as `{"type": "object"}`
             Value::Object(o) => {
-                return o
-                    .iter()
-                    .for_each(|(k, x)| self.map_value(&format!("{path}.{k}"), x));
+                match get(path) {
+                    Some(FieldMapping::LongRange | FieldMapping::DateRange { .. }) => return Ok(()),
+                    Some(m) if *m != FieldMapping::Nested => return leaf_error(path, v),
+                    _ => {}
+                }
+                for (k, x) in o {
+                    self.map_value(id, &format!("{path}.{k}"), k, x, added)?;
+                }
+                return Ok(());
             }
             // Array elements map in order; the first scalar wins.
-            Value::Array(a) => return a.iter().for_each(|x| self.map_value(path, x)),
+            Value::Array(a) => {
+                for x in a {
+                    self.map_value(id, path, "null", x, added)?;
+                }
+                return Ok(());
+            }
+            Value::Null => return Ok(()),
+            _ if get(path) == Some(&FieldMapping::Nested) || {
+                let child = format!("{path}.");
+                let under = |m: &BTreeMap<String, FieldMapping>| {
+                    m.range(child.clone()..)
+                        .next()
+                        .is_some_and(|(p, _)| p.starts_with(&child))
+                };
+                under(props) || under(added)
+            } =>
+            {
+                return Err(format!(
+                    "object mapping for [{path}] tried to parse field [{}] as object, but found a concrete value",
+                    name.rsplit('.').next().unwrap_or(name)
+                ));
+            }
+            _ if get(path).is_some() => return Ok(()),
             // Like Elasticsearch's DynamicFieldsBuilder: numeric strings are never dates.
             // ponytail: Rust's f64 parse stands in for Java's Double.parseDouble (which also
             // takes `1f`, hex and surrounding spaces, but not `inf`)
@@ -208,22 +266,9 @@ impl Index {
             Value::Bool(_) => FieldMapping::Boolean,
             Value::Number(n) if n.is_f64() => FieldMapping::Float,
             Value::Number(_) => FieldMapping::Long,
-            Value::Null => return,
         };
-        let props = &mut self.mappings.properties;
-        // ponytail: a leaf meeting an object (or the reverse) is left unmapped; ES rejects the document
-        let child = format!("{path}.");
-        let conflict = path.match_indices('.').any(|(i, _)| {
-            props
-                .get(&path[..i])
-                .is_some_and(|m| *m != FieldMapping::Nested)
-        }) || props
-            .range(child.clone()..)
-            .next()
-            .is_some_and(|(p, _)| p.starts_with(&child));
-        if !conflict {
-            props.entry(path.to_owned()).or_insert(mapping);
-        }
+        added.insert(path.to_owned(), mapping);
+        Ok(())
     }
 }
 

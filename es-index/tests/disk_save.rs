@@ -258,7 +258,7 @@ fn object_fields_save_under_dotted_paths() {
     use es_index::Index;
     let mut idx = Index::default();
     let doc = json!({"o": {"n": [5, 6]}});
-    idx.map_dynamic(&doc);
+    idx.map_dynamic("1", &doc).unwrap();
     idx.put("1", doc);
     let root = scratch("objects");
     let dir = root.join("data");

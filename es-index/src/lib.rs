@@ -155,12 +155,20 @@ pub fn setting_value(v: &Value) -> Value {
     }
 }
 
-/// A settings value as `Settings.get` reads it: a list renders like Java's `List.toString`.
+/// A settings value as `Settings.get` reads it: a list renders like Java's `List.toString`, an
+/// object like `Map.toString`.
 pub fn setting_string(v: &Value) -> String {
     match v {
         Value::Array(items) => {
             let items: Vec<String> = items.iter().map(setting_string).collect();
             format!("[{}]", items.join(", "))
+        }
+        Value::Object(m) => {
+            let items: Vec<String> = m
+                .iter()
+                .map(|(k, v)| format!("{k}={}", setting_string(v)))
+                .collect();
+            format!("{{{}}}", items.join(", "))
         }
         Value::String(s) => s.clone(),
         v => v.to_string(),
@@ -1408,10 +1416,14 @@ mod tests {
     #[test]
     fn dynamic_mapping_detects_types() {
         let mut i = Index::default();
-        i.map_dynamic(&json!({
-            "s": "hi", "n": 3, "f": 1.5, "b": true, "d": "2024-01-02T03:04:05Z",
-            "d2": "2024-01", "notd": "2024-1-2", "arr": [null, 7], "nul": null
-        }));
+        i.map_dynamic(
+            "1",
+            &json!({
+                "s": "hi", "n": 3, "f": 1.5, "b": true, "d": "2024-01-02T03:04:05Z",
+                "d2": "2024-01", "notd": "2024-1-2", "arr": [null, 7], "nul": null
+            }),
+        )
+        .unwrap();
         let p = &i.mappings.properties;
         assert!(matches!(p["s"], FieldMapping::TextKeyword { .. }));
         assert_eq!(
@@ -1431,10 +1443,14 @@ mod tests {
     #[test]
     fn dynamic_mapping_maps_object_fields() {
         let mut i = Index::default();
-        i.map_dynamic(&json!({
-            "o": {"a": 1, "b": {"c": true}}, "p.q": 1.5,
-            "arr": [{"x": 1}, {"y": false}], "e": {}
-        }));
+        i.map_dynamic(
+            "1",
+            &json!({
+                "o": {"a": 1, "b": {"c": true}}, "p.q": 1.5,
+                "arr": [{"x": 1}, {"y": false}], "e": {}
+            }),
+        )
+        .unwrap();
         assert_eq!(
             serde_json::to_value(&i.mappings).unwrap(),
             json!({"properties": {
@@ -1447,10 +1463,45 @@ mod tests {
             }})
         );
         assert_eq!(i.mappings.field("o.b.c"), Some(&FieldMapping::Boolean));
-        // A leaf cannot become an object, nor an object a leaf.
-        i.map_dynamic(&json!({"o": {"a": {"z": 1}}, "p": 2}));
-        assert!(i.mappings.field("o.a.z").is_none());
-        assert!(i.mappings.field("p").is_none());
+    }
+
+    #[test]
+    fn mapping_validation_leaf_object_conflicts_reject_the_document() {
+        let mut i = Index::default();
+        i.map_dynamic("0", &json!({"a": 1, "o": {"b": 1}, "n": [{"k": 1}]}))
+            .unwrap();
+        let before = i.mappings.clone();
+        let leaf = |f: &str, preview: &str| {
+            format!(
+                "failed to parse field [{f}] of type [long] in document with id '1'. \
+                 Preview of field's value: '{preview}'"
+            )
+        };
+        let object = |o: &str, f: &str| {
+            format!(
+                "object mapping for [{o}] tried to parse field [{f}] as object, but found a concrete value"
+            )
+        };
+        // Elasticsearch 9.5.5's reasons, without the `[line:column]` prefix.
+        for (doc, err) in [
+            (
+                json!({"new": 1, "a": {"b": 1, "c": ["x", null]}}),
+                leaf("a", "{b=1, c=[x, null]}"),
+            ),
+            (json!({"a.b": 1}), leaf("a", "{b=1}")),
+            (json!({"a": {}}), leaf("a", "{}")),
+            (json!({"a": [1, {"b": 1}]}), leaf("a", "{b=1}")),
+            (json!({"x": 1, "x.y": 2}), leaf("x", "{y=2}")),
+            (json!({"o": 2}), object("o", "o")),
+            (json!({"o": [1]}), object("o", "null")),
+            (json!({"n": "s"}), object("n", "n")),
+            (json!({"o": {"b": {"c": 1}}}), leaf("o.b", "{c=1}")),
+        ] {
+            assert_eq!(i.map_dynamic("1", &doc), Err(err), "{doc}");
+            assert_eq!(i.mappings, before, "{doc} maps nothing");
+        }
+        i.map_dynamic("2", &json!({"o": null, "o2": {}, "a": null}))
+            .unwrap();
     }
 
     #[test]
@@ -1462,7 +1513,7 @@ mod tests {
                 ..Default::default()
             };
             assert_eq!(serde_json::to_value(&i.mappings).unwrap(), mappings);
-            i.map_dynamic(&doc);
+            i.map_dynamic("1", &doc).unwrap();
             let p = i.mappings.properties;
             ["l", "f", "y", "d", "s"].map(|f| p[f].type_name())
         };
@@ -1504,7 +1555,7 @@ mod tests {
         assert_eq!(serde_json::to_value(&m).unwrap(), raw);
         let mut i = Index::default();
         std::mem::swap(&mut i.mappings, &mut m);
-        i.map_dynamic(&json!({"n": [{"k": true}]}));
+        i.map_dynamic("1", &json!({"n": [{"k": true}]})).unwrap();
         assert_eq!(i.mappings.properties["n.k"], FieldMapping::Boolean);
     }
 
@@ -1634,7 +1685,7 @@ mod tests {
             ("2024-01-02T03:04:05,5Z", 1_704_164_645_500),
         ] {
             let mut i = Index::default();
-            i.map_dynamic(&json!({ "d": s }));
+            i.map_dynamic("1", &json!({ "d": s })).unwrap();
             assert!(matches!(
                 i.mappings.properties["d"],
                 FieldMapping::Date { .. }

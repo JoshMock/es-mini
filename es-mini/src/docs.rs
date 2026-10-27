@@ -167,7 +167,8 @@ pub fn put_or_create(
             }
         }
         // only once the document is accepted; dynamic dates never fail the check above
-        i.map_dynamic(&source);
+        i.map_dynamic(id, &source)
+            .map_err(AppError::DocumentParsing)?;
         Ok(match create {
             true => i.create_auto(id, source, auto_id_timestamp),
             false => Ok(i.put_auto(id, source, auto_id_timestamp)),
