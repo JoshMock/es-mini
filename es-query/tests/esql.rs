@@ -2182,3 +2182,116 @@ fn esql_es_semantics_conditionals_widen_to_unsigned_long() {
         ))
     );
 }
+
+/// DATE_EXTRACT reads every `ChronoField`, as in Elasticsearch 9.5.5. An unknown part fails the
+/// query when it is a literal, and is null when it comes from a field (where ES warns).
+#[test]
+fn esql_es_semantics_date_extract_parts() {
+    const FIELDS: &str = "NANO_OF_SECOND NANO_OF_DAY MICRO_OF_SECOND MICRO_OF_DAY \
+        MILLI_OF_SECOND MILLI_OF_DAY SECOND_OF_MINUTE SECOND_OF_DAY MINUTE_OF_HOUR MINUTE_OF_DAY \
+        HOUR_OF_AMPM CLOCK_HOUR_OF_AMPM HOUR_OF_DAY CLOCK_HOUR_OF_DAY AMPM_OF_DAY DAY_OF_WEEK \
+        ALIGNED_DAY_OF_WEEK_IN_MONTH ALIGNED_DAY_OF_WEEK_IN_YEAR DAY_OF_MONTH DAY_OF_YEAR \
+        EPOCH_DAY ALIGNED_WEEK_OF_MONTH ALIGNED_WEEK_OF_YEAR MONTH_OF_YEAR PROLEPTIC_MONTH \
+        YEAR_OF_ERA YEAR ERA INSTANT_SECONDS OFFSET_SECONDS";
+    let extract = |millis: i64| {
+        let cols: Vec<String> = FIELDS
+            .split_whitespace()
+            .map(|f| format!("{f} = DATE_EXTRACT(\"{}\", d)", f.to_lowercase()))
+            .collect();
+        let r = q(&format!(
+            "ROW d = TO_DATETIME({millis}) | EVAL {} | DROP d",
+            cols.join(", ")
+        ));
+        r.values[0].clone()
+    };
+    // 2024-12-31T00:05:06.789Z
+    let late: [i64; 30] = [
+        789000000,
+        306789000000,
+        789000,
+        306789000,
+        789,
+        306789,
+        6,
+        306,
+        5,
+        5,
+        0,
+        12,
+        0,
+        24,
+        0,
+        2,
+        3,
+        2,
+        31,
+        366,
+        20088,
+        5,
+        53,
+        12,
+        24299,
+        2024,
+        2024,
+        1,
+        1735603506,
+        0,
+    ];
+    assert_eq!(extract(1_735_603_506_789), late.map(Value::from));
+    // 0000-02-03T13:00:00.001Z
+    let year_0: [i64; 30] = [
+        1000000,
+        46800001000000,
+        1000,
+        46800001000,
+        1,
+        46800001,
+        0,
+        46800,
+        0,
+        780,
+        1,
+        1,
+        13,
+        13,
+        1,
+        4,
+        3,
+        6,
+        3,
+        34,
+        -719495,
+        1,
+        5,
+        2,
+        1,
+        1,
+        0,
+        0,
+        -62164321200,
+        0,
+    ];
+    assert_eq!(extract(-62_164_321_199_999), year_0.map(Value::from));
+    assert_eq!(
+        run(
+            &indices(),
+            "ROW d = TO_DATETIME(0) | EVAL a = DATE_EXTRACT(\"bogus\", d)"
+        ),
+        Err(EsqlError::Failed {
+            status: 400,
+            kind: "invalid_argument_exception",
+            reason: "invalid date field for [DATE_EXTRACT(\"bogus\", d)]: bogus".into()
+        })
+    );
+    assert_eq!(
+        run(
+            &indices(),
+            "ROW d = TO_DATETIME(0) | EVAL a = DATE_EXTRACT(\"bogus\", d) | KEEP nope"
+        ),
+        Err(EsqlError::Verification(
+            "Found 1 problem\nline 1:67: Unknown column [nope]".into()
+        ))
+    );
+    let r = q("FROM people | EVAL a = DATE_EXTRACT(name, TO_DATETIME(0)) | KEEP a | LIMIT 1");
+    assert_eq!(r.values, [[Value::Null]]);
+}

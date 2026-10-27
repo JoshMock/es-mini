@@ -1537,11 +1537,10 @@ fn mv_fn(f: &str, v: &Value) -> Option<Value> {
 }
 
 /// `DATE_EXTRACT(part, date)` or `DATE_FORMAT([pattern,] date)` in UTC, like Elasticsearch's
-/// evaluators: `None` for a multi-valued argument (where ES warns).
-// ponytail: an unknown part or a pattern es_index::format_date lacks (week fields, zone
-// names) is null, where ES fails the query or formats them
+/// evaluators: `None` for a multi-valued argument or an unknown part (where ES warns).
+// ponytail: DATE_FORMAT prints null for a pattern es_index::format_date lacks (week fields, zone
+// names) or rejects, where ES formats it or fails the query
 fn date_fn(f: &str, args: &[Value]) -> Option<Value> {
-    const DAY: i64 = 86_400_000;
     let t = es_index::parse_date_millis(args.last()?)?;
     if f == "DATE_FORMAT" {
         return match args {
@@ -1552,27 +1551,50 @@ fn date_fn(f: &str, args: &[Value]) -> Option<Value> {
         }
         .map(Value::from);
     }
+    chrono_field(args[0].as_str()?, t).map(Value::from)
+}
+
+/// Java's `ChronoField` named `part` (ignoring case) of epoch millis `t` in UTC.
+fn chrono_field(part: &str, t: i64) -> Option<i64> {
+    const DAY: i64 = 86_400_000;
     let (days, ms) = (t.div_euclid(DAY), t.rem_euclid(DAY));
     let (y, m, d) = es_index::civil_from_days(days);
-    // Java's `ChronoField` names, matched ignoring case.
-    let v = match args[0].as_str()?.to_ascii_uppercase().as_str() {
-        "YEAR" => y,
-        "MONTH_OF_YEAR" => m,
-        "DAY_OF_MONTH" => d,
+    let doy = days - es_index::days_from_civil(y, 1, 1) + 1;
+    let h = ms / 3_600_000;
+    Some(match part.to_ascii_uppercase().as_str() {
+        "NANO_OF_SECOND" => ms % 1000 * 1_000_000,
+        "NANO_OF_DAY" => ms * 1_000_000,
+        "MICRO_OF_SECOND" => ms % 1000 * 1000,
+        "MICRO_OF_DAY" => ms * 1000,
+        "MILLI_OF_SECOND" => ms % 1000,
+        "MILLI_OF_DAY" => ms,
+        "SECOND_OF_MINUTE" => ms / 1000 % 60,
+        "SECOND_OF_DAY" => ms / 1000,
+        "MINUTE_OF_HOUR" => ms / 60_000 % 60,
+        "MINUTE_OF_DAY" => ms / 60_000,
+        "HOUR_OF_AMPM" => h % 12,
+        "CLOCK_HOUR_OF_AMPM" => (h + 11) % 12 + 1,
+        "HOUR_OF_DAY" => h,
+        "CLOCK_HOUR_OF_DAY" => (h + 23) % 24 + 1,
+        "AMPM_OF_DAY" => h / 12,
         // ISO: Monday is 1, and 1970-01-01 was a Thursday.
         "DAY_OF_WEEK" => (days + 3).rem_euclid(7) + 1,
-        "DAY_OF_YEAR" => days - es_index::days_from_civil(y, 1, 1) + 1,
+        "ALIGNED_DAY_OF_WEEK_IN_MONTH" => (d - 1) % 7 + 1,
+        "ALIGNED_DAY_OF_WEEK_IN_YEAR" => (doy - 1) % 7 + 1,
+        "DAY_OF_MONTH" => d,
+        "DAY_OF_YEAR" => doy,
         "EPOCH_DAY" => days,
-        "HOUR_OF_DAY" => ms / 3_600_000,
-        "MINUTE_OF_DAY" => ms / 60_000,
-        "MINUTE_OF_HOUR" => ms / 60_000 % 60,
-        "SECOND_OF_DAY" => ms / 1000,
-        "SECOND_OF_MINUTE" => ms / 1000 % 60,
-        "MILLI_OF_DAY" => ms,
-        "MILLI_OF_SECOND" => ms % 1000,
+        "ALIGNED_WEEK_OF_MONTH" => (d - 1) / 7 + 1,
+        "ALIGNED_WEEK_OF_YEAR" => (doy - 1) / 7 + 1,
+        "MONTH_OF_YEAR" => m,
+        "PROLEPTIC_MONTH" => y * 12 + m - 1,
+        "YEAR_OF_ERA" if y < 1 => 1 - y,
+        "YEAR_OF_ERA" | "YEAR" => y,
+        "ERA" => i64::from(y >= 1),
+        "INSTANT_SECONDS" => t.div_euclid(1000),
+        "OFFSET_SECONDS" => 0,
         _ => return None,
-    };
-    Some(v.into())
+    })
 }
 
 /// The canonical unit of a time span literal's unit, like Elasticsearch's
@@ -2149,6 +2171,13 @@ fn resolve(
                     bad.push((*at, problem));
                     return None;
                 }
+                // Like ES building its evaluator, an unknown literal part fails the query.
+                if let ("DATE_EXTRACT", Expr::Lit(Value::String(part), _)) = (*name, &args[0])
+                    && chrono_field(part, 0).is_none()
+                {
+                    let reason = format!("invalid date field for [{}]: {part}", text(e));
+                    fail(400, "invalid_argument_exception", reason);
+                }
                 // The result type: a string, an integer, a double, or the first argument's.
                 let out = match *name {
                     "SUBSTRING" | "CONCAT" | "TO_LOWER" | "TO_UPPER" | "DATE_FORMAT" => "keyword",
@@ -2317,7 +2346,11 @@ pub fn run(
 ) -> Result<Response, EsqlError> {
     FAILURE.take();
     let r = run_at(indices, query, crate::dates::now_millis());
-    FAILURE.take().map_or(r, Err)
+    // Verification fails a query before anything can fail evaluating it.
+    match (r, FAILURE.take()) {
+        (Ok(_), Some(e)) => Err(e),
+        (r, _) => r,
+    }
 }
 
 /// `run` with `now` (epoch millis) as the query's start time.
