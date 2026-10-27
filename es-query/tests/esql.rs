@@ -2066,3 +2066,33 @@ fn esql_es_semantics_negative_substring_length_fails() {
         [[json!("bc"), json!("")]]
     );
 }
+
+/// Like Elasticsearch 9.5.5, ROUND past the long range fails the query (500
+/// `arithmetic_exception`), while integers and unsigned longs round to null (with a warning).
+#[test]
+fn esql_es_semantics_round_overflow() {
+    assert_eq!(
+        run(
+            &indices(),
+            "ROW x = 9223372036854775807 | EVAL a = ROUND(x, -1)"
+        ),
+        Err(EsqlError::Failed {
+            status: 500,
+            kind: "arithmetic_exception",
+            reason: "long overflow".into()
+        })
+    );
+    let r = q(
+        "ROW x = 2147483647 | EVAL a = ROUND(x, -1), b = ROUND(18446744073709551615, -1), \
+               c = ROUND(9223372036854775807, -2)",
+    );
+    assert_eq!(
+        r.values,
+        [[
+            json!(2147483647),
+            Value::Null,
+            Value::Null,
+            json!(9223372036854775800i64)
+        ]]
+    );
+}

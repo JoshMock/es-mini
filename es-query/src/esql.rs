@@ -1450,10 +1450,13 @@ fn math_fn(f: &str, t: &str, args: &[Value]) -> Option<Value> {
         "ROUND" if args.len() == 2 => {
             let n = x.as_i64().map(i128::from).or(x.as_u64().map(i128::from))?;
             let r = round_whole(n, args[1].as_i64()?);
-            // ponytail: an overflowing long fails the query in ES; null here
             match t {
                 "integer" => i32::try_from(r).ok().map(Value::from),
-                "long" => i64::try_from(r).ok().map(Value::from),
+                // ES's `RoundLongEvaluator` does not turn the overflow into a warning.
+                "long" => i64::try_from(r)
+                    .ok()
+                    .map(Value::from)
+                    .or_else(|| fail(500, "arithmetic_exception", "long overflow".into())),
                 _ => u64::try_from(r).ok().map(Value::from),
             }
         }
