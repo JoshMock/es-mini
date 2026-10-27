@@ -101,6 +101,8 @@ pub(crate) struct Shard {
     segments: Vec<SegmentReader>,
     /// Live documents by id. Writes to the index remove the ones they replace or delete.
     ids: HashMap<String, DiskDoc>,
+    /// Per segment, the paths of its nested documents (`_nested_path` terms)
+    nested: Vec<Vec<String>>,
 }
 
 impl std::fmt::Debug for Shard {
@@ -149,7 +151,17 @@ impl Shard {
 
     /// A segment's doc values of `field`; `None` if it has none the codec reads.
     pub(crate) fn column(&self, segment: usize, field: &str) -> Option<DocValues> {
+        if self.nested(segment, field) {
+            return None;
+        }
         self.segments[segment].doc_values(field).ok()
+    }
+
+    /// Whether segment `s` indexes `field` in nested documents, which hold its postings, points
+    /// and doc values instead of the roots es-mini reads as documents; lookups treat such a
+    /// field as one the segment cannot read.
+    fn nested(&self, s: usize, field: &str) -> bool {
+        self.nested[s].iter().any(|p| under(field, p))
     }
 
     /// Forgets a document the index replaced or deleted.
@@ -178,10 +190,12 @@ impl Shard {
         let mut out = BTreeSet::new();
         for (s, seg) in self.segments.iter().enumerate() {
             match seg.term(field, term.as_bytes()) {
-                Ok(t) => out.extend(t.iter().flat_map(|t| &t.docs).map(|d| (s, d.0 as usize))),
+                Ok(t) if !self.nested(s, field) => {
+                    out.extend(t.iter().flat_map(|t| &t.docs).map(|d| (s, d.0 as usize)))
+                }
                 // e.g. a field this segment does not index, or a postings format we lack
-                Err(_) if exact => return None,
-                Err(_) => out.extend((0..seg.max_doc()).map(|d| (s, d))),
+                _ if exact => return None,
+                _ => out.extend((0..seg.max_doc()).map(|d| (s, d))),
             }
         }
         Some(out)
@@ -198,6 +212,9 @@ impl Shard {
     ) -> Option<HashMap<DiskPos, (u32, u32)>> {
         let mut out = HashMap::new();
         for (s, seg) in self.segments.iter().enumerate() {
+            if self.nested(s, field) {
+                return None;
+            }
             let Some(t) = seg.term(field, term.as_bytes()).ok()? else {
                 continue;
             };
@@ -223,12 +240,14 @@ impl Shard {
     ) -> Option<BTreeSet<DiskPos>> {
         let mut out = BTreeSet::new();
         for (s, seg) in self.segments.iter().enumerate() {
-            if let Ok(docs) = seg.point_docs(field, &place) {
+            if let Ok(docs) = seg.point_docs(field, &place)
+                && !self.nested(s, field)
+            {
                 out.extend(docs.into_iter().map(|d| (s, d as usize)));
                 continue;
             }
-            match seg.doc_values(field) {
-                Ok(DocValues::Numbers(n)) => out.extend(
+            match self.column(s, field) {
+                Some(DocValues::Numbers(n)) => out.extend(
                     (n.iter().enumerate())
                         .filter(|(_, v)| v.iter().any(|v| place(*v).is_eq()))
                         .map(|(d, _)| (s, d)),
@@ -343,6 +362,7 @@ fn load_shard(index: &mut Index, dir: &Path) -> es_codec::Result<()> {
     let mut shard = Shard {
         segments: vec![],
         ids: HashMap::new(),
+        nested: vec![],
     };
     for seg in infos.segments {
         let seg = SegmentReader::open(dir, seg)?;
@@ -369,7 +389,8 @@ fn load_shard(index: &mut Index, dir: &Path) -> es_codec::Result<()> {
             shard.ids.insert(id, d);
         };
         // Ids come from the `_id` postings, or from the stored fields where the codec cannot
-        // read those (Elasticsearch writes `_id` in ES812Postings).
+        // read those (Elasticsearch writes `_id` in ES812Postings). Nested docs share their
+        // root's `_id` and come before it, so the root's position is the one kept.
         match seg.terms("_id") {
             Ok(terms) => {
                 for t in terms {
@@ -385,6 +406,12 @@ fn load_shard(index: &mut Index, dir: &Path) -> es_codec::Result<()> {
                 }
             }
         }
+        let paths = seg.terms("_nested_path").unwrap_or_default().into_iter();
+        (shard.nested).push(
+            paths
+                .map(|t| String::from_utf8_lossy(&t.term).into())
+                .collect(),
+        );
         shard.segments.push(seg);
     }
     index.stats = Some(stats);
@@ -448,13 +475,14 @@ pub fn norm_len(norm: i8) -> u32 {
     }
 }
 
-/// Index data for one shard segment, built from the mapped fields whose values are scalars or
-/// arrays of scalars. Field numbers start at 6, after the metadata fields.
-// ponytail: nested objects, and fields holding values Elasticsearch would truncate or reject but
-// es-mini matches as they are (integer fractions or out-of-range values, `date_nanos` before
-// 1970, objects at a text or keyword leaf), are left out of the segment; only Elasticsearch notices, as es-mini reads `_source`
-// where a segment lacks a field. Nested objects need child documents written before their parent;
-// the rest need es-mini to truncate or reject those values at index time, as Elasticsearch does.
+/// Index data for one shard segment's Lucene documents (see [`lucene_docs`]), built from the
+/// mapped fields whose values are scalars or arrays of scalars. Field numbers start at 6, after
+/// the metadata fields.
+// ponytail: fields holding values Elasticsearch would truncate or reject but es-mini matches as
+// they are (integer fractions or out-of-range values, `date_nanos` before 1970, objects at a text
+// or keyword leaf) are left out of the segment; only Elasticsearch notices, as es-mini reads
+// `_source` where a segment lacks a field. Writing them needs es-mini to truncate or reject those
+// values at index time, as Elasticsearch does.
 #[derive(Default)]
 struct UserFields {
     fields: Vec<es_codec::field_infos::FieldInfo>,
@@ -595,9 +623,79 @@ fn encode_ranges(ranges: &[Range]) -> Vec<u8> {
     out.0
 }
 
+/// A Lucene document of a saved one: the object at `path`, a `nested` mapping's path, or the
+/// root's `_source` at "".
+struct LuceneDoc<'a> {
+    /// The saved document's position in the segment's list
+    doc: usize,
+    path: String,
+    object: &'a Value,
+}
+
+/// The Lucene documents of `docs`, as Elasticsearch's DocumentParser orders them: each nested
+/// object right before the one holding it, after those nested in it, in source order.
+// ponytail: a dotted source key that crosses into a nested path (`{"c.a": 1}` with `c` nested)
+// stays in its parent; Elasticsearch expands the dots and makes it a nested document
+fn lucene_docs<'a>(mappings: &Mappings, docs: &[(&str, &'a Document)]) -> Vec<LuceneDoc<'a>> {
+    fn walk<'a>(
+        nested: &[&str],
+        doc: usize,
+        prefix: &str,
+        v: &'a Value,
+        out: &mut Vec<LuceneDoc<'a>>,
+    ) {
+        match v {
+            Value::Array(a) => a.iter().for_each(|x| walk(nested, doc, prefix, x, out)),
+            Value::Object(o) => {
+                for (k, x) in o {
+                    let path = format!("{prefix}{k}");
+                    if !nested.contains(&path.as_str()) {
+                        walk(nested, doc, &format!("{path}."), x, out);
+                        continue;
+                    }
+                    // Elasticsearch rejects documents with anything else at a nested path.
+                    let objects = crate::postings::values(x, "").into_iter();
+                    for object in objects.filter(|o| o.is_object()) {
+                        walk(nested, doc, &format!("{path}."), object, out);
+                        let path = path.clone();
+                        out.push(LuceneDoc { doc, path, object });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let nested = nested_paths(mappings);
+    let mut out = vec![];
+    for (doc, (_, d)) in docs.iter().enumerate() {
+        walk(&nested, doc, "", &d.source, &mut out);
+        let (path, object) = (String::new(), &d.source);
+        out.push(LuceneDoc { doc, path, object });
+    }
+    out
+}
+
+fn nested_paths(mappings: &Mappings) -> Vec<&str> {
+    (mappings.properties.iter())
+        .filter(|(_, m)| **m == crate::FieldMapping::Nested)
+        .map(|(p, _)| p.as_str())
+        .collect()
+}
+
+/// Whether `field` is a path under the object at `path`.
+fn under(field: &str, path: &str) -> bool {
+    field.strip_prefix(path).is_some_and(|r| r.starts_with('.'))
+}
+
+/// The innermost of `nested` paths holding `path`, or "" for the root.
+fn nested_scope<'a>(nested: &[&'a str], path: &str) -> &'a str {
+    let holds = nested.iter().filter(|n| under(path, n));
+    holds.max_by_key(|n| n.len()).unwrap_or(&"")
+}
+
 fn user_fields(
     mappings: &Mappings,
-    docs: &[(&str, &Document)],
+    docs: &[LuceneDoc],
     meta: &[es_codec::field_infos::FieldInfo],
 ) -> UserFields {
     use crate::FieldMapping as M;
@@ -622,15 +720,32 @@ fn user_fields(
             .then(|| (ignored_path.clone(), &ignored_path, &ignored_mapping)),
     );
     let mut ignored: Vec<Vec<Value>> = vec![vec![]; docs.len()];
+    let nested = nested_paths(mappings);
     for (name, path, mapping) in fields {
         let ignored_now;
         // Values per doc at the dotted path: arrays flatten, nulls and absent fields are no values.
         let values: Vec<Vec<&Value>> = if *path == ignored_path {
-            ignored_now = std::mem::take(&mut ignored);
+            // Like IgnoredFieldMapper, on the root, which comes after its nested docs.
+            let mut block = vec![];
+            ignored_now = (docs.iter().zip(std::mem::take(&mut ignored)))
+                .map(|(d, names)| {
+                    block.extend(names);
+                    match d.path.is_empty() {
+                        true => std::mem::take(&mut block),
+                        false => vec![],
+                    }
+                })
+                .collect::<Vec<_>>();
             ignored_now.iter().map(|vs| vs.iter().collect()).collect()
         } else {
+            // Each field is in the docs of the innermost nested object holding it.
+            let scope = nested_scope(&nested, path);
+            let relative = path[scope.len()..].trim_start_matches('.');
             (docs.iter())
-                .map(|(_, d)| crate::postings::values(&d.source, path))
+                .map(|d| match d.path == scope {
+                    true => crate::postings::values(d.object, relative),
+                    false => vec![],
+                })
                 .collect()
         };
         let number = (meta.len() + out.fields.len()) as i32;
@@ -766,7 +881,7 @@ fn user_fields(
                 ));
                 (IndexOptions::None, DocValuesType::Binary, false)
             }
-            // `nested` objects are left out (see `UserFields`)
+            // The path of nested documents (see `lucene_docs`), not a field
             M::Nested => continue,
             M::Ip => {
                 // Like ES: points and sorted-set doc values of the 16-byte encoding, no postings.
@@ -1214,9 +1329,9 @@ fn commit(data_dir: &Path, indices: &Indices) -> es_codec::Result<()> {
 /// Marks the segments es-mini writes, the only ones a later save reuses: Elasticsearch indexes
 /// some fields differently (`_seq_no` points) and Lucene rejects a field with two schemas, so an
 /// Elasticsearch-written index is rewritten whole on its first save. Version 2 added text
-/// positions and version 3 read dates with their mapping's format, so older segments are
-/// rewritten too.
-const WRITER: (&str, &str) = ("es-mini.writer", "3");
+/// positions, version 3 read dates with their mapping's format and version 4 wrote nested
+/// documents, so older segments are rewritten too.
+const WRITER: (&str, &str) = ("es-mini.writer", "4");
 
 // Elasticsearch 9.5.5's merge policy defaults (MergePolicyConfig) for TieredMergePolicy.
 const FLOOR_SEGMENT: u64 = 16 << 20;
@@ -1437,13 +1552,16 @@ fn write_docs(
         terms::TermPostings,
         uid::encode_id,
     };
-    let user = user_fields(mappings, docs, fields);
-    let stored: Vec<_> = (docs.iter().enumerate())
-        .map(|(doc, (id, d))| {
-            let mut stored = vec![
-                (0, StoredValue::Bytes(encode_id(id))),
-                (1, StoredValue::Bytes(d.source.to_string().into_bytes())),
-            ];
+    let lucene = lucene_docs(mappings, docs);
+    let user = user_fields(mappings, &lucene, fields);
+    let stored: Vec<_> = (lucene.iter().enumerate())
+        .map(|(doc, l)| {
+            let (id, d) = docs[l.doc];
+            let mut stored = vec![];
+            if l.path.is_empty() {
+                stored.push((0, StoredValue::Bytes(encode_id(id))));
+                stored.push((1, StoredValue::Bytes(d.source.to_string().into_bytes())));
+            }
             for (n, values) in &user.stored {
                 let text = |v: &String| (*n, StoredValue::String(v.clone()));
                 stored.extend(values[doc].iter().map(text));
@@ -1451,24 +1569,44 @@ fn write_docs(
             stored
         })
         .collect();
-    let col = |f: fn(&Document) -> u64| docs.iter().map(|(_, d)| vec![f(d) as i64]).collect();
+    // Like DocumentParser and SeqNoFieldMapper: nested docs share their root's `_id`, `_version`
+    // and `_seq_no`; only roots have a `_primary_term`, which tells Elasticsearch them apart.
+    let col =
+        |f: fn(&Document) -> u64| (lucene.iter().map(|l| vec![f(docs[l.doc].1) as i64])).collect();
+    let roots = (lucene.iter())
+        .map(|l| match l.path.is_empty() {
+            true => vec![1],
+            false => vec![],
+        })
+        .collect();
     let numeric = [
         (2, col(|d| d.version)),
         (3, col(|d| d.seq_no)),
-        (4, vec![vec![1]; docs.len()]),
+        (4, roots),
         (5, vec![]),
     ];
-    let mut ids: Vec<_> = docs
-        .iter()
-        .enumerate()
-        .map(|(i, (id, _))| (encode_id(id), i as u32))
-        .collect();
-    ids.sort();
-    let ids = TermPostings::from_sorted(ids);
+    let postings = |term: &dyn Fn(&LuceneDoc) -> Option<Vec<u8>>| {
+        let mut entries: Vec<_> = (lucene.iter().zip(0..))
+            .filter_map(|(l, i)| Some((term(l)?, i)))
+            .collect();
+        entries.sort();
+        TermPostings::from_sorted(entries)
+    };
     let mut all_fields = fields.to_vec();
+    let nested_path = (fields.len() + user.fields.len()) as i32;
     all_fields.extend(user.fields);
-    let mut terms = vec![(0, ids)];
+    let mut terms = vec![(0, postings(&|l| Some(encode_id(docs[l.doc].0))))];
     terms.extend(user.terms);
+    let paths = postings(&|l| (!l.path.is_empty()).then(|| l.path.clone().into_bytes()));
+    if !paths.is_empty() {
+        // A StringField, indexed like `_id`
+        all_fields.push(es_codec::field_infos::FieldInfo {
+            name: "_nested_path".into(),
+            number: nested_path,
+            ..fields[0].clone()
+        });
+        terms.push((nested_path, paths));
+    }
     // Unique per segment of an index; the first is the `[7; 16]` earlier saves always used.
     let mut id = [7; 16];
     id[8..].copy_from_slice(&(0x0707_0707_0707_0707 + counter as u64).to_be_bytes());
@@ -1477,7 +1615,7 @@ fn write_docs(
         &NewSegment {
             name: &format!("_{}", radix36(counter as u64)),
             id,
-            max_doc: docs.len() as i32,
+            max_doc: lucene.len() as i32,
             fields: &all_fields,
             stored: &stored,
             numeric: &numeric,

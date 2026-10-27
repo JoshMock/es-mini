@@ -72,6 +72,13 @@ count 1 '{"term":{"dr":"2024-01-10"}}'
 count 1 '{"range":{"dr":{"lte":"2024-01-15"}}}'
 count 1 '{"range":{"dr":{"gte":"2024-01-21","lte":"2024-01-25"}}}'
 count 2 '{"exists":{"field":"dr"}}'
+# Nested objects are child documents: matched one object at a time, and not documents themselves.
+count 5 '{"match_all":{}}'
+count 2 '{"nested":{"path":"ns","query":{"term":{"ns.a":"p"}}}}'
+count 1 '{"nested":{"path":"ns","query":{"bool":{"must":[{"term":{"ns.a":"p"}},{"term":{"ns.n":1}}]}}}}'
+count 0 '{"nested":{"path":"ns","query":{"bool":{"must":[{"term":{"ns.a":"q"}},{"term":{"ns.n":1}}]}}}}'
+count 1 '{"nested":{"path":"ns.r","query":{"term":{"ns.r.x":"u"}}}}'
+count 0 '{"term":{"ns.a":"p"}}'
 # Range aggregations read the binary doc values.
 buckets() { # expected query aggregation
   got=$(req POST /f/_search "{\"size\":0,\"query\":$2,\"aggs\":{\"a\":$3}}" |

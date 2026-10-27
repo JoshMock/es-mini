@@ -269,3 +269,112 @@ fn disk_writer_completeness_writes_ranges_as_points_and_binary_doc_values() {
     assert_eq!(d[1].as_deref(), Some(&want[..]));
     assert_eq!((d[0].as_ref(), d[2].as_ref()), (None, None));
 }
+
+fn nested_index() -> Index {
+    let mut idx = Index::default();
+    let props = &mut idx.mappings.properties;
+    let keyword = || FieldMapping::Keyword {
+        ignore_above: None,
+        split_queries_on_whitespace: false,
+    };
+    props.insert("t".into(), keyword());
+    props.insert("c".into(), FieldMapping::Nested);
+    props.insert("c.a".into(), keyword());
+    props.insert("c.r".into(), FieldMapping::Nested);
+    props.insert("c.r.n".into(), FieldMapping::Long);
+    idx.put(
+        "1",
+        json!({"t": "x", "c": [{"a": "p", "r": [{"n": 1}]}, {"a": "q"}]}),
+    );
+    idx.put("2", json!({"t": "y"}));
+    idx
+}
+
+/// Like DocumentParser: each nested object is a Lucene doc before the one holding it, with the
+/// root's `_id`, `_version` and `_seq_no` and its `_nested_path`; only roots have stored fields
+/// and `_primary_term` (which tells Elasticsearch's nested queries the roots apart).
+#[test]
+fn disk_writer_completeness_writes_nested_objects_as_child_documents() {
+    use es_codec::doc_values::DocValues;
+    let (_root, r) = saved_segment("nested", nested_index());
+    assert_eq!(r.max_doc(), 5);
+    let terms = |f: &str| -> Vec<_> {
+        (r.terms(f).unwrap().into_iter())
+            .map(|t| (t.term, t.docs.iter().map(|d| d.0).collect::<Vec<_>>()))
+            .collect()
+    };
+    let s = |s: &str| s.as_bytes().to_vec();
+    assert_eq!(
+        terms("_nested_path"),
+        [(s("c"), vec![1, 2]), (s("c.r"), vec![0])]
+    );
+    assert_eq!(terms("c.a"), [(s("p"), vec![1]), (s("q"), vec![2])]);
+    assert_eq!(terms("t"), [(s("x"), vec![3]), (s("y"), vec![4])]);
+    let id = |i: &str| es_codec::uid::encode_id(i);
+    assert_eq!(
+        terms("_id"),
+        [(id("1"), vec![0, 1, 2, 3]), (id("2"), vec![4])]
+    );
+    let numbers = |f: &str| match r.doc_values(f).unwrap() {
+        DocValues::Numbers(n) => n,
+        _ => panic!("{f} has numeric doc values"),
+    };
+    assert_eq!(numbers("c.r.n"), [vec![1], vec![], vec![], vec![], vec![]]);
+    assert_eq!(
+        numbers("_primary_term"),
+        [vec![], vec![], vec![], vec![1], vec![1]]
+    );
+    assert_eq!(
+        numbers("_seq_no"),
+        [vec![0], vec![0], vec![0], vec![0], vec![1]]
+    );
+    assert!(r.document(0).unwrap().is_empty());
+    assert_eq!(r.document(3).unwrap().len(), 2);
+}
+
+/// es-mini reads the roots back as its documents; nested fields, whose postings and doc values
+/// are on the children, fall back to `_source`; a replaced document's children die with it.
+#[test]
+fn disk_writer_completeness_reads_back_segments_with_nested_documents() {
+    let root = Scratch::new("completeness-nested-reopen", None);
+    let dir = root.join("data");
+    disk::save(&dir, &Indices::from([("idx".to_owned(), nested_index())])).unwrap();
+    let mut indices = disk::open(&dir).unwrap();
+    let ix = &indices["idx"];
+    let mut live: Vec<_> = ix
+        .disk_live()
+        .map(|(p, (id, _))| (id.to_owned(), p))
+        .collect();
+    live.sort();
+    assert_eq!(live, [("1".to_owned(), (0, 3)), ("2".to_owned(), (0, 4))]);
+    assert_eq!(ix.disk_term("c.a", "p", true), None);
+    assert_eq!(
+        ix.disk_numbers("c.r.n", |_| std::cmp::Ordering::Equal, true),
+        None
+    );
+    assert_eq!(ix.disk_values("c.r.n")("1"), None);
+    assert_eq!(ix.disk_term("t", "x", true), Some([(0, 3)].into()));
+    assert_eq!(ix.disk_values("t")("2"), Some(vec![json!("y")]));
+    assert_eq!(ix.get("1").unwrap().source["c"][1]["a"], "q");
+    // Enough other docs that the deletes stay under the 20% that makes a merge drop the segment
+    let ix = indices.get_mut("idx").unwrap();
+    for i in 3..20 {
+        ix.put(&i.to_string(), json!({}));
+    }
+    disk::save(&dir, &indices).unwrap();
+    indices.get_mut("idx").unwrap().put("1", json!({"t": "z"}));
+    disk::save(&dir, &indices).unwrap();
+    let ix = &disk::open(&dir).unwrap()["idx"];
+    let uuid = &es_codec::cluster_state::read_indices(&dir).unwrap()[0].uuid;
+    let shard = dir.join("indices").join(uuid).join("0/index");
+    let first = SegmentInfos::read_latest(&shard)
+        .unwrap()
+        .segments
+        .remove(0);
+    let live = SegmentReader::open(&shard, first)
+        .unwrap()
+        .live_docs()
+        .unwrap();
+    assert_eq!(live, [false, false, false, false, true]);
+    assert_eq!(ix.get("1").unwrap().source, json!({"t": "z"}));
+}
