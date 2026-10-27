@@ -89,8 +89,11 @@ fn display(text: &str) -> String {
 
 /// The tokens of `src` and the position of its end.
 fn lex(src: &str) -> Result<(Vec<Token>, Pos), EsqlError> {
-    let mut out = Vec::new();
+    let mut out: Vec<Token> = Vec::new();
     let mut it = src.char_indices().peekable();
+    // Whether the command being lexed takes patterns, where `*` is part of a name; elsewhere it
+    // multiplies (or is `COUNT(*)`).
+    let mut patterns = false;
     let (mut line, mut line_start) = (1, 0);
     let digits = |from: usize| {
         from + src[from..]
@@ -160,11 +163,11 @@ fn lex(src: &str) -> Result<(Vec<Token>, Pos), EsqlError> {
                     .or_else(|| s.parse::<f64>().ok().map(Value::from)),
             };
             Tok::Num(n.ok_or_else(|| unrecognized(e))?)
-        } else if c.is_alphabetic() || "_@*".contains(c) {
+        } else if c.is_alphabetic() || "_@".contains(c) || patterns && c == '*' {
             let mut s = String::new();
             while let Some(&(_, c)) = it
                 .peek()
-                .filter(|(_, c)| c.is_alphanumeric() || "_@*.".contains(*c))
+                .filter(|(_, c)| c.is_alphanumeric() || "_@.".contains(*c) || patterns && *c == '*')
             {
                 s.push(c);
                 it.next();
@@ -173,8 +176,8 @@ fn lex(src: &str) -> Result<(Vec<Token>, Pos), EsqlError> {
         } else {
             let rest = &src[i..];
             let sym = [
-                "==", "!=", "<=", ">=", "<", ">", "=", "+", "-", "/", "%", "|", "(", ")", ",", "[",
-                "]",
+                "==", "!=", "<=", ">=", "<", ">", "=", "+", "-", "*", "/", "%", "|", "(", ")", ",",
+                "[", "]",
             ]
             .into_iter()
             .find(|s| rest.starts_with(s))
@@ -186,6 +189,10 @@ fn lex(src: &str) -> Result<(Vec<Token>, Pos), EsqlError> {
             while it.next_if(|&(j, _)| j < end).is_some() {}
         }
         let end = it.peek().map_or(src.len(), |&(j, _)| j);
+        if let (Tok::Word(w), None | Some((Tok::Sym("|"), ..))) = (&tok, out.last()) {
+            patterns =
+                ["from", "keep", "drop", "rename"].contains(&w.to_ascii_lowercase().as_str());
+        }
         out.push((tok, at, i..end));
     }
     Ok((out, (line, src[line_start..].chars().count() + 1)))
@@ -467,8 +474,7 @@ impl Parser<'_> {
         let Some((Tok::Word(w), _, r)) = self.toks.get(self.pos) else {
             return Ok(None);
         };
-        // An unquoted identifier: not `` `quoted` ``, nor a `*` pattern.
-        if !self.src[r.clone()].starts_with(|c: char| c.is_alphabetic() || c == '_' || c == '@')
+        if self.src[r.clone()].starts_with('`')
             || EXPRESSION_KEYWORDS.contains(&w.to_ascii_lowercase().as_str())
         {
             return Ok(None);
@@ -767,10 +773,8 @@ impl Parser<'_> {
         let start = self.pos;
         let mut e = operand(self)?;
         loop {
-            // ponytail: `*` lexes as a pattern word, so `a*2` without spaces is not a product
             let op = match self.peek() {
                 Some(Tok::Sym(s)) => *s,
-                Some(Tok::Word(w)) if w == "*" => "*",
                 _ => return Ok(e),
             };
             let Some(&op) = ops.iter().find(|o| **o == op) else {
@@ -872,7 +876,14 @@ impl Parser<'_> {
                 self.pos += 2;
                 self.parens += 1;
                 let mut args = Vec::new();
-                if !self.sym(")") {
+                if let Some((Tok::Sym("*"), at, r)) = self.toks.get(self.pos).cloned() {
+                    // `COUNT(*)`
+                    self.pos += 1;
+                    args.push(Expr::Field("*".into(), (at, r)));
+                    if !self.sym(")") {
+                        return self.bad_expression();
+                    }
+                } else if !self.sym(")") {
                     loop {
                         args.push(self.or()?);
                         if !self.sym(",") {

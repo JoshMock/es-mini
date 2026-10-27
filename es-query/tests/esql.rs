@@ -1807,3 +1807,15 @@ fn esql_es_semantics_time_span_units() {
         assert_eq!(err(q), format!("line {msg}"), "{q}");
     }
 }
+
+/// `*` multiplies in an expression even without spaces, and is a wildcard only in a pattern.
+#[test]
+fn esql_es_semantics_asterisk_multiplies_in_expressions() {
+    let r =
+        q("ROW a = 3 | EVAL b = a*2, c = a *2, d = a* 2, e = 2*a, f = a*-1, g = a*(2), h = a*2*a");
+    assert_eq!(r.values, [[3, 6, 6, 6, 6, -3, 6, 18].map(|n| json!(n))]);
+    let r = q("ROW ab = 1, ac = 2 | KEEP a*c");
+    assert_eq!(col_names(&r), ["ac"]);
+    let r = q("FROM people | STATS c = COUNT(*)");
+    assert_eq!(r.values, [[json!(3)]]);
+}
