@@ -52,6 +52,8 @@ thread_local! {
 }
 
 /// Fails the running query with `kind` and `reason` (once `run` finishes); null meanwhile.
+// ponytail: fails only when a row is evaluated; ES also fails folding a constant expression,
+// even over no rows (`ROW x = 9223372036854775807 | WHERE false | EVAL ROUND(x, -1)`)
 fn fail(status: u16, kind: &'static str, reason: String) -> Option<Value> {
     FAILURE.with_borrow_mut(|f| {
         f.get_or_insert(EsqlError::Failed {
