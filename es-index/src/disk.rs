@@ -19,6 +19,7 @@ use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     path::Path,
+    sync::Arc,
     time::Duration,
 };
 
@@ -96,9 +97,11 @@ pub(crate) struct DiskDoc {
     pub(crate) seq_no: u64,
 }
 
-/// The segments of a shard opened from disk. Documents stay in them until read.
+/// The segments of a shard opened from disk. Documents stay in them until read. A clone shares
+/// the segments, which keep their files open, so it can read them after a save deletes them.
+#[derive(Clone)]
 pub(crate) struct Shard {
-    segments: Vec<SegmentReader>,
+    segments: Arc<Vec<SegmentReader>>,
     /// Live documents by id. Writes to the index remove the ones they replace or delete.
     ids: HashMap<String, DiskDoc>,
     /// Per segment, the paths of its nested documents (`_nested_path` terms)
@@ -359,11 +362,14 @@ fn load_shard(index: &mut Index, dir: &Path) -> es_codec::Result<()> {
         index.next_seq_no = index.next_seq_no.max(max + 1);
     }
     index.commit = infos.user_data;
-    let mut shard = Shard {
-        segments: vec![],
-        ids: HashMap::new(),
-        nested: vec![],
-    };
+    let (mut segments, mut shard) = (
+        vec![],
+        Shard {
+            segments: Arc::default(),
+            ids: HashMap::new(),
+            nested: vec![],
+        },
+    );
     for seg in infos.segments {
         let seg = SegmentReader::open(dir, seg)?;
         // Documents are read from the segment later; a corrupt one fails here instead.
@@ -373,7 +379,7 @@ fn load_shard(index: &mut Index, dir: &Path) -> es_codec::Result<()> {
         add_stats(&mut stats, &seg);
         let (versions, seq_nos) = (longs(&seg, "_version"), longs(&seg, "_seq_no"));
         let live = seg.live_docs()?;
-        let segment = shard.segments.len();
+        let segment = segments.len();
         let mut add = |id: String, doc: usize| {
             if !live[doc] {
                 return;
@@ -412,8 +418,9 @@ fn load_shard(index: &mut Index, dir: &Path) -> es_codec::Result<()> {
                 .map(|t| String::from_utf8_lossy(&t.term).into())
                 .collect(),
         );
-        shard.segments.push(seg);
+        segments.push(seg);
     }
+    shard.segments = Arc::new(segments);
     index.stats = Some(stats);
     index.disk = Some(shard);
     index.persisted = index.next_seq_no;
@@ -429,7 +436,7 @@ fn unsaved<'a>(
         .docs
         .iter()
         .filter(|(id, _)| !current.contains(*id))
-        .map(|(id, d)| (id.as_str(), Cow::Borrowed(d)))
+        .map(|(id, d)| (id.as_str(), Cow::Borrowed(&**d)))
         .collect();
     if let Some(disk) = &ix.disk {
         let at: HashSet<DiskPos> = (disk.ids.iter())
@@ -1937,6 +1944,7 @@ fn write_snapshot(data_dir: &Path, indices: &Indices, prev: &Path) -> es_codec::
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn saved_index_metadata_has_uuid_and_creation_version() {
@@ -1958,6 +1966,36 @@ mod tests {
         // Twelve 1.1gb segments exceed the 9 allowed; only four fit under 5gb.
         let picked = find_merge(&[(gb * 11 / 10, 100, 0); 12]);
         assert_eq!(picked, [0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn memory_bounds_snapshots_share_documents_instead_of_copying_them() {
+        let dir = std::env::temp_dir().join(format!("esm-snapshot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut ix = Index::default();
+        ix.put("disk", json!({"n": 1}));
+        save(&dir, &Indices::from([("i".to_owned(), ix)])).unwrap();
+        let mut ix = open(&dir).unwrap().remove("i").unwrap();
+        ix.put("memory", json!({"n": 2}));
+        let snap = ix.snapshot();
+        assert!(Arc::ptr_eq(&ix.docs["memory"], &snap.docs["memory"]));
+        let segments = |ix: &Index| Arc::clone(&ix.disk.as_ref().unwrap().segments);
+        assert!(Arc::ptr_eq(&segments(&ix), &segments(&snap)));
+        // later writes do not change it, nor deleting the files of its segments
+        ix.put("disk", json!({"n": 3}));
+        ix.delete("memory");
+        std::fs::remove_dir_all(&dir).unwrap();
+        let got: Vec<_> = snap
+            .docs()
+            .map(|(id, d)| (id.to_owned(), d.source.clone()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("disk".into(), json!({"n": 1})),
+                ("memory".into(), json!({"n": 2}))
+            ]
+        );
     }
 }
 

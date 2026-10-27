@@ -327,7 +327,12 @@ impl<'a> Searcher<'a> {
             Cow::Borrowed(d) => Cow::Borrowed(&d.source),
             Cow::Owned(d) => Cow::Owned(d.source),
         });
-        for source in live.chain(self.index.superseded().iter().map(Cow::Borrowed)) {
+        for source in live.chain(
+            self.index
+                .superseded()
+                .iter()
+                .map(|d| Cow::Borrowed(&d.source)),
+        ) {
             let t = terms(kind, &values(&source, path));
             if t.is_empty() {
                 continue;

@@ -234,7 +234,7 @@ impl Postings {
         path: &str,
         analyzed: bool,
         live: impl Iterator<Item = (&'d str, &'d crate::Document)>,
-        superseded: &[Value],
+        superseded: &[std::sync::Arc<crate::Document>],
         persisted: u64,
     ) -> &Field {
         self.0
@@ -245,10 +245,10 @@ impl Postings {
                     let counted = d.seq_no >= persisted;
                     f.add(id, field_terms(&d.source, path, analyzed), counted);
                 }
-                for (n, source) in superseded.iter().enumerate() {
+                for (n, d) in superseded.iter().enumerate() {
                     // Counted in the statistics, then unlinked like any superseded document.
                     let id = format!("\0superseded{n}");
-                    f.add(&id, field_terms(source, path, analyzed), true);
+                    f.add(&id, field_terms(&d.source, path, analyzed), true);
                     f.remove(&id);
                 }
                 f
@@ -276,7 +276,7 @@ impl crate::Index {
             .postings
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let live = self.docs.iter().map(|(id, d)| (id.as_str(), d));
+        let live = self.docs.iter().map(|(id, d)| (id.as_str(), &**d));
         read(postings.field(path, analyzed, live, &self.superseded, self.persisted))
     }
 

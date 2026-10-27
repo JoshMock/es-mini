@@ -19,7 +19,7 @@ use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque, hash_map::RandomState},
     hash::BuildHasher,
-    sync::{Mutex, OnceLock, PoisonError},
+    sync::{Arc, Mutex, OnceLock, PoisonError},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -236,8 +236,9 @@ pub struct Index {
     pub closed: bool,
     /// User data of the shard commit the index was opened from; saves keep its history markers.
     pub commit: BTreeMap<String, String>,
-    /// Documents written since the index was opened; they replace any on disk.
-    docs: HashMap<String, Document>,
+    /// Documents written since the index was opened; they replace any on disk. Shared with
+    /// snapshots.
+    docs: HashMap<String, Arc<Document>>,
     /// Postings over `docs`, built per field as queries need them (see [`postings`]).
     postings: std::sync::Mutex<postings::Postings>,
     /// Documents in memory with lower sequence numbers are in the segments, which `stats`
@@ -252,7 +253,7 @@ pub struct Index {
     // ponytail: never dropped in an index without a data directory, which never commits;
     // Elasticsearch drops them once a flush and a retention lease renewal let a merge do so.
     // A commit drops those superseded since the previous one, which no segment holds.
-    superseded: Vec<Value>,
+    superseded: Vec<Arc<Document>>,
     /// Version and deletion time of deleted docs, kept for `index.gc_deletes` (default 60s) so
     /// a re-created doc continues the version count, as in ES.
     deleted_versions: HashMap<String, (u64, Instant)>,
@@ -306,15 +307,15 @@ impl Index {
         }
     }
 
-    /// Removes a live document, returning its source if no segment holds it: one in a segment
-    /// stays counted in its statistics, as a deleted document does in Lucene.
-    fn take(&mut self, id: &str) -> Option<Option<Value>> {
+    /// Removes a live document, returning it if no segment holds it: one in a segment stays
+    /// counted in its statistics, as a deleted document does in Lucene.
+    fn take(&mut self, id: &str) -> Option<Option<Arc<Document>>> {
         if let Some(d) = self.docs.remove(id) {
             self.postings
                 .get_mut()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .remove(id);
-            return Some((d.seq_no >= self.persisted).then_some(d.source));
+            return Some((d.seq_no >= self.persisted).then_some(d));
         }
         self.disk.as_mut()?.remove(id).map(|_| None)
     }
@@ -390,11 +391,11 @@ impl Index {
             .add(id, &source);
         self.docs.insert(
             id.to_owned(),
-            Document {
+            Arc::new(Document {
                 source,
                 version,
                 seq_no,
-            },
+            }),
         );
         match old {
             Some(old) => {
@@ -450,18 +451,17 @@ impl Index {
         }
     }
 
-    /// A copy for point-in-time searches: later writes to `self` do not change it.
-    // ponytail: copies every document into memory (on-disk segments may be deleted by later
-    // saves); memory grows with the index size times open snapshots
+    /// A copy for point-in-time searches: later writes to `self` do not change it. It shares
+    /// the documents and segments, which stay readable after a save deletes their files.
+    // ponytail: copies the ids and versions of the documents (not their sources); memory grows
+    // with the document count times open snapshots, where Lucene shares per-segment live docs
     pub fn snapshot(&self) -> Index {
         Index {
             stats: self.stats.clone(),
             settings: self.settings.clone(),
             mappings: self.mappings.clone(),
-            docs: self
-                .docs()
-                .map(|(id, d)| (id.to_owned(), d.into_owned()))
-                .collect(),
+            docs: self.docs.clone(),
+            disk: self.disk.clone(),
             superseded: self.superseded.clone(),
             persisted: self.persisted,
             next_seq_no: self.next_seq_no,
@@ -580,7 +580,7 @@ impl Index {
     /// A live document; one on disk is read from its segment.
     pub fn get(&self, id: &str) -> Option<Cow<'_, Document>> {
         if let Some(d) = self.docs.get(id) {
-            return Some(Cow::Borrowed(d));
+            return Some(Cow::Borrowed(&**d));
         }
         let disk = self.disk.as_ref()?;
         // ponytail: open checksums the segments, so only an I/O error since (e.g. a deleted
@@ -603,7 +603,7 @@ impl Index {
     ) -> impl Iterator<Item = (&'a str, Cow<'a, Document>)> + 'k {
         let keep = move |p| on_disk.is_none_or(|at| at.contains(&p));
         let on_disk = self.disk.iter().flat_map(move |d| d.docs(keep));
-        let mut memory: Vec<(&'a String, &'a Document)> = match in_memory {
+        let mut memory: Vec<(&'a String, &'a Arc<Document>)> = match in_memory {
             // Few candidates: look them up instead of walking every document.
             Some(ids) => ids
                 .iter()
@@ -621,7 +621,7 @@ impl Index {
             .chain(
                 memory
                     .into_iter()
-                    .map(|(id, d)| (id.as_str(), Cow::Borrowed(d))),
+                    .map(|(id, d)| (id.as_str(), Cow::Borrowed(&**d))),
             )
     }
 
@@ -741,8 +741,8 @@ impl Index {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Default::default();
     }
 
-    /// Sources of in-memory documents that were updated or deleted (see `superseded`).
-    pub fn superseded(&self) -> &[Value] {
+    /// In-memory documents that were updated or deleted (see `superseded`).
+    pub fn superseded(&self) -> &[Arc<Document>] {
         &self.superseded
     }
 
