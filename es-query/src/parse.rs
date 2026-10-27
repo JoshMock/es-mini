@@ -68,6 +68,11 @@ pub enum Query {
         tie_breaker: f64,
     },
     /// A query given a `_name`, which hits report in `matched_queries`.
+    /// A query whose scores are multiplied by `boost`.
+    Boosted {
+        boost: f64,
+        query: Box<Query>,
+    },
     Named {
         name: String,
         query: Box<Query>,
@@ -183,12 +188,22 @@ fn constant_score_any(field: &str, vals: &[Value]) -> Query {
 pub fn parse_query(v: &Value) -> Result<Query, QueryError> {
     let (kind, body) = single_field("query", v)
         .map_err(|_| "query malformed, expected a single query type".to_owned())?;
-    let query = parse_kind(kind, body)?;
+    let mut query = parse_kind(kind, body)?;
     // `_name` sits in the query's body, or in its single field's parameters
     let name = body.get("_name").or_else(|| {
         let (_, p) = single_field(kind, body).ok()?;
         p.get("_name")
     });
+    let boost = body.get("boost").or_else(|| {
+        let (_, p) = single_field(kind, body).ok()?;
+        p.get("boost")
+    });
+    if let Some(boost) = boost.and_then(Value::as_f64).filter(|b| *b != 1.0) {
+        query = Query::Boosted {
+            boost,
+            query: Box::new(query),
+        };
+    }
     Ok(match name.and_then(Value::as_str) {
         Some(name) => Query::Named {
             name: name.to_owned(),
@@ -294,6 +309,26 @@ fn parse_kind(kind: &str, body: &Value) -> Result<Query, QueryError> {
                 value,
             })
         }
+        "prefix" => {
+            let (field, p) = single_field(kind, body)?;
+            let prefix = match p {
+                Value::Object(o) => {
+                    check_keys(
+                        "prefix",
+                        o,
+                        &["value", "prefix", "boost", "_name", "rewrite"],
+                    )?;
+                    let v = o.get("value").or_else(|| o.get("prefix"));
+                    text(v.ok_or("[prefix] query requires a value")?)
+                }
+                v => text(v),
+            };
+            // ponytail: no case_insensitive
+            Ok(Query::Prefix {
+                field: field.clone(),
+                prefix,
+            })
+        }
         "wildcard" => {
             let (field, p) = single_field(kind, body)?;
             let (pattern, case_insensitive) = match p {
@@ -341,7 +376,6 @@ fn parse_kind(kind: &str, body: &Value) -> Result<Query, QueryError> {
             let filter = o
                 .get("filter")
                 .ok_or("[constant_score] requires a 'filter' element")?;
-            // ponytail: boost is ignored, so the score is always 1.0
             Ok(Query::Bool {
                 must: vec![Query::MatchAll],
                 should: vec![],

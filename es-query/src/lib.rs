@@ -170,6 +170,7 @@ fn named_queries(q: &Query) -> Vec<(String, Query)> {
             } => {
                 (must.iter().chain(should).chain(must_not).chain(filter)).for_each(|c| walk(c, out))
             }
+            Query::Boosted { query, .. } => walk(query, out),
             Query::DisMax { queries, .. } => queries.iter().for_each(|c| walk(c, out)),
             _ => {}
         }
@@ -294,7 +295,7 @@ impl<'a> Searcher<'a> {
                 return;
             }
             Query::DisMax { queries, .. } => return queries.iter().for_each(|c| self.gather(c)),
-            Query::Named { query, .. } => return self.gather(query),
+            Query::Named { query, .. } | Query::Boosted { query, .. } => return self.gather(query),
             _ => return,
         };
         let (kind, path) = self.kind(field);
@@ -378,7 +379,9 @@ impl<'a> Searcher<'a> {
                     .filter_map(|t| self.term_docs(field, t, false, false))
                     .reduce(|a, b| &a & &b)
             }
-            Query::Named { query, .. } => self.candidates(query, exact),
+            Query::Named { query, .. } | Query::Boosted { query, .. } => {
+                self.candidates(query, exact)
+            }
             Query::DisMax { queries, .. } => (queries.iter())
                 .map(|c| self.candidates(c, exact))
                 .collect::<Option<Vec<_>>>()
@@ -450,7 +453,9 @@ impl<'a> Searcher<'a> {
                     .filter_map(|t| lookup(field, t, false))
                     .reduce(|a, b| &a & &b)
             }
-            Query::Named { query, .. } => self.memory_candidates(query),
+            Query::Named { query, .. } | Query::Boosted { query, .. } => {
+                self.memory_candidates(query)
+            }
             Query::DisMax { queries, .. } => (queries.iter())
                 .map(|c| self.memory_candidates(c))
                 .collect::<Option<Vec<_>>>()
@@ -617,6 +622,10 @@ impl<'a> Searcher<'a> {
                 return explanation(score, "sum of:".into(), details.collect());
             }
             Query::Named { query, .. } => return self.explain_query(query, id, d),
+            Query::Boosted { query, .. } => {
+                let inner = self.explain_query(query, id, d);
+                return explanation(score, "boost".into(), vec![inner]);
+            }
             Query::MatchAll => return explanation(score, "*:*".into(), vec![]),
             _ => vec![],
         };
@@ -814,6 +823,7 @@ impl<'a> Searcher<'a> {
                 dis_max(hits, *tie_breaker)
             }
             Query::Named { query, .. } => self.score(query, id, d),
+            Query::Boosted { boost, query } => self.score(query, id, d).map(|s| s * boost),
         }
     }
 
@@ -847,7 +857,9 @@ impl<'a> Searcher<'a> {
             Query::DisMax { queries, .. } => queries
                 .iter()
                 .for_each(|c| self.highlight_terms(c, field, out)),
-            Query::Named { query, .. } => self.highlight_terms(query, field, out),
+            Query::Named { query, .. } | Query::Boosted { query, .. } => {
+                self.highlight_terms(query, field, out)
+            }
             _ => {}
         }
     }
@@ -952,6 +964,9 @@ impl<'a> Searcher<'a> {
                 Some(dis_max(scores.into_iter(), *tie_breaker))
             }
             Query::Named { query, .. } => self.postings_score(query, id, matched),
+            Query::Boosted { boost, query } => self
+                .postings_score(query, id, matched)
+                .map(|s| s.map(|s| s * boost)),
             // Unless the document is known to match, its filters would need checking.
             Query::Bool {
                 must_not, filter, ..
@@ -1264,6 +1279,7 @@ fn constant_score(q: &Query) -> Option<f64> {
         Query::Match { .. } | Query::MatchPhrase { .. } | Query::MatchPhrasePrefix { .. } => None,
         Query::Term { field, .. } if field != "_id" => None,
         Query::Named { query, .. } => constant_score(query),
+        Query::Boosted { boost, query } => constant_score(query).map(|s| s * boost),
         Query::Bool { must, should, .. } if should.is_empty() => {
             must.iter().map(constant_score).sum()
         }
@@ -1470,7 +1486,7 @@ fn exact<K: Copy + Eq + std::hash::Hash>(
 ) -> Option<HashSet<K>> {
     match q {
         Query::MatchAll => Some(all.clone()),
-        Query::Named { query, .. } => exact(query, all, leaf),
+        Query::Named { query, .. } | Query::Boosted { query, .. } => exact(query, all, leaf),
         Query::Bool {
             must,
             should,
@@ -1904,5 +1920,117 @@ mod tests {
         let body = json!({"query": {"term": {"tag": "a"}}});
         let r = search(&ix, &SearchRequest::parse(&body).unwrap());
         assert_eq!(r.hits[0].score, r.hits[1].score);
+    }
+
+    /// The score of the only document a query matches.
+    fn boost_score(q: Value) -> f64 {
+        let mut ix = Index::default();
+        let props = &mut ix.mappings.properties;
+        props.insert("title".into(), FieldMapping::Text { store: false });
+        props.insert(
+            "tag".into(),
+            FieldMapping::Keyword {
+                ignore_above: None,
+                split_queries_on_whitespace: false,
+            },
+        );
+        ix.put("1", json!({"title": "a b", "tag": "x", "n": 5}));
+        ix.put("2", json!({"title": "c", "tag": "y"}));
+        let r = search(&ix, &SearchRequest::parse(&json!({"query": q})).unwrap());
+        assert_eq!(r.hits.len(), 1, "{r:?}");
+        f64::from(r.hits[0].score.unwrap())
+    }
+
+    /// `kind` with `boost: 3` scores 3 times as much as without.
+    fn boost_triples(plain: Value, boosted: Value) {
+        let (a, b) = (boost_score(plain), boost_score(boosted));
+        assert!(a > 0.0 && (b - 3.0 * a).abs() < 1e-5 * b, "{a} {b}");
+    }
+
+    #[test]
+    fn boost_constant_score() {
+        let q =
+            |b: Value| json!({"constant_score": {"filter": {"term": {"tag": "x"}}, "boost": b}});
+        assert_eq!(boost_score(q(json!(2.5))), 2.5);
+        assert_eq!(boost_score(q(json!(1.0))), 1.0);
+    }
+
+    #[test]
+    fn boost_nested_multiplies() {
+        let inner = json!({"constant_score": {"filter": {"term": {"tag": "x"}}, "boost": 2.0}});
+        let q = json!({"bool": {"must": [inner], "boost": 3.0}});
+        assert_eq!(boost_score(q), 6.0);
+    }
+
+    #[test]
+    fn boost_term() {
+        boost_triples(
+            json!({"term": {"title": "a"}}),
+            json!({"term": {"title": {"value": "a", "boost": 3}}}),
+        );
+    }
+
+    #[test]
+    fn boost_terms() {
+        boost_triples(
+            json!({"terms": {"tag": ["x"]}}),
+            json!({"terms": {"tag": ["x"], "boost": 3}}),
+        );
+    }
+
+    #[test]
+    fn boost_match() {
+        boost_triples(
+            json!({"match": {"title": "a"}}),
+            json!({"match": {"title": {"query": "a", "boost": 3}}}),
+        );
+    }
+
+    #[test]
+    fn boost_range() {
+        boost_triples(
+            json!({"range": {"n": {"gte": 1}}}),
+            json!({"range": {"n": {"gte": 1, "boost": 3}}}),
+        );
+    }
+
+    #[test]
+    fn boost_ids() {
+        boost_triples(
+            json!({"ids": {"values": ["1"]}}),
+            json!({"ids": {"values": ["1"], "boost": 3}}),
+        );
+    }
+
+    #[test]
+    fn boost_exists() {
+        boost_triples(
+            json!({"exists": {"field": "n"}}),
+            json!({"exists": {"field": "n", "boost": 3}}),
+        );
+    }
+
+    #[test]
+    fn boost_wildcard() {
+        boost_triples(
+            json!({"wildcard": {"tag": "x*"}}),
+            json!({"wildcard": {"tag": {"value": "x*", "boost": 3}}}),
+        );
+    }
+
+    #[test]
+    fn boost_prefix() {
+        boost_triples(
+            json!({"prefix": {"tag": "x"}}),
+            json!({"prefix": {"tag": {"value": "x", "boost": 3}}}),
+        );
+    }
+
+    #[test]
+    fn boost_bool() {
+        boost_triples(
+            json!({"bool": {"must": [{"match": {"title": "a"}}]}}),
+            json!({"bool": {"must": [{"match": {"title": "a"}}], "boost": 3}}),
+        );
     }
 }

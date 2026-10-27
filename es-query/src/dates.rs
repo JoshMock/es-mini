@@ -88,6 +88,10 @@ pub(crate) fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, 
             filter: all(filter)?,
             min_should,
         },
+        Query::Boosted { boost, query } => Query::Boosted {
+            boost,
+            query: Box::new(resolve_dates(index, *query, now)?),
+        },
         Query::Named { name, query } => Query::Named {
             name,
             query: Box::new(resolve_dates(index, *query, now)?),
