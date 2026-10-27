@@ -318,11 +318,28 @@ impl Parser {
         } else {
             self.term(&field)?
         };
-        if self.peek() == Some(&Tok::Caret) {
-            // ponytail: no boosts until queries carry one
-            return Err("boosts (`^`) are not supported".into());
+        if !self.eat(&Tok::Caret) {
+            return Ok(q);
         }
-        Ok(q)
+        // Lucene's NUMBER token: digits, then optionally a dot and digits
+        let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+        let boost = match self.peek() {
+            Some(Tok::Term(t))
+                if t.split_once('.')
+                    .map_or(digits(t), |(a, b)| digits(a) && digits(b)) =>
+            {
+                t.parse::<f32>().map_err(|e| e.to_string())?
+            }
+            _ => return Err(self.unexpected()),
+        };
+        self.at += 1;
+        Ok(q.map(|q| match boost == 1.0 {
+            true => q,
+            false => Query::Boosted {
+                boost: boost.into(),
+                query: Box::new(q),
+            },
+        }))
     }
 
     fn term(&mut self, field: &str) -> Result<Option<Query>, String> {

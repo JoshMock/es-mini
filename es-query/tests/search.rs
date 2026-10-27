@@ -1391,3 +1391,38 @@ fn query_dsl_gaps_query_string_keeps_keyword_case() {
     assert_eq!(qs("title:QUI*"), ["1", "2"]);
     assert_eq!(qs("title:L?ZY"), ["3"]);
 }
+
+#[test]
+fn query_dsl_gaps_query_string_boosts() {
+    let idx = index();
+    let scores = |q: &str| {
+        let body = json!({"query": {"query_string": {"query": q}}});
+        let r = search(&idx, &SearchRequest::parse(&body).unwrap());
+        let mut s: Vec<_> = (r.hits.iter())
+            .map(|h| (h.id.to_owned(), h.score.unwrap()))
+            .collect();
+        s.sort_by(|a, b| a.0.cmp(&b.0));
+        s
+    };
+    let base = scores("title:quick");
+    let times = |q: &str, k: f32| {
+        let got = scores(q);
+        assert_eq!(got.len(), base.len(), "{q}");
+        for ((id, s), (_, b)) in got.iter().zip(&base) {
+            assert!((s - b * k).abs() < 1e-5, "{q} {id}: {s} vs {b} * {k}");
+        }
+    };
+    times("title:quick^2", 2.0);
+    times("(title:quick)^0.5", 0.5);
+    times("title:(quick)^3", 3.0);
+    let pet = scores("tag:pet")[0].1;
+    assert_eq!(scores("tag:pet^4"), [("3".to_owned(), pet * 4.0)]);
+    let qs = |q: &str| json!({"query": {"query_string": {"query": q}}});
+    for q in ["quick^", "quick^x"] {
+        let err = SearchRequest::parse(&qs(q)).unwrap_err();
+        assert!(
+            err.msg.starts_with(&format!("Cannot parse '{q}'")),
+            "{q}: {err:?}"
+        );
+    }
+}
