@@ -39,15 +39,34 @@ fn is_term_char(c: char) -> bool {
     !is_ws(c) && !"!():^[]\"{}~*?\\/".contains(c)
 }
 
-/// Lucene's `discardEscapeChar`: drops each escaping backslash.
-// ponytail: no `\uXXXX` escapes
-fn unescape(s: &str) -> String {
-    let mut out = String::new();
+/// Lucene's `discardEscapeChar`: drops each escaping backslash and reads `\uXXXX` as the UTF-16
+/// unit it names.
+fn unescape(s: &str) -> Result<String, String> {
+    let mut out = vec![];
     let mut chars = s.chars();
     while let Some(c) = chars.next() {
-        out.extend(if c == '\\' { chars.next() } else { Some(c) });
+        let c = match c {
+            '\\' => match chars.next() {
+                Some('u') => {
+                    let mut unit = 0;
+                    for _ in 0..4 {
+                        let c = chars.next().ok_or("Truncated Unicode escape sequence.")?;
+                        let d = c.to_digit(16).ok_or_else(|| {
+                            format!("Non-hex character in Unicode escape sequence: {c}")
+                        })?;
+                        unit = unit * 16 + d as u16;
+                    }
+                    out.push(unit);
+                    continue;
+                }
+                Some(c) => c,
+                None => return Err("Term can not end with escape character.".into()),
+            },
+            c => c,
+        };
+        out.extend_from_slice(c.encode_utf16(&mut [0; 2]));
     }
-    out
+    Ok(String::from_utf16_lossy(&out))
 }
 
 fn lex(q: &str) -> Result<Vec<Tok>, String> {
@@ -282,7 +301,7 @@ impl Parser {
         let mut field = field.to_owned();
         if self.toks.get(self.at + 1) == Some(&Tok::Colon) {
             match self.peek() {
-                Some(Tok::Term(f)) => field = unescape(f),
+                Some(Tok::Term(f)) => field = unescape(f)?,
                 Some(Tok::Star) => field = "*".into(),
                 _ => {}
             }
@@ -323,14 +342,14 @@ impl Parser {
             return Err("querying all fields (`*`) is not supported".into());
         }
         Ok(Some(match tok {
-            Some(Tok::Term(t)) => return Ok(Some(self.field_query(field, unescape(&t)))),
+            Some(Tok::Term(t)) => return Ok(Some(self.field_query(field, unescape(&t)?))),
             Some(Tok::Star) if field == "*" => Query::MatchAll,
             Some(Tok::Star) => Query::Exists { field },
             // ponytail: prefixes and wildcards are lowercased, as for text fields, even on
             // keyword fields
             Some(Tok::Prefix(p)) => Query::Prefix {
                 field,
-                prefix: unescape(&p).to_lowercase(),
+                prefix: unescape(&p)?.to_lowercase(),
             },
             Some(Tok::Wild(w)) => Query::Wildcard {
                 field,
@@ -344,17 +363,17 @@ impl Parser {
                 hi_inc,
             }) => range(
                 field,
-                Some(unescape(&lo)),
-                Some(unescape(&hi)),
+                Some(unescape(&lo)?),
+                Some(unescape(&hi)?),
                 lo_inc,
                 hi_inc,
             ),
             Some(Tok::Quoted(t)) if field == "_exists_" => Query::Exists {
-                field: unescape(&t),
+                field: unescape(&t)?,
             },
             Some(Tok::Quoted(t)) => Query::MatchPhrase {
                 field,
-                query: unescape(&t),
+                query: unescape(&t)?,
                 // Lucene reads the slop as a float and ignores one that does not parse
                 slop: fuzzy
                     .and_then(|f| f.parse::<f32>().ok())

@@ -1362,3 +1362,20 @@ fn query_dsl_gaps_prefix_and_wildcard_need_keyword_or_text() {
     assert_eq!(run(json!({"prefix": {"tag": "pe"}})).unwrap(), 1);
     assert_eq!(run(json!({"wildcard": {"title": "do?"}})).unwrap(), 2);
 }
+
+#[test]
+fn query_dsl_gaps_query_string_unicode_escapes() {
+    let qs = |q: &str| json!({"query": {"query_string": {"query": q}}});
+    assert_eq!(sorted(ids(qs(r"tag:\u0070et"))), ["3"]);
+    assert_eq!(sorted(ids(qs(r#"title:"\u0044OG""#))), ["3", "4"]);
+    for (q, msg) in [
+        (r"tag:p\u00", "Truncated Unicode escape sequence."),
+        (
+            r"tag:\u00zz",
+            "Non-hex character in Unicode escape sequence: z",
+        ),
+    ] {
+        let err = SearchRequest::parse(&qs(q)).unwrap_err();
+        assert_eq!(err.msg, format!("Cannot parse '{q}': {msg}"));
+    }
+}
