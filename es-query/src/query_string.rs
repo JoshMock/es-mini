@@ -333,13 +333,7 @@ impl Parser {
             _ => return Err(self.unexpected()),
         };
         self.at += 1;
-        Ok(q.map(|q| match boost == 1.0 {
-            true => q,
-            false => Query::Boosted {
-                boost: boost.into(),
-                query: Box::new(q),
-            },
-        }))
+        Ok(q.map(|q| q.boosted(boost.into())))
     }
 
     fn term(&mut self, field: &str) -> Result<Option<Query>, String> {

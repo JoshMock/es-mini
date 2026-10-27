@@ -82,6 +82,19 @@ pub enum Query {
     Normalized(Box<Query>),
 }
 
+impl Query {
+    /// This query with its scores multiplied by `boost`; itself for a boost of 1.
+    pub(crate) fn boosted(self, boost: f64) -> Query {
+        match boost == 1.0 {
+            true => self,
+            false => Query::Boosted {
+                boost,
+                query: Box::new(self),
+            },
+        }
+    }
+}
+
 /// The single `{field: params}` entry of a leaf query.
 fn single_field<'a>(kind: &str, v: &'a Value) -> Result<(&'a String, &'a Value), String> {
     match v
@@ -226,11 +239,8 @@ pub fn parse_query(v: &Value) -> Result<Query, QueryError> {
         let (_, p) = single_field(kind, body).ok()?;
         p.get("boost")
     });
-    if let Some(boost) = boost.and_then(Value::as_f64).filter(|b| *b != 1.0) {
-        query = Query::Boosted {
-            boost,
-            query: Box::new(query),
-        };
+    if let Some(boost) = boost.and_then(Value::as_f64) {
+        query = query.boosted(boost);
     }
     Ok(match name.and_then(Value::as_str) {
         Some(name) => Query::Named {
@@ -586,13 +596,7 @@ fn parse_kind(kind: &str, body: &Value) -> Result<Query, QueryError> {
                     Some(f) if !f.contains('*') => {
                         let (f, boost) = field_boost(f)?;
                         let query = parse_kind(field_kind, &serde_json::json!({ f: p }))?;
-                        Ok::<_, QueryError>(match boost == 1.0 {
-                            true => query,
-                            false => Query::Boosted {
-                                boost,
-                                query: Box::new(query),
-                            },
-                        })
+                        Ok::<_, QueryError>(query.boosted(boost))
                     }
                     _ => Err(format!("[multi_match] field [{f}] is not supported").into()),
                 })
@@ -664,13 +668,7 @@ fn parse_kind(kind: &str, body: &Value) -> Result<Query, QueryError> {
                                 query: t.to_owned(),
                                 and: false,
                             };
-                            match boost == 1.0 {
-                                true => q,
-                                false => Query::Boosted {
-                                    boost,
-                                    query: Box::new(q),
-                                },
-                            }
+                            q.boosted(boost)
                         })
                         .collect(),
                     must_not: vec![],
