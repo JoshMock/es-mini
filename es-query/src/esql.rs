@@ -1416,13 +1416,14 @@ fn arith(op: &str, t: &str, a: &Value, b: &Value) -> Option<Value> {
 }
 
 /// The conversion functions and their result types.
-const CONVERSIONS: [(&str, &str); 6] = [
+const CONVERSIONS: [(&str, &str); 7] = [
     ("TO_STRING", "keyword"),
     ("TO_DATETIME", "date"),
     ("TO_INTEGER", "integer"),
     ("TO_LONG", "long"),
     ("TO_DOUBLE", "double"),
     ("TO_BOOLEAN", "boolean"),
+    ("TO_IP", "ip"),
 ];
 
 /// The scalar functions and how many arguments they take.
@@ -2062,7 +2063,10 @@ fn convert(f: &str, t: &str, v: &Value) -> Option<Value> {
     let long: Value = match (f, t) {
         ("TO_STRING", "date") => return es_index::parse_date_millis(v).map(iso_date_value),
         ("TO_STRING", "date_nanos") => return nanos().map(|n| iso_nanos(n).into()),
-        ("TO_STRING", "ip") => return es_index::ip_bytes(v).map(|b| es_index::ip_string(b).into()),
+        // The canonical text, like `DocValueFormat.IP`.
+        ("TO_STRING", "ip") | ("TO_IP", _) => {
+            return es_index::ip_bytes(v).map(|b| es_index::ip_string(b).into());
+        }
         // Truncated to millis, like `DateUtils.toMilliSeconds`.
         ("TO_DATETIME", "date_nanos") => return nanos().map(|n| iso_date_value(n / 1_000_000)),
         (_, "date") => es_index::parse_date_millis(v)?.into(),
@@ -2396,7 +2400,9 @@ fn resolve(
             };
             let ta = resolve(arg, src, types, bad)?;
             // The types each conversion takes (of those es-mini has) and how ES lists all it
-            // takes; es-mini lacks a version type, so TO_VERSION and TO_IP do not exist here.
+            // takes.
+            // ponytail: no TO_VERSION, as es-mini has no version type; no TO_IP leading_zeros
+            // option, so it always rejects leading zeros like ES's default
             let (takes, accepted): (&[&str], _) = match name {
                 "TO_STRING" => (&["boolean", "date", "date_nanos", "ip"], None),
                 "TO_DATETIME" => (
@@ -2421,11 +2427,13 @@ fn resolve(
                          datetime or numeric or string",
                     ),
                 ),
+                "TO_IP" => (&["ip"], Some("ip or string")),
                 _ => (&["boolean"], Some("boolean or numeric or string")),
             };
+            let numeric: &[&str] = if name == "TO_IP" { &[] } else { &NUMERIC };
             let Some(&ta) = ["null", "keyword", "text"]
                 .iter()
-                .chain(&NUMERIC)
+                .chain(numeric)
                 .chain(takes)
                 .find(|n| **n == ta)
             else {

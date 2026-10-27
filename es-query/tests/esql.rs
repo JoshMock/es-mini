@@ -2536,3 +2536,24 @@ fn esql_conversions_compare_dates_ips_and_booleans_with_string_literals() {
         }
     }
 }
+
+#[test]
+fn esql_conversions_to_ip_reads_strings() {
+    let r = q(
+        r#"ROW a = TO_IP("::ffff:10.0.0.1"), b = TO_IP("1.1.010.1"), c = TO_IP(["::1", "x"]), d = TO_IP("10.0.0.1") == "::ffff:10.0.0.1""#,
+    );
+    let types: Vec<&str> = r.columns.iter().map(|c| c.r#type.as_str()).collect();
+    assert_eq!(types, ["ip", "ip", "ip", "boolean"]);
+    assert_eq!(
+        r.values,
+        [[json!("10.0.0.1"), Value::Null, json!("::1"), json!(true)]]
+    );
+    match run(&indices(), "ROW a = TO_IP(1)") {
+        Err(EsqlError::Verification(m)) => assert_eq!(
+            m,
+            "Found 1 problem\nline 1:9: argument of [TO_IP(1)] must be [ip or string], found \
+             value [1] type [integer]"
+        ),
+        other => panic!("{other:?}"),
+    }
+}
