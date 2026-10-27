@@ -2384,3 +2384,29 @@ fn esql_conversions_date_math_adds_and_subtracts_time_spans() {
         }
     }
 }
+
+#[test]
+fn esql_conversions_count_distinct_hashes_ips_and_dates_as_values() {
+    let mut i = Index::default();
+    for (f, t) in [("ip", "ip"), ("n", "date_nanos")] {
+        let m: FieldMapping = serde_json::from_value(json!({ "type": t })).unwrap();
+        i.mappings.properties.insert(f.into(), m);
+    }
+    i.put("1", json!({"ip": "::1", "n": "2024-01-01T00:00:00Z"}));
+    i.put(
+        "2",
+        json!({"ip": "0:0:0:0:0:0:0:1", "n": "2024-01-01T00:00:00.000000000Z"}),
+    );
+    i.put(
+        "3",
+        json!({"ip": "::ffff:10.0.0.1", "n": "2024-01-01T00:00:00.5Z"}),
+    );
+    i.put("4", json!({"ip": "10.0.0.1"}));
+    let indices = BTreeMap::from([("t".to_owned(), i)]);
+    let r = run(
+        &indices,
+        "FROM t | STATS i = COUNT_DISTINCT(ip), n = COUNT_DISTINCT(n)",
+    )
+    .unwrap();
+    assert_eq!(r.values, [[json!(2), json!(2)]]);
+}

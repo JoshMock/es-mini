@@ -2639,6 +2639,12 @@ fn run_at(
                     let Some(t) = resolve(arg, query, &types, &mut bad) else {
                         continue;
                     };
+                    // What COUNT_DISTINCT hashes: the value's long or binary form.
+                    if let Expr::Call(_, _, hashed, _) = e
+                        && let Some(&ty) = ["date", "date_nanos", "ip"].iter().find(|ty| **ty == t)
+                    {
+                        let _ = hashed.set(("COUNT_DISTINCT", ty));
+                    }
                     let numeric =
                         t == "null" || (NUMERIC.contains(&t.as_str()) && t != "unsigned_long");
                     let source = &query[span(e).1.clone()];
@@ -2827,13 +2833,29 @@ fn run_at(
                     match f.as_str() {
                         "COUNT" => all.len().into(),
                         "COUNT_DISTINCT" => {
-                            // Hashed like ES's HllStates, with its default precision threshold.
-                            // ponytail: dates, IPs and versions hash their text where ES hashes
-                            // their long or binary form; the same count up to the threshold
+                            // Hashed like ES's HllStates, with its default precision threshold:
+                            // dates as epoch millis or nanos, IPs as their 16 bytes.
+                            // ponytail: date_nanos read in the default format; es-mini has no
+                            // version type to hash
                             use crate::hll::{self, Hll};
                             let mut counter = Hll::new(hll::precision_from_threshold(3000));
+                            let ty = match e {
+                                Expr::Call(_, _, hashed, _) => hashed.get().map(|h| h.1),
+                                _ => None,
+                            };
                             for v in &all {
-                                counter.collect(match v {
+                                let long = match ty {
+                                    Some("date") => es_index::parse_date_millis(v),
+                                    Some("date_nanos") => {
+                                        es_index::disk::date_nanos(None, None, v).flatten()
+                                    }
+                                    _ => None,
+                                };
+                                let typed = match ty {
+                                    Some("ip") => es_index::ip_bytes(v).map(|b| hll::murmur3(&b)),
+                                    _ => long.map(|l| hll::mix64(l as u64)),
+                                };
+                                counter.collect(typed.unwrap_or_else(|| match v {
                                     Value::Number(n) if n.is_f64() => {
                                         hll::mix64(n.as_f64().unwrap_or_default().to_bits())
                                     }
@@ -2841,7 +2863,7 @@ fn run_at(
                                         hll::mix64(n.as_i64().unwrap_or_default() as u64)
                                     }
                                     v => hll::murmur3(es_index::postings::text(v).as_bytes()),
-                                });
+                                }));
                             }
                             counter.cardinality().into()
                         }
