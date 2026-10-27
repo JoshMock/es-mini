@@ -45,10 +45,10 @@ pub enum Query {
     },
     Range {
         field: String,
-        gt: Option<Value>,
-        gte: Option<Value>,
-        lt: Option<Value>,
-        lte: Option<Value>,
+        gt: Option<Box<Value>>,
+        gte: Option<Box<Value>>,
+        lt: Option<Box<Value>>,
+        lte: Option<Box<Value>>,
         /// The date format the bounds are in, instead of the field's.
         format: Option<String>,
         /// The time zone of date bounds without an offset.
@@ -408,12 +408,12 @@ fn parse_kind(kind: &str, body: &Value) -> Result<Query, QueryError> {
             }
             Ok(Query::Range {
                 field: field.clone(),
-                // ES keeps the last of gt/gte (and lt/lte) parsed; serde_json sorts keys, so
-                // the inclusive bound stands in for "last". ponytail: enable preserve_order for true order.
-                gt: get("gte").map_or_else(|| get("gt"), |_| None),
-                gte: get("gte"),
-                lt: get("lte").map_or_else(|| get("lt"), |_| None),
-                lte: get("lte"),
+                // ES keeps the last of gt/gte (and lt/lte) parsed; here the inclusive bound wins.
+                // ponytail: preserve_order is on now, so true last-wins order is possible.
+                gt: get("gte").map_or_else(|| get("gt"), |_| None).map(Box::new),
+                gte: get("gte").map(Box::new),
+                lt: get("lte").map_or_else(|| get("lt"), |_| None).map(Box::new),
+                lte: get("lte").map(Box::new),
                 format: p.get("format").and_then(Value::as_str).map(Into::into),
                 time_zone,
             })

@@ -185,10 +185,10 @@ async fn profile_times_each_aggregation_per_shard() {
     assert_eq!(
         types,
         [
-            (&json!("a"), &json!("AvgAggregator")),
-            (&json!("d"), &json!("CardinalityAggregator")),
-            (&json!("k"), &json!("GlobalOrdCardinalityAggregator")),
             (&json!("n"), &json!("CardinalityAggregator")),
+            (&json!("k"), &json!("GlobalOrdCardinalityAggregator")),
+            (&json!("d"), &json!("CardinalityAggregator")),
+            (&json!("a"), &json!("AvgAggregator")),
         ]
     );
     for a in profiled {
@@ -205,8 +205,8 @@ async fn profile_times_each_aggregation_per_shard() {
         assert_eq!(b["collect_count"], 3);
         assert_eq!(b["reduce"], 0);
     }
-    assert_eq!(profiled[1]["debug"]["string_hashing_collectors_used"], 1);
-    assert_eq!(profiled[3]["debug"]["numeric_collectors_used"], 1);
+    assert_eq!(profiled[2]["debug"]["string_hashing_collectors_used"], 1);
+    assert_eq!(profiled[0]["debug"]["numeric_collectors_used"], 1);
     assert_eq!(r["aggregations"]["n"]["value"], 3);
 
     let (_, r) = call(
@@ -471,7 +471,7 @@ async fn runtime_fields_stringify_the_source_like_java() {
     let (s, r) = call(&app, Method::POST, "/idx/_search", Some(body)).await;
     assert_eq!(s, StatusCode::OK, "{r}");
     let rt = &r["hits"]["hits"][0]["fields"]["rt"][0];
-    assert!(rt.as_str().unwrap().starts_with("{n=1, "), "{rt}");
+    assert_eq!(rt, "{t=green apple, n=1}");
 }
 
 #[tokio::test]
@@ -512,4 +512,17 @@ fn searches_do_not_wait_for_writes_to_other_indices() {
     drop(shared);
     search_b.join().unwrap();
     assert_eq!(searched, Ok(StatusCode::OK));
+}
+
+#[tokio::test]
+async fn search_response_keys_in_es_order() {
+    let app = seeded().await;
+    let body = json!({"size": 0, "aggs": {"n": {"max": {"field": "n"}}}});
+    let (s, r) = call(&app, Method::POST, "/idx/_search", Some(body)).await;
+    assert_eq!(s, StatusCode::OK);
+    let keys: Vec<&str> = r.as_object().unwrap().keys().map(String::as_str).collect();
+    assert_eq!(
+        keys,
+        ["took", "timed_out", "_shards", "hits", "aggregations"]
+    );
 }

@@ -28,9 +28,9 @@ pub(crate) fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, 
         let range = Query::Range {
             field,
             gt: None,
-            gte: Some(v.clone()),
+            gte: Some(Box::new(v.clone())),
             lt: None,
-            lte: Some(v),
+            lte: Some(Box::new(v)),
             format: None,
             time_zone: None,
         };
@@ -125,13 +125,13 @@ pub(crate) fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, 
             };
             let number = [&gt, &gte, &lt, &lte]
                 .iter()
-                .any(|b| b.as_ref().is_some_and(Value::is_number));
+                .any(|b| b.as_deref().is_some_and(Value::is_number));
             let format = (format.as_deref())
                 .or(number.then_some("epoch_millis"))
                 .or(f.as_deref());
             let tz = time_zone.unwrap_or(es_index::tz::TimeZone::UTC);
-            let millis = |b: Option<Value>, round_up| {
-                let parse = |b: Value| {
+            let millis = |b: Option<Box<Value>>, round_up| {
+                let parse = |b: Box<Value>| {
                     es_index::date_math::parse(
                         &text(&b),
                         format,
@@ -152,9 +152,9 @@ pub(crate) fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, 
             Query::Range {
                 field,
                 gt: None,
-                gte: lo.map(Value::from),
+                gte: lo.map(|t| Box::new(Value::from(t))),
                 lt: None,
-                lte: hi.map(Value::from),
+                lte: hi.map(|t| Box::new(Value::from(t))),
                 format: None,
                 time_zone: None,
             }

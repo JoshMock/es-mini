@@ -408,7 +408,7 @@ fn range(
     lo_inc: bool,
     hi_inc: bool,
 ) -> Query {
-    let open = |b: Option<String>| b.filter(|b| b != "*").map(Value::String);
+    let open = |b: Option<String>| b.filter(|b| b != "*").map(|s| Box::new(Value::String(s)));
     let (lo, hi) = (open(lo), open(hi));
     let (gte, gt) = if lo_inc { (lo, None) } else { (None, lo) };
     let (lte, lt) = if hi_inc { (hi, None) } else { (None, hi) };

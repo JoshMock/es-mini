@@ -367,7 +367,7 @@ impl<'a> Searcher<'a> {
                 lt,
                 lte,
                 ..
-            } => self.number_docs(field, [gt, gte, lt, lte].map(Option::as_ref), exact),
+            } => self.number_docs(field, [gt, gte, lt, lte].map(Option::as_deref), exact),
             Query::Match { field, query, and } => {
                 self.term_docs(field, &self.match_terms(field, query), *and, exact)
             }
@@ -440,7 +440,7 @@ impl<'a> Searcher<'a> {
                 lt,
                 lte,
                 ..
-            } => numbers(field, [gt, gte, lt, lte].map(Option::as_ref)),
+            } => numbers(field, [gt, gte, lt, lte].map(Option::as_deref)),
             Query::Match { field, query, and } => {
                 lookup(field, &self.match_terms(field, query), *and)
             }
@@ -782,7 +782,7 @@ impl<'a> Searcher<'a> {
                         _ => Ordering::Less,
                     },
                 };
-                let bounds = [gt, gte, lt, lte].map(Option::as_ref);
+                let bounds = [gt, gte, lt, lte].map(Option::as_deref);
                 (values(&d.source, path).into_iter())
                     .any(|v| in_range(bounds, |b| cmp(v, b)))
                     .then_some(1.0)
