@@ -451,7 +451,8 @@ pub fn norm_len(norm: i8) -> u32 {
 // ponytail: fields the writer cannot encode yet are left out of the segment, which only
 // Elasticsearch notices (es-mini reads `_source` where a segment lacks a field): integer fields
 // holding fractions or out-of-range values (ES truncates or rejects them, es-mini matches them as
-// they are), nested objects, and `date_nanos`. `_ignored` does not list ignore_above fields.
+// they are), nested objects, and `date_nanos` before 1970. `_ignored` does not list ignore_above
+// fields.
 #[derive(Default)]
 struct UserFields {
     fields: Vec<es_codec::field_infos::FieldInfo>,
@@ -502,6 +503,34 @@ fn integer(v: &Value, min: i64, max: i64) -> Option<Option<i64>> {
         .or_else(|| v.as_str()?.parse().ok())
         .or_else(|| (f.fract() == 0.0 && f.abs() < 2f64.powi(63)).then_some(f as i64))?;
     (min..=max).contains(&n).then_some(Some(n))
+}
+
+/// Epoch nanos of a `date_nanos` value, as Elasticsearch indexes it: [`crate::date_millis`] plus
+/// the sub-millisecond digits of its fraction (of a millisecond for `epoch_millis`, of a second
+/// otherwise). `None` before 1970 or after 2262, which Elasticsearch rejects and es-mini matches.
+fn date_nanos(format: Option<&str>, locale: Option<&str>, v: &Value) -> Option<Option<i64>> {
+    let Some(millis) = crate::date_millis(format, locale, v) else {
+        return Some(None);
+    };
+    let s = crate::postings::text(v);
+    let number = s.parse::<f64>().is_ok();
+    if number && s.starts_with('-') {
+        return None;
+    }
+    let digits = s.split_once(['.', ',']).map_or("", |(_, f)| f);
+    let digits = &digits[..digits.bytes().take_while(u8::is_ascii_digit).count()];
+    let epoch_millis = number
+        && format.is_none_or(|f| {
+            f.split("||").find(|a| a.starts_with("epoch_")) == Some("epoch_millis")
+        });
+    let sub = if epoch_millis {
+        digits
+    } else {
+        digits.get(3..).unwrap_or("")
+    };
+    let sub: i64 = format!("{:0<6}", &sub[..sub.len().min(6)]).parse().ok()?;
+    let nanos = millis.checked_mul(1_000_000)?.checked_add(sub)?;
+    (nanos >= 0).then_some(Some(nanos))
 }
 
 fn user_fields(
@@ -613,9 +642,9 @@ fn user_fields(
                 out.keyword.push((number, keys));
                 (IndexOptions::Docs, DocValuesType::SortedSet, true)
             }
-            // ponytail: date_nanos and ranges are not indexed on disk; their `_source` is kept
+            // ponytail: ranges are not indexed on disk; their `_source` is kept
             // `nested` holds objects, which never reach this match
-            M::DateNanos { .. } | M::LongRange | M::DateRange { .. } | M::Nested => continue,
+            M::LongRange | M::DateRange { .. } | M::Nested => continue,
             M::Ip => {
                 // Like ES: points and sorted-set doc values of the 16-byte encoding, no postings.
                 let Some(ips) = typed(&values, &|v| Some(crate::ip_bytes(v))) else {
@@ -667,7 +696,8 @@ fn user_fields(
             | M::Double
             | M::Float
             | M::HalfFloat
-            | M::Date { .. } => {
+            | M::Date { .. }
+            | M::DateNanos { .. } => {
                 // Doc values are the sortable longs ES stores; points are their big-endian bytes.
                 let sortable_long = |f: f64| {
                     let b = f.to_bits() as i64;
@@ -714,6 +744,12 @@ fn user_fields(
                         8,
                         typed(&values, &|v| {
                             Some(crate::date_millis(format.as_deref(), locale.as_deref(), v))
+                        }),
+                    ),
+                    M::DateNanos { format, locale } => (
+                        8,
+                        typed(&values, &|v| {
+                            date_nanos(format.as_deref(), locale.as_deref(), v)
                         }),
                     ),
                     _ => continue,

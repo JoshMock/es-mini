@@ -119,3 +119,35 @@ fn disk_writer_completeness_coerces_scalars_and_skips_malformed_values() {
     // matches the fraction, so the field stays out of the segment.
     assert!(r.field("i").is_err());
 }
+
+#[test]
+fn disk_writer_completeness_writes_date_nanos_as_epoch_nanos() {
+    use es_codec::doc_values::DocValues;
+    let mut idx = Index::default();
+    let nanos = |format: Option<&str>| FieldMapping::DateNanos {
+        format: format.map(Into::into),
+        locale: None,
+    };
+    let props = &mut idx.mappings.properties;
+    props.insert("dn".into(), nanos(None));
+    props.insert("ms".into(), nanos(Some("epoch_millis")));
+    idx.put(
+        "1",
+        json!({"dn": "2024-01-01T00:00:00.123456789Z", "ms": 1.5}),
+    );
+    idx.put("2", json!({"dn": "1970-01-01T01:00:01+01:00", "ms": "2"}));
+    let (_root, r) = saved_segment("nanos", idx);
+    let nanos = |f: &str| {
+        let Ok(DocValues::Numbers(n)) = r.doc_values(f) else {
+            panic!("date_nanos are sorted numerics");
+        };
+        n
+    };
+    let jan_2024 = 1_704_067_200_000_000_000;
+    assert_eq!(
+        nanos("dn"),
+        [vec![jan_2024 + 123_456_789], vec![1_000_000_000]]
+    );
+    assert_eq!(nanos("ms"), [vec![1_500_000], vec![2_000_000]]);
+    assert_eq!(r.field("dn").unwrap().point_num_bytes, 8);
+}

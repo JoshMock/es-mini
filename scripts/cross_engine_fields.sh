@@ -3,7 +3,8 @@
 # Elasticsearch 9.5.5 (via scripts/cross_engine.sh) must answer the right _count for term, range and
 # exists queries on each of them, phrase queries on text, term queries on dynamic object fields,
 # stored_fields of text mapped with `store`, multi-fields, keyword ignore_above, and values of
-# another JSON type that Elasticsearch coerces (numbers in keyword fields, numeric strings).
+# another JSON type that Elasticsearch coerces (numbers in keyword fields, numeric strings), and
+# date_nanos at nanosecond precision.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DATA="$(mktemp -d)"; PORT=${ES_MINI_PORT:-9392}
@@ -14,9 +15,9 @@ PID=$!
 trap 'kill $PID 2>/dev/null || true; rm -rf "$DATA" "$DATA.log"' EXIT
 for _ in $(seq 50); do curl -s "localhost:$PORT/" >/dev/null && break; sleep 0.2; done
 mini() { curl -sf -X "$1" "localhost:$PORT$2" -H 'content-type: application/json' --data-binary "$3" >/dev/null; }
-mini PUT /f '{"settings":{"number_of_shards":1,"number_of_replicas":0},"mappings":{"properties":{"d":{"type":"date"},"fl":{"type":"float"},"db":{"type":"double"},"arr":{"type":"long"},"kw":{"type":"keyword"},"t":{"type":"text"},"m":{"type":"text"},"st":{"type":"text","store":true},"lg":{"type":"keyword","ignore_above":3},"ck":{"type":"keyword"},"cn":{"type":"long"},"cb":{"type":"boolean"}}}}'
+mini PUT /f '{"settings":{"number_of_shards":1,"number_of_replicas":0},"mappings":{"properties":{"d":{"type":"date"},"fl":{"type":"float"},"db":{"type":"double"},"arr":{"type":"long"},"kw":{"type":"keyword"},"t":{"type":"text"},"m":{"type":"text"},"st":{"type":"text","store":true},"lg":{"type":"keyword","ignore_above":3},"ck":{"type":"keyword"},"cn":{"type":"long"},"cb":{"type":"boolean"},"dn":{"type":"date_nanos"}}}}'
 mini POST '/f/_bulk?refresh=true' '{"index":{"_id":"1"}}
-{"d":"2024-01-01","fl":1.5,"db":2.5,"arr":[1,2,3],"kw":["a","b"],"t":"quick fox","o":{"n":5,"s":"x"},"st":["one two","three"],"lg":["abc","abcd"]}
+{"d":"2024-01-01","fl":1.5,"db":2.5,"arr":[1,2,3],"kw":["a","b"],"t":"quick fox","o":{"n":5,"s":"x"},"st":["one two","three"],"lg":["abc","abcd"],"dn":"2024-01-01T00:00:00.123456789Z"}
 {"index":{"_id":"2"}}
 {"d":"2024-02-01T10:00:00Z","fl":2.5,"db":-1.5,"arr":[3],"m":["brown cat","red hen"]}
 {"index":{"_id":"3"}}
@@ -24,7 +25,7 @@ mini POST '/f/_bulk?refresh=true' '{"index":{"_id":"1"}}
 {"index":{"_id":"4"}}
 {"fl":-3.5,"db":7,"kw":["c","c"],"lg":"abcde"}
 {"index":{"_id":"5"}}
-{"ck":[42,true],"cn":["7","8"],"cb":"true"}
+{"ck":[42,true],"cn":["7","8"],"cb":"true","dn":["2024-01-01T00:00:00.123Z",1700000000000]}
 '
 # Writes only reach the translog, which Elasticsearch would replay and index itself; creating an
 # index changes the metadata, which makes es-mini commit them as segments.

@@ -51,6 +51,11 @@ count 1 '{"term":{"ck":"true"}}'
 count 1 '{"term":{"cn":7}}'
 count 1 '{"range":{"cn":{"gte":8}}}'
 count 1 '{"term":{"cb":true}}'
+# date_nanos keep nanosecond precision.
+count 1 '{"term":{"dn":"2024-01-01T00:00:00.123456789Z"}}'
+count 1 '{"range":{"dn":{"gt":"2024-01-01T00:00:00.123456Z","lt":"2024-01-01T00:00:00.1234568Z"}}}'
+count 1 '{"range":{"dn":{"lt":"2024-01-01T00:00:00.1231Z"}}}'
+count 2 '{"exists":{"field":"dn"}}'
 # Text mapped with `store` comes back from the Lucene stored field, not `_source`.
 got=$(req POST /f/_search '{"stored_fields":["st"],"query":{"ids":{"values":["1"]}}}' |
   python3 -c 'import json,sys;print(json.load(sys.stdin)["hits"]["hits"][0].get("fields"))')
