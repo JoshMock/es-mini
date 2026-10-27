@@ -555,3 +555,25 @@ async fn mapping_validation_objects_and_nulls_inside_setting_lists_fail() {
         assert_eq!((s, r), (StatusCode::INTERNAL_SERVER_ERROR, refused(source)));
     }
 }
+
+#[tokio::test]
+async fn mapping_validation_put_mapping_merges_like_elasticsearch() {
+    let app = app();
+    call(&app, Method::PUT, "/x/_doc/1", Some(json!({"s": "x"}))).await;
+    let restate = json!({"date_detection": false, "properties": {"s": {"type": "text"}}});
+    let (s, _) = call(&app, Method::PUT, "/x/_mapping", Some(restate)).await;
+    assert_eq!(s, StatusCode::OK);
+    let (_, r) = call(&app, Method::GET, "/x/_mapping", None).await;
+    let keyword = json!({"type": "keyword", "ignore_above": 256});
+    let expected = json!({"x": {"mappings": {"date_detection": false, "properties": {
+        "s": {"type": "text", "fields": {"keyword": keyword}}
+    }}}});
+    assert_eq!(r, expected);
+    let store = json!({"properties": {"s": {"type": "text", "store": true}}});
+    let (s, r) = call(&app, Method::PUT, "/x/_mapping", Some(store)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        r["error"]["reason"],
+        "Mapper for [s] conflicts with existing mapper:\n\tCannot update parameter [store] from [false] to [true]"
+    );
+}

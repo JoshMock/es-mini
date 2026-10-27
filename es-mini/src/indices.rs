@@ -613,10 +613,7 @@ fn check_setting_lists(settings: &Value) -> Result<(), AppError> {
     }
 }
 
-/// `PUT|POST /{index}/_mapping`: adds fields and updates the parameters of existing ones.
-// ponytail: only `properties` merge; a field cannot change type, and other mapping sections are ignored.
-// A restated field replaces the old one whole: it loses multi-fields it omits (ES keeps them), and
-// any parameter may change (ES refuses non-updatable ones such as a date `format`)
+/// `PUT|POST /{index}/_mapping`: merges the body into each index's mappings ([`Mappings::merged`]).
 pub async fn put_mapping(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -632,23 +629,12 @@ pub async fn put_mapping(
     let new = Mappings::deserialize(&body).map_err(|e| AppError::MapperParsing(e.to_string()))?;
     let mut indices = state.write();
     let names = read_indices(&indices, &name, &params)?;
-    for n in &names {
-        let props = &indices[n].mappings.properties;
-        for (field, m) in &new.properties {
-            if let Some(old) = props.get(field)
-                && old.mapping_type() != m.mapping_type()
-            {
-                return Err(AppError::IllegalArgument(format!(
-                    "mapper [{field}] cannot be changed from type [{}] to [{}]",
-                    old.mapping_type(),
-                    m.mapping_type()
-                )));
-            }
-        }
-    }
-    for n in names {
-        (indices.get_mut(&n).expect("resolved index exists").mappings)
-            .extend(new.properties.clone());
+    let merged = (names.iter())
+        .map(|n| indices[n].mappings.merged(&new))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(AppError::IllegalArgument)?;
+    for (n, m) in names.into_iter().zip(merged) {
+        indices.get_mut(&n).expect("resolved index exists").mappings = m;
     }
     Ok(Json(json!({"acknowledged": true})))
 }

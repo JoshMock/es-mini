@@ -168,6 +168,69 @@ impl Mappings {
         }
     }
 
+    /// `new` merged into these mappings, as PUT _mapping merges: root sections `new` sets
+    /// replace these, fields restated keep the multi-fields they omit, and changing a field's
+    /// type, an object to a leaf (or the reverse), or a parameter Elasticsearch fixes fails with
+    /// its reason.
+    // ponytail: `text` fields declared with `fields` drop them on parse (only dynamic text keeps
+    // its `keyword`), so their multi-fields are neither merged nor checked
+    pub fn merged(&self, new: &Mappings) -> Result<Mappings, String> {
+        #[derive(PartialEq)]
+        enum Kind {
+            Leaf,
+            Object,
+            Nested,
+        }
+        let kind = |props: &BTreeMap<String, FieldMapping>, p: &str| match props.get(p) {
+            Some(FieldMapping::Nested) => Some(Kind::Nested),
+            Some(FieldMapping::Object) => Some(Kind::Object),
+            Some(_) => Some(Kind::Leaf),
+            None => {
+                let child = format!("{p}.");
+                (props.range(child.clone()..).next())
+                    .is_some_and(|(c, _)| c.starts_with(&child))
+                    .then_some(Kind::Object)
+            }
+        };
+        let mut paths = std::collections::BTreeSet::new();
+        for path in new.properties.keys() {
+            paths.extend(path.match_indices('.').map(|(i, _)| &path[..i]));
+            paths.insert(path.as_str());
+        }
+        let mut merged = BTreeMap::new();
+        for p in paths {
+            match (kind(&self.properties, p), kind(&new.properties, p)) {
+                (Some(Kind::Leaf), Some(Kind::Leaf)) => {
+                    let m = merge_field(p, &self.properties[p], &new.properties[p])?;
+                    merged.insert(p.to_owned(), m);
+                }
+                (Some(Kind::Leaf), _) | (Some(_), Some(Kind::Leaf)) => {
+                    return Err(format!(
+                        "can't merge a non object mapping [{p}] with an object mapping"
+                    ));
+                }
+                (Some(a), Some(b)) if a != b => {
+                    return Err(format!(
+                        "can't merge a non-nested mapping [{p}] with a nested mapping"
+                    ));
+                }
+                (_, _) => {
+                    if let Some(m) = new.properties.get(p) {
+                        merged.insert(p.to_owned(), m.clone());
+                    }
+                }
+            }
+        }
+        let mut out = self.clone();
+        out.extend(merged);
+        if new.source.is_some() {
+            out.source.clone_from(&new.source);
+        }
+        out.date_detection = new.date_detection.or(self.date_detection);
+        out.numeric_detection = new.numeric_detection.or(self.numeric_detection);
+        Ok(out)
+    }
+
     /// False when the mapping sets `_source.enabled` to `false`.
     pub fn source_enabled(&self) -> bool {
         self.source.as_ref().is_none_or(|s| s["enabled"] != false)
@@ -302,6 +365,90 @@ impl Index {
             (m.range(child.clone()..).next()).is_some_and(|(p, _)| p.starts_with(&child))
         };
         under(&self.mappings.properties) || under(added)
+    }
+}
+
+/// `new` merged into the field `old` at `path` (see [`Mappings::merged`]).
+fn merge_field(path: &str, old: &FieldMapping, new: &FieldMapping) -> Result<FieldMapping, String> {
+    use FieldMapping as M;
+    let (from, to) = (old.mapping_type(), new.mapping_type());
+    if from != to {
+        return Err(format!(
+            "mapper [{path}] cannot be changed from type [{from}] to [{to}]"
+        ));
+    }
+    let mut conflicts = String::new();
+    let mut fixed = |name: &str, a: String, b: String| {
+        if a != b {
+            conflicts += &format!("\n\tCannot update parameter [{name}] from [{a}] to [{b}]");
+        }
+    };
+    let date_format = |f: &Option<String>, default: &str| f.clone().unwrap_or(default.into());
+    let locale = |l: &Option<String>| l.clone().unwrap_or("en".into());
+    const DATE: &str = "strict_date_optional_time||epoch_millis";
+    let out = match (old, new) {
+        (M::Text { store: a }, M::Text { store: b }) => {
+            fixed("store", a.to_string(), b.to_string());
+            new.clone()
+        }
+        (M::TextKeyword { .. }, M::Text { store }) => {
+            fixed("store", false.to_string(), store.to_string());
+            old.clone()
+        }
+        (
+            M::Date {
+                format: f1,
+                locale: l1,
+                fields: old_fields,
+            },
+            M::Date {
+                format,
+                locale: l2,
+                fields,
+            },
+        ) => {
+            fixed("format", date_format(f1, DATE), date_format(format, DATE));
+            fixed("locale", locale(l1), locale(l2));
+            let mut all = old_fields.clone();
+            for (sub, m) in fields {
+                let m = match old_fields.get(sub) {
+                    Some(o) => merge_field(&format!("{path}.{sub}"), o, m)?,
+                    None => m.clone(),
+                };
+                all.insert(sub.clone(), m);
+            }
+            M::Date {
+                format: format.clone(),
+                locale: l2.clone(),
+                fields: all,
+            }
+        }
+        (
+            M::DateNanos {
+                format: f1,
+                locale: l1,
+            },
+            M::DateNanos {
+                format: f2,
+                locale: l2,
+            },
+        ) => {
+            let nanos = "strict_date_optional_time_nanos||epoch_millis";
+            fixed("format", date_format(f1, nanos), date_format(f2, nanos));
+            fixed("locale", locale(l1), locale(l2));
+            new.clone()
+        }
+        (M::DateRange { format: f1 }, M::DateRange { format: f2 }) => {
+            fixed("format", date_format(f1, DATE), date_format(f2, DATE));
+            new.clone()
+        }
+        _ => new.clone(),
+    };
+    match conflicts.is_empty() {
+        true => Ok(out),
+        false => Err(format!(
+            "Mapper for [{path}] conflicts with existing mapper:{conflicts}"
+        )),
     }
 }
 

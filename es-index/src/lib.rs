@@ -1608,6 +1608,120 @@ mod tests {
     }
 
     #[test]
+    fn mapping_validation_merges_keep_multi_fields_and_refuse_fixed_parameters() {
+        let m = |v: Value| serde_json::from_value::<Mappings>(v).unwrap();
+        let mut old = m(json!({"properties": {
+            "n": {"type": "nested"}, "o": {"properties": {"a": {"type": "long"}}},
+            "d": {"type": "date", "format": "yyyy"}, "t": {"type": "text"},
+            "dn": {"type": "date_nanos"}, "dr": {"type": "date_range"},
+            "e": {"type": "object"}, "k": {"type": "keyword", "ignore_above": 5}
+        }}));
+        let mut i = Index::default();
+        i.map_dynamic("1", &json!({"s": "x"})).unwrap();
+        old.extend(i.mappings.properties);
+        let merge = |new: Value| old.merged(&m(json!({ "properties": new })));
+        let fixed = |f: &str, conflicts: &[&str]| {
+            let c: Vec<String> = conflicts
+                .iter()
+                .map(|c| format!("\n\tCannot update parameter {c}"))
+                .collect();
+            Err(format!(
+                "Mapper for [{f}] conflicts with existing mapper:{}",
+                c.concat()
+            ))
+        };
+        let non_object = |p: &str| {
+            Err(format!(
+                "can't merge a non object mapping [{p}] with an object mapping"
+            ))
+        };
+        let non_nested = |p: &str| {
+            Err(format!(
+                "can't merge a non-nested mapping [{p}] with a nested mapping"
+            ))
+        };
+        // Elasticsearch 9.5.5's reasons.
+        for (new, err) in [
+            (
+                json!({"n": {"properties": {"x": {"type": "long"}}}}),
+                non_nested("n"),
+            ),
+            (json!({"o": {"type": "nested"}}), non_nested("o")),
+            (json!({"e": {"type": "nested"}}), non_nested("e")),
+            (json!({"o": {"type": "long"}}), non_object("o")),
+            (json!({"e": {"type": "long"}}), non_object("e")),
+            (
+                json!({"k": {"properties": {"x": {"type": "long"}}}}),
+                non_object("k"),
+            ),
+            (json!({"k.x": {"type": "long"}}), non_object("k")),
+            (
+                json!({"o.a": {"type": "integer"}}),
+                Err("mapper [o.a] cannot be changed from type [long] to [integer]".into()),
+            ),
+            (
+                json!({"d": {"type": "date"}}),
+                fixed(
+                    "d",
+                    &["[format] from [yyyy] to [strict_date_optional_time||epoch_millis]"],
+                ),
+            ),
+            (
+                json!({"d": {"type": "date", "format": "MM", "locale": "fr"}}),
+                fixed(
+                    "d",
+                    &["[format] from [yyyy] to [MM]", "[locale] from [en] to [fr]"],
+                ),
+            ),
+            (
+                json!({"dn": {"type": "date_nanos", "format": "yyyy"}}),
+                fixed(
+                    "dn",
+                    &["[format] from [strict_date_optional_time_nanos||epoch_millis] to [yyyy]"],
+                ),
+            ),
+            (
+                json!({"dr": {"type": "date_range", "format": "yyyy"}}),
+                fixed(
+                    "dr",
+                    &["[format] from [strict_date_optional_time||epoch_millis] to [yyyy]"],
+                ),
+            ),
+            (
+                json!({"t": {"type": "text", "store": true}}),
+                fixed("t", &["[store] from [false] to [true]"]),
+            ),
+            (
+                json!({"s": {"type": "text", "store": true}}),
+                fixed("s", &["[store] from [false] to [true]"]),
+            ),
+        ] {
+            assert_eq!(merge(new.clone()).map(|_| ()), err, "{new}");
+        }
+        let new = m(json!({"date_detection": false, "properties": {
+            "s": {"type": "text"}, "k": {"type": "keyword", "ignore_above": 10},
+            "d": {"type": "date", "format": "yyyy", "locale": "en"},
+            "e": {"properties": {"x": {"type": "long"}}}, "n": {"type": "nested"}, "z": {"type": "long"}
+        }}));
+        let merged = serde_json::to_value(old.merged(&new).unwrap()).unwrap();
+        // The omitted `keyword` multi-field of `s` is kept.
+        assert_eq!(
+            merged["properties"]["s"],
+            json!({"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}})
+        );
+        assert_eq!(
+            merged["properties"]["k"],
+            json!({"type": "keyword", "ignore_above": 10})
+        );
+        assert_eq!(
+            merged["properties"]["e"],
+            json!({"properties": {"x": {"type": "long"}}})
+        );
+        assert_eq!(merged["properties"]["z"], json!({"type": "long"}));
+        assert_eq!(merged["date_detection"], false);
+    }
+
+    #[test]
     fn object_mappings_round_trip_through_dotted_paths() {
         let raw = json!({"properties": {
             "o": {"properties": {"a": {"type": "keyword"}, "b": {"properties": {"c": {"type": "long"}}}}}
