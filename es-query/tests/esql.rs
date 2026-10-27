@@ -1860,3 +1860,42 @@ fn esql_es_semantics_bucket_only_in_stats() {
     let r = q("ROW a = 5 | STATS c = COUNT(*) BY b = BUCKET(a, 2) + 1");
     assert_eq!(r.values, [[json!(1), json!(5.0)]]);
 }
+
+/// Elasticsearch 9.5.5's messages for DATE_TRUNC's arguments, which name the date types in the
+/// other order than DATE_EXTRACT and DATE_FORMAT.
+#[test]
+fn esql_es_semantics_date_function_argument_messages() {
+    let err = |q: &str| match run(&indices(), q) {
+        Err(EsqlError::Verification(m)) => m,
+        other => panic!("{q}: {other:?}"),
+    };
+    for (q, msg) in [
+        (
+            "ROW a = DATE_TRUNC(\"x\", NOW())",
+            "1:9: first argument of [DATE_TRUNC(\"x\", NOW())] must be [dateperiod or \
+             timeduration], found value [\"x\"] type [keyword]",
+        ),
+        (
+            "ROW a = DATE_TRUNC(1, NOW())",
+            "1:9: first argument of [DATE_TRUNC(1, NOW())] must be [dateperiod or \
+             timeduration], found value [1] type [integer]",
+        ),
+        (
+            "ROW a = 5 | EVAL b = DATE_TRUNC(1 day, a)",
+            "1:22: second argument of [DATE_TRUNC(1 day, a)] must be [date_nanos or datetime], \
+             found value [a] type [integer]",
+        ),
+        (
+            "ROW a = 5 | EVAL b = DATE_EXTRACT(\"year\", a)",
+            "1:22: second argument of [DATE_EXTRACT(\"year\", a)] must be [datetime or \
+             date_nanos], found value [a] type [integer]",
+        ),
+        (
+            "ROW a = 5 | EVAL b = DATE_FORMAT(a)",
+            "1:22: first argument of [DATE_FORMAT(a)] must be [datetime or date_nanos], found \
+             value [a] type [integer]",
+        ),
+    ] {
+        assert_eq!(err(q), format!("Found 1 problem\nline {msg}"), "{q}");
+    }
+}

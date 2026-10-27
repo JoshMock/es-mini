@@ -1322,14 +1322,12 @@ fn accepts(f: &str, i: usize, t: &str) -> (&'static str, bool) {
         }
         ("SUBSTRING", _) => ("integer", t == "integer"),
         ("DATE_EXTRACT" | "DATE_FORMAT", 0) => ("string", t == "keyword" || t == "text"),
-        // ponytail: this message is not checked against Elasticsearch
         ("DATE_TRUNC", 0) => (
             "dateperiod or timeduration",
             t == "date_period" || t == "time_duration",
         ),
-        ("DATE_EXTRACT" | "DATE_FORMAT" | "DATE_TRUNC", _) => {
-            ("datetime or date_nanos", t == "date")
-        }
+        ("DATE_TRUNC", _) => ("date_nanos or datetime", t == "date"),
+        ("DATE_EXTRACT" | "DATE_FORMAT", _) => ("datetime or date_nanos", t == "date"),
         ("BUCKET", 0) => ("datetime or numeric", t == "date" || NUMERIC.contains(&t)),
         // Checked by `bucket_problem`, which knows the field's type.
         ("BUCKET", _) => ("any", true),
