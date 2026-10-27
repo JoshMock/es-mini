@@ -2,9 +2,9 @@
 # es-mini writes docs with date, float, double, multi-valued and sparse fields into a fresh data dir;
 # Elasticsearch 9.5.5 (via scripts/cross_engine.sh) must answer the right _count for term, range and
 # exists queries on each of them, phrase queries on text, term queries on dynamic object fields,
-# stored_fields of text mapped with `store`, multi-fields, keyword ignore_above, and values of
-# another JSON type that Elasticsearch coerces (numbers in keyword fields, numeric strings), and
-# date_nanos at nanosecond precision.
+# stored_fields of text mapped with `store`, multi-fields, keyword ignore_above (and `_ignored`),
+# values of another JSON type that Elasticsearch coerces (numbers in keyword fields, numeric
+# strings), and date_nanos at nanosecond precision.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DATA="$(mktemp -d)"; PORT=${ES_MINI_PORT:-9392}

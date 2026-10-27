@@ -448,11 +448,11 @@ pub fn norm_len(norm: i8) -> u32 {
 
 /// Index data for one shard segment, built from the mapped fields whose values are scalars or
 /// arrays of scalars. Field numbers start at 6, after the metadata fields.
-// ponytail: fields the writer cannot encode yet are left out of the segment, which only
-// Elasticsearch notices (es-mini reads `_source` where a segment lacks a field): integer fields
-// holding fractions or out-of-range values (ES truncates or rejects them, es-mini matches them as
-// they are), nested objects, and `date_nanos` before 1970. `_ignored` does not list ignore_above
-// fields.
+// ponytail: nested objects, and fields holding values Elasticsearch would truncate or reject but
+// es-mini matches as they are (integer fractions or out-of-range values, `date_nanos` before
+// 1970), are left out of the segment; only Elasticsearch notices, as es-mini reads `_source`
+// where a segment lacks a field. Nested objects need child documents written before their parent;
+// the rest need es-mini to truncate or reject those values at index time, as Elasticsearch does.
 #[derive(Default)]
 struct UserFields {
     fields: Vec<es_codec::field_infos::FieldInfo>,
@@ -548,12 +548,29 @@ fn user_fields(
             .map(move |(sub, sm)| (format!("{path}.{sub}"), path, sm));
         std::iter::once((path.clone(), path, m)).chain(subs)
     });
+    // Last, `_ignored` lists the fields that left a value out per doc, like IgnoredFieldMapper
+    // (unless a source field took the name, which Elasticsearch refuses).
+    let ignored_mapping = M::Keyword {
+        ignore_above: None,
+        split_queries_on_whitespace: false,
+    };
+    let ignored_path = "_ignored".to_owned();
+    let fields = fields.chain(
+        (!mappings.properties.contains_key(&ignored_path))
+            .then(|| (ignored_path.clone(), &ignored_path, &ignored_mapping)),
+    );
+    let mut ignored: Vec<Vec<Value>> = vec![vec![]; docs.len()];
     for (name, path, mapping) in fields {
+        let ignored_now;
         // Values per doc at the dotted path: arrays flatten, nulls and absent fields are no values.
-        let values: Vec<Vec<&Value>> = docs
-            .iter()
-            .map(|(_, d)| crate::postings::values(&d.source, path))
-            .collect();
+        let values: Vec<Vec<&Value>> = if *path == ignored_path {
+            ignored_now = std::mem::take(&mut ignored);
+            ignored_now.iter().map(|vs| vs.iter().collect()).collect()
+        } else {
+            (docs.iter())
+                .map(|(_, d)| crate::postings::values(&d.source, path))
+                .collect()
+        };
         let number = (meta.len() + out.fields.len()) as i32;
         let postings = |keys: Vec<Vec<Vec<u8>>>| -> Vec<TermPostings> {
             let mut m = BTreeMap::<Vec<u8>, Vec<(u32, u32)>>::new();
@@ -632,6 +649,11 @@ fn user_fields(
                 // Like ES, values longer than ignore_above UTF-16 units are not indexed.
                 let fits =
                     |s: &str| ignore_above.is_none_or(|n| s.encode_utf16().count() <= n as usize);
+                for (doc, vs) in values.iter().enumerate() {
+                    if vs.iter().any(|v| scalar_text(v).is_some_and(|s| !fits(&s))) {
+                        ignored[doc].push(Value::from(name.as_str()));
+                    }
+                }
                 let Some(keys) = typed(&values, &|v| {
                     Some(scalar_text(v).filter(|s| fits(s)).map(String::into_bytes))
                 }) else {

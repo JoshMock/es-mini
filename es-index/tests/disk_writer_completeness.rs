@@ -151,3 +151,36 @@ fn disk_writer_completeness_writes_date_nanos_as_epoch_nanos() {
     assert_eq!(nanos("ms"), [vec![1_500_000], vec![2_000_000]]);
     assert_eq!(r.field("dn").unwrap().point_num_bytes, 8);
 }
+
+#[test]
+fn disk_writer_completeness_lists_ignore_above_fields_in_ignored() {
+    use es_codec::doc_values::DocValues;
+    let mut idx = Index::default();
+    let keyword = || FieldMapping::Keyword {
+        ignore_above: Some(3),
+        split_queries_on_whitespace: false,
+    };
+    let props = &mut idx.mappings.properties;
+    props.insert("a".into(), keyword());
+    let s = FieldMapping::TextKeyword {
+        fields: [("keyword".to_owned(), keyword())].into(),
+    };
+    props.insert("s".into(), s);
+    idx.put("1", json!({"a": ["abc", "abcd"], "s": "long text"}));
+    idx.put("2", json!({"a": "ab", "s": "x"}));
+    idx.put("3", json!({"a": "abcde"}));
+    let (_root, r) = saved_segment("ignored", idx);
+    // Like IgnoredFieldMapper: a docs-only term and a sorted-set doc value per ignored field.
+    let terms: Vec<_> = (r.terms("_ignored").unwrap().into_iter())
+        .map(|t| (String::from_utf8(t.term).unwrap(), t.docs))
+        .collect();
+    let want = [
+        ("a".to_owned(), vec![(0, 1), (2, 1)]),
+        ("s.keyword".to_owned(), vec![(0, 1)]),
+    ];
+    assert_eq!(terms, want);
+    let DocValues::Ordinals { ords, .. } = r.doc_values("_ignored").unwrap() else {
+        panic!("_ignored doc values are sorted sets");
+    };
+    assert_eq!(ords, [vec![0, 1], vec![], vec![0]]);
+}

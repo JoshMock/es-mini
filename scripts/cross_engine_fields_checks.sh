@@ -45,6 +45,8 @@ count 1 '{"term":{"o.s.keyword":"x"}}'
 count 1 '{"term":{"lg":"abc"}}'
 count 0 '{"term":{"lg":"abcd"}}'
 count 1 '{"exists":{"field":"lg"}}'
+count 2 '{"term":{"_ignored":"lg"}}'
+count 2 '{"exists":{"field":"_ignored"}}'
 # Values of another JSON type, coerced as Elasticsearch does.
 count 1 '{"term":{"ck":"42"}}'
 count 1 '{"term":{"ck":"true"}}'
