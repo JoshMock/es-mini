@@ -450,7 +450,7 @@ pub fn norm_len(norm: i8) -> u32 {
 /// arrays of scalars. Field numbers start at 6, after the metadata fields.
 // ponytail: fields the writer cannot encode yet are left out of the segment, which only
 // Elasticsearch notices (es-mini reads `_source` where a segment lacks a field): values of the
-// wrong type or nested objects, `date_nanos`, and multi-fields.
+// wrong type or nested objects, and `date_nanos`. `_ignored` does not list ignore_above fields.
 #[derive(Default)]
 struct UserFields {
     fields: Vec<es_codec::field_infos::FieldInfo>,
@@ -480,11 +480,17 @@ fn user_fields(
     use es_codec::{field_infos::DocValuesType, terms::TermPostings};
     use std::collections::BTreeMap;
     let mut out = UserFields::default();
-    for (name, mapping) in &mappings.properties {
+    // Multi-fields (`path.sub`) index the values at their parent's path.
+    let fields = mappings.properties.iter().flat_map(|(path, m)| {
+        let subs = (m.fields().into_iter().flatten())
+            .map(move |(sub, sm)| (format!("{path}.{sub}"), path, sm));
+        std::iter::once((path.clone(), path, m)).chain(subs)
+    });
+    for (name, path, mapping) in fields {
         // Values per doc at the dotted path: arrays flatten, nulls and absent fields are no values.
         let values: Vec<Vec<&Value>> = docs
             .iter()
-            .map(|(_, d)| crate::postings::values(&d.source, name))
+            .map(|(_, d)| crate::postings::values(&d.source, path))
             .collect();
         let flat = || values.iter().flatten();
         if flat().next().is_none() || flat().any(|v| v.is_array() || v.is_object()) {
@@ -564,12 +570,23 @@ fn user_fields(
                     false,
                 )
             }
-            M::Keyword { .. } => {
-                let Some(keys) = typed(&values, &|v| v.as_str().map(|s| s.as_bytes().to_vec()))
-                else {
+            M::Keyword { ignore_above, .. } => {
+                // Like ES, values longer than ignore_above UTF-16 units are not indexed.
+                let fits =
+                    |s: &str| ignore_above.is_none_or(|n| s.encode_utf16().count() <= n as usize);
+                let Some(keys) = typed(&values, &|v| {
+                    v.as_str().map(|s| fits(s).then(|| s.as_bytes().to_vec()))
+                }) else {
                     continue;
                 };
-                let keys = dedup(keys);
+                let keys = dedup(
+                    keys.into_iter()
+                        .map(|k| k.into_iter().flatten().collect())
+                        .collect(),
+                );
+                if keys.iter().all(Vec::is_empty) {
+                    continue;
+                }
                 out.terms.push((number, postings(keys.clone())));
                 out.keyword.push((number, keys));
                 (IndexOptions::Docs, DocValuesType::SortedSet, true)

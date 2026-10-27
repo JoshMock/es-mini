@@ -44,3 +44,33 @@ fn disk_writer_completeness_stores_text_fields_mapped_with_store() {
     let t = r.field("t").unwrap().number;
     assert!(r.document(0).unwrap().iter().all(|(n, _)| *n != t));
 }
+
+#[test]
+fn disk_writer_completeness_writes_multi_fields_and_honors_ignore_above() {
+    use es_codec::doc_values::DocValues;
+    let mut idx = Index::default();
+    let keyword = FieldMapping::Keyword {
+        ignore_above: Some(5),
+        split_queries_on_whitespace: false,
+    };
+    let s = FieldMapping::TextKeyword {
+        fields: [("keyword".to_owned(), keyword)].into(),
+    };
+    idx.mappings.properties.insert("s".into(), s);
+    idx.put("1", json!({"s": ["short", "much too long"]}));
+    idx.put("2", json!({"s": "abc"}));
+    let (_root, r) = saved_segment("multi", idx);
+    let terms: Vec<_> = (r.terms("s.keyword").unwrap().into_iter())
+        .map(|t| (String::from_utf8(t.term).unwrap(), t.docs))
+        .collect();
+    let want = [
+        ("abc".to_owned(), vec![(1, 1)]),
+        ("short".to_owned(), vec![(0, 1)]),
+    ];
+    assert_eq!(terms, want);
+    let DocValues::Ordinals { ords, .. } = r.doc_values("s.keyword").unwrap() else {
+        panic!("keyword doc values are sorted sets");
+    };
+    assert_eq!(ords, [vec![1], vec![0]]);
+    assert!(r.terms("s").is_ok());
+}
