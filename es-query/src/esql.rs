@@ -825,6 +825,13 @@ impl Parser<'_> {
                     }
                 }
                 self.parens -= 1;
+                if let Some(msg) = arity_error(&w, args.len()) {
+                    let name = w.to_ascii_lowercase();
+                    return Err(parse_error(
+                        span.0,
+                        &format!("error building [{name}]: {msg}"),
+                    ));
+                }
                 // ponytail: not checked against Elasticsearch's follow set after a call
                 self.follow = AFTER_LITERAL;
                 return Ok(Expr::Call(w, args, OnceCell::new(), self.span(start)));
@@ -1213,6 +1220,28 @@ const SCALAR_FNS: [(&str, RangeInclusive<usize>); 23] = [
     ("MV_MIN", 1..=1),
     ("MV_MAX", 1..=1),
 ];
+
+/// Elasticsearch's message (`FunctionArgumentValidation`) for calling `f` with `n` arguments,
+/// when `f` is a function it knows that does not take that many.
+fn arity_error(f: &str, n: usize) -> Option<&'static str> {
+    let f = f.to_ascii_uppercase();
+    let arity = match SCALAR_FNS.iter().find(|(name, _)| *name == f) {
+        Some((_, arity)) => arity.clone(),
+        None if f == "TO_INTEGER" || f == "TO_LONG" => 1..=2,
+        None if CONVERSIONS.iter().any(|(name, _)| *name == f) => 1..=1,
+        None => return None,
+    };
+    (!arity.contains(&n)).then_some(match (*arity.start(), *arity.end()) {
+        (0, 0) => "expects no arguments",
+        (1, 1) => "expects exactly one argument",
+        (2, 2) => "expects exactly two arguments",
+        (1, 2) => "expects one or two arguments",
+        (2, 3) => "expects two or three arguments",
+        (2, 4) => "expects minimum two, maximum four arguments",
+        (1, _) => "expects at least one argument",
+        _ => "expects at least two arguments",
+    })
+}
 
 /// What argument `i` of scalar function `f` must be, in Elasticsearch's words, and whether type
 /// `t` is that (null always is).
@@ -1879,12 +1908,8 @@ fn resolve(
         }
         Expr::Call(f, args, t, (at, _)) => {
             let upper = f.to_ascii_uppercase();
-            if let Some((name, arity)) = SCALAR_FNS.iter().find(|(n, _)| *n == upper) {
-                // ponytail: arity errors are not ES's messages
-                if !arity.contains(&args.len()) {
-                    bad.push((*at, format!("[{f}] takes {arity:?} arguments")));
-                    return None;
-                }
+            // The parser checked the argument count.
+            if let Some((name, _)) = SCALAR_FNS.iter().find(|(n, _)| *n == upper) {
                 let ts: Vec<_> = args.iter().map(|a| resolve(a, src, types, bad)).collect();
                 let ts: Vec<String> = ts.into_iter().collect::<Option<_>>()?;
                 // The first argument of the wrong type, and what it must be.
@@ -1949,9 +1974,9 @@ fn resolve(
                 bad.push((*at, format!("Unknown function [{f}]")));
                 return None;
             };
-            // ponytail: single-argument conversions only; arity errors are not ES's messages
+            // ponytail: TO_INTEGER and TO_LONG with a base fail here; ES parses in that base
             let [arg] = &args[..] else {
-                bad.push((*at, format!("[{f}] takes exactly one argument")));
+                bad.push((*at, format!("[{f}] with a base is not supported")));
                 return None;
             };
             let ta = resolve(arg, src, types, bad)?;

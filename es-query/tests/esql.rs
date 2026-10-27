@@ -1685,3 +1685,48 @@ fn mapping_validation_empty_objects_are_not_columns() {
     let r = run(&BTreeMap::from([("i".to_owned(), i)]), "FROM i").unwrap();
     assert_eq!(col_names(&r), ["n"]);
 }
+
+/// Elasticsearch 9.5.5 fails a call with the wrong number of arguments while parsing, before
+/// verification finds other problems.
+#[test]
+fn esql_es_semantics_arity_errors_are_parse_errors() {
+    let err = |q: &str| match run(&indices(), q) {
+        Err(EsqlError::Parse(m)) => m,
+        other => panic!("{q}: {other:?}"),
+    };
+    for (call, msg) in [
+        ("ABS()", "[abs]: expects exactly one argument"),
+        ("ABS(1, 2)", "[abs]: expects exactly one argument"),
+        (
+            "SUBSTRING(\"a\")",
+            "[substring]: expects two or three arguments",
+        ),
+        ("CONCAT(\"a\")", "[concat]: expects at least two arguments"),
+        ("ROUND(1, 2, 3)", "[round]: expects one or two arguments"),
+        ("COALESCE()", "[coalesce]: expects at least one argument"),
+        ("NOW(1)", "[now]: expects no arguments"),
+        (
+            "DATE_EXTRACT(\"year\")",
+            "[date_extract]: expects exactly two arguments",
+        ),
+        (
+            "BUCKET(1)",
+            "[bucket]: expects minimum two, maximum four arguments",
+        ),
+        ("CASE(true)", "[case]: expects at least two arguments"),
+        ("TO_LONG()", "[to_long]: expects one or two arguments"),
+        (
+            "to_string(1, 2, 3)",
+            "[to_string]: expects exactly one argument",
+        ),
+    ] {
+        assert_eq!(
+            err(&format!("ROW a = {call}")),
+            format!("line 1:9: error building {msg}")
+        );
+    }
+    assert_eq!(
+        err("ROW a = nope | EVAL b = FOO(ABS())"),
+        "line 1:29: error building [abs]: expects exactly one argument"
+    );
+}
