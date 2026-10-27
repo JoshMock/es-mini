@@ -19,6 +19,8 @@ struct Action {
     index: String,
     id: Option<String>,
     body: Option<Value>,
+    /// The source line `body` was parsed from.
+    raw: Vec<u8>,
     require_alias: bool,
 }
 
@@ -73,12 +75,12 @@ fn parse(
         } else {
             op.as_str()
         };
-        let body = match op {
-            "delete" => None,
+        let (body, raw) = match op {
+            "delete" => (None, vec![]),
             _ => {
                 // Like Elasticsearch, an action line with no source line is dropped.
                 let Some((_, line)) = lines.next() else { break };
-                Some(parse_json(line)?)
+                (Some(parse_json(line)?), line.to_vec())
             }
         };
         actions.push(Action {
@@ -86,6 +88,7 @@ fn parse(
             index: index.to_owned(),
             id,
             body,
+            raw,
             require_alias: meta["require_alias"].as_bool().unwrap_or(require_alias),
         });
     }
@@ -122,8 +125,8 @@ fn execute(state: &AppState, params: &HashMap<String, String>, a: Action) -> Val
             ));
         }
         let mut reply = match a.op.as_str() {
-            "index" => put_or_create(state, &target, &id, body, false, ts),
-            "create" => put_or_create(state, &target, &id, body, true, ts),
+            "index" => put_or_create(state, &target, &id, body, &a.raw, false, ts),
+            "create" => put_or_create(state, &target, &id, body, &a.raw, true, ts),
             "update" => update_doc(state, &target, &id, &body),
             _ => delete_doc(state, &target, &id),
         }?;

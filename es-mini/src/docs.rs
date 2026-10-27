@@ -27,6 +27,78 @@ fn parse_source(body: &[u8]) -> Result<Value, AppError> {
     }
 }
 
+/// Where (1-based line, and column in bytes, as Jackson counts) the first value equal to `v`
+/// under the dotted key `path` starts in the JSON document `raw`.
+fn locate(raw: &[u8], path: &str, v: &Value) -> Option<(usize, usize)> {
+    fn skip_ws(raw: &[u8], at: &mut usize) {
+        while raw.get(*at).is_some_and(u8::is_ascii_whitespace) {
+            *at += 1;
+        }
+    }
+    /// One past the string starting at `start`.
+    fn string_end(raw: &[u8], start: usize) -> usize {
+        let mut at = start + 1;
+        while at < raw.len() && raw[at] != b'"' {
+            at += if raw[at] == b'\\' { 2 } else { 1 };
+        }
+        at + 1
+    }
+    /// Walks the value at `at`, found under `here`, to the end of it.
+    fn walk(raw: &[u8], at: &mut usize, here: &str, path: &str, v: &Value) -> Option<usize> {
+        skip_ws(raw, at);
+        let start = *at;
+        match *raw.get(start)? {
+            open @ (b'{' | b'[') => {
+                *at += 1;
+                while *at < raw.len() {
+                    skip_ws(raw, at);
+                    if matches!(raw.get(*at), Some(b'}' | b']')) {
+                        *at += 1;
+                        return None;
+                    }
+                    let child = match open {
+                        b'{' => {
+                            let end = string_end(raw, *at);
+                            let key: String = serde_json::from_slice(raw.get(*at..end)?).ok()?;
+                            *at = end;
+                            skip_ws(raw, at);
+                            *at += 1; // the colon
+                            match here {
+                                "" => key,
+                                _ => format!("{here}.{key}"),
+                            }
+                        }
+                        _ => here.to_owned(),
+                    };
+                    if let Some(found) = walk(raw, at, &child, path, v) {
+                        return Some(found);
+                    }
+                    skip_ws(raw, at);
+                    if raw.get(*at) == Some(&b',') {
+                        *at += 1;
+                    }
+                }
+                return None;
+            }
+            b'"' => *at = string_end(raw, start),
+            _ => {
+                while raw.get(*at).is_some_and(|b| !b",]} \t\r\n".contains(b)) {
+                    *at += 1;
+                }
+            }
+        }
+        let value = serde_json::from_slice::<Value>(raw.get(start..*at)?).ok();
+        (here == path && value.as_ref() == Some(v)).then_some(start)
+    }
+    let start = walk(raw, &mut 0, "", path, v)?;
+    let line_start = raw[..start]
+        .iter()
+        .rposition(|b| *b == b'\n')
+        .map_or(0, |i| i + 1);
+    let line = 1 + raw[..start].iter().filter(|b| **b == b'\n').count();
+    Some((line, start - line_start + 1))
+}
+
 fn check_source(v: Value) -> Result<Value, AppError> {
     if !v.is_object() {
         return Err(AppError::MapperParsing(
@@ -124,6 +196,7 @@ pub fn put_or_create(
     index: &str,
     id: &str,
     source: Value,
+    raw: &[u8],
     create: bool,
     auto_id_timestamp: i64,
 ) -> Reply {
@@ -146,24 +219,43 @@ pub fn put_or_create(
             )));
         }
         for (name, m) in &i.mappings.properties {
-            let (FieldMapping::Date { format, locale, .. }
-            | FieldMapping::DateNanos { format, locale }) = m
-            else {
-                continue;
+            let (format, locale, default) = match m {
+                FieldMapping::Date { format, locale, .. } => {
+                    (format, locale, "strict_date_optional_time||epoch_millis")
+                }
+                FieldMapping::DateNanos { format, locale } => (
+                    format,
+                    locale,
+                    "strict_date_optional_time_nanos||epoch_millis",
+                ),
+                _ => continue,
             };
-            let (format, locale) = (format.as_deref(), locale.as_deref());
+            let (format, locale) = (format.as_deref().unwrap_or(default), locale.as_deref());
             let values = es_index::postings::values(&source, name);
             if let Some(v) = values
                 .iter()
-                .find(|v| es_query::bad_date(format, locale, v))
+                .find(|v| es_query::bad_date(Some(format), locale, v))
             {
-                // ponytail: no `[line:column]` prefix or `caused_by`, unlike ES
-                return Err(AppError::DocumentParsing(format!(
-                    "failed to parse field [{name}] of type [{}] in document with id '{id}'. \
-                     Preview of field's value: '{}'",
+                let text = es_index::postings::text(v);
+                let at = locate(raw, name, v).map_or(String::new(), |(l, c)| format!("[{l}:{c}] "));
+                let error = AppError::DocumentParsing(format!(
+                    "{at}failed to parse field [{name}] of type [{}] in document with id '{id}'. \
+                     Preview of field's value: '{text}'",
                     m.type_name(),
-                    es_index::postings::text(v)
-                )));
+                ));
+                let mut cause = json!({
+                    "type": "illegal_argument_exception",
+                    "reason": format!("failed to parse date field [{text}] with format [{format}]"),
+                });
+                // ponytail: a one-pattern format's date_time_parse_exception cause (naming where
+                // the text stopped parsing) is left out
+                if format.contains("||") {
+                    cause["caused_by"] = json!({
+                        "type": "date_time_parse_exception",
+                        "reason": "Failed to parse with all enclosed parsers",
+                    });
+                }
+                return Err(AppError::Caused(Box::new(error), cause));
             }
         }
         // only once the document is accepted; dynamic dates never fail the check above
@@ -255,7 +347,7 @@ pub async fn index_with_id(
     params::check(&uri, &params, &WRITE_PARAMS)?;
     let create = params.get("op_type").is_some_and(|o| o == "create");
     with_write_params(&state, &params, &index, || {
-        put_or_create(&state, &index, &id, parse_source(&body)?, create, -1)
+        put_or_create(&state, &index, &id, parse_source(&body)?, &body, create, -1)
     })
 }
 
@@ -269,7 +361,7 @@ pub async fn index_auto_id(
     params::check(&uri, &params, &WRITE_PARAMS)?;
     with_write_params(&state, &params, &index, || {
         let (id, ts) = auto_id();
-        put_or_create(&state, &index, &id, parse_source(&body)?, true, ts)
+        put_or_create(&state, &index, &id, parse_source(&body)?, &body, true, ts)
     })
 }
 
@@ -282,7 +374,7 @@ pub async fn create(
 ) -> Reply {
     params::check(&uri, &params, &WRITE_PARAMS)?;
     with_write_params(&state, &params, &index, || {
-        put_or_create(&state, &index, &id, parse_source(&body)?, true, -1)
+        put_or_create(&state, &index, &id, parse_source(&body)?, &body, true, -1)
     })
 }
 

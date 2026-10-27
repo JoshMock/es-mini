@@ -48,6 +48,8 @@ pub enum AppError {
     TooManyBuckets(String),
     /// A scroll or point-in-time id whose context expired or was freed.
     SearchContextMissing(u64),
+    /// An error with the `caused_by` it reports.
+    Caused(Box<AppError>, Value),
     /// A search that failed on every index: each index's failure.
     AllShardsFailed(Vec<(String, es_query::QueryError)>),
     /// Settings (given as JSON) with a list holding more than strings, numbers and booleans.
@@ -90,6 +92,11 @@ impl AppError {
                         },
                     }),
                 );
+            }
+            Self::Caused(error, cause) => {
+                let (status, mut error) = error.parts();
+                error["caused_by"] = cause;
+                return (status, error);
             }
             Self::AllShardsFailed(shards) => {
                 let (mut status, mut root_cause, mut failed_shards) = (None, vec![], vec![]);

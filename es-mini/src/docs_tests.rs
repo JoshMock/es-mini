@@ -497,7 +497,7 @@ fn writes_to_different_indices_run_concurrently() {
     let to_b = std::thread::spawn({
         let state = state.clone();
         move || {
-            let wrote = crate::docs::put_or_create(&state, "b", "1", json!({}), false, 0);
+            let wrote = crate::docs::put_or_create(&state, "b", "1", json!({}), b"{}", false, 0);
             tx.send(wrote.is_ok()).unwrap();
         }
     });
@@ -506,4 +506,77 @@ fn writes_to_different_indices_run_concurrently() {
     drop(shared);
     to_b.join().unwrap();
     assert_eq!(wrote_b, Ok(true));
+}
+
+/// Elasticsearch 9.5.5's responses to dates that do not parse: the reason starts with the
+/// `[line:column]` (in bytes) of the value, and the causes name the format.
+#[tokio::test]
+async fn error_shapes_bad_dates_report_their_location_and_cause() {
+    use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+    let app = app();
+    let raw = |method: Method, uri: &str, body: &str| {
+        let req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_owned()))
+            .unwrap();
+        let app = app.clone();
+        async move {
+            let resp = app.oneshot(req).await.unwrap();
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+        }
+    };
+    let mappings = json!({"mappings": {"properties": {
+        "d": {"type": "date"}, "e": {"type": "date", "format": "yyyy"},
+        "o": {"properties": {"d": {"type": "date"}}}
+    }}});
+    call(&app, Method::PUT, "/t", Some(mappings)).await;
+    let f = "strict_date_optional_time||epoch_millis";
+    let error = |at: &str, field: &str, value: &str, format: &str| {
+        let reason = format!(
+            "[{at}] failed to parse field [{field}] of type [date] in document with id '1'. \
+             Preview of field's value: '{value}'"
+        );
+        let mut cause = json!({
+            "type": "illegal_argument_exception",
+            "reason": format!("failed to parse date field [{value}] with format [{format}]"),
+        });
+        if format.contains("||") {
+            cause["caused_by"] = json!({
+                "type": "date_time_parse_exception",
+                "reason": "Failed to parse with all enclosed parsers",
+            });
+        }
+        let root = json!({"type": "document_parsing_exception", "reason": reason});
+        json!({"root_cause": [root], "type": "document_parsing_exception", "reason": reason,
+            "caused_by": cause})
+    };
+    for (body, at, field, value, format) in [
+        (
+            "{\n  \"k\": \"x\",\n\t\"d\" : \"foo\"\n}",
+            "3:8",
+            "d",
+            "foo",
+            f,
+        ),
+        (r#"{"k":"éé€","d":"foo"}"#, "1:20", "d", "foo", f),
+        (r#"{"d":["2020-01-01","foo"]}"#, "1:20", "d", "foo", f),
+        (r#"{"d":[["foo"]]}"#, "1:8", "d", "foo", f),
+        (r#"{"o":{"d":"foo"}}"#, "1:11", "o.d", "foo", f),
+        (r#"{"o.d":"foo"}"#, "1:8", "o.d", "foo", f),
+        (r#"{"d":true}"#, "1:6", "d", "true", f),
+        (r#"{"e":"ab"}"#, "1:6", "e", "ab", "yyyy"),
+    ] {
+        let r = raw(Method::PUT, "/t/_doc/1", body).await;
+        assert_eq!(r["error"], error(at, field, value, format), "{body}");
+    }
+    let bulk = "{\"index\":{\"_index\":\"t\",\"_id\":\"1\"}}\n{\"k\": 1, \"d\":\"foo\"}\n";
+    let r = raw(Method::POST, "/_bulk", bulk).await;
+    let mut want = error("1:14", "d", "foo", f);
+    want.as_object_mut().unwrap().remove("root_cause");
+    assert_eq!(r["items"][0]["index"]["error"], want);
 }
