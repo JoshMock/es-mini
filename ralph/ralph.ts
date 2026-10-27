@@ -180,7 +180,7 @@ const COMMON_RULES = (model: string) => `
 function prompt(suite: Suite, id: string, model: string): string {
   const goal =
     suite.kind === "xfail"
-      ? `Make one known-failing test pass: \`${id}\`. Then delete exactly its line from \`${suite.list}\` (and the lines of any other listed tests that now pass).`
+      ? `Make one known-failing test pass: \`${id}\`. Then delete exactly its line from \`${suite.list}\` (and the lines of any other listed tests that now pass). First check what the test needs against the out-of-scope list in z_old/PLAN.md: if it needs anything listed there, stop without committing and record the test and the feature in ralph/NEEDS_HUMAN.md.`
       : `Make progress on this goal from \`${suite.list}\`: ${id}`;
   return `You are one iteration of a Ralph loop in the es-mini repository (an Elasticsearch-compatible server in Rust).
 
