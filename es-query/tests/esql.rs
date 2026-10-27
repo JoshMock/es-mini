@@ -2485,3 +2485,54 @@ fn esql_conversions_convert_dates_ips_and_numbers_to_dates() {
         }
     }
 }
+
+#[test]
+fn esql_conversions_compare_dates_ips_and_booleans_with_string_literals() {
+    let mut i = Index::default();
+    for (f, t) in [("d", "date"), ("n", "date_nanos"), ("ip", "ip")] {
+        let m: FieldMapping = serde_json::from_value(json!({ "type": t })).unwrap();
+        i.mappings.properties.insert(f.into(), m);
+    }
+    i.put(
+        "1",
+        json!({"d": "2024-01-02T03:04:05.678Z", "n": "2024-01-02T03:04:05.123456700Z",
+               "ip": "::ffff:10.0.0.1"}),
+    );
+    let indices = BTreeMap::from([("t".to_owned(), i)]);
+    let r = run(
+        &indices,
+        "FROM t | EVAL a = d == \"2024-01-02T03:04:05.678Z\", b = d > \"2024-01-02\", \
+         c = \"2025\" > d, e = ip == \"10.0.0.1\", f = ip < \"10.0.0.2\", \
+         g = n > \"2024-01-02T03:04:05.1234Z\", h = n < d, j = TRUE == \"True\" \
+         | DROP d, n, ip",
+    )
+    .unwrap();
+    assert_eq!(r.values, [vec![json!(true); 8]]);
+    for (query, problem) in [
+        (
+            "FROM t | EVAL a = d > \"foo\"",
+            "line 1:23: Cannot convert string [foo] to [DATETIME], error [failed to parse date \
+             field [foo] with format [strict_date_optional_time]]",
+        ),
+        (
+            "FROM t | EVAL a = \"x\" == ip",
+            "line 1:19: Cannot convert string [x] to [IP], error ['x' is not an IP string \
+             literal.]",
+        ),
+        (
+            "FROM t | EVAL a = d == TO_STRING(d)",
+            "line 1:19: first argument of [d == TO_STRING(d)] is [datetime] so second argument \
+             must also be [datetime] but was [keyword]",
+        ),
+        (
+            "FROM t | EVAL a = ip > d",
+            "line 1:19: first argument of [ip > d] is [ip] so second argument must also be [ip] \
+             but was [datetime]",
+        ),
+    ] {
+        match run(&indices, query) {
+            Err(EsqlError::Verification(m)) => assert_eq!(m, format!("Found 1 problem\n{problem}")),
+            other => panic!("{query}: {other:?}"),
+        }
+    }
+}

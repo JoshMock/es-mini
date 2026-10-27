@@ -297,7 +297,15 @@ enum Expr {
     Lit(Value, Span),
     /// A time span literal such as `1 year`: its count and canonical unit (see `time_unit`).
     Interval(i64, &'static str, Span),
-    Cmp(&'static str, Box<Expr>, Box<Expr>, Span),
+    /// A comparison, with its operands' types once `resolve` finds both are `CASTABLE` (a
+    /// string literal compared with one of those is cast to its type).
+    Cmp(
+        &'static str,
+        Box<Expr>,
+        Box<Expr>,
+        OnceCell<[&'static str; 2]>,
+        Span,
+    ),
     And(Box<Expr>, Box<Expr>, Span),
     Or(Box<Expr>, Box<Expr>, Span),
     Not(Box<Expr>, Span),
@@ -777,7 +785,15 @@ impl Parser<'_> {
             self.parens -= 1;
             self.follow = AFTER_LITERAL;
             let span = self.span(start);
-            let eq = |x| Expr::Cmp("==", Box::new(left.clone()), Box::new(x), span.clone());
+            let eq = |x| {
+                Expr::Cmp(
+                    "==",
+                    Box::new(left.clone()),
+                    Box::new(x),
+                    OnceCell::new(),
+                    span.clone(),
+                )
+            };
             let mut items = items.into_iter().map(eq);
             let first = items.next().expect("one item");
             let e = items.fold(first, |a, b| {
@@ -797,6 +813,7 @@ impl Parser<'_> {
                     op,
                     Box::new(left),
                     Box::new(right),
+                    OnceCell::new(),
                     self.span(start),
                 ))
             }
@@ -1263,9 +1280,19 @@ fn eval(e: &Expr, row: &Row) -> Option<Value> {
                 v => one(&v),
             }
         }
-        Expr::Cmp(op, a, b, _) => {
+        Expr::Cmp(op, a, b, t, _) => {
             // ponytail: multi-valued fields compare as null, like ES (which also warns)
-            let ord = compare(&eval(a, row)?, &eval(b, row)?)?;
+            let (a, b) = (eval(a, row)?, eval(b, row)?);
+            let truth = |v: &Value| {
+                v.as_bool()
+                    .or_else(|| Some(v.as_str()?.eq_ignore_ascii_case("true")))
+            };
+            let ord = match t.get() {
+                Some(["ip", _]) => es_index::ip_bytes(&a)?.cmp(&es_index::ip_bytes(&b)?),
+                Some(["boolean", _]) => truth(&a)?.cmp(&truth(&b)?),
+                Some([ta, tb]) => epoch_nanos(ta, &a)?.cmp(&epoch_nanos(tb, &b)?),
+                None => compare(&a, &b)?,
+            };
             let r = match *op {
                 "==" => ord.is_eq(),
                 "!=" => ord.is_ne(),
@@ -1276,6 +1303,40 @@ fn eval(e: &Expr, row: &Row) -> Option<Value> {
             };
             Some(r.into())
         }
+    }
+}
+
+/// Why string `s` does not convert to type `t`, in ES's words (`EsqlDataTypeConverter`).
+fn cast_error(s: &str, t: &str) -> Option<String> {
+    let v = Value::from(s);
+    let (format, ok) = match t {
+        "ip" => {
+            return es_index::ip_bytes(&v)
+                .is_none()
+                .then(|| format!("'{s}' is not an IP string literal."));
+        }
+        "boolean" => return None,
+        _ if s.is_empty() => return Some("cannot parse empty datetime".into()),
+        "date" => (
+            "strict_date_optional_time",
+            es_index::parse_date_millis(&v).is_some(),
+        ),
+        _ => {
+            let format = "strict_date_optional_time_nanos";
+            let nanos = es_index::disk::date_nanos(Some(format), None, &v);
+            (format, nanos.flatten().is_some())
+        }
+    };
+    (!ok).then(|| format!("failed to parse date field [{s}] with format [{format}]"))
+}
+
+/// Epoch nanos of a value of type `date` or `date_nanos`.
+fn epoch_nanos(t: &str, v: &Value) -> Option<i128> {
+    match t {
+        "date" => Some(i128::from(es_index::parse_date_millis(v)?) * 1_000_000),
+        _ => es_index::disk::date_nanos(None, None, v)
+            .flatten()
+            .map(i128::from),
     }
 }
 
@@ -2066,7 +2127,7 @@ fn walk<'e>(e: &'e Expr, f: &mut impl FnMut(&'e Expr)) {
         Expr::Call(_, args, ..) => args.iter().for_each(|a| walk(a, f)),
         Expr::Field(..) | Expr::Lit(..) | Expr::Interval(..) => {}
         Expr::Not(x, _) | Expr::IsNull(x, ..) | Expr::Neg(x, ..) | Expr::Like(x, ..) => walk(x, f),
-        Expr::Cmp(_, a, b, _)
+        Expr::Cmp(_, a, b, ..)
         | Expr::And(a, b, _)
         | Expr::Or(a, b, _)
         | Expr::Arith(_, a, b, ..) => {
@@ -2124,6 +2185,9 @@ fn number_type(n: &Value, negative: bool) -> &'static str {
         _ => "double",
     }
 }
+
+/// The types a string literal compared with them is cast to, like ES's ImplicitCasting.
+const CASTABLE: [&str; 4] = ["date", "date_nanos", "ip", "boolean"];
 
 const NUMERIC: [&str; 4] = ["integer", "long", "unsigned_long", "double"];
 
@@ -2425,27 +2489,50 @@ fn resolve(
             };
             found.map(|found| format!("{nth} argument of [{}] must be [boolean], {found}", text(e)))
         }
-        Expr::Cmp(_, a, b, _) => {
+        Expr::Cmp(_, a, b, typed, _) => {
             let (ta, tb) = (resolve(a, src, types, bad), resolve(b, src, types, bad));
-            let (ta, tb) = (ta?, tb?);
-            // ponytail: only numeric, string and boolean operands are checked; dates, ips and
-            // the like take string literals through implicit casts that this does not model.
+            let (mut ta, mut tb) = (ta?, tb?);
+            let literal = |x: &Expr, other: &String| match x {
+                Expr::Lit(Value::String(s), (at, _)) if CASTABLE.contains(&other.as_str()) => {
+                    Some((s.clone(), *at, other.clone()))
+                }
+                _ => None,
+            };
+            if let Some((s, at, to)) = literal(b, &ta).or_else(|| literal(a, &tb)) {
+                if let Some(error) = cast_error(&s, &to) {
+                    let upper = if to == "date" { "DATETIME" } else { &to };
+                    let upper = upper.to_ascii_uppercase();
+                    let msg = format!("Cannot convert string [{s}] to [{upper}], error [{error}]");
+                    bad.push((at, msg));
+                    return None;
+                }
+                (ta, tb) = (to.clone(), to);
+            }
             let class = |t: &str| match t {
                 "integer" | "long" | "unsigned_long" | "double" => Some("numeric"),
                 "keyword" | "text" => Some("string"),
+                "date" | "date_nanos" => Some("date"),
                 "boolean" => Some("boolean"),
+                "ip" => Some("ip"),
                 _ => None,
             };
             match (class(&ta), class(&tb)) {
                 (Some(ca), Some(cb)) if ca != cb => {
-                    let first = if ca == "numeric" { ca } else { &ta };
+                    let first = if ca == "numeric" { ca } else { es_name(&ta) };
                     Some(format!(
                         "first argument of [{}] is [{first}] so second argument must also be \
-                         [{first}] but was [{tb}]",
-                        text(e)
+                         [{first}] but was [{}]",
+                        text(e),
+                        es_name(&tb)
                     ))
                 }
-                _ => None,
+                _ => {
+                    let name = |t: &str| CASTABLE.into_iter().find(|n| *n == t);
+                    if let Some(both) = name(&ta).zip(name(&tb)) {
+                        let _ = typed.set([both.0, both.1]);
+                    }
+                    None
+                }
             }
         }
     };
@@ -3362,7 +3449,7 @@ fn conjuncts<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
 /// Whether Lucene can run the filter: anything but a comparison of two fields.
 fn pushable(e: &Expr) -> bool {
     match e {
-        Expr::Cmp(_, a, b, _) => {
+        Expr::Cmp(_, a, b, ..) => {
             !matches!((&**a, &**b), (Expr::Field(..), Expr::Field(..)))
                 && pushable(a)
                 && pushable(b)
