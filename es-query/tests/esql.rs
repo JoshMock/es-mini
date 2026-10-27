@@ -803,10 +803,26 @@ fn from_metadata_adds_id_index_and_version_columns() {
         col_names(&r),
         ["age", "city", "city.keyword", "name", "_index"]
     );
-    match run(&indices(), "FROM people METADATA _foo") {
-        Err(EsqlError::Parse(m)) => assert_eq!(m, "line 1:22: unsupported metadata field [_foo]"),
+}
+
+/// Elasticsearch 9.5.5's verification failures for unknown metadata fields.
+#[test]
+fn esql_es_semantics_unknown_metadata_fails_verification() {
+    let err = |q: &str| match run(&indices(), q) {
+        Err(EsqlError::Verification(m)) => m,
         other => panic!("{other:?}"),
-    }
+    };
+    assert_eq!(
+        err("FROM people METADATA _foo"),
+        "Found 2 problems\nline 1:1: unresolved metadata fields: [?_foo]\n\
+         line 1:22: Unresolved metadata pattern [_foo]"
+    );
+    assert_eq!(
+        err("  FROM people METADATA _a, _b | WHERE x > 1"),
+        "Found 3 problems\nline 1:3: unresolved metadata fields: [?_a, ?_b]\n\
+         line 1:24: Unresolved metadata pattern [_a]\nline 1:28: Unresolved metadata pattern [_b]"
+    );
+    assert_eq!(err("FROM nope METADATA _a"), "Unknown index [nope]");
 }
 
 #[test]

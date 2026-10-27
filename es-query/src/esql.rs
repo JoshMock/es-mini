@@ -271,8 +271,8 @@ struct SortKey {
 /// Where the rows come from.
 #[derive(Debug, Clone, PartialEq)]
 enum Source {
-    /// Index expressions, and the `METADATA` fields to add as columns.
-    From(Vec<String>, Vec<String>),
+    /// Index expressions, the `METADATA` fields to add as columns, and where `FROM` starts.
+    From(Vec<String>, Vec<Name>, Pos),
     /// `ROW`, and `SHOW INFO` as a row of constants: named expressions without fields.
     Row(Vec<(String, Expr)>),
 }
@@ -444,6 +444,7 @@ impl Parser<'_> {
         if self.keyword("row") {
             return Ok(Source::Row(self.assignments()?));
         }
+        let from = self.toks.get(self.pos).map_or(self.eof, |t| t.1);
         if !self.keyword("from") {
             return self.unsupported(SOURCE_COMMANDS);
         }
@@ -451,18 +452,11 @@ impl Parser<'_> {
         self.follow = AFTER_SOURCES;
         let mut metadata = Vec::new();
         if self.keyword("metadata") {
-            for (f, at) in self.ident_list(ID_PATTERN)? {
-                if metadata_type(&f).is_none() {
-                    // ponytail: message not checked against Elasticsearch
-                    let msg = format!("unsupported metadata field [{f}]");
-                    return Err(parse_error(at, &msg));
-                }
-                metadata.push(f);
-            }
+            metadata = self.ident_list(ID_PATTERN)?;
             self.follow = AFTER_ID_PATTERNS;
         }
         let sources = sources.into_iter().map(|(s, _)| s).collect();
-        Ok(Source::From(sources, metadata))
+        Ok(Source::From(sources, metadata, from))
     }
 
     /// `name = expression, ...`, where an unnamed expression is named by its text.
@@ -2115,7 +2109,7 @@ pub fn run(
     let (source, cmds) = match source {
         // A row is an EVAL over one empty row.
         Source::Row(fields) => (None, [vec![Command::Eval(fields)], cmds].concat()),
-        Source::From(sources, metadata) => (Some((sources, metadata)), cmds),
+        Source::From(sources, metadata, from) => (Some((sources, metadata, from)), cmds),
     };
     let Table {
         mut types,
@@ -2125,7 +2119,25 @@ pub fn run(
         empty,
         counted,
     } = match source {
-        Some((sources, metadata)) => table_from(indices, &sources, &metadata, &read(&cmds))?,
+        Some((sources, metadata, from)) => {
+            let names: Vec<String> = metadata.iter().map(|(f, _)| f.clone()).collect();
+            let table = table_from(indices, &sources, &names, &read(&cmds))?;
+            // Like ES, unknown metadata fails verification once the indices resolve.
+            let bad: Vec<&Name> = (metadata.iter())
+                .filter(|(f, _)| metadata_type(f).is_none())
+                .collect();
+            if !bad.is_empty() {
+                let list: Vec<String> = bad.iter().map(|(f, _)| format!("?{f}")).collect();
+                let fields = (
+                    from,
+                    format!("unresolved metadata fields: [{}]", list.join(", ")),
+                );
+                let patterns =
+                    (bad.iter()).map(|(f, at)| (*at, format!("Unresolved metadata pattern [{f}]")));
+                return Err(problems(std::iter::once(fields).chain(patterns).collect()));
+            }
+            table
+        }
         None => Table {
             types: BTreeMap::new(),
             conflicts: BTreeMap::new(),
