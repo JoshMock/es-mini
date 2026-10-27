@@ -484,9 +484,7 @@ impl Histogram {
                     let pattern = self.format.as_deref();
                     let utc = &es_index::tz::TimeZone::UTC;
                     Some(
-                        match pattern
-                            .and_then(|p| es_index::format_pattern(p, t, tz.unwrap_or(utc)))
-                        {
+                        match pattern.and_then(|p| es_index::format_date(p, t, tz.unwrap_or(utc))) {
                             Some(s) => s,
                             None => tz.map_or_else(|| iso_date(t), |tz| tz.format(t)),
                         },

@@ -109,12 +109,11 @@ fn terms(kind: Kind, vals: &[&Value]) -> Vec<String> {
     es_index::postings::terms(kind == Kind::Text, vals)
 }
 
-/// Whether a value of a date field with `format` surely cannot be read: every format is an
-/// epoch or a pattern and none reads it.
-// ponytail: named formats only parse as the default format, so they never reject values
+/// Whether a value of a date field with `format` surely cannot be read: es-mini knows every
+/// format and none reads it.
 pub fn bad_date(format: Option<&str>, locale: Option<&str>, v: &Value) -> bool {
     let known =
-        |f: &str| f.starts_with("epoch_") || es_index::date_pattern::Pattern::new(f).is_some();
+        |f: &str| f.starts_with("epoch_") || es_index::date_pattern::DateFormat::new(f).is_some();
     format.is_some_and(|f| f.split("||").all(known)) && date_millis(format, locale, v).is_none()
 }
 
@@ -1595,6 +1594,16 @@ mod tests {
     use super::*;
     use es_index::{Indices, disk};
     use serde_json::json;
+
+    #[test]
+    fn date_formats_named_formats_reject_values_they_cannot_read() {
+        let f = Some("strict_date_time");
+        assert!(bad_date(f, None, &json!("2021-05-01")));
+        assert!(!bad_date(f, None, &json!("2021-05-01T00:00:00Z")));
+        assert!(!bad_date(Some("basic_date"), None, &json!("20210501")));
+        // a format es-mini lacks reads values as the default format, so none are refused
+        assert!(!bad_date(Some("week_date"), None, &json!("2021-05-01")));
+    }
 
     #[test]
     fn queries_on_an_opened_index_read_only_the_docs_their_postings_hold() {

@@ -981,15 +981,21 @@ pub fn iso_date(millis: i64) -> String {
     format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{sec:02}.{milli:03}Z")
 }
 
-/// Epoch milliseconds (UTC) of `s` in a Java DateTimeFormatter pattern (see [`date_pattern`]).
+/// Epoch milliseconds (UTC) of `s` in a Java DateTimeFormatter pattern or named format (see
+/// [`date_pattern`]).
 pub fn parse_pattern(pattern: &str, s: &str) -> Option<i64> {
-    date_pattern::Pattern::new(pattern)?.parse(s, "", &tz::TimeZone::UTC, false)
+    date_pattern::DateFormat::new(pattern)?.parse(s, "", &tz::TimeZone::UTC, false)
 }
 
-/// Epoch milliseconds `t` in a Java DateTimeFormatter pattern at its offset in `tz`, in the
-/// root locale; `None` for a pattern es-mini cannot print (see [`date_pattern`]).
-pub fn format_pattern(pattern: &str, t: i64, tz: &tz::TimeZone) -> Option<String> {
-    date_pattern::Pattern::new(pattern)?.format(t, tz.offset(t), "")
+/// Epoch milliseconds `t` in an Elasticsearch date format (the first of its `||` alternatives)
+/// at its offset in `tz`, in the root locale; `None` for a format es-mini cannot print.
+pub fn format_date(format: &str, t: i64, tz: &tz::TimeZone) -> Option<String> {
+    Some(match format.split("||").next()? {
+        "epoch_millis" => t.to_string(),
+        "epoch_second" if t % 1000 == 0 => (t / 1000).to_string(),
+        "epoch_second" => (t as f64 / 1000.0).to_string(),
+        f => date_pattern::DateFormat::new(f)?.format(t, tz.offset(t), "")?,
+    })
 }
 
 /// The `(year, month, day)` of days since 1970-01-01 (Howard Hinnant's civil_from_days).
@@ -1014,84 +1020,18 @@ pub fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468
 }
 
-/// Epoch milliseconds of a date value: a number, or ES's default `strict_date_optional_time`
-/// string `yyyy[-MM[-dd[THH[:mm[:ss[.S+]]][Z|+HH[:mm]|-HH[:mm]]]]]`.
+/// Epoch milliseconds of a date value: a number, or a `strict_date_optional_time` string.
 // ponytail: the mapping's `format` is ignored; numeric strings are not read as epoch_millis
 pub fn parse_date_millis(v: &serde_json::Value) -> Option<i64> {
     let Some(s) = v.as_str() else {
         return v.as_i64();
     };
-    let (local, offset) = parse_iso(s, false)?;
-    Some(local - offset.unwrap_or(0))
-}
-
-/// The local epoch millis of a `strict_date_optional_time` string and the offset it gives, if
-/// any. Missing fields default to the start of the year, or with `round_up` to 23:59:59.999 of
-/// its first day, like ES's round-up parser.
-fn parse_iso(mut s: &str, round_up: bool) -> Option<(i64, Option<i64>)> {
-    fn num(s: &mut &str, n: usize) -> Option<i64> {
-        let (d, rest) = s.split_at_checked(n)?;
-        if !d.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        *s = rest;
-        d.parse().ok()
-    }
-    fn eat(s: &mut &str, c: char) -> bool {
-        s.strip_prefix(c).inspect(|r| *s = r).is_some()
-    }
-    let y = num(&mut s, 4)?;
-    let [mut m, mut day] = [1, 1];
-    let [mut h, mut min, mut sec, mut milli] = match round_up {
-        true => [23, 59, 59, 999],
-        false => [0; 4],
-    };
-    let mut offset = None;
-    if eat(&mut s, '-') {
-        m = num(&mut s, 2)?;
-        if eat(&mut s, '-') {
-            day = num(&mut s, 2)?;
-            if eat(&mut s, 'T') {
-                h = num(&mut s, 2)?;
-                if eat(&mut s, ':') {
-                    min = num(&mut s, 2)?;
-                    if eat(&mut s, ':') {
-                        sec = num(&mut s, 2)?;
-                        if eat(&mut s, '.') || eat(&mut s, ',') {
-                            let n = s.bytes().take_while(u8::is_ascii_digit).count();
-                            if n == 0 {
-                                return None;
-                            }
-                            milli = format!("{:0<3}", &s[..n.min(3)]).parse().ok()?;
-                            s = &s[n..];
-                        }
-                    }
-                }
-                let sign = if eat(&mut s, '+') {
-                    1
-                } else if eat(&mut s, '-') {
-                    -1
-                } else {
-                    0
-                };
-                if sign == 0 {
-                    offset = eat(&mut s, 'Z').then_some(0);
-                } else {
-                    let oh = num(&mut s, 2)?;
-                    let om = if eat(&mut s, ':') { num(&mut s, 2)? } else { 0 };
-                    offset = Some(sign * (oh * 60 + om) * 60_000);
-                }
-            }
-        }
-    }
-    if !s.is_empty() {
-        return None;
-    }
-    let days = days_from_civil(y, m, day);
-    Some((
-        ((days * 24 + h) * 60 + min) * 60_000 + sec * 1000 + milli,
-        offset,
-    ))
+    date_pattern::DateFormat::new("strict_date_optional_time")?.parse(
+        s,
+        "",
+        &tz::TimeZone::UTC,
+        false,
+    )
 }
 
 /// Epoch millis of a value of a date field with `format` and `locale`.
@@ -1100,7 +1040,7 @@ pub fn date_millis(format: Option<&str>, locale: Option<&str>, v: &Value) -> Opt
 }
 
 /// [`date_millis`] of a value without an offset of its own in time zone `tz`, missing fields
-/// rounded up with `round_up` (see [`parse_iso`]).
+/// rounded up with `round_up` like ES's round-up parsers.
 pub(crate) fn date_millis_in(
     format: Option<&str>,
     locale: Option<&str>,
@@ -1108,24 +1048,19 @@ pub(crate) fn date_millis_in(
     tz: &tz::TimeZone,
     round_up: bool,
 ) -> Option<i64> {
-    let iso = |s: &str| {
-        parse_iso(s, round_up).map(|(l, o)| o.map_or_else(|| tz.at_local(l, 0), |o| l - o))
-    };
-    let Some(format) = format else {
-        // strict_date_optional_time||epoch_millis
-        return v
-            .as_str()
-            .map_or_else(|| v.as_i64(), |s| iso(s).or_else(|| s.parse().ok()));
-    };
+    let format = format.unwrap_or("strict_date_optional_time||epoch_millis");
     (format.split("||")).find_map(|f| match f {
-        "epoch_millis" => json_num(v).map(|x| x as i64),
+        "epoch_millis" => v
+            .as_i64()
+            .or_else(|| v.as_str()?.parse().ok())
+            .or_else(|| json_num(v).map(|x| x as i64)),
         "epoch_second" => json_num(v)
             .map(|x| (x * 1000.0) as i64 + if round_up && x.fract() == 0.0 { 999 } else { 0 }),
-        // ponytail: other named formats (`strict_date_time`, ...) parse as the default format
-        f => match date_pattern::Pattern::new(f) {
-            Some(p) => p.parse(v.as_str()?, locale.unwrap_or(""), tz, round_up),
-            None => iso(v.as_str()?),
-        },
+        // ponytail: formats es-mini lacks (week-based fields, see date_pattern) parse as
+        // strict_date_optional_time
+        f => date_pattern::DateFormat::new(f)
+            .or_else(|| date_pattern::DateFormat::new("strict_date_optional_time"))?
+            .parse(v.as_str()?, locale.unwrap_or(""), tz, round_up),
     })
 }
 
@@ -1273,13 +1208,13 @@ mod tests {
         assert_eq!(parse_pattern(p, "2021-05-01 20:00:00"), Some(t));
         let utc = &tz::TimeZone::UTC;
         assert_eq!(
-            format_pattern(p, t, utc).as_deref(),
+            format_date(p, t, utc).as_deref(),
             Some("2021-05-01 20:00:00")
         );
         let q = "yyyy-MM-dd'T'HH:mm:ss.SSS";
         assert_eq!(parse_pattern(q, "1969-12-31T23:59:59.999"), Some(-1));
         assert_eq!(
-            format_pattern(q, -1, utc).as_deref(),
+            format_date(q, -1, utc).as_deref(),
             Some("1969-12-31T23:59:59.999")
         );
         assert_eq!(parse_pattern(p, "2021-05-01T20:00:00"), None);
@@ -1314,11 +1249,11 @@ mod tests {
         let paris = tz::TimeZone::parse("Europe/Paris").unwrap();
         let f = "EEE, dd MMM yy HH:mm:ss.SS Z '['xxx']'";
         assert_eq!(
-            format_pattern(f, t + 120, &paris).as_deref(),
+            format_date(f, t + 120, &paris).as_deref(),
             Some("Sat, 01 May 21 22:00:00.12 +0200 [+02:00]")
         );
         assert_eq!(
-            format_pattern("[uuuu]G hh a O", t, &tz::TimeZone::UTC).as_deref(),
+            format_date("[uuuu]G hh a O", t, &tz::TimeZone::UTC).as_deref(),
             Some("2021AD 08 PM GMT")
         );
     }
@@ -1351,6 +1286,46 @@ mod tests {
             Some(at("2021-05-01T23:59:59.999Z"))
         );
         assert_eq!(up("MMMM d", "May 3"), Some(at("1970-05-03T23:59:59.999Z")));
+    }
+
+    #[test]
+    fn date_formats_named_formats_parse_and_print_mapping_values() {
+        let at = |iso: &str| parse_date_millis(&json!(iso)).unwrap();
+        let v = json!("2021-05-01T20:00:00");
+        // strict_date_time requires an offset, which the default format leaves optional
+        assert_eq!(date_millis(Some("strict_date_time"), None, &v), None);
+        assert_eq!(
+            date_millis(None, None, &v),
+            Some(at("2021-05-01T20:00:00Z"))
+        );
+        let basic = Some("basic_date||epoch_millis");
+        assert_eq!(
+            date_millis(basic, None, &json!("20210501")),
+            Some(at("2021-05-01"))
+        );
+        assert_eq!(date_millis(basic, None, &json!("5")), Some(5));
+        let up =
+            |f: &str, s: &str| date_millis_in(Some(f), None, &json!(s), &tz::TimeZone::UTC, true);
+        assert_eq!(
+            up("strict_year_month", "2021-05"),
+            Some(at("2021-05-01T23:59:59.999Z"))
+        );
+        assert_eq!(up("year", "2021"), Some(at("2021-01-01T23:59:59.999Z")));
+        let t = at("2021-05-01T20:00:00.123Z");
+        let utc = &tz::TimeZone::UTC;
+        assert_eq!(
+            format_date("basic_date_time||epoch_millis", t, utc).as_deref(),
+            Some("20210501T200000.123Z")
+        );
+        let kolkata = tz::TimeZone::parse("+05:30").unwrap();
+        assert_eq!(
+            format_date("date_time_no_millis", t, &kolkata).as_deref(),
+            Some("2021-05-02T01:30:00+05:30")
+        );
+        assert_eq!(
+            format_date("epoch_second", 1500, utc).as_deref(),
+            Some("1.5")
+        );
     }
 
     #[test]

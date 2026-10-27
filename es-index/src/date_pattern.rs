@@ -5,6 +5,9 @@
 
 use crate::{days_from_civil, tz::TimeZone};
 
+mod named;
+pub use named::DateFormat;
+
 /// The `ChronoField`s patterns can name.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum F {
@@ -79,8 +82,13 @@ enum Tok {
         subsequent: usize,
         reduced: bool,
     },
-    /// FractionPrinterParser: this many digits of the nano-of-second.
-    Fraction(usize),
+    /// FractionPrinterParser: `min` to `max` digits of the nano-of-second, after a `.` with
+    /// `dot`.
+    Fraction {
+        min: usize,
+        max: usize,
+        dot: bool,
+    },
     Text(F, Style),
     /// OffsetIdPrinterParser: an index into its PATTERNS (`+HH`, `+HHmm`, `+HH:mm`, `+HHMM`,
     /// `+HH:MM`, `+HHMMss`, `+HH:MM:ss`, `+HHMMSS`, `+HH:MM:SS`, `+HHmmss`, `+HH:mm:ss`) and
@@ -117,7 +125,11 @@ impl Seq {
                 sign: Sign::NotNegative,
                 ..
             } if min == max => Some(max),
-            Tok::Fraction(n) => Some(n),
+            Tok::Fraction {
+                min,
+                max,
+                dot: false,
+            } if min == max => Some(max),
             _ => None,
         };
         match (self.active, width) {
@@ -183,7 +195,11 @@ impl Seq {
             'E' => self.push(text(F::DayOfWeek, n)?),
             'G' => self.push(text(F::Era, n)?),
             'a' if n == 1 => self.push(Tok::Text(F::AmPm, Style::Short)),
-            'S' if n <= 9 => self.value(Tok::Fraction(n)),
+            'S' if n <= 9 => self.value(Tok::Fraction {
+                min: n,
+                max: n,
+                dot: false,
+            }),
             'd' => self.value(one_or_two(F::DayOfMonth)?),
             'h' => self.value(one_or_two(F::ClockHourOfAmPm)?),
             'H' => self.value(one_or_two(F::HourOfDay)?),
@@ -227,9 +243,13 @@ impl Seq {
     }
 }
 
-/// A compiled pattern.
+/// A compiled pattern, or a formatter DateFormatters builds; `lenient` resolves out-of-range
+/// dates like `ResolverStyle.LENIENT` (only `strict_date` does).
 #[derive(Clone, Debug)]
-pub struct Pattern(Vec<Tok>);
+pub struct Pattern {
+    toks: Vec<Tok>,
+    lenient: bool,
+}
 
 /// The zone a parsed value gave.
 #[derive(Clone)]
@@ -243,6 +263,7 @@ enum Zone {
 struct Fields {
     v: [Option<i64>; 18],
     zone: Option<Zone>,
+    lenient: bool,
 }
 
 impl Fields {
@@ -254,7 +275,7 @@ impl Fields {
     /// the same value (`Parsed.updateCheckConflict`).
     fn set(&mut self, f: F, x: i64) -> Option<()> {
         let (lo, hi) = f.range();
-        if !(lo..=hi).contains(&x) {
+        if !self.lenient && !(lo..=hi).contains(&x) {
             return None;
         }
         match self.v[f as usize].replace(x) {
@@ -272,77 +293,39 @@ impl Pattern {
     /// Compiles a pattern like `appendPattern`; `None` where Java rejects it or es-mini lacks a
     /// letter (no week-based fields, zone names, quarter names, day periods or padding).
     pub fn new(pattern: &str) -> Option<Pattern> {
-        let chars: Vec<char> = pattern.chars().collect();
         let mut stack = vec![Seq::default()];
-        let mut i = 0;
-        while let Some(&c) = chars.get(i) {
-            i += 1;
-            if c.is_ascii_alphabetic() {
-                let n = 1 + chars[i..].iter().take_while(|&&x| x == c).count();
-                i += n - 1;
-                stack.last_mut()?.letter(c, n)?;
-                continue;
-            }
-            match c {
-                '\'' => {
-                    let mut lit = String::new();
-                    loop {
-                        match *chars.get(i)? {
-                            '\'' if chars.get(i + 1) == Some(&'\'') => {
-                                lit.push('\'');
-                                i += 2;
-                            }
-                            '\'' => break i += 1,
-                            ch => {
-                                lit.push(ch);
-                                i += 1;
-                            }
-                        }
-                    }
-                    if lit.is_empty() {
-                        lit.push('\'');
-                    }
-                    stack.last_mut()?.push(Tok::Lit(lit));
-                }
-                '[' => stack.push(Seq::default()),
-                ']' if stack.len() > 1 => {
-                    let inner = stack.pop()?.toks;
-                    stack.last_mut()?.push(Tok::Optional(inner));
-                }
-                ']' | '{' | '}' | '#' => return None,
-                c => stack.last_mut()?.push(Tok::Lit(c.into())),
-            }
-        }
+        append_pattern(&mut stack, pattern)?;
         // toFormatter closes open optional sections
         while stack.len() > 1 {
             let inner = stack.pop()?.toks;
             stack.last_mut()?.push(Tok::Optional(inner));
         }
-        Some(Pattern(stack.pop()?.toks))
+        Some(Pattern {
+            toks: stack.pop()?.toks,
+            lenient: false,
+        })
     }
 
     /// Epoch millis of `s`, its local time in `tz` unless it gives an offset or zone; with
     /// `round_up`, missing fields default to the end of their range like ES's round-up parser.
     pub fn parse(&self, s: &str, locale: &str, tz: &TimeZone, round_up: bool) -> Option<i64> {
-        let mut p = Fields::default();
-        if parse_seq(&self.0, s, 0, &mut p, locale)? != s.len() {
+        let mut p = Fields {
+            lenient: self.lenient,
+            ..Fields::default()
+        };
+        if parse_seq(&self.toks, s, 0, &mut p, locale)? != s.len() {
             return None;
         }
         if round_up {
             self.round_up_defaults(&mut p);
         }
-        let local = resolve(&mut p)?;
-        Some(match &p.zone {
-            Some(Zone::Offset(o)) => local - o,
-            Some(Zone::Region(z)) => z.at_local(local, i64::MIN),
-            None => tz.at_local(local, 0),
-        })
+        Some(instant(resolve(&mut p)?, p.zone.as_ref(), tz))
     }
 
     /// `JavaDateFormatter.defaultRoundUp`: `parseDefaulting` for the fields not parsed.
     fn round_up_defaults(&self, p: &mut Fields) {
         let mut has = vec![];
-        fields(&self.0, &mut has);
+        fields(&self.toks, &mut has);
         let mut default = |f: F, x: i64| {
             p.v[f as usize].get_or_insert(x);
         };
@@ -366,12 +349,66 @@ impl Pattern {
         default(F::Nano, 999_999_999);
     }
 
-    /// Instant `t` (epoch millis) at `offset` (millis), or `None` for a letter es-mini cannot
-    /// print (`VV`) or a value too wide for its field.
+    /// Instant `t` (epoch millis) at `offset` (millis), or `None` for a value too wide for its
+    /// field.
     pub fn format(&self, t: i64, offset: i64, locale: &str) -> Option<String> {
         let mut out = String::new();
-        format_seq(&self.0, t + offset, offset, locale, &mut out)?;
+        format_seq(&self.toks, t + offset, offset, locale, &mut out)?;
         Some(out)
+    }
+}
+
+/// `DateTimeFormatterBuilder.appendPattern` onto the open sections in `stack`.
+fn append_pattern(stack: &mut Vec<Seq>, pattern: &str) -> Option<()> {
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut i = 0;
+    while let Some(&c) = chars.get(i) {
+        i += 1;
+        if c.is_ascii_alphabetic() {
+            let n = 1 + chars[i..].iter().take_while(|&&x| x == c).count();
+            i += n - 1;
+            stack.last_mut()?.letter(c, n)?;
+            continue;
+        }
+        match c {
+            '\'' => {
+                let mut lit = String::new();
+                loop {
+                    match *chars.get(i)? {
+                        '\'' if chars.get(i + 1) == Some(&'\'') => {
+                            lit.push('\'');
+                            i += 2;
+                        }
+                        '\'' => break i += 1,
+                        ch => {
+                            lit.push(ch);
+                            i += 1;
+                        }
+                    }
+                }
+                if lit.is_empty() {
+                    lit.push('\'');
+                }
+                stack.last_mut()?.push(Tok::Lit(lit));
+            }
+            '[' => stack.push(Seq::default()),
+            ']' if stack.len() > 1 => {
+                let inner = stack.pop()?.toks;
+                stack.last_mut()?.push(Tok::Optional(inner));
+            }
+            ']' | '{' | '}' | '#' => return None,
+            c => stack.last_mut()?.push(Tok::Lit(c.into())),
+        }
+    }
+    Some(())
+}
+
+/// The instant of local epoch millis `local` in the zone a value gave, else in `tz`.
+fn instant(local: i64, zone: Option<&Zone>, tz: &TimeZone) -> i64 {
+    match zone {
+        Some(Zone::Offset(o)) => local - o,
+        Some(Zone::Region(z)) => z.at_local(local, i64::MIN),
+        None => tz.at_local(local, 0),
     }
 }
 
@@ -463,12 +500,25 @@ fn parse_seq(toks: &[Tok], s: &str, mut pos: usize, p: &mut Fields, locale: &str
                 p.set(f, if reduced { 2000 + v } else { v })?;
                 n
             }
-            &Tok::Fraction(n) => {
-                let digits = rest
-                    .get(..n)
-                    .filter(|d| d.bytes().all(|b| b.is_ascii_digit()))?;
-                p.set(F::Nano, format!("{digits:0<9}").parse().ok()?)?;
-                n
+            &Tok::Fraction { min, max, dot } => {
+                let start = match dot {
+                    true if !rest.starts_with('.') => (min == 0).then_some(0)?,
+                    true => 1,
+                    false => 0,
+                };
+                let digits = rest[start..]
+                    .bytes()
+                    .take(max)
+                    .take_while(u8::is_ascii_digit)
+                    .count();
+                if digits < min {
+                    return None;
+                }
+                if digits > 0 || dot && start == 1 {
+                    let d = &rest[start..start + digits];
+                    p.set(F::Nano, format!("{d:0<9}").parse().unwrap_or(0))?;
+                }
+                start + digits
             }
             &Tok::Text(f, style) => {
                 let names = names(f, style, locale)?;
@@ -670,6 +720,20 @@ fn date(y: i64, m: Option<i64>, d: Option<i64>, doy: Option<i64>) -> Option<Opti
 /// Local epoch millis of parsed fields: `Parsed.resolve` with ResolverStyle.STRICT, then
 /// `DateFormatters.from`; `None` where either throws.
 fn resolve(p: &mut Fields) -> Option<i64> {
+    // IsoChronology.resolveYMD when lenient: Jan 1, plus months, plus days
+    if let (true, Some(y), Some(m), Some(d)) = (
+        p.lenient,
+        p.get(F::Year),
+        p.get(F::Month),
+        p.get(F::DayOfMonth),
+    ) {
+        let months = y.checked_mul(12)?.checked_add(m - 1)?;
+        let days = days_from_civil(months.div_euclid(12), months.rem_euclid(12) + 1, 1);
+        let (y, m, d) = crate::civil_from_days(days.checked_add(d - 1)?);
+        p.v[F::Year as usize] = Some(y);
+        p.v[F::Month as usize] = Some(m);
+        p.v[F::DayOfMonth as usize] = Some(d);
+    }
     // IsoChronology.resolveYearOfEra: no era is invented when strict
     if let Some(yoe) = p.take(F::YearOfEra) {
         match (p.take(F::Era), p.get(F::Year)) {
@@ -821,7 +885,15 @@ fn format_seq(toks: &[Tok], t: i64, offset: i64, locale: &str, out: &mut String)
                 out.extend(std::iter::repeat_n('0', min.saturating_sub(digits.len())));
                 out.push_str(&digits);
             }
-            &Tok::Fraction(n) => out.push_str(&format!("{:09}", field_at(F::Nano, t))[..n]),
+            &Tok::Fraction { min, max, dot } => {
+                // trailing zeros are dropped down to `min` digits
+                let nanos = format!("{:09}", field_at(F::Nano, t));
+                let n = nanos.trim_end_matches('0').len().clamp(min, max);
+                if n > 0 && dot {
+                    out.push('.');
+                }
+                out.push_str(&nanos[..n]);
+            }
             &Tok::Text(f, style) => {
                 let i = field_at(f, t) - first_value(f);
                 out.push_str(names(f, style, locale)?[i as usize]);
@@ -847,8 +919,9 @@ fn format_seq(toks: &[Tok], t: i64, offset: i64, locale: &str, out: &mut String)
                     }
                 }
             }
-            // ponytail: zone IDs only parse; printing one needs the zone's ID kept in TimeZone
-            Tok::ZoneId => return None,
+            // ponytail: a region zone prints as its offset's ID (`+HH:MM:ss`); keep the zone's
+            // ID in TimeZone to print `Europe/Paris`
+            Tok::ZoneId => format_offset(offset, 6, "Z", out),
             Tok::Optional(inner) => format_seq(inner, t, offset, locale, out)?,
         }
     }

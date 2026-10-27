@@ -2107,17 +2107,12 @@ fn render_counted(
     Ok(out.into())
 }
 
-/// Epoch millis `t` in a date field's `format` (the first of its `||` alternatives).
-// ponytail: no time zones; named formats other than epochs render as the default format
+/// Epoch millis `t` in a date field's `format` (the first of its `||` alternatives), in UTC.
+// ponytail: date_range's `time_zone` is not read
 fn date_string(format: Option<&str>, t: i64) -> String {
-    match format.and_then(|f| f.split("||").next()) {
-        Some("epoch_millis") => t.to_string(),
-        Some("epoch_second") if t % 1000 == 0 => (t / 1000).to_string(),
-        Some("epoch_second") => (t as f64 / 1000.0).to_string(),
-        Some(p) => es_index::format_pattern(p, t, &es_index::tz::TimeZone::UTC)
-            .unwrap_or_else(|| iso_date(t)),
-        None => iso_date(t),
-    }
+    format
+        .and_then(|f| es_index::format_date(f, t, &es_index::tz::TimeZone::UTC))
+        .unwrap_or_else(|| iso_date(t))
 }
 
 /// Buckets as an object by key, or else an array.
