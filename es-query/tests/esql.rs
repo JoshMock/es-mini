@@ -2033,3 +2033,15 @@ fn esql_es_semantics_date_trunc_multiple_calendar_units() {
         [dates.map(|d| json!(format!("{d}T00:00:00.000Z")))]
     );
 }
+
+/// Elasticsearch 9.5.5 refuses spatial types in MV_MIN and MV_MAX; es-mini has no spatial types,
+/// so its spatial conversions are unknown functions.
+#[test]
+fn esql_es_semantics_no_spatial_types() {
+    assert_eq!(
+        run(&indices(), "ROW a = MV_MIN(TO_GEOPOINT(\"POINT(1 2)\"))"),
+        Err(EsqlError::Verification(
+            "Found 1 problem\nline 1:16: Unknown function [TO_GEOPOINT]".into()
+        ))
+    );
+}

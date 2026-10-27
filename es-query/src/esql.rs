@@ -1344,7 +1344,7 @@ fn accepts(f: &str, i: usize, t: &str) -> (&'static str, bool) {
         ("BUCKET", 0) => ("datetime or numeric", t == "date" || NUMERIC.contains(&t)),
         // Checked by `bucket_problem`, which knows the field's type.
         ("BUCKET", _) => ("any", true),
-        // ponytail: spatial types are not refused
+        // ponytail: no spatial types exist here (no geo fields or TO_GEOPOINT) for ES to refuse
         ("MV_COUNT" | "MV_MIN" | "MV_MAX", _) => ("any", true),
         ("ROUND", 1) => (
             "whole number except unsigned_long or counter types",
