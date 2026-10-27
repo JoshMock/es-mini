@@ -2323,8 +2323,9 @@ mod tests {
     }
 
     /// A merge copies what its segments indexed: a field mapped after a segment was written
-    /// stays out of the merge (es-mini reads it from `_source` there), as in Elasticsearch,
-    /// while a field a segment has no values of merges with those that do.
+    /// stays out of the merge for every doc (es-mini reads it from `_source` there; Lucene would
+    /// merge the values later segments indexed), while a field a segment has no values of merges
+    /// with those that do.
     #[test]
     fn memory_bounds_a_merge_indexes_no_field_some_segment_left_out() {
         let dir = scratch("merge-unknown");
