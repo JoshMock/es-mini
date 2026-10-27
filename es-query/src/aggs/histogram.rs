@@ -46,8 +46,8 @@ pub(crate) enum Unit {
 }
 
 impl Unit {
-    /// DateHistogramAggregationBuilder.DATE_FIELD_UNITS.
-    // ponytail: no `years`/`months` (multiples of a unit)
+    /// DateHistogramAggregationBuilder.DATE_FIELD_UNITS; `years` and `months` are multiples of a
+    /// unit, but a date_histogram builds them with a multiplier of 1.
     pub(crate) fn parse(s: &str) -> Option<Unit> {
         Some(match s {
             "second" | "1s" => Unit::Second,
@@ -55,9 +55,9 @@ impl Unit {
             "hour" | "1h" => Unit::Hour,
             "day" | "1d" => Unit::Day,
             "week" | "1w" => Unit::Week,
-            "month" | "1M" => Unit::Month,
+            "month" | "months" | "1M" => Unit::Month,
             "quarter" | "1q" => Unit::Quarter,
-            "year" | "1y" => Unit::Year,
+            "year" | "years" | "1y" => Unit::Year,
             _ => return None,
         })
     }
@@ -886,6 +886,22 @@ mod tests {
                 ["2016-04-01T00:00:00.000Z", 1]
             ])
         );
+    }
+
+    #[test]
+    fn aggs_gaps_years_and_months_are_one_unit() {
+        // DATE_FIELD_UNITS maps them to YEARS_OF_CENTURY and MONTHS_OF_YEAR, built with a
+        // multiplier of 1
+        for (interval, first) in [
+            ("years", "2016-01-01T00:00:00.000Z"),
+            ("months", "2016-05-01T00:00:00.000Z"),
+        ] {
+            let got = date_histo(
+                &["2016-05-15"],
+                json!({"field": "at", "calendar_interval": interval}),
+            );
+            assert_eq!(got.unwrap(), json!([[first, 1]]), "{interval}");
+        }
     }
 
     #[test]
