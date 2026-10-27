@@ -1166,17 +1166,24 @@ impl<'a> Searcher<'a> {
                 "_score" => Value::from(score as f32),
                 field => {
                     let vals = values(&doc.source, self.kind(field).1);
-                    // ponytail: date_nanos sort by their JSON values, not epoch nanos
-                    let Some(FieldMapping::Date { format, locale, .. }) =
-                        self.index.mappings.field(field)
-                    else {
-                        return sort_value(f, vals);
+                    // dates sort by epoch millis, date_nanos by epoch nanos
+                    let instant: fn(Option<&str>, Option<&str>, &Value) -> Option<i64>;
+                    let (format, locale) = match self.index.mappings.field(field) {
+                        Some(FieldMapping::Date { format, locale, .. }) => {
+                            instant = date_millis;
+                            (format, locale)
+                        }
+                        Some(FieldMapping::DateNanos { format, locale }) => {
+                            instant = |f, l, v| es_index::disk::date_nanos(f, l, v).flatten();
+                            (format, locale)
+                        }
+                        _ => return sort_value(f, vals),
                     };
-                    let millis: Vec<Value> = (vals.into_iter())
-                        .filter_map(|v| date_millis(format.as_deref(), locale.as_deref(), v))
+                    let instants: Vec<Value> = (vals.into_iter())
+                        .filter_map(|v| instant(format.as_deref(), locale.as_deref(), v))
                         .map(Value::from)
                         .collect();
-                    sort_value(f, millis.iter().collect())
+                    sort_value(f, instants.iter().collect())
                 }
             })
             .collect()
@@ -1603,6 +1610,32 @@ mod tests {
         assert!(!bad_date(Some("basic_date"), None, &json!("20210501")));
         // a format es-mini lacks reads values as the default format, so none are refused
         assert!(!bad_date(Some("week_date"), None, &json!("2021-05-01")));
+    }
+
+    #[test]
+    fn date_formats_date_nanos_sort_by_epoch_nanos() {
+        let mut ix = Index::default();
+        let nanos = FieldMapping::DateNanos {
+            format: None,
+            locale: None,
+        };
+        ix.mappings.properties.insert("n".into(), nanos);
+        // as text, 2's value sorts last; as an instant it is the day before 1's
+        ix.put("1", json!({"n": "2016-01-03T00:00:00.123456789Z"}));
+        ix.put("2", json!({"n": "2016-01-03T01:00:00+02:00"}));
+        ix.put("3", json!({"n": "1970-01-01T00:00:00.000000001Z"}));
+        let body = json!({"sort": [{"n": "asc"}]});
+        let r = search(&ix, &SearchRequest::parse(&body).unwrap());
+        // epoch nanos, as Elasticsearch 9.5.5 returns them
+        let sorts: Vec<_> = r.hits.iter().map(|h| (h.id, h.sort[0].clone())).collect();
+        assert_eq!(
+            sorts,
+            [
+                ("3", json!(1)),
+                ("2", json!(1_451_775_600_000_000_000_i64)),
+                ("1", json!(1_451_779_200_123_456_789_i64)),
+            ]
+        );
     }
 
     #[test]

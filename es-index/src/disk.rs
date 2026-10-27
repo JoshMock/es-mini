@@ -546,7 +546,7 @@ fn integer(v: &Value, min: i64, max: i64) -> Option<Option<i64>> {
 /// Epoch nanos of a `date_nanos` value, as Elasticsearch indexes it: [`crate::date_millis`] plus
 /// the sub-millisecond digits of its fraction (of a millisecond for `epoch_millis`, of a second
 /// otherwise). `None` before 1970 or after 2262, which Elasticsearch rejects and es-mini matches.
-fn date_nanos(format: Option<&str>, locale: Option<&str>, v: &Value) -> Option<Option<i64>> {
+pub fn date_nanos(format: Option<&str>, locale: Option<&str>, v: &Value) -> Option<Option<i64>> {
     let Some(millis) = crate::date_millis(format, locale, v) else {
         return Some(None);
     };
