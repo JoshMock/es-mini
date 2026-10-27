@@ -1730,3 +1730,29 @@ fn esql_es_semantics_arity_errors_are_parse_errors() {
         "line 1:29: error building [abs]: expects exactly one argument"
     );
 }
+
+/// The tokens Elasticsearch 9.5.5 expects after an expression depend on where it is: a list
+/// item may be followed by `,`, a STATS aggregate by `where` and `by`, a field in parentheses
+/// by `.`.
+#[test]
+fn esql_es_semantics_expected_tokens_after_expressions() {
+    let err = |q: &str| match run(&indices(), q) {
+        Err(EsqlError::Parse(m)) => m,
+        other => panic!("{q}: {other:?}"),
+    };
+    let ops = "'or', '+', '-', '*', '/', '%'}";
+    for (q, msg) in [
+        ("ROW a = 1 2 3", format!("1:11: mismatched input '2' expecting {{<EOF>, '|', 'and', '::', ',', {ops}")),
+        ("ROW a = ABS(1) 2 3", format!("1:16: mismatched input '2' expecting {{<EOF>, '|', 'and', '::', ',', {ops}")),
+        ("ROW a = 1 days 2 hours", format!("1:16: mismatched input '2' expecting {{<EOF>, '|', 'and', '::', ',', {ops}")),
+        ("ROW a = 1 | WHERE ABS(1) 2 3", format!("1:26: mismatched input '2' expecting {{<EOF>, '|', 'and', '::', {ops}")),
+        ("ROW a = 1 | EVAL b = a 2 3", format!("1:24: mismatched input '2' expecting {{<EOF>, '|', 'and', '::', ',', '.', {ops}")),
+        ("ROW a = 1 | STATS c = COUNT(*) BY a 2 3", format!("1:37: mismatched input '2' expecting {{<EOF>, '|', 'and', '::', ',', '.', {ops}")),
+        ("ROW a = 1 | STATS c = COUNT(*) 2 3", format!("1:32: mismatched input '2' expecting {{<EOF>, 'where', '|', 'and', 'by', '::', ',', {ops}")),
+        ("ROW a = 1 | EVAL b = a is null 2 3", "1:32: mismatched input '2' expecting {<EOF>, '|', 'and', ',', 'or'}".into()),
+        ("ROW a = 1 | EVAL b = (a) 2 3", "1:26: mismatched input '2' expecting {'and', '::', '.', 'or', '+', '-', '*', '/', '%', ')'}".into()),
+        ("ROW a = (1) 2 3", "1:13: mismatched input '2' expecting {'and', '::', 'or', '+', '-', '*', '/', '%', ')'}".into()),
+    ] {
+        assert_eq!(err(q), format!("line {msg}"), "{q}");
+    }
+}

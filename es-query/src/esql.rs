@@ -216,6 +216,7 @@ const AFTER_ID_PATTERNS: &str = "{<EOF>, '|', ',', '.'}";
 const AFTER_FIELD: &str = "{<EOF>, '|', 'and', '::', '.', 'or', '+', '-', '*', '/', '%'}";
 const AFTER_LITERAL: &str = "{<EOF>, '|', 'and', '::', 'or', '+', '-', '*', '/', '%'}";
 const AFTER_PARENS: &str = "{'and', '::', 'or', '+', '-', '*', '/', '%', ')'}";
+const AFTER_PARENS_FIELD: &str = "{'and', '::', '.', 'or', '+', '-', '*', '/', '%', ')'}";
 const AFTER_IS_NULL: &str = "{<EOF>, '|', 'and', 'or'}";
 const AFTER_SORT_FIELD: &str = "{<EOF>, '|', 'and', 'asc', '::', ',', 'desc', '.', 'nulls', \
     'or', '+', '-', '*', '/', '%'}";
@@ -223,6 +224,23 @@ const AFTER_SORT_ORDER: &str = "{<EOF>, '|', ',', 'nulls'}";
 const AFTER_SORT_NULLS: &str = "{<EOF>, '|', ','}";
 // ponytail: not checked against Elasticsearch (`LIMIT 1 x` lexes as a time span there).
 const AFTER_LIMIT: &str = "{<EOF>, '|'}";
+
+/// What may follow the last item of a comma-separated list (`ROW`, `EVAL`, `BY`), or of `STATS`
+/// aggregates, that ends where `follow` may.
+fn after_list(follow: &'static str, stats: bool) -> &'static str {
+    match (follow, stats) {
+        (AFTER_LITERAL, false) => "{<EOF>, '|', 'and', '::', ',', 'or', '+', '-', '*', '/', '%'}",
+        (AFTER_FIELD, false) => {
+            "{<EOF>, '|', 'and', '::', ',', '.', 'or', '+', '-', '*', '/', '%'}"
+        }
+        (AFTER_IS_NULL, false) => "{<EOF>, '|', 'and', ',', 'or'}",
+        (AFTER_LITERAL, true) => {
+            "{<EOF>, 'where', '|', 'and', 'by', '::', ',', 'or', '+', '-', '*', '/', '%'}"
+        }
+        // ponytail: other STATS aggregate endings keep the plain set, unchecked against ES
+        _ => follow,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 enum Expr {
@@ -442,7 +460,7 @@ impl Parser<'_> {
             ]));
         }
         if self.keyword("row") {
-            return Ok(Source::Row(self.assignments()?));
+            return Ok(Source::Row(self.assignments(false)?));
         }
         let from = self.toks.get(self.pos).map_or(self.eof, |t| t.1);
         if !self.keyword("from") {
@@ -460,7 +478,7 @@ impl Parser<'_> {
     }
 
     /// `name = expression, ...`, where an unnamed expression is named by its text.
-    fn assignments(&mut self) -> Result<Vec<(String, Expr)>, EsqlError> {
+    fn assignments(&mut self, stats: bool) -> Result<Vec<(String, Expr)>, EsqlError> {
         let mut fields = Vec::new();
         loop {
             let named = matches!(
@@ -478,6 +496,7 @@ impl Parser<'_> {
             let name = name.unwrap_or_else(|| span(&e).1.clone());
             fields.push((self.src[name].to_owned(), e));
             if !self.sym(",") {
+                self.follow = after_list(self.follow, stats);
                 return Ok(fields);
             }
         }
@@ -501,11 +520,11 @@ impl Parser<'_> {
             self.pos += 1;
             let cmd = match command.as_str() {
                 "where" => Command::Where(self.or()?),
-                "eval" => Command::Eval(self.assignments()?),
+                "eval" => Command::Eval(self.assignments(false)?),
                 "stats" => {
-                    let aggs = self.assignments()?;
+                    let aggs = self.assignments(true)?;
                     let by = match self.keyword("by") {
-                        true => self.assignments()?,
+                        true => self.assignments(false)?,
                         false => Vec::new(),
                     };
                     Command::Stats(aggs, by)
@@ -743,7 +762,10 @@ impl Parser<'_> {
                 return self.bad_expression();
             }
             self.parens -= 1;
-            self.follow = AFTER_PARENS;
+            self.follow = match self.follow {
+                AFTER_FIELD => AFTER_PARENS_FIELD,
+                _ => AFTER_PARENS,
+            };
             return Ok(e);
         }
         let start = self.pos;
@@ -832,7 +854,6 @@ impl Parser<'_> {
                         &format!("error building [{name}]: {msg}"),
                     ));
                 }
-                // ponytail: not checked against Elasticsearch's follow set after a call
                 self.follow = AFTER_LITERAL;
                 return Ok(Expr::Call(w, args, OnceCell::new(), self.span(start)));
             }
