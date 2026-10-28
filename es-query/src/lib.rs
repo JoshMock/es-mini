@@ -1460,9 +1460,20 @@ pub fn search_many<'a>(
                 continue;
             }
         };
+        let before = hits.len();
         hits.extend(selected.into_iter().flatten());
+        // With one score for all, hits rank in write order, so once enough are counted the
+        // rest of those in memory (borrowed: `docs_at` gives them last, in write order) change
+        // neither the page nor a total past the limit.
+        let enough = (req.sort.is_empty() && req.aggs.is_empty() && !req.profile)
+            .then(|| constant_score(&query).and(req.total_up_to))
+            .flatten()
+            .map(|n| (n + 1).max(req.from + req.size));
         let visible = index.visible_seq_no();
         for (id, doc) in s.docs().filter(|(_, d)| d.seq_no < visible) {
+            if matches!(doc, Cow::Borrowed(_)) && enough.is_some_and(|n| hits.len() - before >= n) {
+                break;
+            }
             let Some(score) = s.score(&query, id, &doc) else {
                 continue;
             };
@@ -2181,6 +2192,40 @@ mod tests {
         let body = json!({"query": {"term": {"tag": "a"}}});
         let r = search(&ix, &SearchRequest::parse(&body).unwrap());
         assert_eq!(r.hits[0].score, r.hits[1].score);
+    }
+
+    /// With one score for every hit, counting stops once the page is full and the count is
+    /// past `total_up_to`; the hits stay the first written. Updated and unrefreshed documents
+    /// keep their places in write order.
+    #[test]
+    fn constant_score_hits_stop_counting_past_total_up_to() {
+        let mut ix = Index::default();
+        ix.settings
+            .merge(&json!({ es_index::index_settings::REFRESH_INTERVAL: "-1" }));
+        for i in 0..6 {
+            ix.put(&i.to_string(), json!({"n": i}));
+        }
+        ix.put("0", json!({"n": 0}));
+        ix.refresh();
+        ix.put("9", json!({"n": 9}));
+        let run = |body: Value, up_to| {
+            let mut req = SearchRequest::parse(&body).unwrap();
+            req.total_up_to = up_to;
+            let r = search(&ix, &req);
+            let ids: Vec<_> = r.hits.iter().map(|h| h.id).collect();
+            (r.total, ids.join(","))
+        };
+        let all = json!({"query": {"match_all": {}}, "size": 2});
+        assert_eq!(run(all.clone(), None), (6, "1,2".into()));
+        assert_eq!(run(all.clone(), Some(2)), (3, "1,2".into()));
+        assert_eq!(run(all.clone(), Some(0)), (2, "1,2".into()));
+        let paged = json!({"query": {"match_all": {}}, "size": 2, "from": 4});
+        assert_eq!(run(paged, Some(2)), (6, "5,0".into()));
+        // hits sorted by a field, and aggregations, still need every match
+        let scored = json!({"query": {"range": {"n": {"gte": 1}}}, "sort": ["n"], "size": 2});
+        assert_eq!(run(scored, Some(1)).0, 5);
+        let aggs = json!({"size": 1, "aggs": {"m": {"max": {"field": "n"}}}});
+        assert_eq!(run(aggs, Some(1)).0, 6);
     }
 
     /// The score of the only document a query matches.

@@ -261,17 +261,16 @@ pub async fn search(
         .then_some(index),
         _ => None,
     };
-    let respond = || -> Result<Value, AppError> {
-        let r = es_query::search_many(&targets, &req)?;
-        let hits = render_hits(&r.hits);
-        let as_int = params
-            .get("rest_total_hits_as_int")
-            .is_some_and(|v| v == "true");
-        let track = params
-            .get("track_total_hits")
-            .or(req.track_total_hits.as_ref())
-            .map(String::as_str);
-        let limit = match track {
+    let as_int = params
+        .get("rest_total_hits_as_int")
+        .is_some_and(|v| v == "true");
+    let track = params
+        .get("track_total_hits")
+        .or(req.track_total_hits.as_ref())
+        .map(String::as_str);
+    // validated after the search runs, so that its errors come first
+    let limit = (|| -> Result<_, AppError> {
+        Ok(match track {
             Some("true" | "-1") => None,
             None if as_int => None,
             None => Some(Some(10_000)),
@@ -289,7 +288,17 @@ pub async fn search(
                     )));
                 }
             },
-        };
+        })
+    })();
+    req.total_up_to = match limit {
+        Ok(Some(Some(n))) => Some(n as usize),
+        Ok(Some(None)) => Some(0),
+        _ => None,
+    };
+    let respond = || -> Result<Value, AppError> {
+        let r = es_query::search_many(&targets, &req)?;
+        let hits = render_hits(&r.hits);
+        let limit = limit?;
         let total = match limit {
             Some(None) if as_int => json!(-1),
             Some(None) => Value::Null,

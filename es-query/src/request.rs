@@ -21,6 +21,10 @@ pub struct SearchRequest {
     pub sort: Vec<SortField>,
     /// Body `track_total_hits` (`true`, `false` or a number) as the URL-parameter spelling.
     pub track_total_hits: Option<String>,
+    /// The hit count past which the total need not be exact (`None`: count every hit), as
+    /// `track_total_hits` sets it. Hits ordered by one score for all then stop being counted
+    /// once the page is full and the count is past it.
+    pub total_up_to: Option<usize>,
     pub aggs: Vec<crate::aggs::Agg>,
     /// Top-level `max_bucket` aggregations, computed from the rendered `aggs`.
     pub pipelines: Vec<crate::aggs::MaxBucket>,
@@ -160,6 +164,7 @@ impl SearchRequest {
             profile: body.get("profile").and_then(Value::as_bool) == Some(true),
             query,
             track_total_hits,
+            total_up_to: None,
             from: usize_of("from", 0)?,
             size: usize_of("size", 10)?,
             sort,
