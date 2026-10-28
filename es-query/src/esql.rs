@@ -19,7 +19,7 @@ use std::{
     cell::{OnceCell, RefCell},
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet, HashMap},
-    hash::{Hash, Hasher},
+    hash::{BuildHasher, Hash, Hasher},
     ops::{Range, RangeInclusive},
     sync::Arc,
 };
@@ -3029,7 +3029,7 @@ fn run_at(
             Command::Stats(aggs, by) => {
                 // Each group's key and its rows' positions.
                 let mut buckets: Vec<(Vec<Value>, Vec<usize>)> = Vec::new();
-                let mut index = HashMap::new();
+                let mut index = GroupIndex::default();
                 // Each row's key values, read in place where a key is a column.
                 let mut vals: Vec<Cow<Value>> = Vec::with_capacity(by.len());
                 for (i, r) in rows.iter().enumerate() {
@@ -3253,7 +3253,7 @@ type Row = BTreeMap<String, Value>;
 /// by their key's `key_hash`.
 fn join_group<'v, T>(
     groups: &mut Vec<(Vec<Value>, Vec<T>)>,
-    index: &mut HashMap<u64, Vec<usize>>,
+    index: &mut GroupIndex,
     key: impl Iterator<Item = &'v Value> + Clone,
     r: T,
 ) {
@@ -3264,6 +3264,24 @@ fn join_group<'v, T>(
             slots.push(groups.len());
             groups.push((key.cloned().collect(), vec![r]));
         }
+    }
+}
+
+/// Groups by their key's `key_hash`, which is already a hash: used as is.
+type GroupIndex = HashMap<u64, Vec<usize>, std::hash::BuildHasherDefault<Prehashed>>;
+
+#[derive(Default)]
+struct Prehashed(u64);
+
+impl Hasher for Prehashed {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, _: &[u8]) {
+        unreachable!("only u64 keys")
+    }
+    fn write_u64(&mut self, n: u64) {
+        self.0 = n;
     }
 }
 
@@ -3281,7 +3299,11 @@ fn key_hash<'v>(key: impl Iterator<Item = &'v Value>) -> u64 {
             Value::Object(o) => o.len().hash(h),
         }
     }
-    let mut h = std::hash::DefaultHasher::new();
+    // Keyed at random once per process, so data cannot be made to collide on purpose: the
+    // group index uses this hash as is.
+    static KEYS: std::sync::LazyLock<std::hash::RandomState> =
+        std::sync::LazyLock::new(Default::default);
+    let mut h = KEYS.build_hasher();
     key.for_each(|v| value(v, &mut h));
     h.finish()
 }
