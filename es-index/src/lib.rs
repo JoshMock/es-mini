@@ -295,7 +295,7 @@ pub struct Index {
     /// Writes not yet in the translog (see [`disk::persist`]).
     unlogged: Vec<es_codec::translog::Op>,
     request_cache: std::sync::Mutex<RequestCache>,
-    /// What [`Index::memo`] built, and the mappings it was built with.
+    /// What [`Index::memo`] built, and the writes since.
     memo: Memo,
 }
 
@@ -306,7 +306,19 @@ pub struct Index {
 pub const REQUEST_CACHE_BYTES: usize = (1 << 30) / 100;
 
 #[derive(Default)]
-struct Memo(Mutex<Option<(Mappings, Arc<dyn std::any::Any + Send + Sync>)>>);
+struct Memo(Mutex<Option<Memoized>>);
+
+/// A value [`Index::memo`] built, the mappings it was built with, and the writes since: the
+/// sequence numbers of the documents removed and the ids of those stored.
+struct Memoized {
+    mappings: Mappings,
+    value: Arc<dyn std::any::Any + Send + Sync>,
+    removed: Vec<u64>,
+    written: Vec<String>,
+}
+
+/// Writes past which the memo is dropped instead of followed, as rebuilding it then costs less.
+const MEMO_WRITES: usize = 10_000;
 
 impl std::fmt::Debug for Memo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -350,19 +362,32 @@ impl Index {
     /// Removes a live document, returning it if no segment holds it: one in a segment stays
     /// counted in its statistics, as a deleted document does in Lucene.
     fn take(&mut self, id: &str) -> Option<Option<Arc<Document>>> {
-        *self
-            .memo
-            .0
-            .get_mut()
-            .unwrap_or_else(PoisonError::into_inner) = None;
         if let Some(d) = self.docs.remove(id) {
+            self.memo_log(|m| m.removed.push(d.seq_no));
             self.postings
                 .get_mut()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .remove(id);
             return Some((d.seq_no >= self.persisted).then_some(d));
         }
-        self.disk.as_mut()?.remove(id).map(|_| None)
+        let d = self.disk.as_mut()?.remove(id)?;
+        self.memo_log(|m| m.removed.push(d.seq_no));
+        Some(None)
+    }
+
+    /// Notes a write for the memo to follow, or drops it past [`MEMO_WRITES`].
+    fn memo_log(&mut self, log: impl FnOnce(&mut Memoized)) {
+        let memo = self
+            .memo
+            .0
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(m) = memo {
+            log(m);
+            if m.removed.len() + m.written.len() > MEMO_WRITES {
+                *memo = None;
+            }
+        }
     }
 
     fn next_seq_no(&mut self) -> u64 {
@@ -442,6 +467,7 @@ impl Index {
                 seq_no,
             }),
         );
+        self.memo_log(|m| m.written.push(id.to_owned()));
         match old {
             Some(old) => {
                 self.superseded.extend(old);
@@ -523,19 +549,48 @@ impl Index {
         }
     }
 
-    /// What `build` makes of the documents and mappings, reused until a write or a mapping
-    /// change. One value at a time: building another type replaces it.
-    pub fn memo<T: std::any::Any + Send + Sync>(&self, build: impl FnOnce() -> T) -> Arc<T> {
+    /// What `build` makes of the documents and mappings, reused until a mapping change. After
+    /// writes, `follow` updates it with the sequence numbers of the documents they removed and
+    /// the live documents they stored, by sequence number; it is rebuilt instead if `follow`
+    /// returns false or a caller still holds it. One value at a time: building another type
+    /// replaces it.
+    pub fn memo<T: std::any::Any + Send + Sync>(
+        &self,
+        build: impl FnOnce() -> T,
+        follow: impl FnOnce(&mut T, &[u64], &[(&str, &Document)]) -> bool,
+    ) -> Arc<T> {
         // Held while building, so concurrent callers wait for one build.
         let mut memo = self.memo.0.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some((mappings, v)) = &*memo
-            && *mappings == self.mappings
-            && let Ok(v) = v.clone().downcast::<T>()
+        let keep = |v: &Arc<T>| Memoized {
+            mappings: self.mappings.clone(),
+            value: v.clone(),
+            removed: Vec::new(),
+            written: Vec::new(),
+        };
+        if let Some(m) = memo.take()
+            && m.mappings == self.mappings
+            && let Ok(mut v) = m.value.downcast::<T>()
         {
-            return v;
+            if m.removed.is_empty() && m.written.is_empty() {
+                *memo = Some(Memoized {
+                    value: v.clone(),
+                    ..m
+                });
+                return v;
+            }
+            let mut written: Vec<_> = (m.written.iter())
+                .filter_map(|id| self.docs.get_key_value(id))
+                .map(|(id, d)| (id.as_str(), &**d))
+                .collect();
+            written.sort_by_key(|(_, d)| d.seq_no);
+            written.dedup_by_key(|(_, d)| d.seq_no);
+            if Arc::get_mut(&mut v).is_some_and(|t| follow(t, &m.removed, &written)) {
+                *memo = Some(keep(&v));
+                return v;
+            }
         }
         let v = Arc::new(build());
-        *memo = Some((self.mappings.clone(), v.clone()));
+        *memo = Some(keep(&v));
         v
     }
 
@@ -1216,24 +1271,44 @@ mod tests {
     }
 
     #[test]
-    fn memo_is_reused_until_a_write_or_a_mapping_change() {
+    fn memo_follows_writes_until_a_mapping_change() {
         let mut ix = Index::default();
-        let mut builds = 0;
-        let mut memo = |ix: &Index| {
-            *ix.memo(|| {
-                builds += 1;
-                builds
-            })
+        ix.put("a", json!({}));
+        let builds = std::cell::Cell::new(0);
+        // Each build's number, then what each follow was handed.
+        let memo = |ix: &Index, follows: bool| {
+            let v = ix.memo(
+                || {
+                    builds.set(builds.get() + 1);
+                    vec![builds.get().to_string()]
+                },
+                |v: &mut Vec<String>, removed, written| {
+                    let ids: Vec<_> = written.iter().map(|(id, d)| (*id, d.seq_no)).collect();
+                    v.push(format!("{removed:?} {ids:?}"));
+                    follows
+                },
+            );
+            v.join("; ")
         };
-        assert_eq!(memo(&ix), 1);
-        assert_eq!(memo(&ix), 1);
-        ix.put("1", json!({}));
-        assert_eq!(memo(&ix), 2);
-        ix.delete("1");
-        assert_eq!(memo(&ix), 3);
+        assert_eq!(memo(&ix, true), "1");
+        assert_eq!(memo(&ix, true), "1");
+        ix.put("b", json!({}));
+        ix.put("a", json!({}));
+        ix.put("c", json!({}));
+        ix.delete("c");
+        ix.delete("none");
+        let followed = r#"1; [0, 3] [("b", 1), ("a", 2)]"#;
+        assert_eq!(memo(&ix, true), followed);
+        assert_eq!(memo(&ix, true), followed);
+        // One that cannot follow is rebuilt, as is one a caller still holds.
+        ix.put("d", json!({}));
+        assert_eq!(memo(&ix, false), "2");
+        let held = ix.memo(Vec::<String>::new, |_, _, _| true);
+        ix.put("e", json!({}));
+        assert_eq!(memo(&ix, true), "3");
+        drop(held);
         ix.mappings.source = Some(json!({"enabled": false}));
-        assert_eq!(memo(&ix), 4);
-        assert_eq!(memo(&ix), 4);
+        assert_eq!(memo(&ix, true), "4");
     }
 
     #[test]

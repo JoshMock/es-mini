@@ -9,7 +9,7 @@
 //! names and literals. Any other syntax is a parse error; any other function fails verification.
 
 use es_index::{
-    FieldMapping, Index,
+    Document, FieldMapping, Index,
     aliases::{self, ResolveError},
 };
 use serde::Serialize;
@@ -18,7 +18,7 @@ use std::{
     borrow::Cow,
     cell::{OnceCell, RefCell},
     cmp::Ordering,
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     hash::{BuildHasher, Hash, Hasher},
     ops::{Range, RangeInclusive},
     sync::{
@@ -3403,6 +3403,8 @@ impl Fields for Row {
 /// per row.
 struct Group {
     len: usize,
+    /// Each row's document's sequence number, in a whole index's cached table (see `follow`).
+    seqs: Vec<u64>,
     /// By name.
     cols: Vec<(String, Vec<Value>)>,
     /// Where the last column looked up is: rows read one column many times in a row. Shared by
@@ -3420,6 +3422,7 @@ impl Group {
         let ords = cols.iter().map(|_| OnceLock::new()).collect();
         Group {
             len,
+            seqs: Vec::new(),
             cols,
             hint,
             ords,
@@ -3561,11 +3564,60 @@ fn table_from(
         && metadata.is_empty()
     {
         let index: &Index = indices[&t.index].borrow();
-        return Ok(index.memo(|| table_of(indices, &targets, &filters, &[], &|_| true)));
+        return Ok(index.memo(
+            || table_of(indices, &targets, &filters, &[], &|_| true),
+            |t, removed, written| follow(t, index, removed, written),
+        ));
     }
     Ok(Arc::new(table_of(
         indices, &targets, &filters, metadata, read,
     )))
+}
+
+/// Updates a whole index's cached table after writes (see [`Index::memo`]): drops the rows of
+/// the `removed` sequence numbers and appends the `written` documents. False when the writes
+/// may change its columns: when it has an unmapped column, or a written document adds one.
+fn follow(t: &mut Table, index: &Index, removed: &[u64], written: &[(&str, &Document)]) -> bool {
+    let mapped = columns(index, std::iter::empty());
+    let [g] = &mut t.groups[..] else {
+        return false;
+    };
+    if !mapped.keys().eq(t.types.keys())
+        || columns(index, written.iter().map(|(_, d)| &d.source)).len() != mapped.len()
+    {
+        return false;
+    }
+    let removed: HashSet<u64> = removed.iter().copied().collect();
+    let keep: Vec<bool> = g.seqs.iter().map(|s| !removed.contains(s)).collect();
+    for (c, v) in &mut g.cols {
+        let mut keep = keep.iter();
+        v.retain(|_| *keep.next().unwrap_or(&true));
+        v.extend(column(
+            written.iter().map(|(_, d)| *d),
+            c,
+            &t.types[c],
+            index,
+        ));
+    }
+    g.seqs.retain(|s| !removed.contains(s));
+    g.seqs.extend(written.iter().map(|(_, d)| d.seq_no));
+    g.len = g.seqs.len();
+    g.ords = g.cols.iter().map(|_| OnceLock::new()).collect();
+    true
+}
+
+/// Column `c`'s values (of ES|QL type `ty`) in `docs` of `index`, as a table holds them.
+fn column<'d>(
+    docs: impl Iterator<Item = &'d Document>,
+    c: &str,
+    ty: &str,
+    index: &Index,
+) -> impl Iterator<Item = Value> {
+    let mappings = &index.mappings;
+    let multi_field = c.ends_with(".keyword")
+        || !mappings.properties.contains_key(c) && mappings.field(c).is_some();
+    let m = mappings.field(c);
+    docs.map(move |d| doc_value(cell(&d.source, c, multi_field), ty, m))
 }
 
 /// The table of the documents of `targets` that their `filters` match.
@@ -3625,29 +3677,15 @@ fn table_of(
         .iter()
         .zip(targets)
         .map(|(g, t)| {
-            let mappings = &indices[&t.index].borrow().mappings;
-            // Per column read, what loading it needs: looked up once, not per document.
-            let read: Vec<_> = (types.iter())
+            let index: &Index = indices[&t.index].borrow();
+            let mut cols: BTreeMap<String, Vec<Value>> = (types.iter())
                 .filter(|(c, _)| read(c))
                 .map(|(c, ty)| {
-                    let multi_field = c.ends_with(".keyword")
-                        || !mappings.properties.contains_key(c) && mappings.field(c).is_some();
-                    (
-                        c,
-                        ty,
-                        conflicts.contains_key(c),
-                        mappings.field(c),
-                        multi_field,
-                    )
-                })
-                .collect();
-            let mut cols: BTreeMap<String, Vec<Value>> = (read.iter())
-                .map(|&(c, ty, conflict, m, multi_field)| {
-                    let v = g.iter().map(|(_, d)| match conflict {
-                        true => Value::Null,
-                        false => doc_value(cell(&d.source, c, multi_field), ty, m),
-                    });
-                    (c.clone(), v.collect())
+                    let v = match conflicts.contains_key(c) {
+                        true => vec![Value::Null; g.len()],
+                        false => column(g.iter().map(|(_, d)| &**d), c, ty, index).collect(),
+                    };
+                    (c.clone(), v)
                 })
                 .collect();
             for f in metadata {
@@ -3658,7 +3696,10 @@ fn table_of(
                 });
                 cols.insert(f.clone(), v.collect());
             }
-            Group::new(g.len(), cols)
+            Group {
+                seqs: g.iter().map(|(_, d)| d.seq_no).collect(),
+                ..Group::new(g.len(), cols)
+            }
         })
         .collect();
     // Metadata columns follow the fields, in the order listed.
@@ -3994,6 +4035,57 @@ mod tests {
         let i = indices.get_mut("i").unwrap();
         i.map_dynamic("3", &serde_json::json!({"m": "x"})).unwrap();
         assert_eq!(values(&indices, "FROM i | KEEP m"), [[Value::Null]]);
+    }
+
+    /// A cached table follows writes: after updates, deletes and new documents (also one with a
+    /// column the table lacks, and removing a column's only value) it answers like a new one.
+    #[test]
+    fn a_cached_table_answers_like_a_new_one_after_writes() {
+        let mut i = Index::default();
+        i.mappings.properties.insert("n".into(), FieldMapping::Long);
+        let keyword = FieldMapping::Keyword {
+            ignore_above: None,
+            split_queries_on_whitespace: false,
+        };
+        i.mappings.properties.insert("k".into(), keyword);
+        for n in 0..6 {
+            let k = ["a", "b", "c"][n % 3];
+            i.put(&n.to_string(), serde_json::json!({"n": n, "k": k}));
+        }
+        let mut indices = BTreeMap::from([("i".to_owned(), i)]);
+        let check = |indices: &BTreeMap<String, Index>| {
+            let new = BTreeMap::from([("i".to_owned(), indices["i"].snapshot())]);
+            for q in [
+                "FROM i",
+                "FROM i | STATS c = COUNT(*), s = SUM(n) BY k | SORT k",
+                "FROM i | WHERE n > 2 | SORT n DESC | LIMIT 3",
+            ] {
+                assert_eq!(run(indices, q).unwrap(), run(&new, q).unwrap(), "{q}");
+            }
+        };
+        check(&indices);
+        let writes: [fn(&mut Index); 5] = [
+            |i| {
+                i.put("1", serde_json::json!({"n": 10, "k": "c"}));
+            },
+            |i| {
+                i.delete("4");
+            },
+            |i| {
+                i.put("9", serde_json::json!({"n": 9}));
+                i.put("9", serde_json::json!({"n": 8, "k": "a"}));
+            },
+            |i| {
+                i.put("7", serde_json::json!({"n": 7, "u": "x"}));
+            },
+            |i| {
+                i.delete("7");
+            },
+        ];
+        for write in writes {
+            write(indices.get_mut("i").unwrap());
+            check(&indices);
+        }
     }
 
     /// Equal STATS keys hash alike, so they share a group.
