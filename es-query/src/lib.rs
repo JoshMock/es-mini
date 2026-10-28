@@ -1272,9 +1272,10 @@ impl<'a> Searcher<'a> {
             .collect::<Option<Vec<_>>>()?;
         let live: HashMap<_, _> = self.index.disk_live().collect();
         let matched = exact(q, &live.keys().copied().collect(), &|c| self.disk_leaf(c))?;
+        let visible = self.index.visible_seq_no();
         let mut out = vec![];
         for (id, seq_no) in matched.iter().map(|p| live[p]) {
-            if !self.index.searchable(seq_no) {
+            if seq_no >= visible {
                 continue;
             }
             let score = match constant {

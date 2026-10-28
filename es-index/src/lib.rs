@@ -547,11 +547,7 @@ impl Index {
         key: String,
         compute: impl FnOnce() -> Result<Value, E>,
     ) -> Result<Value, E> {
-        let visible = if self.refresh_due() {
-            self.next_seq_no
-        } else {
-            self.refreshed_seq_no
-        };
+        let visible = self.visible_seq_no();
         let lock = || {
             self.request_cache
                 .lock()
@@ -642,7 +638,17 @@ impl Index {
 
     /// Whether the write with `seq_no` is visible to search.
     pub fn searchable(&self, seq_no: u64) -> bool {
-        seq_no < self.refreshed_seq_no || self.refresh_due()
+        seq_no < self.visible_seq_no()
+    }
+
+    /// The sequence number below which writes are visible to search: every write if a
+    /// scheduled refresh has come due, else those before the last refresh.
+    pub fn visible_seq_no(&self) -> u64 {
+        if self.refresh_due() {
+            self.next_seq_no
+        } else {
+            self.refreshed_seq_no
+        }
     }
 
     /// A live document; one on disk is read from its segment.
