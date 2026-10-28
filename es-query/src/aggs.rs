@@ -2234,9 +2234,10 @@ pub(crate) fn render(
     Ok(out)
 }
 
-/// Counts `n` more buckets toward the request's [`MAX_BUCKETS`], like ES's MultiBucketConsumer.
-// ponytail: counts histogram, filters and range buckets as rendered, so sub-aggregations of empty
-// buckets count once per bucket (ES reduces them once) and terms buckets not at all
+/// Counts `n` more buckets toward the request's [`MAX_BUCKETS`], like ES's MultiBucketConsumer
+/// in the final reduce.
+// ponytail: counts the buckets rendered; ES also counts buckets it drops (min_doc_count, size),
+// then takes them back, so it can fail on a peak this never reaches
 fn consume_buckets(buckets: &Cell<usize>, n: usize) -> Result<(), QueryError> {
     buckets.set(buckets.get() + n);
     match buckets.get() > MAX_BUCKETS {
@@ -2288,6 +2289,11 @@ fn render_counted(
             Metric::Terms(t) => {
                 if let Some(b) = &mut st.terms {
                     ty = t.render(b, &mut body, date, sub)?;
+                    let n = body
+                        .get("buckets")
+                        .and_then(Value::as_array)
+                        .map_or(0, Vec::len);
+                    consume_buckets(buckets, n)?;
                 }
             }
             Metric::Histogram(h) => {

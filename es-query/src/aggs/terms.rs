@@ -1122,6 +1122,24 @@ mod tests {
     }
 
     #[test]
+    fn aggs_gaps_terms_buckets_count_toward_max_buckets() {
+        // like AbstractInternalTerms' reduce: one per bucket kept, sub-aggregations included
+        let mut ix = index();
+        let ks: Vec<String> = (0..300).map(|i| format!("k{i}")).collect();
+        ix.put("6", json!({"k": ks, "n": (0..300).collect::<Vec<_>>()}));
+        let nested = |size: usize| {
+            let body = json!({"size": 0, "aggs": {"t": {"terms": {"field": "k", "size": size},
+                "aggs": {"u": {"terms": {"field": "n", "size": size}}}}}});
+            run(&[&ix], body)
+        };
+        assert!(nested(200).is_ok());
+        assert_eq!(
+            nested(300).unwrap_err(),
+            "Trying to create too many buckets. Must be less than or equal to: [65536] but this number of buckets was exceeded. This limit can be set by changing the [search.max_buckets] cluster level setting."
+        );
+    }
+
+    #[test]
     fn aggs_gaps_order_by_percentiles() {
         let p = json!({"p": {"percentiles": {"field": "n", "percents": [50, 99.9]}}});
         assert_eq!(
