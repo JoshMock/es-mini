@@ -22,7 +22,7 @@ use std::{
     hash::{BuildHasher, Hash, Hasher},
     ops::{Range, RangeInclusive},
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicUsize, Ordering::Relaxed},
     },
 };
@@ -3032,14 +3032,48 @@ fn run_at(
                 let mut index = GroupIndex::default();
                 // Each row's key values, read in place where a key is a column.
                 let mut vals: Vec<Cow<Value>> = Vec::with_capacity(by.len());
+                // With one column as the key, a document's group by its value's number in its
+                // index's `Group::ords`, once a row with that value has found it.
+                let single = match &by[..] {
+                    [(_, Expr::Field(f, _))] => Some(f),
+                    _ => None,
+                };
+                let mut known: Vec<(&Group, Vec<usize>)> = Vec::new();
                 for (i, r) in rows.iter().enumerate() {
+                    let mut slot = None;
+                    if let (Some(f), Line::Doc(g, at, added)) = (single, r)
+                        && added.is_none_or(|a| a.get(f).is_none())
+                        && let Some(ords) = g.ords(f)
+                        && ords[*at] != u32::MAX
+                    {
+                        let k = match known.iter().position(|(k, _)| std::ptr::eq(*k, *g)) {
+                            Some(k) => k,
+                            None => {
+                                known.push((g, Vec::new()));
+                                known.len() - 1
+                            }
+                        };
+                        let (ord, groups) = (ords[*at] as usize, &mut known[k].1);
+                        if groups.len() <= ord {
+                            groups.resize(ord + 1, usize::MAX);
+                        }
+                        let b = &mut groups[ord];
+                        if *b != usize::MAX {
+                            buckets[*b].1.push(i);
+                            continue;
+                        }
+                        slot = Some(b);
+                    }
                     vals.clear();
                     vals.extend(by.iter().map(|(_, e)| match e {
                         Expr::Field(f, _) => Cow::Borrowed(r.field(f)),
                         e => Cow::Owned(eval(e, r).unwrap_or(Value::Null)),
                     }));
                     if !vals.iter().any(|v| v.is_array()) {
-                        join_group(&mut buckets, &mut index, vals.iter().map(|v| &**v), i);
+                        let b = join_group(&mut buckets, &mut index, vals.iter().map(|v| &**v), i);
+                        if let Some(slot) = slot {
+                            *slot = b;
+                        }
                         continue;
                     }
                     // A row joins the group of every combination of its distinct key values.
@@ -3249,20 +3283,24 @@ fn run_at(
 
 type Row = BTreeMap<String, Value>;
 
-/// Adds `r` to the STATS group of `key`, a new group if none has it. `index` lists the groups
-/// by their key's `key_hash`.
+/// Adds `r` to the STATS group of `key`, a new group if none has it, and returns that group.
+/// `index` lists the groups by their key's `key_hash`.
 fn join_group<'v, T>(
     groups: &mut Vec<(Vec<Value>, Vec<T>)>,
     index: &mut GroupIndex,
     key: impl Iterator<Item = &'v Value> + Clone,
     r: T,
-) {
+) -> usize {
     let slots = index.entry(key_hash(key.clone())).or_default();
     match slots.iter().find(|&&g| groups[g].0.iter().eq(key.clone())) {
-        Some(&g) => groups[g].1.push(r),
+        Some(&g) => {
+            groups[g].1.push(r);
+            g
+        }
         None => {
             slots.push(groups.len());
             groups.push((key.cloned().collect(), vec![r]));
+            groups.len() - 1
         }
     }
 }
@@ -3330,25 +3368,54 @@ struct Group {
     /// Where the last column looked up is: rows read one column many times in a row. Shared by
     /// concurrent queries; a stale hint only costs the search.
     hint: AtomicUsize,
+    /// Per column, made on its first use as a STATS key: each row's value as a number that equal
+    /// values share (`u32::MAX` for a multi-value), so keying a cached table hashes nothing.
+    ords: Vec<OnceLock<Vec<u32>>>,
 }
 
 impl Group {
     fn new(len: usize, cols: BTreeMap<String, Vec<Value>>) -> Group {
-        let cols = cols.into_iter().collect();
+        let cols: Vec<_> = cols.into_iter().collect();
         let hint = AtomicUsize::new(0);
-        Group { len, cols, hint }
+        let ords = cols.iter().map(|_| OnceLock::new()).collect();
+        Group {
+            len,
+            cols,
+            hint,
+            ords,
+        }
     }
 
     fn col(&self, c: &str) -> Option<&[Value]> {
+        self.at(c).map(|at| &self.cols[at].1[..])
+    }
+
+    fn at(&self, c: &str) -> Option<usize> {
         let at = self.hint.load(Relaxed);
-        if let Some((name, v)) = self.cols.get(at)
+        if let Some((name, _)) = self.cols.get(at)
             && name == c
         {
-            return Some(v);
+            return Some(at);
         }
         let at = (self.cols.binary_search_by(|(name, _)| name.as_str().cmp(c))).ok()?;
         self.hint.store(at, Relaxed);
-        Some(&self.cols[at].1)
+        Some(at)
+    }
+
+    // ponytail: an uncached table (several indices, an alias filter, METADATA) builds them per
+    // query, about one more hashing pass than keying alone
+    fn ords(&self, c: &str) -> Option<&[u32]> {
+        let at = self.at(c)?;
+        let ords = self.ords[at].get_or_init(|| {
+            let (mut distinct, mut index) = (Vec::new(), GroupIndex::default());
+            (self.cols[at].1.iter())
+                .map(|v| match v.is_array() {
+                    true => u32::MAX,
+                    false => join_group(&mut distinct, &mut index, [v].into_iter(), ()) as u32,
+                })
+                .collect()
+        });
+        Some(ords)
     }
 
     fn lines(&self) -> impl Iterator<Item = Line<'_>> {
@@ -3900,6 +3967,48 @@ mod tests {
         for (a, b) in pairs {
             assert_eq!(a, b);
             assert_eq!(key_hash([&a].into_iter()), key_hash([&b].into_iter()));
+        }
+    }
+
+    /// STATS BY one column (keyed through `Group::ords`) groups like the general path does, in
+    /// the same order, with multi-values, nulls, numbers, several indices and EVAL's shadowing.
+    #[test]
+    fn after_bench_stats_by_a_column_groups_like_by_two_keys() {
+        let ks = [
+            serde_json::json!("a"),
+            serde_json::json!(["b", "a"]),
+            Value::Null,
+            serde_json::json!("b"),
+            serde_json::json!("a"),
+            serde_json::json!("c"),
+        ];
+        let mut indices = BTreeMap::new();
+        for (name, docs) in [("i", &ks[..]), ("j", &ks[2..])] {
+            let mut i = Index::default();
+            for (n, k) in docs.iter().enumerate() {
+                let doc = serde_json::json!({"k": k, "n": n});
+                i.map_dynamic(&n.to_string(), &doc).unwrap();
+                i.put(&n.to_string(), doc);
+            }
+            indices.insert(name.to_owned(), i);
+        }
+        let values = |q: &str| run(&indices, q).unwrap().values;
+        for (from, eval) in [
+            ("i", ""),
+            ("i,j", ""),
+            ("i", "| EVAL k = CASE(n == 0, \"c\", k) "),
+        ] {
+            let q =
+                |by: &str| format!("FROM {from} {eval}| EVAL z = 1 | STATS c = COUNT(*) BY {by}");
+            let two: Vec<_> = (values(&q("k, z")).into_iter())
+                .map(|mut r| {
+                    r.pop();
+                    r
+                })
+                .collect();
+            for _ in 0..2 {
+                assert_eq!(values(&q("k")), two, "{from} {eval}");
+            }
         }
     }
 
