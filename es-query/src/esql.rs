@@ -3027,8 +3027,10 @@ fn run_at(
                 }
             }
             Command::Stats(aggs, by) => {
-                // Each group's key and its rows' positions.
-                let mut buckets: Vec<(Vec<Value>, Vec<usize>)> = Vec::new();
+                // Each group's key and its rows, only counted.
+                let mut buckets: Vec<(Vec<Value>, Vec<()>)> = Vec::new();
+                // Each row's groups, in row order.
+                let mut members: Vec<(usize, usize)> = Vec::with_capacity(rows.len());
                 let mut index = GroupIndex::default();
                 // Each row's key values, read in place where a key is a column.
                 let mut vals: Vec<Cow<Value>> = Vec::with_capacity(by.len());
@@ -3059,7 +3061,8 @@ fn run_at(
                         }
                         let b = &mut groups[ord];
                         if *b != usize::MAX {
-                            buckets[*b].1.push(i);
+                            buckets[*b].1.push(());
+                            members.push((i, *b));
                             continue;
                         }
                         slot = Some(b);
@@ -3070,7 +3073,8 @@ fn run_at(
                         e => Cow::Owned(eval(e, r).unwrap_or(Value::Null)),
                     }));
                     if !vals.iter().any(|v| v.is_array()) {
-                        let b = join_group(&mut buckets, &mut index, vals.iter().map(|v| &**v), i);
+                        let b = join_group(&mut buckets, &mut index, vals.iter().map(|v| &**v), ());
+                        members.push((i, b));
                         if let Some(slot) = slot {
                             *slot = b;
                         }
@@ -3097,15 +3101,13 @@ fn run_at(
                             .collect();
                     }
                     for key in keys {
-                        join_group(&mut buckets, &mut index, key.iter(), i);
+                        let b = join_group(&mut buckets, &mut index, key.iter(), ());
+                        members.push((i, b));
                     }
                 }
                 if by.is_empty() && buckets.is_empty() {
                     buckets.push((Vec::new(), Vec::new()));
                 }
-                // Each aggregate's argument per row, read in row order and in place where it is
-                // a field: a group then gathers its values from these instead of chasing its
-                // rows through memory.
                 let arg = |e| aggregate(e).expect("STATS was verified").1;
                 let computed: Vec<Vec<Value>> = (aggs.iter())
                     .map(|(_, e)| match arg(e) {
@@ -3115,25 +3117,10 @@ fn run_at(
                             .collect(),
                     })
                     .collect();
-                let args: Vec<Vec<&Value>> = (aggs.iter().zip(&computed))
-                    .map(|((_, e), c)| match arg(e) {
-                        Some(Expr::Field(f, _)) => rows.iter().map(|r| r.field(f)).collect(),
-                        _ => c.iter().collect(),
-                    })
-                    .collect();
-                let agg = |name: &str, e: &Expr, group: &[usize], arg: &[&Value]| {
+                let agg = |name: &str, e: &Expr, count: usize, all: Vec<&Value>| {
                     let (f, arg_expr, param) = aggregate(e).expect("STATS was verified");
                     if arg_expr.is_none() {
-                        return group.len().into();
-                    }
-                    // Every value in the group: multi-values count value by value.
-                    let mut all: Vec<&Value> = Vec::with_capacity(group.len());
-                    for v in group.iter().map(|&i| arg[i]) {
-                        match v {
-                            Value::Array(a) => all.extend(a.iter().filter(|v| !v.is_null())),
-                            Value::Null => {}
-                            v => all.push(v),
-                        }
+                        return count.into();
                     }
                     let doubles = all.iter().filter_map(|v| v.as_f64());
                     match f.as_str() {
@@ -3214,12 +3201,36 @@ fn run_at(
                         _ => (crate::aggs::compensated_sum(doubles) / all.len() as f64).into(),
                     }
                 };
-                rows = buckets
-                    .into_iter()
-                    .map(|(key, group)| {
-                        let mut r: Row = (aggs.iter().zip(&args))
-                            .map(|((a, e), arg)| (a.clone(), agg(a, e, &group, arg)))
-                            .collect();
+                let mut out: Vec<Row> = buckets.iter().map(|_| Row::new()).collect();
+                for ((a, e), c) in aggs.iter().zip(&computed) {
+                    // The values per group, gathered in one pass in row order rather than a pass
+                    // per group chasing its rows through memory: multi-values count value by
+                    // value.
+                    let x = arg(e);
+                    let mut all: Vec<Vec<&Value>> = (buckets.iter())
+                        .map(|(_, n)| Vec::with_capacity(x.map_or(0, |_| n.len())))
+                        .collect();
+                    if let Some(x) = x {
+                        for &(i, b) in &members {
+                            let v = match x {
+                                Expr::Field(f, _) => rows[i].field(f),
+                                _ => &c[i],
+                            };
+                            let all = &mut all[b];
+                            match v {
+                                Value::Array(a) => all.extend(a.iter().filter(|v| !v.is_null())),
+                                Value::Null => {}
+                                v => all.push(v),
+                            }
+                        }
+                    }
+                    for (b, r) in out.iter_mut().enumerate() {
+                        let n = buckets[b].1.len();
+                        r.insert(a.clone(), agg(a, e, n, std::mem::take(&mut all[b])));
+                    }
+                }
+                rows = (out.into_iter().zip(buckets))
+                    .map(|(mut r, (key, _))| {
                         r.extend(by.iter().map(|(b, _)| b.clone()).zip(key));
                         Line::Own(r)
                     })
