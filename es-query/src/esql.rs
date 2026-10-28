@@ -20,6 +20,7 @@ use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
     ops::{Range, RangeInclusive},
+    sync::Arc,
 };
 
 /// ES applies an implicit `LIMIT 1000`.
@@ -2627,17 +2628,11 @@ fn run_at(
         Source::Row(fields) => (None, [vec![Command::Eval(fields)], cmds].concat()),
         Source::From(sources, metadata, from) => (Some((sources, metadata, from)), cmds),
     };
-    let Table {
-        mut types,
-        mut conflicts,
-        groups,
-        mut cols,
-        empty,
-        counted,
-    } = match source {
+    let reads = read(&cmds);
+    let table = match source {
         Some((sources, metadata, from)) => {
             let names: Vec<String> = metadata.iter().map(|(f, _)| f.clone()).collect();
-            let table = table_from(indices, &sources, &names, &read(&cmds))?;
+            let table = table_from(indices, &sources, &names, &reads)?;
             // Like ES, unknown metadata fails verification once the indices resolve.
             let bad: Vec<&Name> = (metadata.iter())
                 .filter(|(f, _)| metadata_type(f).is_none())
@@ -2654,15 +2649,21 @@ fn run_at(
             }
             table
         }
-        None => Table {
+        None => Arc::new(Table {
             types: BTreeMap::new(),
             conflicts: BTreeMap::new(),
             groups: vec![vec![Row::new()]],
             cols: Vec::new(),
             empty: false,
             counted: false,
-        },
+        }),
     };
+    let (mut types, mut conflicts, mut cols) = (
+        table.types.clone(),
+        table.conflicts.clone(),
+        table.cols.clone(),
+    );
+    let (groups, empty, counted) = (&table.groups, table.empty, table.counted);
     // A referenced column must exist and have one type.
     let check = |cols: &[String], conflicts: &BTreeMap<String, _>, f: &str| match conflicts.get(f) {
         _ if !cols.iter().any(|c| c == f) => Some(unknown(f)),
@@ -2901,7 +2902,7 @@ fn run_at(
             }
             Command::Eval(named) => {
                 for r in &mut rows {
-                    let r = r.to_mut();
+                    let r = owned(r, &reads);
                     for (name, e) in named {
                         let v = eval(e, r).unwrap_or(Value::Null);
                         r.insert(name.clone(), v);
@@ -2937,7 +2938,7 @@ fn run_at(
             },
             Command::Rename(pairs) => {
                 for r in &mut rows {
-                    let r = r.to_mut();
+                    let r = owned(r, &reads);
                     for ((old, _), new, _) in pairs.iter().filter(|(o, n, _)| o.0 != *n) {
                         let v = r.remove(old).unwrap_or(Value::Null);
                         r.insert(new.clone(), v);
@@ -3088,7 +3089,7 @@ fn run_at(
         rows.truncate(DEFAULT_LIMIT);
     }
     let (documents_found, values_loaded) = match counted {
-        true => load_counts(&groups, &cmds, &cols, &types),
+        true => load_counts(groups, &cmds, &cols, &types),
         false => (0, 0),
     };
     if empty {
@@ -3159,7 +3160,7 @@ fn table_from(
     sources: &[String],
     metadata: &[String],
     read: &dyn Fn(&str) -> bool,
-) -> Result<Table, EsqlError> {
+) -> Result<Arc<Table>, EsqlError> {
     // Like Elasticsearch: a missing index is only "unknown" when no source matches anything.
     let none_match = || {
         sources
@@ -3179,10 +3180,37 @@ fn table_from(
         }
     };
     let targets = aliases::resolve_data(indices, &sources.join(",")).map_err(unknown_index)?;
+    let filters = (targets.iter())
+        .map(|t| t.filter.as_ref().map(crate::parse_query).transpose())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| EsqlError::Verification(e.msg))?;
+    // A whole index's table, every column read, is kept until the index changes.
+    // ponytail: holds every value of the index in memory until its next write; cache per
+    // column, or bound it, if memory matters more than repeated queries
+    if let [t] = &targets[..]
+        && t.filter.is_none()
+        && metadata.is_empty()
+    {
+        let index: &Index = indices[&t.index].borrow();
+        return Ok(index.memo(|| table_of(indices, &targets, &filters, &[], &|_| true)));
+    }
+    Ok(Arc::new(table_of(
+        indices, &targets, &filters, metadata, read,
+    )))
+}
+
+/// The table of the documents of `targets` that their `filters` match.
+fn table_of(
+    indices: &aliases::Map<impl aliases::IndexMeta + std::borrow::Borrow<Index>>,
+    targets: &[aliases::Target],
+    filters: &[Option<crate::Query>],
+    metadata: &[String],
+    read: &dyn Fn(&str) -> bool,
+) -> Table {
     // Per column: its ES|QL type, and the indices for each mapping type (named like ES|QL does).
     let mut mapped: BTreeMap<String, (String, BTreeMap<String, Vec<String>>)> = BTreeMap::new();
     let mut docs = Vec::new();
-    for t in &targets {
+    for (t, filter) in targets.iter().zip(filters) {
         let index: &Index = indices[&t.index].borrow();
         // Read once: on-disk documents are decoded on every read.
         let mut mine: Vec<_> = index.docs().collect();
@@ -3195,12 +3223,6 @@ fn table_from(
             let e = mapped.entry(c).or_insert_with(|| (ty, BTreeMap::new()));
             e.1.entry(es_type).or_default().push(t.index.clone());
         }
-        let filter = t
-            .filter
-            .as_ref()
-            .map(crate::parse_query)
-            .transpose()
-            .map_err(|e| EsqlError::Verification(e.msg))?;
         let searcher = filter.as_ref().map(|f| (crate::Searcher::new(index, f), f));
         mine.retain(|(id, d)| {
             searcher
@@ -3232,7 +3254,7 @@ fn table_from(
     // One group of rows per index, for counting what Elasticsearch's per-shard plan loads.
     let groups = docs
         .iter()
-        .zip(&targets)
+        .zip(targets)
         .map(|(g, t)| {
             let mappings = &indices[&t.index].borrow().mappings;
             // Per column read, what loading it needs: looked up once, not per document.
@@ -3281,14 +3303,14 @@ fn table_from(
         cols.push(f.clone());
         types.insert(f.clone(), metadata_type(f).unwrap_or_default().into());
     }
-    Ok(Table {
+    Table {
         cols,
         types,
         conflicts,
         groups,
         empty: targets.is_empty(),
         counted: true,
-    })
+    }
 }
 
 /// Whether a query reads (or outputs) a source column: every column unless a KEEP or STATS
@@ -3316,6 +3338,19 @@ fn read(cmds: &[Command]) -> impl Fn(&str) -> bool + '_ {
                 _ => false,
             })
     }
+}
+
+/// A row to change: a shared one is copied with only the columns the query reads.
+fn owned<'r>(r: &'r mut Cow<Row>, reads: &dyn Fn(&str) -> bool) -> &'r mut Row {
+    if let Cow::Borrowed(b) = *r {
+        *r = Cow::Owned(
+            b.iter()
+                .filter(|(c, _)| reads(c))
+                .map(|(c, v)| (c.clone(), v.clone()))
+                .collect(),
+        );
+    }
+    r.to_mut()
 }
 
 fn sort_rows<R: Borrow<Row>>(rows: &mut [R], keys: &[SortKey]) {
@@ -3507,6 +3542,28 @@ mod tests {
         let r = run_at(&indices, "FROM i | EVAL t = NOW() | KEEP t", 1000).unwrap();
         let t = Value::from("1970-01-01T00:00:01.000Z");
         assert_eq!(r.values, vec![vec![t]; 3]);
+    }
+
+    /// An index's table is reused between queries, but never past a write or mapping change.
+    #[test]
+    fn esql_sees_every_write_and_mapping_change() {
+        let values = |indices: &BTreeMap<String, Index>, q: &str| run(indices, q).unwrap().values;
+        let mut indices = BTreeMap::from([("i".to_owned(), Index::default())]);
+        let i = indices.get_mut("i").unwrap();
+        i.map_dynamic("1", &serde_json::json!({"n": 1})).unwrap();
+        i.put("1", serde_json::json!({"n": 1}));
+        let q = "FROM i | STATS c = COUNT(*), s = SUM(n)";
+        assert_eq!(values(&indices, q), [[Value::from(1), 1.into()]]);
+        indices
+            .get_mut("i")
+            .unwrap()
+            .put("2", serde_json::json!({"n": 2}));
+        assert_eq!(values(&indices, q), [[Value::from(2), 3.into()]]);
+        indices.get_mut("i").unwrap().delete("1");
+        assert_eq!(values(&indices, q), [[Value::from(1), 2.into()]]);
+        let i = indices.get_mut("i").unwrap();
+        i.map_dynamic("3", &serde_json::json!({"m": "x"})).unwrap();
+        assert_eq!(values(&indices, "FROM i | KEEP m"), [[Value::Null]]);
     }
 
     /// A top N keeps the rows a stable sort and a truncation keep, ties in input order.
