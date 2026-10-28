@@ -295,6 +295,8 @@ pub struct Index {
     /// Writes not yet in the translog (see [`disk::persist`]).
     unlogged: Vec<es_codec::translog::Op>,
     request_cache: std::sync::Mutex<RequestCache>,
+    /// What [`Index::memo`] built, and the mappings it was built with.
+    memo: Memo,
 }
 
 /// The request cache's cap, `indices.requests.cache.size`: Elasticsearch's default of 1% of
@@ -302,6 +304,15 @@ pub struct Index {
 // ponytail: each index is capped on its own, where ES caps all of a node's together; es-mini
 // has no heap or node settings to size it from
 pub const REQUEST_CACHE_BYTES: usize = (1 << 30) / 100;
+
+#[derive(Default)]
+struct Memo(Mutex<Option<(Mappings, Arc<dyn std::any::Any + Send + Sync>)>>);
+
+impl std::fmt::Debug for Memo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Memo")
+    }
+}
 
 /// Elasticsearch's shard request cache (see [`Index::cached`]).
 #[derive(Debug, Default)]
@@ -339,6 +350,11 @@ impl Index {
     /// Removes a live document, returning it if no segment holds it: one in a segment stays
     /// counted in its statistics, as a deleted document does in Lucene.
     fn take(&mut self, id: &str) -> Option<Option<Arc<Document>>> {
+        *self
+            .memo
+            .0
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner) = None;
         if let Some(d) = self.docs.remove(id) {
             self.postings
                 .get_mut()
@@ -505,6 +521,22 @@ impl Index {
             refreshed_at: self.refreshed_at,
             ..Index::default()
         }
+    }
+
+    /// What `build` makes of the documents and mappings, reused until a write or a mapping
+    /// change. One value at a time: building another type replaces it.
+    pub fn memo<T: std::any::Any + Send + Sync>(&self, build: impl FnOnce() -> T) -> Arc<T> {
+        // Held while building, so concurrent callers wait for one build.
+        let mut memo = self.memo.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((mappings, v)) = &*memo
+            && *mappings == self.mappings
+            && let Ok(v) = v.clone().downcast::<T>()
+        {
+            return v;
+        }
+        let v = Arc::new(build());
+        *memo = Some((self.mappings.clone(), v.clone()));
+        v
     }
 
     /// The result of `compute` for `key`, reused until the visible documents or the mappings
@@ -1174,6 +1206,27 @@ mod tests {
         let (hits, misses, evictions, bytes) = ix.request_cache_stats();
         assert_eq!((hits, misses, evictions), (1, 4, 0));
         assert!(bytes > 0);
+    }
+
+    #[test]
+    fn memo_is_reused_until_a_write_or_a_mapping_change() {
+        let mut ix = Index::default();
+        let mut builds = 0;
+        let mut memo = |ix: &Index| {
+            *ix.memo(|| {
+                builds += 1;
+                builds
+            })
+        };
+        assert_eq!(memo(&ix), 1);
+        assert_eq!(memo(&ix), 1);
+        ix.put("1", json!({}));
+        assert_eq!(memo(&ix), 2);
+        ix.delete("1");
+        assert_eq!(memo(&ix), 3);
+        ix.mappings.source = Some(json!({"enabled": false}));
+        assert_eq!(memo(&ix), 4);
+        assert_eq!(memo(&ix), 4);
     }
 
     #[test]
