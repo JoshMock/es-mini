@@ -56,7 +56,7 @@ pub async fn field_caps_all(
     field_caps(state, Path("_all".into()), uri, params, body).await
 }
 
-// ponytail: `index_filter` and `runtime_mappings` are ignored; every resolved index is reported
+// ponytail: `index_filter` keeps empty indices and those with a matching document; Elasticsearch only drops those it can prove empty of matches
 pub async fn field_caps(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -88,16 +88,28 @@ pub async fn field_caps(
         |k: &str| -> Vec<&str> { params.get(k).map_or(Vec::new(), |v| v.split(',').collect()) };
     let (filters, types) = (list("filters"), list("types"));
     let shared = state.read();
-    let names: BTreeSet<String> = crate::indices::data_targets(&*shared, &name, &params)?
-        .into_iter()
-        .map(|t| t.index)
-        .collect();
+    let resolved = crate::indices::data_targets(&*shared, &name, &params)?;
+    let mut names: BTreeSet<String> = resolved.iter().map(|t| t.index.clone()).collect();
     let indices = shared.lock(&names);
+    if !body["index_filter"].is_null() {
+        let q = es_query::parse_query(&body["index_filter"])
+            .map_err(|e| AppError::ParsingException(e.to_string()))?;
+        names.retain(|n| {
+            let one = [("", &*indices[n], None)];
+            es_query::count_many(&one, &q).map_or(true, |c| c > 0 || indices[n].docs().count() == 0)
+        });
+    }
+    let runtime: Vec<(String, String)> =
+        (body["runtime_mappings"].as_object().into_iter().flatten())
+            .filter_map(|(f, s)| Some((f.clone(), s["type"].as_str()?.to_owned())))
+            .collect();
 
     // field -> type -> (capabilities, indices having the field with that type)
     let mut found: BTreeMap<String, BTreeMap<String, (Value, Vec<&str>)>> = BTreeMap::new();
     for index in &names {
-        for (field, t, metadata, searchable, aggregatable) in fields(&indices[index], &filters) {
+        for (field, t, metadata, searchable, aggregatable) in
+            fields(&indices[index], &filters, &runtime)
+        {
             if !patterns.iter().any(|p| glob(p, &field))
                 || !(types.is_empty() || types.contains(&t.as_str()))
             {
@@ -149,7 +161,11 @@ fn cap(t: &str, metadata: bool, searchable: bool, aggregatable: bool) -> Value {
 }
 
 /// An index's fields as (name, type, metadata, searchable, aggregatable), honoring the `filters` parameter.
-fn fields(index: &Index, filters: &[&str]) -> Vec<(String, String, bool, bool, bool)> {
+fn fields(
+    index: &Index,
+    filters: &[&str],
+    runtime: &[(String, String)],
+) -> Vec<(String, String, bool, bool, bool)> {
     let mapped = |name: String, m: &FieldMapping| {
         let t = m.mapping_type();
         let aggregatable = t != "text";
@@ -175,5 +191,12 @@ fn fields(index: &Index, filters: &[&str]) -> Vec<(String, String, bool, bool, b
             );
         }
     }
+    // Runtime fields replace mapped fields of the same name.
+    out.retain(|(n, ..)| !runtime.iter().any(|(r, _)| r == n));
+    out.extend(
+        runtime
+            .iter()
+            .map(|(n, t)| (n.clone(), t.clone(), false, true, true)),
+    );
     out
 }

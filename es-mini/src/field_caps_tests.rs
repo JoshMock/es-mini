@@ -186,3 +186,41 @@ async fn mapping_validation_empty_objects_are_left_out() {
     .await;
     assert_eq!(r, json!({"indices": ["o"], "fields": {}}));
 }
+
+#[tokio::test]
+async fn api_gaps_field_caps_index_filter_drops_indices_without_matches() {
+    let app = app();
+    call(
+        &app,
+        Method::PUT,
+        "/p/_doc/1?refresh=true",
+        Some(json!({"k": "x"})),
+    )
+    .await;
+    call(
+        &app,
+        Method::PUT,
+        "/q/_doc/1?refresh=true",
+        Some(json!({"k": "y", "m": 1})),
+    )
+    .await;
+    let body = json!({"fields": ["*"], "index_filter": {"term": {"k.keyword": "y"}}});
+    let (s, r) = call(&app, Method::POST, "/_field_caps", Some(body)).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(r["indices"], json!(["q"]));
+    assert!(r["fields"].get("m").is_some());
+}
+
+#[tokio::test]
+async fn api_gaps_field_caps_runtime_mappings_add_fields() {
+    let app = seeded().await;
+    let body = json!({"fields": ["rt", "n"], "runtime_mappings": {
+        "rt": {"type": "keyword", "script": "emit('x')"}}});
+    let (s, r) = call(&app, Method::POST, "/a/_field_caps", Some(body)).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(
+        r["fields"]["rt"],
+        json!({"keyword": cap("keyword", true, true)})
+    );
+    assert!(r["fields"].get("n").is_some());
+}
