@@ -45,7 +45,7 @@ const SUITES: Record<string, Suite> = {
   goals: {
     kind: "goal",
     list: "ralph/goals.txt",
-    frozen: ["ralph/ponytail-ledger.md", "ralph/ledger-check.sh", "bench"],
+    frozen: ["ralph/ponytail-ledger.md", "ralph/ledger-check.sh", "bench", "ralph/esql-cold.sh"],
     howTo: () =>
       "Read z_old/EXECUTION.md for the task's full definition of done. Make one coherent, verified step " +
       "of progress per iteration (it is fine if the goal needs several iterations). Delete the goal's line " +
@@ -82,7 +82,7 @@ const GOAL_MODELS: Record<string, string> = Object.fromEntries(
       "unsupported-codecs", "index-sorting", "date-semantics", "per-index-locks",
       "esql-parity-harness", "esql-eval-functions", "esql-stats",
       "disk-writer-completeness", "write-failure-handling", "memory-bounds", "date-formats",
-      "esql-es-semantics", "regexp-automaton", "esql-perf-100k",
+      "esql-es-semantics", "regexp-automaton", "esql-perf-100k", "esql-cold-after-write",
     ],
     [`${OPUS}:medium`]: [
       "api-field-caps", "api-by-query", "api-scroll-pit", "api-search-template", "aggs-terms",
