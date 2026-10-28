@@ -21,7 +21,10 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     hash::{BuildHasher, Hash, Hasher},
     ops::{Range, RangeInclusive},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering::Relaxed},
+    },
 };
 
 /// ES applies an implicit `LIMIT 1000`.
@@ -2695,10 +2698,7 @@ fn run_at(
         None => Arc::new(Table {
             types: BTreeMap::new(),
             conflicts: BTreeMap::new(),
-            groups: vec![Group {
-                len: 1,
-                cols: BTreeMap::new(),
-            }],
+            groups: vec![Group::new(1, BTreeMap::new())],
             cols: Vec::new(),
             empty: false,
             counted: false,
@@ -3325,10 +3325,32 @@ impl Fields for Row {
 /// per row.
 struct Group {
     len: usize,
-    cols: BTreeMap<String, Vec<Value>>,
+    /// By name.
+    cols: Vec<(String, Vec<Value>)>,
+    /// Where the last column looked up is: rows read one column many times in a row. Shared by
+    /// concurrent queries; a stale hint only costs the search.
+    hint: AtomicUsize,
 }
 
 impl Group {
+    fn new(len: usize, cols: BTreeMap<String, Vec<Value>>) -> Group {
+        let cols = cols.into_iter().collect();
+        let hint = AtomicUsize::new(0);
+        Group { len, cols, hint }
+    }
+
+    fn col(&self, c: &str) -> Option<&[Value]> {
+        let at = self.hint.load(Relaxed);
+        if let Some((name, v)) = self.cols.get(at)
+            && name == c
+        {
+            return Some(v);
+        }
+        let at = (self.cols.binary_search_by(|(name, _)| name.as_str().cmp(c))).ok()?;
+        self.hint.store(at, Relaxed);
+        Some(&self.cols[at].1)
+    }
+
     fn lines(&self) -> impl Iterator<Item = Line<'_>> {
         (0..self.len).map(move |i| Line::Doc(self, i, None))
     }
@@ -3359,7 +3381,7 @@ impl Fields for Line<'_> {
         match self {
             Line::Doc(g, i, added) => match added.and_then(|a| a.get(c)) {
                 Some(v) => v,
-                None => g.cols.get(c).map_or(&NULL, |v| &v[*i]),
+                None => g.col(c).map_or(&NULL, |v| &v[*i]),
             },
             Line::Own(r) => r.field(c),
         }
@@ -3529,7 +3551,7 @@ fn table_of(
                 });
                 cols.insert(f.clone(), v.collect());
             }
-            Group { len: g.len(), cols }
+            Group::new(g.len(), cols)
         })
         .collect();
     // Metadata columns follow the fields, in the order listed.
@@ -3849,6 +3871,18 @@ mod tests {
         for (a, b) in pairs {
             assert_eq!(a, b);
             assert_eq!(key_hash([&a].into_iter()), key_hash([&b].into_iter()));
+        }
+    }
+
+    /// A column lookup finds the column whatever the hint left by the lookup before it.
+    #[test]
+    fn group_col_finds_each_column_after_any_other() {
+        let names = ["a", "b", "c"];
+        let cols = names.map(|n| (n.to_owned(), vec![Value::from(n)]));
+        let g = Group::new(1, BTreeMap::from(cols));
+        for n in ["c", "c", "a", "x", "b", "a", "c"] {
+            let found = names.contains(&n).then(|| vec![Value::from(n)]);
+            assert_eq!(g.col(n).map(<[Value]>::to_vec), found);
         }
     }
 
