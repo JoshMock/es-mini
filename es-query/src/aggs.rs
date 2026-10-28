@@ -85,9 +85,9 @@ struct TopHits {
     version: bool,
     seq_no: bool,
     explain: bool,
-    docvalue_fields: Vec<String>,
+    docvalue_fields: Vec<FieldSpec>,
     /// The `fields` to fetch; `None` inherits the search's.
-    fields: Option<Vec<String>>,
+    fields: Option<Vec<FieldSpec>>,
     stored_fields: Vec<String>,
     /// The fields to highlight, each with the query to highlight it by (the search's if `None`).
     highlight: Vec<(String, Option<Query>)>,
@@ -150,9 +150,8 @@ impl TopHits {
                 "version" => t.version = v.as_bool().ok_or_else(|| bad(k))?,
                 "seq_no_primary_term" => t.seq_no = v.as_bool().ok_or_else(|| bad(k))?,
                 "explain" => t.explain = v.as_bool().ok_or_else(|| bad(k))?,
-                // ponytail: no per-field `format`
-                "docvalue_fields" => t.docvalue_fields = field_names(v).ok_or_else(|| bad(k))?,
-                "fields" => t.fields = Some(field_names(v).ok_or_else(|| bad(k))?),
+                "docvalue_fields" => t.docvalue_fields = field_specs(v).ok_or_else(|| bad(k))?,
+                "fields" => t.fields = Some(field_specs(v).ok_or_else(|| bad(k))?),
                 "stored_fields" => stored_fields = Some(patterns(k, v)?),
                 "highlight" => {
                     // ponytail: only `fields` of plain names, each with a `highlight_query`
@@ -1375,15 +1374,32 @@ fn doc_values(s: &Searcher, field: &str, mapping: &FieldMapping, doc: &Document)
     v
 }
 
-/// A `fields`/`docvalue_fields` list: names, or `{"field": name}` objects.
-// ponytail: no per-field `format` or wildcard patterns
-pub(crate) fn field_names(v: &Value) -> Option<Vec<String>> {
+/// A `fields`/`docvalue_fields` entry: a field name or `*` pattern, and the `format` of its
+/// values.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FieldSpec {
+    pattern: String,
+    format: Option<String>,
+}
+
+/// A `fields`/`docvalue_fields` list: names, or `{"field": name, "format": f}` objects.
+pub(crate) fn field_specs(v: &Value) -> Option<Vec<FieldSpec>> {
     (v.as_array()?.iter())
-        .map(|f| match f {
-            Value::Object(o) if o.len() == 1 => o.get("field"),
-            f => Some(f),
+        .map(|f| {
+            let (pattern, format) = match f {
+                Value::Object(o) => {
+                    let format = match o.get("format") {
+                        None => None,
+                        Some(f) => Some(f.as_str()?.to_owned()),
+                    };
+                    let known = |k: &String| matches!(k.as_str(), "field" | "format");
+                    (o.keys().all(known)).then_some((o.get("field")?, format))?
+                }
+                f => (f, None),
+            };
+            let pattern = pattern.as_str()?.to_owned();
+            Some(FieldSpec { pattern, format })
         })
-        .map(|f| f.and_then(Value::as_str).map(String::from))
         .collect()
 }
 
@@ -1404,7 +1420,7 @@ fn stored_fields(s: &Searcher, fields: &[String], doc: &Document) -> Map<String,
 }
 
 /// Gives every `top_hits` without its own `fields` the search's, like ES's SubSearchContext.
-pub(crate) fn inherit_fields(aggs: &mut [Agg], fields: &[String]) {
+pub(crate) fn inherit_fields(aggs: &mut [Agg], fields: &[FieldSpec]) {
     for a in aggs {
         if let Metric::TopHits(t) = &mut a.metric {
             t.fields.get_or_insert_with(|| fields.to_vec());
@@ -1414,15 +1430,40 @@ pub(crate) fn inherit_fields(aggs: &mut [Agg], fields: &[String]) {
 }
 
 /// A hit's `fields`: each mapped field's values, dates formatted. `fetch` reads them like ES's
-/// FieldFetcher (source order, text included), otherwise as doc values.
+/// FieldFetcher (source order, text included, only dates take a `format`), otherwise as doc
+/// values (numbers also take a DecimalFormat `format`). Patterns expand to mapped and runtime
+/// fields; the last match of a field sets its format, like FetchDocValuesContext.
+// ponytail: a `format` a field cannot take is ignored, and text fields matched by a pattern
+// have no doc values; ES fails the shard for both
 pub(crate) fn hit_fields(
     s: &Searcher,
-    fields: &[String],
+    fields: &[FieldSpec],
     doc: &Document,
     fetch: bool,
 ) -> Map<String, Value> {
-    (fields.iter())
-        .filter_map(|f| {
+    let mut expanded: Vec<(String, Option<&str>)> = vec![];
+    let names = || {
+        let mut names = s.index.mappings.names();
+        names.extend(s.runtime_source.iter().cloned());
+        names
+    };
+    for spec in fields {
+        let matched = match spec.pattern.contains('*') {
+            true => (names().into_iter())
+                .filter(|f| es_index::aliases::glob(&spec.pattern, f))
+                .collect(),
+            false => vec![spec.pattern.clone()],
+        };
+        for f in matched {
+            match expanded.iter_mut().find(|(e, _)| *e == f) {
+                Some(e) => e.1 = spec.format.as_deref(),
+                None => expanded.push((f, spec.format.as_deref())),
+            }
+        }
+    }
+    (expanded.into_iter())
+        .filter_map(|(f, format)| {
+            let f = &f;
             if fetch && s.runtime_source.contains(f) {
                 return Some((
                     f.clone(),
@@ -1441,9 +1482,12 @@ pub(crate) fn hit_fields(
                     })
                     .collect(),
             };
-            let v: Vec<Value> = match m {
-                FieldMapping::Date { format, .. } => (v.iter())
-                    .filter_map(|t| Some(date_string(format.as_deref(), int(t)?).into()))
+            let v: Vec<Value> = match (m, format) {
+                (FieldMapping::Date { format: mapped, .. }, f) => (v.iter())
+                    .filter_map(|t| Some(date_string(f.or(mapped.as_deref()), int(t)?).into()))
+                    .collect(),
+                (m, Some(p)) if !fetch && m.is_numeric() => (v.iter())
+                    .filter_map(|x| Some(decimal_format(p, num(x)?).into()))
                     .collect(),
                 _ => v,
             };
@@ -2785,6 +2829,43 @@ mod tests {
         let fields =
             json!({"i": [151], "k": ["c"], "at": ["2021-05-04T00:00:00.000Z"], "f": [2.0]});
         assert_eq!(hit["fields"], fields);
+    }
+
+    #[test]
+    fn aggs_gaps_fields_take_a_format() {
+        // docvalue_fields format dates and numbers (DocValueFormat), fields only dates
+        let body = json!({"fields": [{"field": "at", "format": "yyyy/MM"}], "sort": ["i"],
+            "aggs": {"top": {"top_hits": {"size": 1, "sort": [{"i": "desc"}],
+            "_source": false, "fields": [], "docvalue_fields": [{"field": "at", "format": "yyyy"},
+                {"field": "f", "format": "0.0"}, {"field": "i", "format": "#,##0.00"}]}}}});
+        let (ix, req) = (index(), SearchRequest::parse(&body).unwrap());
+        let r = search(&ix, &req);
+        let top = &r.aggregations.unwrap()["top"]["hits"]["hits"][0];
+        let fields = json!({"at": ["2021"], "f": ["2.0"], "i": ["151.00"]});
+        assert_eq!(top["fields"], fields);
+        assert_eq!(
+            Value::from(r.hits[0].fields.clone()),
+            json!({"at": ["2021/05"]})
+        );
+    }
+
+    #[test]
+    fn aggs_gaps_fields_match_wildcards() {
+        // like FetchDocValuesContext: patterns expand to mapped fields, the last match's
+        // format wins
+        let body = json!({"fields": ["k*", {"field": "a*", "format": "yyyy"}, "at"],
+            "sort": ["i"], "aggs": {"top": {"top_hits": {"size": 1, "sort": [{"i": "desc"}],
+            "_source": false, "fields": [],
+            "docvalue_fields": ["*t", {"field": "at", "format": "yyyy"}]}}}});
+        let (ix, req) = (index(), SearchRequest::parse(&body).unwrap());
+        let r = search(&ix, &req);
+        let top = &r.aggregations.unwrap()["top"]["hits"]["hits"][0];
+        // `t` is text, without doc values
+        assert_eq!(top["fields"], json!({"at": ["2021"]}));
+        assert_eq!(
+            Value::from(r.hits[0].fields.clone()),
+            json!({"k": ["a", "a"], "at": ["2021-05-01T00:00:00.000Z"]})
+        );
     }
 
     #[test]

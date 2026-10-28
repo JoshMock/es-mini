@@ -29,7 +29,7 @@ pub struct SearchRequest {
     /// Body `profile`: report where each shard's aggregation time went.
     pub profile: bool,
     /// Body `fields`: the mapped fields each hit fetches.
-    pub fields: Vec<String>,
+    pub fields: Vec<crate::aggs::FieldSpec>,
     /// Body `runtime_mappings`: names of the fields that emit the hit's `_source` as a string.
     pub runtime_source: Vec<String>,
 }
@@ -145,7 +145,7 @@ impl SearchRequest {
         };
         let fields = match body.get("fields") {
             None => vec![],
-            Some(v) => crate::aggs::field_names(v).ok_or("[fields] must be field names")?,
+            Some(v) => crate::aggs::field_specs(v).ok_or("[fields] must be field names")?,
         };
         crate::aggs::inherit_fields(&mut aggs, &fields);
         let runtime_source = body
