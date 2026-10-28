@@ -2678,6 +2678,9 @@ fn run_at(
     };
     let mut rows: Vec<Line> = groups.iter().flat_map(Group::lines).collect();
     let mut explicit_limit = false;
+    // The rows at the cut of `load_counts`' plan, which it may reuse.
+    let cut = plan_cut(&cmds);
+    let mut at_cut = Vec::new();
 
     for (i, cmd) in cmds.iter().enumerate() {
         // Like ES, report every problem of the first command that has any.
@@ -3103,12 +3106,15 @@ fn run_at(
                     .collect();
             }
         }
+        if i + 1 == cut {
+            at_cut = rows.iter().take(MAX_LIMIT).cloned().collect();
+        }
     }
     if !explicit_limit {
         rows.truncate(DEFAULT_LIMIT);
     }
     let (documents_found, values_loaded) = match counted {
-        true => load_counts(groups, &cmds, &cols, &types),
+        true => load_counts(groups, &cmds, &cols, &types, &at_cut),
         false => (0, 0),
     };
     if empty {
@@ -3222,6 +3228,7 @@ impl Group {
 
 /// A row in a query: a document still in its group with the columns EVAL added (the last of a
 /// name wins), or one a command built or changed.
+#[derive(Clone)]
 enum Line<'a> {
     Doc(&'a Group, usize, Vec<(&'a str, Value)>),
     Own(Row),
@@ -3523,19 +3530,11 @@ fn load_counts(
     cmds: &[Command],
     out: &[String],
     types: &BTreeMap<String, String>,
+    at_cut: &[Line],
 ) -> (usize, usize) {
     // ponytail: the plan is cut at an EVAL, RENAME or STATS as if at a LIMIT, though ES pushes a
     // LIMIT through an EVAL or RENAME and a STATS reads every match rather than the first 1000
-    let (head, tail) = cmds.split_at(
-        cmds.iter()
-            .position(|c| {
-                matches!(
-                    c,
-                    Command::Limit(_) | Command::Eval(_) | Command::Rename(_) | Command::Stats(..)
-                )
-            })
-            .unwrap_or(cmds.len()),
-    );
+    let (head, tail) = cmds.split_at(plan_cut(cmds));
     let limit = match tail.first() {
         Some(&Command::Limit(n)) => n.min(MAX_LIMIT),
         _ => DEFAULT_LIMIT,
@@ -3582,10 +3581,20 @@ fn load_counts(
             .flat_map(|r| fields.iter().map(|f| count(r.field(f))))
             .sum()
     };
+    // The query's own rows at the cut are this top N when it has one index, one SORT before the
+    // cut (a second one would have broken the ties) and the cut is a LIMIT or the end.
+    let reuse = groups.len() == 1
+        && matches!(tail.first(), None | Some(Command::Limit(_)))
+        && head
+            .iter()
+            .filter(|c| matches!(c, Command::Sort(_)))
+            .count()
+            == 1;
     let found = (groups.iter()).map(|g| g.lines().filter(|r| passes(r, &pushed)));
     if residual.is_empty() && keys.iter().all(|k| types[k] != "text") {
         let emitted: Vec<Line> = match sort.is_empty() {
             true => found.flatten().take(limit).collect(),
+            false if reuse => at_cut.iter().take(limit).cloned().collect(),
             false => found
                 .flat_map(|g| {
                     let mut g: Vec<Line> = g.collect();
@@ -3607,6 +3616,18 @@ fn load_counts(
     top_rows(&mut rows, sort, limit);
     n += values(&rows, &(&later - &loaded));
     (documents, n)
+}
+
+/// Where `load_counts` cuts the plan: at the first LIMIT, EVAL, RENAME or STATS.
+fn plan_cut(cmds: &[Command]) -> usize {
+    (cmds.iter())
+        .position(|c| {
+            matches!(
+                c,
+                Command::Limit(_) | Command::Eval(_) | Command::Rename(_) | Command::Stats(..)
+            )
+        })
+        .unwrap_or(cmds.len())
 }
 
 fn conjuncts<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {

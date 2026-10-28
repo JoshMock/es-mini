@@ -403,6 +403,23 @@ fn documents_found_and_values_loaded_follow_the_plan() {
     }
 }
 
+/// The counts' plan keeps only the last SORT, so ties fall in document order there even where
+/// an earlier SORT ordered the query's own rows.
+#[test]
+fn documents_found_and_values_loaded_drop_an_overridden_sort() {
+    let mut t = Index::default();
+    t.put("1", json!({"k": 1, "c": "x"}));
+    t.put("2", json!({"k": 1}));
+    let all = BTreeMap::from([("t".to_owned(), t)]);
+    let r = run(
+        &all,
+        "FROM t | SORT c NULLS FIRST | SORT k | KEEP c | LIMIT 1",
+    )
+    .unwrap();
+    assert_eq!(r.values, [[Value::Null]]);
+    assert_eq!((r.documents_found, r.values_loaded), (1, 2));
+}
+
 /// Messages a live Elasticsearch 9.5.5 returned for the same queries: every problem in the first
 /// command that has any, with its line and column.
 #[test]
