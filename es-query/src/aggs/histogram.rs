@@ -450,12 +450,14 @@ impl Histogram {
         date: Option<&str>,
         mut sub: impl FnMut(&mut [Stats], &mut Map<String, Value>) -> Result<(), QueryError>,
     ) -> Result<(), QueryError> {
-        let mut v: Vec<(f64, u64, Vec<Stats>)> = std::mem::take(&mut b.counts)
+        // an empty bucket's sub-aggregations are `None`: they render (and count) once for all
+        let mut v: Vec<(f64, u64, Option<Vec<Stats>>)> = std::mem::take(&mut b.counts)
             .into_iter()
-            .map(|(k, bucket)| (k.f64(), bucket.count, bucket.subs))
+            .map(|(k, bucket)| (k.f64(), bucket.count, Some(bucket.subs)))
             .filter(|b| b.1 >= self.min_doc_count)
             .collect();
         super::consume_buckets(buckets, v.len())?;
+        let mut empty = Map::new();
         if self.min_doc_count == 0 {
             // InternalHistogram.iterateEmptyBuckets
             let (mut min, mut max) = (self.extended_bounds.min, self.extended_bounds.max);
@@ -500,10 +502,11 @@ impl Histogram {
                     }
                 }
             }
-            v.extend(keys.into_iter().map(|k| (k, 0, b.empty.clone())));
+            v.extend(keys.into_iter().map(|k| (k, 0, None)));
+            sub(&mut b.empty, &mut empty)?;
             v.sort_by(|a, b| a.0.total_cmp(&b.0));
         }
-        let rendered = v.into_iter().map(|(key, count, mut subs)| {
+        let rendered = v.into_iter().map(|(key, count, subs)| {
             let mut out = Map::new();
             let key_as_string = match (b.format, &self.format) {
                 (Format::Date, _) => {
@@ -528,7 +531,10 @@ impl Histogram {
                 false => out.insert("key".into(), key.into()),
             };
             out.insert("doc_count".into(), count.into());
-            sub(&mut subs, &mut out)?;
+            match subs {
+                Some(mut subs) => sub(&mut subs, &mut out)?,
+                None => out.extend(empty.clone()),
+            }
             Ok((
                 key_as_string.unwrap_or_else(|| super::java_double(key)),
                 out,
@@ -754,18 +760,34 @@ mod tests {
         assert_eq!(ext(65_535.0).unwrap_err(), too_many);
         let ok = ext(30_000.0).unwrap();
         assert_eq!(ok["h"]["buckets"].as_array().unwrap().len(), 30_001);
-        // the limit holds across a request: nested histograms multiply (stricter than ES, which
-        // counts the sub-aggregations of empty buckets once)
-        let nested = json!({"h": {"histogram": {"field": "n", "interval": 1,
-            "extended_bounds": {"min": 0, "max": 1000}},
-            "aggs": {"g": {"histogram": {"field": "n", "interval": 1,
-                "extended_bounds": {"min": 0, "max": 1000}}}}}});
-        assert_eq!(run(&[&index(&[json!(1)])], nested).unwrap_err(), too_many);
         // a key too large to step past still ends
         let stuck =
             json!({"field": "n", "interval": 1, "extended_bounds": {"min": 1e17, "max": 2e17}});
         let got = run(&[&index(&[])], json!({"h": {"histogram": stuck}}));
         assert_eq!(got.unwrap_err(), too_many);
+    }
+
+    #[test]
+    fn aggs_gaps_empty_buckets_count_their_sub_aggregations_once() {
+        // InternalHistogram reduces the sub-aggregations of empty buckets once, for all of them
+        let h = |max: u32| {
+            json!({"histogram": {"field": "n", "interval": 1,
+            "extended_bounds": {"min": 0, "max": max}}})
+        };
+        let mut nested = h(300);
+        nested["aggs"] = json!({"g": h(300)});
+        let got = run(&[&index(&[json!(1)])], json!({"h": nested})).unwrap();
+        let outer = got["h"]["buckets"].as_array().unwrap();
+        assert_eq!(outer.len(), 301);
+        let inner = |b: &Value| b["g"]["buckets"].as_array().unwrap().len();
+        assert_eq!((inner(&outer[0]), inner(&outer[1])), (301, 301));
+        assert_eq!(outer[0]["g"]["buckets"][1]["doc_count"], 0);
+        assert_eq!(outer[1]["g"]["buckets"][1]["doc_count"], 1);
+        // the real buckets' sub-aggregations still count, each
+        let mut nested = h(1);
+        nested["aggs"] = json!({"g": h(70_000)});
+        let ix = index(&[json!(0), json!(1)]);
+        assert!(run(&[&ix], json!({"h": nested})).is_err());
     }
 
     #[test]
