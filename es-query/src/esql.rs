@@ -15,9 +15,11 @@ use es_index::{
 use serde::Serialize;
 use serde_json::Value;
 use std::{
+    borrow::Cow,
     cell::{OnceCell, RefCell},
     cmp::Ordering,
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
+    hash::{Hash, Hasher},
     ops::{Range, RangeInclusive},
     sync::Arc,
 };
@@ -2955,20 +2957,31 @@ fn run_at(
                 }
             }
             Command::Stats(aggs, by) => {
-                // ponytail: linear group lookup, O(rows × groups); hash keys when that matters
                 let mut buckets: Vec<(Vec<Value>, Vec<&Line>)> = Vec::new();
+                let mut index = HashMap::new();
+                // Each row's key values, read in place where a key is a column.
+                let mut vals: Vec<Cow<Value>> = Vec::with_capacity(by.len());
                 for r in &rows {
+                    vals.clear();
+                    vals.extend(by.iter().map(|(_, e)| match e {
+                        Expr::Field(f, _) => Cow::Borrowed(r.field(f)),
+                        e => Cow::Owned(eval(e, r).unwrap_or(Value::Null)),
+                    }));
+                    if !vals.iter().any(|v| v.is_array()) {
+                        join_group(&mut buckets, &mut index, vals.iter().map(|v| &**v), r);
+                        continue;
+                    }
                     // A row joins the group of every combination of its distinct key values.
                     let mut keys: Vec<Vec<Value>> = vec![Vec::new()];
-                    for (_, e) in by {
+                    for v in &vals {
                         let mut vs = Vec::new();
-                        match eval(e, r) {
-                            Some(Value::Array(a)) => a.into_iter().for_each(|v| {
-                                if !vs.contains(&v) {
-                                    vs.push(v);
+                        match &**v {
+                            Value::Array(a) => a.iter().for_each(|v| {
+                                if !vs.contains(v) {
+                                    vs.push(v.clone());
                                 }
                             }),
-                            v => vs.push(v.unwrap_or(Value::Null)),
+                            v => vs.push(v.clone()),
                         }
                         keys = keys
                             .into_iter()
@@ -2979,10 +2992,7 @@ fn run_at(
                             .collect();
                     }
                     for key in keys {
-                        match buckets.iter_mut().find(|(k, _)| *k == key) {
-                            Some(b) => b.1.push(r),
-                            None => buckets.push((key, vec![r])),
-                        }
+                        join_group(&mut buckets, &mut index, key.iter(), r);
                     }
                 }
                 if by.is_empty() && buckets.is_empty() {
@@ -2994,14 +3004,14 @@ fn run_at(
                         return group.len().into();
                     };
                     // Every value in the group: multi-values count value by value.
-                    let all = group.iter().filter_map(|r| eval(arg, *r));
-                    let all: Vec<Value> = all
-                        .flat_map(|v| match v {
-                            Value::Array(a) => a,
-                            v => vec![v],
-                        })
-                        .filter(|v| !v.is_null())
-                        .collect();
+                    let mut all = Vec::with_capacity(group.len());
+                    for v in group.iter().filter_map(|r| eval(arg, *r)) {
+                        match v {
+                            Value::Array(a) => all.extend(a.into_iter().filter(|v| !v.is_null())),
+                            Value::Null => {}
+                            v => all.push(v),
+                        }
+                    }
                     let doubles = all.iter().filter_map(Value::as_f64);
                     match f.as_str() {
                         "COUNT" => all.len().into(),
@@ -3146,6 +3156,43 @@ fn run_at(
 }
 
 type Row = BTreeMap<String, Value>;
+
+/// Adds `r` to the STATS group of `key`, a new group if none has it. `index` lists the groups
+/// by their key's `key_hash`.
+fn join_group<'v, T>(
+    groups: &mut Vec<(Vec<Value>, Vec<T>)>,
+    index: &mut HashMap<u64, Vec<usize>>,
+    key: impl Iterator<Item = &'v Value> + Clone,
+    r: T,
+) {
+    let slots = index.entry(key_hash(key.clone())).or_default();
+    match slots.iter().find(|&&g| groups[g].0.iter().eq(key.clone())) {
+        Some(&g) => groups[g].1.push(r),
+        None => {
+            slots.push(groups.len());
+            groups.push((key.cloned().collect(), vec![r]));
+        }
+    }
+}
+
+/// A hash of values that agrees with their equality: numbers hash their `f64` value (either
+/// zero as `0.0`), objects only their size (their equality ignores key order).
+fn key_hash<'v>(key: impl Iterator<Item = &'v Value>) -> u64 {
+    fn value(v: &Value, h: &mut impl Hasher) {
+        std::mem::discriminant(v).hash(h);
+        match v {
+            Value::Null => {}
+            Value::Bool(b) => b.hash(h),
+            Value::Number(n) => (n.as_f64().unwrap_or_default() + 0.0).to_bits().hash(h),
+            Value::String(s) => s.hash(h),
+            Value::Array(a) => a.iter().for_each(|v| value(v, h)),
+            Value::Object(o) => o.len().hash(h),
+        }
+    }
+    let mut h = std::hash::DefaultHasher::new();
+    key.for_each(|v| value(v, &mut h));
+    h.finish()
+}
 
 /// A row's values by column name; a column it lacks reads as null.
 trait Fields {
@@ -3626,6 +3673,22 @@ mod tests {
         let i = indices.get_mut("i").unwrap();
         i.map_dynamic("3", &serde_json::json!({"m": "x"})).unwrap();
         assert_eq!(values(&indices, "FROM i | KEEP m"), [[Value::Null]]);
+    }
+
+    /// Equal STATS keys hash alike, so they share a group.
+    #[test]
+    fn after_bench_equal_group_keys_hash_alike() {
+        let pairs = [
+            (serde_json::json!(0.0), serde_json::json!(-0.0)),
+            (
+                serde_json::json!({"a": 1, "b": 2}),
+                serde_json::json!({"b": 2, "a": 1}),
+            ),
+        ];
+        for (a, b) in pairs {
+            assert_eq!(a, b);
+            assert_eq!(key_hash([&a].into_iter()), key_hash([&b].into_iter()));
+        }
     }
 
     /// A top N keeps the rows a stable sort and a truncation keep, ties in input order.
