@@ -2160,6 +2160,24 @@ fn eval_fails_before_the_where_after_it() {
     );
 }
 
+/// The EVAL's failure on a later row still wins when the WHERE after it failed on several earlier
+/// rows.
+#[test]
+fn eval_fails_before_the_where_after_it_that_failed_twice() {
+    assert_eq!(
+        run(
+            &indices(),
+            "FROM people | EVAL s = SUBSTRING(name, 1, TO_INTEGER(40 - age)) \
+             | WHERE SUBSTRING(name, 1, TO_INTEGER(age - 41)) == \"a\""
+        ),
+        Err(EsqlError::Failed {
+            status: 400,
+            kind: "illegal_argument_exception",
+            reason: "Length parameter cannot be negative, found [-1]".into()
+        })
+    );
+}
+
 /// Like Elasticsearch 9.5.5, ROUND past the long range fails the query (500
 /// `arithmetic_exception`), while integers and unsigned longs round to null (with a warning).
 #[test]

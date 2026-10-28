@@ -3288,8 +3288,8 @@ fn eval_rows<'a>(
         if let Some(w) = filter {
             let clean = FAILURE.with_borrow(Option::is_none);
             let keep = truth(w, &Pending(r, named, &vals)) == Some(true);
-            if clean && deferred.is_none() {
-                deferred = FAILURE.take();
+            if clean {
+                deferred = deferred.take().or(FAILURE.take());
             }
             if !keep {
                 return false;
