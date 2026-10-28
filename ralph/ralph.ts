@@ -82,7 +82,7 @@ const GOAL_MODELS: Record<string, string> = Object.fromEntries(
       "unsupported-codecs", "index-sorting", "date-semantics", "per-index-locks",
       "esql-parity-harness", "esql-eval-functions", "esql-stats",
       "disk-writer-completeness", "write-failure-handling", "memory-bounds", "date-formats",
-      "esql-es-semantics", "regexp-automaton", "esql-perf-100k", "esql-cold-after-write",
+      "esql-es-semantics", "regexp-automaton", "esql-perf-100k", "esql-cold-after-write", "search-memory-walk",
     ],
     [`${OPUS}:medium`]: [
       "api-field-caps", "api-by-query", "api-scroll-pit", "api-search-template", "aggs-terms",
