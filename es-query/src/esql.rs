@@ -1166,6 +1166,16 @@ fn compare(a: &Value, b: &Value) -> Option<Ordering> {
     }
 }
 
+/// `eval` of an operand, read in place when it is a field or a literal.
+fn operand<'a>(e: &'a Expr, row: &'a dyn Fields) -> Option<Cow<'a, Value>> {
+    match e {
+        Expr::Lit(v, _) => Some(Cow::Borrowed(v)),
+        Expr::Field(f, _) => Some(Cow::Borrowed(row.field(f))),
+        e => eval(e, row).map(Cow::Owned),
+    }
+    .filter(|v| !v.is_null())
+}
+
 /// Three-valued logic: `None` is SQL NULL.
 fn eval(e: &Expr, row: &dyn Fields) -> Option<Value> {
     let truth = |e: &Expr| eval(e, row).and_then(|v| v.as_bool());
@@ -1204,7 +1214,12 @@ fn eval(e: &Expr, row: &dyn Fields) -> Option<Value> {
             // A null operand.
             _ => None,
         },
-        Expr::Arith(op, a, b, t, _) => arith(op, t.get().copied()?, &eval(a, row)?, &eval(b, row)?),
+        Expr::Arith(op, a, b, t, _) => arith(
+            op,
+            t.get().copied()?,
+            &*operand(a, row)?,
+            &*operand(b, row)?,
+        ),
         // Like Java's `Math.negateExact`, null on overflow; null for a multi-value too.
         Expr::Neg(x, t, _) => {
             let v = eval(x, row)?;
@@ -1284,7 +1299,7 @@ fn eval(e: &Expr, row: &dyn Fields) -> Option<Value> {
         }
         Expr::Cmp(op, a, b, t, _) => {
             // ponytail: multi-valued fields compare as null, like ES (which also warns)
-            let (a, b) = (eval(a, row)?, eval(b, row)?);
+            let (a, b) = (operand(a, row)?, operand(b, row)?);
             let truth = |v: &Value| {
                 v.as_bool()
                     .or_else(|| Some(v.as_str()?.eq_ignore_ascii_case("true")))
