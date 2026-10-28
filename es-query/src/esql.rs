@@ -3363,9 +3363,19 @@ fn top_rows<R: Borrow<Row>>(rows: &mut Vec<R>, keys: &[SortKey], n: usize) {
     if n >= rows.len() {
         return sort_rows(rows, keys);
     }
+    // Each row's sort values, looked up once rather than per comparison.
+    let vals: Vec<&Value> = (rows.iter())
+        .flat_map(|r| keys.iter().map(|k| &r.borrow()[k.field.as_str()]))
+        .collect();
+    let at = |i: usize| &vals[i * keys.len()..][..keys.len()];
     // Ties broken by position, as the stable sort does.
-    let cmp =
-        |&i: &usize, &j: &usize| cmp_rows(rows[i].borrow(), rows[j].borrow(), keys).then(i.cmp(&j));
+    let cmp = |&i: &usize, &j: &usize| {
+        (keys.iter().zip(at(i).iter().zip(at(j))))
+            .fold(Ordering::Equal, |o, (k, (x, y))| {
+                o.then_with(|| cmp_values(x, y, k))
+            })
+            .then(i.cmp(&j))
+    };
     let mut top: Vec<usize> = (0..rows.len()).collect();
     if n > 0 {
         top.select_nth_unstable_by(n - 1, cmp);
@@ -3378,31 +3388,32 @@ fn top_rows<R: Borrow<Row>>(rows: &mut Vec<R>, keys: &[SortKey], n: usize) {
 
 fn cmp_rows(a: &Row, b: &Row, keys: &[SortKey]) -> Ordering {
     keys.iter().fold(Ordering::Equal, |acc, k| {
-        acc.then_with(|| {
-            let (x, y) = (&a[k.field.as_str()], &b[k.field.as_str()]);
-            match (x.is_null(), y.is_null()) {
-                (true, true) => Ordering::Equal,
-                (true, false) => {
-                    if k.nulls_first {
-                        Ordering::Less
-                    } else {
-                        Ordering::Greater
-                    }
-                }
-                (false, true) => {
-                    if k.nulls_first {
-                        Ordering::Greater
-                    } else {
-                        Ordering::Less
-                    }
-                }
-                _ => {
-                    let o = compare(x, y).unwrap_or(Ordering::Equal);
-                    if k.desc { o.reverse() } else { o }
-                }
-            }
-        })
+        acc.then_with(|| cmp_values(&a[k.field.as_str()], &b[k.field.as_str()], k))
     })
+}
+
+fn cmp_values(x: &Value, y: &Value, k: &SortKey) -> Ordering {
+    match (x.is_null(), y.is_null()) {
+        (true, true) => Ordering::Equal,
+        (true, false) => {
+            if k.nulls_first {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            }
+        }
+        (false, true) => {
+            if k.nulls_first {
+                Ordering::Greater
+            } else {
+                Ordering::Less
+            }
+        }
+        _ => {
+            let o = compare(x, y).unwrap_or(Ordering::Equal);
+            if k.desc { o.reverse() } else { o }
+        }
+    }
 }
 
 /// `documents_found` and `values_loaded` as Elasticsearch 9.5.5's plan counts them. Up to the
@@ -3573,20 +3584,33 @@ mod tests {
         let rows: Vec<Row> = [3, 1, 2, 1, 3, 2, 1, 3]
             .iter()
             .enumerate()
-            .map(|(i, k)| Row::from([("k".into(), (*k).into()), ("i".into(), i.into())]))
+            .map(|(i, k)| {
+                let m = if i % 3 == 0 {
+                    Value::Null
+                } else {
+                    (i % 2).into()
+                };
+                Row::from([
+                    ("k".into(), (*k).into()),
+                    ("m".into(), m),
+                    ("i".into(), i.into()),
+                ])
+            })
             .collect();
-        let keys = [SortKey {
-            field: "k".into(),
+        let key = |field: &str, desc| SortKey {
+            field: field.into(),
             at: (1, 1),
-            desc: false,
+            desc,
             nulls_first: false,
-        }];
-        let mut sorted = rows.clone();
-        sort_rows(&mut sorted, &keys);
-        for n in 0..=rows.len() + 1 {
-            let mut top = rows.clone();
-            top_rows(&mut top, &keys, n);
-            assert_eq!(top, sorted[..n.min(rows.len())]);
+        };
+        for keys in [vec![key("k", false)], vec![key("k", false), key("m", true)]] {
+            let mut sorted = rows.clone();
+            sort_rows(&mut sorted, &keys);
+            for n in 0..=rows.len() + 1 {
+                let mut top = rows.clone();
+                top_rows(&mut top, &keys, n);
+                assert_eq!(top, sorted[..n.min(rows.len())]);
+            }
         }
     }
 }
