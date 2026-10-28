@@ -503,32 +503,259 @@ pub fn java_double(x: f64) -> String {
     }
 }
 
-/// Java's `DecimalFormat` (HALF_EVEN) of `x`: a literal prefix and suffix around `0`/`#`
-/// integer and fraction digits.
-// ponytail: no grouping, quoting, exponents, percent or negative subpatterns; add when needed
+/// Java's `DecimalFormat` of `x` with Locale.ROOT symbols, as ES's DocValueFormat.Decimal: a
+/// prefix and suffix (`'` quotes, `%` and `\u{2030}` scale `x`) around integer digits grouped by
+/// `,`, fraction digits and an `E0` exponent, and an optional negative subpattern after `;`
+/// whose affixes replace a `-` prefix. Digits round HALF_EVEN.
+// ponytail: a malformed pattern formats as best it can; ES rejects it
 fn decimal_format(pattern: &str, x: f64) -> String {
-    let digit = |c: char| matches!(c, '#' | '0' | ',' | '.');
-    let start = pattern.find(digit).unwrap_or(pattern.len());
-    let end = (pattern[start..].find(|c| !digit(c))).map_or(pattern.len(), |i| start + i);
-    let (int, frac) = pattern[start..end]
-        .split_once('.')
-        .unwrap_or((&pattern[start..end], ""));
-    let min_int = int.matches('0').count();
-    let (min_frac, max_frac) = (frac.matches('0').count(), frac.len());
-    // Rust rounds the exact binary value half to even, as DecimalFormat does
-    let s = format!("{:.max_frac$}", x.abs());
-    let (i, f) = s.split_once('.').unwrap_or((&s, ""));
-    let f = f.trim_end_matches('0');
-    let f = format!("{f:0<min_frac$}");
-    let i = i.trim_start_matches('0');
-    let mut num = format!("{i:0>min_int$}");
-    if !f.is_empty() {
-        num = format!("{num}.{f}");
-    } else if num.is_empty() {
-        num = "0".into();
+    if x.is_nan() {
+        return "NaN".into();
     }
-    let sign = if x < 0.0 { "-" } else { "" };
-    format!("{sign}{}{num}{}", &pattern[..start], &pattern[end..])
+    let p = DecimalPattern::parse(pattern);
+    let negative = x < 0.0 || (x == 0.0 && x.is_sign_negative());
+    let x = (x * p.multiplier).abs();
+    let (prefix, suffix) = (
+        &p.affixes[usize::from(negative)],
+        &p.affixes[2 + usize::from(negative)],
+    );
+    let num = match x.is_infinite() {
+        true => "\u{221e}".into(),
+        false => p.number(x),
+    };
+    format!("{prefix}{num}{suffix}")
+}
+
+/// A parsed `DecimalFormat` pattern, as `DecimalFormat.applyPattern` sets it up.
+struct DecimalPattern {
+    /// The positive and negative prefixes, then the positive and negative suffixes.
+    affixes: [String; 4],
+    min_int: usize,
+    /// Only bounded with an exponent.
+    max_int: usize,
+    min_frac: usize,
+    max_frac: usize,
+    /// Digits per group; 0 for no grouping.
+    group: usize,
+    multiplier: f64,
+    /// The minimum exponent digits, if the pattern has an exponent.
+    exponent: Option<usize>,
+    /// Whether the decimal point shows even without fraction digits.
+    point: bool,
+}
+
+impl DecimalPattern {
+    fn parse(pattern: &str) -> DecimalPattern {
+        let chars: Vec<char> = pattern.chars().collect();
+        let mut p = DecimalPattern {
+            affixes: Default::default(),
+            min_int: 0,
+            max_int: usize::MAX,
+            min_frac: 0,
+            // DOUBLE_FRACTION_DIGITS, for an empty pattern
+            max_frac: 340,
+            group: 0,
+            multiplier: 1.0,
+            exponent: None,
+            point: false,
+        };
+        let mut start = Some(0);
+        for neg in [false, true] {
+            let Some(mut pos) = start.take().filter(|&s| s < chars.len()) else {
+                break;
+            };
+            let mut affix = [String::new(), String::new()];
+            let (mut phase, mut quoted) = (0, false);
+            let (mut left, mut zeros, mut right) = (0usize, 0, 0);
+            let (mut decimal, mut grouping) = (None, None);
+            while pos < chars.len() {
+                let ch = chars[pos];
+                let a = &mut affix[usize::from(phase != 0)];
+                match (phase, ch) {
+                    (1, _) if neg => match ch {
+                        '#' | '0' | ',' | '.' | 'E' => {}
+                        _ => {
+                            phase = 2;
+                            continue;
+                        }
+                    },
+                    (0 | 2, '\'') if chars.get(pos + 1) == Some(&'\'') => {
+                        pos += 1;
+                        a.push('\'');
+                    }
+                    (0 | 2, '\'') => quoted = !quoted,
+                    (0 | 2, _) if quoted => a.push(ch),
+                    (0 | 2, '#' | '0' | ',' | '.') => {
+                        phase = 1;
+                        continue;
+                    }
+                    (0 | 2, ';') => {
+                        start = Some(pos + 1);
+                        break;
+                    }
+                    (0 | 2, '%' | '\u{2030}') => {
+                        p.multiplier = if ch == '%' { 100.0 } else { 1000.0 };
+                        a.push(ch);
+                    }
+                    (0 | 2, _) => a.push(ch),
+                    (_, '#' | '0') => {
+                        match ch == '#' {
+                            true if zeros > 0 => right += 1,
+                            true => left += 1,
+                            false => zeros += 1,
+                        }
+                        if decimal.is_none() {
+                            grouping = grouping.map(|g| g + 1);
+                        }
+                    }
+                    (_, ',') => grouping = Some(0),
+                    (_, '.') => decimal = Some(left + zeros + right),
+                    (_, 'E') => {
+                        let digits = chars[pos + 1..].iter().take_while(|&&c| c == '0');
+                        let n = digits.count();
+                        p.exponent = Some(n);
+                        pos += n;
+                        phase = 2;
+                    }
+                    _ => {
+                        phase = 2;
+                        continue;
+                    }
+                }
+                pos += 1;
+            }
+            let [prefix, suffix] = affix;
+            if neg {
+                if prefix != p.affixes[0] || suffix != p.affixes[2] {
+                    (p.affixes[1], p.affixes[3]) = (prefix, suffix);
+                }
+                continue;
+            }
+            (p.affixes[1], p.affixes[3]) = (format!("-{prefix}"), suffix.clone());
+            (p.affixes[0], p.affixes[2]) = (prefix, suffix);
+            // "##.###" is "#0.###", ".###" is ".0##"
+            if let Some(d) = decimal.filter(|_| zeros == 0 && left > 0) {
+                let n = d.max(1);
+                (right, left, zeros) = (left - n, n - 1, 1);
+            }
+            let total = left + zeros + right;
+            p.min_int = decimal.unwrap_or(total).saturating_sub(left);
+            if p.exponent.is_some() {
+                p.max_int = left + p.min_int;
+            }
+            if total > 0 || decimal.is_some() {
+                p.max_frac = decimal.map_or(0, |d| total.saturating_sub(d));
+            }
+            p.min_frac = decimal.map_or(0, |d| (left + zeros).saturating_sub(d));
+            p.group = grouping.unwrap_or(0);
+            p.point = decimal == Some(0) || decimal == Some(total);
+        }
+        p
+    }
+
+    /// The digits of finite, non-negative `x`: `DecimalFormat.subformatNumber`.
+    fn number(&self, x: f64) -> String {
+        // DigitList.set: the shortest repr, unless it has more digits than allowed
+        let shortest = digit_list(&format!("{x:e}"));
+        let (d, at) = match self.exponent {
+            Some(_) => {
+                let sig = self.max_int.saturating_add(self.max_frac).max(1);
+                match shortest.0.len() <= sig {
+                    true => shortest,
+                    false => digit_list(&format!("{x:.*e}", sig - 1)),
+                }
+            }
+            None => match shortest.0.len() as i64 - shortest.1 <= self.max_frac as i64 {
+                true => shortest,
+                false => digit_list(&format!("{x:.*}", self.max_frac)),
+            },
+        };
+        let digit = |i: usize| char::from(b'0' + d.get(i).copied().unwrap_or(0));
+        let mut out = String::new();
+        if let Some(min_exp) = self.exponent {
+            let (repeat, mut min_int) = (self.max_int as i64, self.min_int as i64);
+            let mut exponent = at;
+            if repeat > 1 && repeat > min_int {
+                // engineering notation: exponents are multiples of the integer digits
+                exponent = match exponent >= 1 {
+                    true => (exponent - 1) / repeat * repeat,
+                    false => (exponent - repeat) / repeat * repeat,
+                };
+                min_int = 1;
+            } else {
+                exponent -= min_int;
+            }
+            let int_digits = if d.is_empty() { min_int } else { at - exponent };
+            let min_digits = ((self.min_int + self.min_frac) as i64).max(int_digits);
+            let total = (d.len() as i64).max(min_digits);
+            for i in 0..total {
+                if i == int_digits {
+                    out.push('.');
+                }
+                out.push(digit(i as usize));
+            }
+            if self.point && total == int_digits {
+                out.push('.');
+            }
+            let exponent = if d.is_empty() { 0 } else { exponent };
+            let sign = if exponent < 0 { "-" } else { "" };
+            out += &format!("E{sign}{:0min_exp$}", exponent.unsigned_abs());
+            return out;
+        }
+        let mut count = self.min_int as i64;
+        if at > count {
+            count = at;
+        }
+        let mut next = 0;
+        for i in (0..count).rev() {
+            if i < at && next < d.len() {
+                out.push(digit(next));
+                next += 1;
+            } else {
+                out.push('0');
+            }
+            if self.group > 0 && i > 0 && i % self.group as i64 == 0 {
+                out.push(',');
+            }
+        }
+        let fraction = self.min_frac > 0 || next < d.len();
+        if !fraction && out.is_empty() {
+            out.push('0');
+        }
+        if self.point || fraction {
+            out.push('.');
+        }
+        for i in 0..self.max_frac as i64 {
+            if i >= self.min_frac as i64 && next >= d.len() {
+                break;
+            }
+            if -1 - i > at - 1 {
+                out.push('0');
+            } else {
+                out.push(digit(next));
+                next += 1;
+            }
+        }
+        out
+    }
+}
+
+/// A formatted decimal's digits without leading or trailing zeros, and the position of the
+/// decimal point in them, like Java's DigitList (no digits for zero).
+fn digit_list(s: &str) -> (Vec<u8>, i64) {
+    let (m, e) = s.split_once('e').unwrap_or((s, "0"));
+    let (int, frac) = m.split_once('.').unwrap_or((m, ""));
+    let mut d: Vec<u8> = (int.bytes().chain(frac.bytes()))
+        .map(|b| b - b'0')
+        .collect();
+    let lead = d.iter().take_while(|&&b| b == 0).count();
+    d.drain(..lead);
+    while d.last() == Some(&0) {
+        d.pop();
+    }
+    let at = int.len() as i64 + e.parse::<i64>().unwrap_or(0) - lead as i64;
+    let at = if d.is_empty() { 0 } else { at };
+    (d, at)
 }
 
 /// One named aggregation of a request.
@@ -2322,11 +2549,46 @@ mod tests {
         assert_eq!(f("0.0#", 1.0), "1.0");
         assert_eq!(f("0.0#", 1.256), "1.26");
         assert_eq!(f("0.0###", 2.5), "2.5");
-        assert_eq!(f("#.#", 0.5), ".5");
+        assert_eq!(f("#.#", 0.5), "0.5");
         assert_eq!(f("000", 7.0), "007");
         assert_eq!(f("0 units", -3.4), "-3 units");
         // HALF_EVEN
         assert_eq!(f("0", 2.5), "2");
+    }
+
+    #[test]
+    fn aggs_gaps_decimal_patterns_follow_java() {
+        // expectations checked against Elasticsearch 9.5.5 (`min` with `format`)
+        let f = super::decimal_format;
+        // grouping: the size is the digits after the last `,`
+        assert_eq!(f("#,##0.00", 1_234_567.891), "1,234,567.89");
+        assert_eq!(f("#,##,###", 1_234_567.0), "1,234,567");
+        assert_eq!(f("0,000", 5.0), "0,005");
+        // quoting, and `%`/`‰` scale the value
+        assert_eq!(f("'#'0 o''clock", 3.0), "#3 o'clock");
+        assert_eq!(f("0.#%", 0.256), "25.6%");
+        assert_eq!(f("0\u{2030}", 0.256), "256\u{2030}");
+        // negative subpatterns take only their affixes
+        assert_eq!(f("0.0;(0.0)", -1.25), "(1.2)");
+        assert_eq!(f("0.0;(#)", 2.0), "2.0");
+        assert_eq!(f("0;0", -2.0), "-2");
+        // exponents: significant digits are the integer and fraction maximums
+        assert_eq!(f("0.###E0", 12_345.0), "1.234E4");
+        assert_eq!(f("00.##E0", 0.001_234_6), "12.35E-4");
+        assert_eq!(f("##0.#####E0", 12_345.0), "12.345E3");
+        assert_eq!(f("##0.#####E0", 0.000_123_45), "123.45E-6");
+        assert_eq!(f("0.0E00", 0.0), "0.0E00");
+        assert_eq!(f("##0.##E0", 0.5), "500E-3");
+        assert_eq!(f("#E0", 123.0), ".1E3");
+        // a pattern without any `0` gets one before the point; the shortest repr wins
+        assert_eq!(f("#.00", 0.5), ".50");
+        assert_eq!(f(".##", 5.0), "5.0");
+        assert_eq!(f("0.", 3.0), "3.");
+        assert_eq!(f("0.####################", 0.1), "0.1");
+        assert_eq!(f("0", f64::INFINITY), "\u{221e}");
+        assert_eq!(f("0", f64::NAN), "NaN");
+        assert_eq!(f("0.00", -0.0001), "-0.00");
+        assert_eq!(f("0", -0.0), "-0");
     }
 
     fn index() -> Index {
