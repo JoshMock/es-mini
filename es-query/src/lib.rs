@@ -1423,6 +1423,8 @@ pub fn search_many<'a>(
     let mut aggs = vec![aggs::Stats::default(); req.aggs.len()];
     let mut profile = req.profile.then(Vec::new);
     let mut failures = Vec::new();
+    // hits counted but not kept, past the page
+    let mut total = 0;
     for (pos, (name, index, filter)) in targets.iter().enumerate() {
         let query = match with_filter(index, &req.query, *filter, now) {
             Ok(q) => q,
@@ -1464,19 +1466,25 @@ pub fn search_many<'a>(
         hits.extend(selected.into_iter().flatten());
         // With one score for all, hits rank in write order, so once enough are counted the
         // rest of those in memory (borrowed: `docs_at` gives them last, in write order) change
-        // neither the page nor a total past the limit.
+        // neither the page nor a total past the limit. Those past the page are only counted.
         let enough = (req.sort.is_empty() && req.aggs.is_empty() && !req.profile)
             .then(|| constant_score(&query).and(req.total_up_to))
             .flatten()
             .map(|n| (n + 1).max(req.from + req.size));
         let visible = index.visible_seq_no();
+        let mut counted = 0;
         for (id, doc) in s.docs().filter(|(_, d)| d.seq_no < visible) {
-            if matches!(doc, Cow::Borrowed(_)) && enough.is_some_and(|n| hits.len() - before >= n) {
+            let in_order = enough.is_some() && matches!(doc, Cow::Borrowed(_));
+            if in_order && enough.is_some_and(|n| hits.len() - before + counted >= n) {
                 break;
             }
             let Some(score) = s.score(&query, id, &doc) else {
                 continue;
             };
+            if in_order && hits.len() - before >= req.from + req.size {
+                counted += 1;
+                continue;
+            }
             collector.collect(id, &doc, score);
             hits.push(Found {
                 target: pos,
@@ -1492,6 +1500,7 @@ pub fn search_many<'a>(
             failures.push((*name, e));
             continue;
         }
+        total += counted;
         let (stats, p) = collector.finish(matches!(query, Query::MatchAll));
         aggs::reduce(&mut aggs, stats);
         if let (Some(all), Some(p)) = (&mut profile, p) {
@@ -1523,7 +1532,7 @@ pub fn search_many<'a>(
             .then(|| aggs::render(&req.aggs, &req.pipelines, &mut aggs, req.typed_keys))
             .transpose()?,
         profile,
-        total: hits.len(),
+        total: total + hits.len(),
         max_score,
         hits: hits
             .into_iter()
@@ -2219,6 +2228,9 @@ mod tests {
         assert_eq!(run(all.clone(), None), (6, "1,2".into()));
         assert_eq!(run(all.clone(), Some(2)), (3, "1,2".into()));
         assert_eq!(run(all.clone(), Some(0)), (2, "1,2".into()));
+        assert_eq!(run(all.clone(), Some(4)), (5, "1,2".into()));
+        let filter = json!({"query": {"range": {"n": {"gte": 2}}}, "size": 2});
+        assert_eq!(run(filter, Some(9)), (4, "2,3".into()));
         let paged = json!({"query": {"match_all": {}}, "size": 2, "from": 4});
         assert_eq!(run(paged, Some(2)), (6, "5,0".into()));
         // hits sorted by a field, and aggregations, still need every match
