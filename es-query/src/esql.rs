@@ -15,7 +15,6 @@ use es_index::{
 use serde::Serialize;
 use serde_json::Value;
 use std::{
-    borrow::{Borrow, Cow},
     cell::{OnceCell, RefCell},
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
@@ -1166,13 +1165,13 @@ fn compare(a: &Value, b: &Value) -> Option<Ordering> {
 }
 
 /// Three-valued logic: `None` is SQL NULL.
-fn eval(e: &Expr, row: &Row) -> Option<Value> {
+fn eval(e: &Expr, row: &dyn Fields) -> Option<Value> {
     let truth = |e: &Expr| eval(e, row).and_then(|v| v.as_bool());
     match e {
         Expr::Lit(v, _) => Some(v.clone()).filter(|v| !v.is_null()),
         // ponytail: only DATE_TRUNC and BUCKET read a time span, straight from the literal
         Expr::Interval(..) => None,
-        Expr::Field(f, _) => row.get(f.as_str()).cloned().filter(|v| !v.is_null()),
+        Expr::Field(f, _) => Some(row.field(f).clone()).filter(|v| !v.is_null()),
         Expr::IsNull(x, negated, _) => Some(Value::Bool(eval(x, row).is_none() != *negated)),
         // A multi-value is null, like ES (which warns).
         Expr::Like(x, p, rlike, _) => match eval(x, row)? {
@@ -1857,7 +1856,7 @@ fn bucket_problem(ts: &[String], e: &Expr, src: &str) -> Option<String> {
 /// `BUCKET(x, ...)` of one row: a date rounded down like `DATE_TRUNC`, or a number rounded down
 /// to a multiple of the span as a double. With a target bucket count and a range, the span is
 /// picked like Elasticsearch's `Bucket`.
-fn bucket(args: &[Expr], date: bool, row: &Row) -> Option<Value> {
+fn bucket(args: &[Expr], date: bool, row: &dyn Fields) -> Option<Value> {
     let x = eval(&args[0], row)?;
     let fold = |e: &Expr| eval(e, &Row::new());
     if date {
@@ -2652,7 +2651,10 @@ fn run_at(
         None => Arc::new(Table {
             types: BTreeMap::new(),
             conflicts: BTreeMap::new(),
-            groups: vec![vec![Row::new()]],
+            groups: vec![Group {
+                len: 1,
+                cols: BTreeMap::new(),
+            }],
             cols: Vec::new(),
             empty: false,
             counted: false,
@@ -2672,7 +2674,7 @@ fn run_at(
         Some(m) => Some(conflict_error(f, m)),
         None => None,
     };
-    let mut rows: Vec<Cow<Row>> = groups.iter().flatten().map(Cow::Borrowed).collect();
+    let mut rows: Vec<Line> = groups.iter().flat_map(Group::lines).collect();
     let mut explicit_limit = false;
 
     for (i, cmd) in cmds.iter().enumerate() {
@@ -2949,7 +2951,7 @@ fn run_at(
             }
             Command::Stats(aggs, by) => {
                 // ponytail: linear group lookup, O(rows × groups); hash keys when that matters
-                let mut buckets: Vec<(Vec<Value>, Vec<&Row>)> = Vec::new();
+                let mut buckets: Vec<(Vec<Value>, Vec<&Line>)> = Vec::new();
                 for r in &rows {
                     // A row joins the group of every combination of its distinct key values.
                     let mut keys: Vec<Vec<Value>> = vec![Vec::new()];
@@ -2981,13 +2983,13 @@ fn run_at(
                 if by.is_empty() && buckets.is_empty() {
                     buckets.push((Vec::new(), Vec::new()));
                 }
-                let agg = |name: &str, e: &Expr, group: &[&Row]| {
+                let agg = |name: &str, e: &Expr, group: &[&Line]| {
                     let (f, arg, param) = aggregate(e).expect("STATS was verified");
                     let Some(arg) = arg else {
                         return group.len().into();
                     };
                     // Every value in the group: multi-values count value by value.
-                    let all = group.iter().filter_map(|r| eval(arg, r));
+                    let all = group.iter().filter_map(|r| eval(arg, *r));
                     let all: Vec<Value> = all
                         .flat_map(|v| match v {
                             Value::Array(a) => a,
@@ -3081,7 +3083,7 @@ fn run_at(
                             .map(|(a, e)| (a.clone(), agg(a, e, &group)))
                             .collect();
                         r.extend(by.iter().map(|(b, _)| b.clone()).zip(key));
-                        Cow::Owned(r)
+                        Line::Own(r)
                     })
                     .collect();
             }
@@ -3133,12 +3135,53 @@ fn run_at(
             .collect(),
         values: rows
             .into_iter()
-            .map(|r| cols.iter().map(|c| r[c.as_str()].clone()).collect())
+            .map(|r| cols.iter().map(|c| r.field(c).clone()).collect())
             .collect(),
     })
 }
 
 type Row = BTreeMap<String, Value>;
+
+/// A row's values by column name; a column it lacks reads as null.
+trait Fields {
+    fn field(&self, c: &str) -> &Value;
+}
+
+static NULL: Value = Value::Null;
+
+impl Fields for Row {
+    fn field(&self, c: &str) -> &Value {
+        self.get(c).unwrap_or(&NULL)
+    }
+}
+
+/// One index's documents, column by column: rows read them in place instead of chasing a map
+/// per row.
+struct Group {
+    len: usize,
+    cols: BTreeMap<String, Vec<Value>>,
+}
+
+impl Group {
+    fn lines(&self) -> impl Iterator<Item = Line<'_>> {
+        (0..self.len).map(move |i| Line::Doc(self, i))
+    }
+}
+
+/// A row in a query: a document still in its group, or one a command built or changed.
+enum Line<'a> {
+    Doc(&'a Group, usize),
+    Own(Row),
+}
+
+impl Fields for Line<'_> {
+    fn field(&self, c: &str) -> &Value {
+        match self {
+            Line::Doc(g, i) => g.cols.get(c).map_or(&NULL, |v| &v[*i]),
+            Line::Own(r) => r.field(c),
+        }
+    }
+}
 
 /// The rows a source command yields, before any processing command.
 struct Table {
@@ -3147,7 +3190,7 @@ struct Table {
     /// For each conflicting column, the indices per mapping type.
     conflicts: BTreeMap<String, BTreeMap<String, Vec<String>>>,
     /// One group of rows per index.
-    groups: Vec<Vec<Row>>,
+    groups: Vec<Group>,
     /// The columns, in output order.
     cols: Vec<String>,
     /// No index matched: the response is a placeholder column.
@@ -3274,28 +3317,24 @@ fn table_of(
                     )
                 })
                 .collect();
-            g.iter()
-                .map(|(id, d)| {
-                    let mut row: Row = (read.iter())
-                        .map(|&(c, ty, conflict, m, multi_field)| {
-                            let v = match conflict {
-                                true => Value::Null,
-                                false => doc_value(cell(&d.source, c, multi_field), ty, m),
-                            };
-                            (c.clone(), v)
-                        })
-                        .collect();
-                    for f in metadata {
-                        let v = match f.as_str() {
-                            "_id" => Value::from(id.to_string()),
-                            "_index" => Value::from(t.index.as_str()),
-                            _ => Value::from(d.version),
-                        };
-                        row.insert(f.clone(), v);
-                    }
-                    row
+            let mut cols: BTreeMap<String, Vec<Value>> = (read.iter())
+                .map(|&(c, ty, conflict, m, multi_field)| {
+                    let v = g.iter().map(|(_, d)| match conflict {
+                        true => Value::Null,
+                        false => doc_value(cell(&d.source, c, multi_field), ty, m),
+                    });
+                    (c.clone(), v.collect())
                 })
-                .collect()
+                .collect();
+            for f in metadata {
+                let v = g.iter().map(|(id, d)| match f.as_str() {
+                    "_id" => Value::from(id.to_string()),
+                    "_index" => Value::from(t.index.as_str()),
+                    _ => Value::from(d.version),
+                });
+                cols.insert(f.clone(), v.collect());
+            }
+            Group { len: g.len(), cols }
         })
         .collect();
     // Metadata columns follow the fields, in the order listed.
@@ -3343,29 +3382,30 @@ fn read(cmds: &[Command]) -> impl Fn(&str) -> bool + '_ {
 }
 
 /// A row to change: a shared one is copied with only the `kept` columns.
-fn owned<'r>(r: &'r mut Cow<Row>, kept: &[&String]) -> &'r mut Row {
-    if let Cow::Borrowed(b) = *r {
-        *r = Cow::Owned(
+fn owned<'r>(r: &'r mut Line, kept: &[&String]) -> &'r mut Row {
+    if let Line::Doc(..) = r {
+        *r = Line::Own(
             (kept.iter())
-                .filter_map(|&c| Some((c.clone(), b.get(c)?.clone())))
+                .map(|&c| (c.clone(), r.field(c).clone()))
                 .collect(),
         );
     }
-    r.to_mut()
+    let Line::Own(r) = r else { unreachable!() };
+    r
 }
 
-fn sort_rows<R: Borrow<Row>>(rows: &mut [R], keys: &[SortKey]) {
-    rows.sort_by(|a, b| cmp_rows(a.borrow(), b.borrow(), keys));
+fn sort_rows<R: Fields>(rows: &mut [R], keys: &[SortKey]) {
+    rows.sort_by(|a, b| cmp_rows(a, b, keys));
 }
 
 /// `sort_rows` then `truncate(n)`, without sorting the rows past the first `n`.
-fn top_rows<R: Borrow<Row>>(rows: &mut Vec<R>, keys: &[SortKey], n: usize) {
+fn top_rows<R: Fields>(rows: &mut Vec<R>, keys: &[SortKey], n: usize) {
     if n >= rows.len() {
         return sort_rows(rows, keys);
     }
     // Each row's sort values, looked up once rather than per comparison.
     let vals: Vec<&Value> = (rows.iter())
-        .flat_map(|r| keys.iter().map(|k| &r.borrow()[k.field.as_str()]))
+        .flat_map(|r| keys.iter().map(|k| r.field(&k.field)))
         .collect();
     let at = |i: usize| &vals[i * keys.len()..][..keys.len()];
     // Ties broken by position, as the stable sort does.
@@ -3386,9 +3426,9 @@ fn top_rows<R: Borrow<Row>>(rows: &mut Vec<R>, keys: &[SortKey], n: usize) {
     rows.extend(top.into_iter().filter_map(|i| slots[i].take()));
 }
 
-fn cmp_rows(a: &Row, b: &Row, keys: &[SortKey]) -> Ordering {
+fn cmp_rows(a: &dyn Fields, b: &dyn Fields, keys: &[SortKey]) -> Ordering {
     keys.iter().fold(Ordering::Equal, |acc, k| {
-        acc.then_with(|| cmp_values(&a[k.field.as_str()], &b[k.field.as_str()], k))
+        acc.then_with(|| cmp_values(a.field(&k.field), b.field(&k.field), k))
     })
 }
 
@@ -3422,7 +3462,7 @@ fn cmp_values(x: &Value, y: &Value, k: &SortKey) -> Ordering {
 /// field is loaded only for the rows still alive when the plan first needs it. Everything after the
 /// first LIMIT runs on its output, so the fields it uses load for those rows.
 fn load_counts(
-    groups: &[Vec<Row>],
+    groups: &[Group],
     cmds: &[Command],
     out: &[String],
     types: &BTreeMap<String, String>,
@@ -3474,22 +3514,22 @@ fn load_counts(
         }
     }
     let keys: BTreeSet<String> = sort.iter().map(|k| k.field.clone()).collect();
-    let passes = |r: &Row, es: &[&Expr]| es.iter().all(|e| eval(e, r) == Some(true.into()));
-    let values = |rows: &[&Row], fields: &BTreeSet<String>| -> usize {
+    let passes = |r: &Line, es: &[&Expr]| es.iter().all(|e| eval(e, r) == Some(true.into()));
+    let values = |rows: &[Line], fields: &BTreeSet<String>| -> usize {
         let count = |v: &Value| match v {
             Value::Null => 0,
             Value::Array(a) => a.len(),
             _ => 1,
         };
         rows.iter()
-            .flat_map(|r| fields.iter().filter_map(|f| r.get(f.as_str()).map(count)))
+            .flat_map(|r| fields.iter().map(|f| count(r.field(f))))
             .sum()
     };
     let found = groups
         .iter()
-        .map(|g| g.iter().filter(|r| passes(r, &pushed)).collect::<Vec<_>>());
+        .map(|g| g.lines().filter(|r| passes(r, &pushed)).collect::<Vec<_>>());
     if residual.is_empty() && keys.iter().all(|k| types[k] != "text") {
-        let emitted: Vec<&Row> = match sort.is_empty() {
+        let emitted: Vec<Line> = match sort.is_empty() {
             true => found.flatten().take(limit).collect(),
             false => found
                 .flat_map(|mut g| {
@@ -3501,7 +3541,7 @@ fn load_counts(
         return (emitted.len(), values(&emitted, &(&keys | &later)));
     }
     // ponytail: reads every match; ES's source can stop early once a plain LIMIT fills
-    let mut rows: Vec<&Row> = found.flatten().collect();
+    let mut rows: Vec<Line> = found.flatten().collect();
     let documents = rows.len();
     let mut loaded: BTreeSet<String> = residual.iter().flat_map(|e| names(e)).collect();
     let mut n = values(&rows, &loaded);
