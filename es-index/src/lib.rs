@@ -268,6 +268,8 @@ pub struct Index {
     /// Documents written since the index was opened; they replace any on disk. Shared with
     /// snapshots.
     docs: HashMap<String, Arc<Document>>,
+    /// `docs` by sequence number, so searches visit them in write order without sorting.
+    by_seq_no: BTreeMap<u64, (String, Arc<Document>)>,
     /// Postings over `docs`, built per field as queries need them (see [`postings`]).
     postings: std::sync::Mutex<postings::Postings>,
     /// Documents in memory with lower sequence numbers are in the segments, which `stats`
@@ -363,6 +365,7 @@ impl Index {
     /// counted in its statistics, as a deleted document does in Lucene.
     fn take(&mut self, id: &str) -> Option<Option<Arc<Document>>> {
         if let Some(d) = self.docs.remove(id) {
+            self.by_seq_no.remove(&d.seq_no);
             self.memo_log(|m| m.removed.push(d.seq_no));
             self.postings
                 .get_mut()
@@ -459,14 +462,13 @@ impl Index {
             .get_mut()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .add(id, &source);
-        self.docs.insert(
-            id.to_owned(),
-            Arc::new(Document {
-                source,
-                version,
-                seq_no,
-            }),
-        );
+        let doc = Arc::new(Document {
+            source,
+            version,
+            seq_no,
+        });
+        self.by_seq_no.insert(seq_no, (id.to_owned(), doc.clone()));
+        self.docs.insert(id.to_owned(), doc);
         self.memo_log(|m| m.written.push(id.to_owned()));
         match old {
             Some(old) => {
@@ -535,6 +537,7 @@ impl Index {
             settings,
             mappings: self.mappings.clone(),
             docs: self.docs.clone(),
+            by_seq_no: self.by_seq_no.clone(),
             disk: self.disk.clone(),
             superseded: self.superseded.clone(),
             persisted: self.persisted,
@@ -732,27 +735,26 @@ impl Index {
     ) -> impl Iterator<Item = (&'a str, Cow<'a, Document>)> + 'k {
         let keep = move |p| on_disk.is_none_or(|at| at.contains(&p));
         let on_disk = self.disk.iter().flat_map(move |d| d.docs(keep));
-        let mut memory: Vec<(&'a String, &'a Arc<Document>)> = match in_memory {
-            // Few candidates: look them up instead of walking every document.
-            Some(ids) => ids
-                .iter()
-                .filter_map(|id| self.docs.get_key_value(id))
-                .collect(),
-            None => self.docs.iter().collect(),
-        };
         // results that depend on the visiting order (floating-point sums) are then deterministic
-        // reading each key once: comparing through the Arc misses the cache on every compare
-        memory.sort_by_cached_key(|(_, d)| d.seq_no);
+        let memory: Box<dyn Iterator<Item = (&'a String, &'a Arc<Document>)> + 'k> = match in_memory
+        {
+            // Few candidates: look them up instead of walking every document.
+            Some(ids) => {
+                let mut m: Vec<_> = (ids.iter())
+                    .filter_map(|id| self.docs.get_key_value(id))
+                    .collect();
+                // reading each key once: comparing through the Arc misses the cache on every compare
+                m.sort_by_cached_key(|(_, d)| d.seq_no);
+                Box::new(m.into_iter())
+            }
+            None => Box::new(self.by_seq_no.values().map(|(id, d)| (id, d))),
+        };
         on_disk
             // ponytail: open checksums the segments; documents an I/O error since makes
             // unreadable are skipped
             .filter_map(Result::ok)
             .map(|(id, d)| (id, Cow::Owned(d)))
-            .chain(
-                memory
-                    .into_iter()
-                    .map(|(id, d)| (id.as_str(), Cow::Borrowed(&**d))),
-            )
+            .chain(memory.map(|(id, d)| (id.as_str(), Cow::Borrowed(&**d))))
     }
 
     /// Every live document, without reading it: its position on disk or its id in memory.
