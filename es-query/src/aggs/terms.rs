@@ -1122,6 +1122,30 @@ mod tests {
     }
 
     #[test]
+    fn aggs_gaps_order_by_percentiles() {
+        let p = json!({"p": {"percentiles": {"field": "n", "percents": [50, 99.9]}}});
+        assert_eq!(
+            order(json!({"p.50": "desc"}), p.clone()).unwrap(),
+            ["c", "b", "a"]
+        );
+        assert_eq!(
+            order(json!({"p[99.9]": "asc"}), p.clone()).unwrap(),
+            ["a", "b", "c"]
+        );
+        // only requested percents; names parse as Java doubles
+        assert_eq!(
+            order(json!({"p.99": "asc"}), p.clone()).unwrap_err(),
+            "Invalid aggregation order path [p.99]. Unknown metric name [99] on multi-value metrics aggregation [p]"
+        );
+        assert_eq!(
+            order(json!({"p.max": "asc"}), p).unwrap_err(),
+            "Invalid aggregation order path [p.max]. For input string: \"max\""
+        );
+        let r = json!({"r": {"percentile_ranks": {"field": "n", "values": [1.5]}}});
+        assert_eq!(order(json!({"r[1.5]": "asc"}), r).unwrap(), ["b", "c", "a"]);
+    }
+
+    #[test]
     fn terms_typed_keys() {
         let body = json!({"aggs": {
             "s": {"terms": {"field": "k"}},

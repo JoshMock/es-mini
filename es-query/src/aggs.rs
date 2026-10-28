@@ -935,7 +935,6 @@ const NOT_SORTABLE: &str = "Buckets can only be sorted on a sub-aggregator path 
 /// The value `terms` buckets sort by for an order path into `agg` (`rest` is the path after
 /// its name, see `split_path`), like ES's aggregators' `bucketComparator`; `st` is `agg`'s
 /// result, `None` to only check the path. `Err` explains an invalid path.
-// ponytail: multi-value metrics sort by stats names only, not by percentiles
 fn sort_value(agg: &Agg, rest: &str, st: Option<&Stats>) -> Result<f64, String> {
     let name = &agg.name;
     if let Some(path) = rest.strip_prefix('>') {
@@ -983,15 +982,33 @@ fn sort_value(agg: &Agg, rest: &str, st: Option<&Stats>) -> Result<f64, String> 
             return Err(NOT_SORTABLE.into());
         }
         Metric::Stats | Metric::ExtendedStats { .. } | Metric::Percentiles { .. } => {
-            let stats = !matches!(agg.metric, Metric::Percentiles { .. });
-            return match key {
-                None => Err("When ordering on a multi-value metrics aggregation a metric name must be specified.".into()),
-                Some("count") if stats => Ok(st.count as f64),
-                Some("sum") if stats => Ok(st.sum),
-                Some("min") if stats => Ok(st.min),
-                Some("max") if stats => Ok(st.max),
-                Some("avg") if stats => Ok(avg),
-                Some(k) => Err(format!("Unknown metric name [{k}] on multi-value metrics aggregation [{name}]")),
+            let unknown = |k| {
+                format!("Unknown metric name [{k}] on multi-value metrics aggregation [{name}]")
+            };
+            return match (key, &agg.metric) {
+                (None, _) => Err("When ordering on a multi-value metrics aggregation a metric name must be specified.".into()),
+                // AbstractTDigestPercentilesAggregator.hasMetric and metric
+                (Some(k), Metric::Percentiles { percents, ranks, .. }) => {
+                    let x: f64 = k.parse().map_err(|_| format!("For input string: \"{k}\""))?;
+                    if !percents.contains(&x) {
+                        return Err(unknown(k));
+                    }
+                    // ponytail: clones the digest per comparison; cache values per bucket if
+                    // sorting many buckets shows up in profiles
+                    let Some(mut d) = st.digest.clone() else {
+                        return Ok(f64::NAN);
+                    };
+                    Ok(match ranks {
+                        true => d.cdf(x).clamp(0.0, 1.0) * 100.0,
+                        false => d.quantile(x / 100.0),
+                    })
+                }
+                (Some("count"), _) => Ok(st.count as f64),
+                (Some("sum"), _) => Ok(st.sum),
+                (Some("min"), _) => Ok(st.min),
+                (Some("max"), _) => Ok(st.max),
+                (Some("avg"), _) => Ok(avg),
+                (Some(k), _) => Err(unknown(k)),
             };
         }
     };
