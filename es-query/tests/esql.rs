@@ -1367,6 +1367,22 @@ fn eval_redefines_a_column() {
     );
 }
 
+/// A later EVAL sees and redefines what an earlier one added, past a WHERE that drops rows.
+#[test]
+fn evals_chain_through_a_where() {
+    let r = q(
+        "FROM people | EVAL a = age + 1 | WHERE a > 26 | EVAL a = a * 2, b = a \
+               | RENAME a AS c | SORT c | KEEP name, b, c",
+    );
+    assert_eq!(
+        r.values,
+        [
+            [json!("ann"), json!(62), json!(62)],
+            [json!("cid"), json!(84), json!(84)],
+        ]
+    );
+}
+
 #[test]
 fn rename_moves_columns_in_place() {
     let r = q("FROM people | RENAME name AS who, age AS years | SORT years");

@@ -2691,6 +2691,9 @@ fn run_at(
         Some(m) => Some(conflict_error(f, m)),
         None => None,
     };
+    // Per EVAL, the values it added to documents, which their rows then point into.
+    let evals: Vec<(OnceCell<_>, OnceCell<Vec<Added>>)> =
+        cmds.iter().map(|_| Default::default()).collect();
     let mut rows: Vec<Line> = groups.iter().flat_map(Group::lines).collect();
     let mut explicit_limit = false;
     // The rows at the cut of `load_counts`' plan, which it may reuse.
@@ -2925,16 +2928,38 @@ fn run_at(
                 rows.retain(|r| eval(e, r) == Some(Value::Bool(true)));
             }
             Command::Eval(named) => {
+                // A document's new values go in one block per EVAL, not an allocation per row.
+                let mut block = Vec::new();
+                let mut vals = Vec::with_capacity(named.len());
                 for r in &mut rows {
-                    if let Line::Doc(_, _, added) = r {
-                        added.reserve_exact(named.len());
+                    vals.clear();
+                    for (_, e) in named {
+                        let names = &named[..vals.len()];
+                        let row = Pending(r, names, &vals);
+                        vals.push(eval(e, &row).unwrap_or(Value::Null));
                     }
-                    for (name, e) in named {
-                        let v = eval(e, r).unwrap_or(Value::Null);
-                        match r {
-                            Line::Doc(_, _, added) => added.push((name, v)),
-                            Line::Own(r) => _ = r.insert(name.clone(), v),
+                    match r {
+                        Line::Doc(..) => block.append(&mut vals),
+                        Line::Own(r) => {
+                            r.extend(named.iter().map(|(n, _)| n.clone()).zip(vals.drain(..)))
                         }
+                    }
+                }
+                let (block_cell, added_cell) = &evals[i];
+                let block = block_cell.get_or_init(|| block);
+                let mut at = 0;
+                let added = rows.iter().filter_map(|r| match r {
+                    Line::Doc(_, _, prev) => {
+                        at += named.len();
+                        let vals = &block[at - named.len()..at];
+                        Some(Added(named, vals, *prev))
+                    }
+                    Line::Own(_) => None,
+                });
+                let mut added = added_cell.get_or_init(|| added.collect()).iter();
+                for r in &mut rows {
+                    if let Line::Doc(_, _, a) = r {
+                        *a = added.next();
                     }
                 }
             }
@@ -3256,7 +3281,7 @@ struct Group {
 
 impl Group {
     fn lines(&self) -> impl Iterator<Item = Line<'_>> {
-        (0..self.len).map(move |i| Line::Doc(self, i, Vec::new()))
+        (0..self.len).map(move |i| Line::Doc(self, i, None))
     }
 }
 
@@ -3264,18 +3289,42 @@ impl Group {
 /// name wins), or one a command built or changed.
 #[derive(Clone)]
 enum Line<'a> {
-    Doc(&'a Group, usize, Vec<(&'a str, Value)>),
+    Doc(&'a Group, usize, Option<&'a Added<'a>>),
     Own(Row),
+}
+
+/// The columns one EVAL added to a document, their values, and what the EVALs before it added.
+struct Added<'a>(&'a [(String, Expr)], &'a [Value], Option<&'a Added<'a>>);
+
+impl Added<'_> {
+    fn get(&self, c: &str) -> Option<&Value> {
+        match self.0.iter().rposition(|(n, _)| n == c) {
+            Some(k) => Some(&self.1[k]),
+            None => self.2?.get(c),
+        }
+    }
 }
 
 impl Fields for Line<'_> {
     fn field(&self, c: &str) -> &Value {
         match self {
-            Line::Doc(g, i, added) => match added.iter().rev().find(|(n, _)| *n == c) {
-                Some((_, v)) => v,
+            Line::Doc(g, i, added) => match added.and_then(|a| a.get(c)) {
+                Some(v) => v,
                 None => g.cols.get(c).map_or(&NULL, |v| &v[*i]),
             },
             Line::Own(r) => r.field(c),
+        }
+    }
+}
+
+/// A row while an EVAL runs: with the values it computed so far for the columns it names.
+struct Pending<'r>(&'r dyn Fields, &'r [(String, Expr)], &'r [Value]);
+
+impl Fields for Pending<'_> {
+    fn field(&self, c: &str) -> &Value {
+        match self.1.iter().rposition(|(n, _)| n == c) {
+            Some(k) => &self.2[k],
+            None => self.0.field(c),
         }
     }
 }
@@ -3480,12 +3529,21 @@ fn read(cmds: &[Command]) -> impl Fn(&str) -> bool + '_ {
 
 /// A row to change: a document is copied with only the `kept` columns and the ones EVAL added.
 fn owned<'r>(r: &'r mut Line, kept: &[&String]) -> &'r mut Row {
-    if let Line::Doc(_, _, added) = r {
-        let added = std::mem::take(added);
+    if let Line::Doc(_, _, added) = *r {
         let mut own: Row = (kept.iter())
             .map(|&c| (c.clone(), r.field(c).clone()))
             .collect();
-        own.extend(added.into_iter().map(|(n, v)| (n.to_owned(), v)));
+        // The oldest EVAL first, so the last value of a name wins.
+        let mut evals = Vec::new();
+        let mut a = added;
+        while let Some(x) = a {
+            evals.push(x);
+            a = x.2;
+        }
+        for Added(named, vals, _) in evals.into_iter().rev() {
+            let names = named.iter().map(|(n, _)| n.clone());
+            own.extend(names.zip(vals.iter().cloned()));
+        }
         *r = Line::Own(own);
     }
     let Line::Own(r) = r else { unreachable!() };
