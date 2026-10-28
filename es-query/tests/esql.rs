@@ -2117,6 +2117,34 @@ fn esql_es_semantics_negative_substring_length_fails() {
     );
 }
 
+/// A WHERE right after an EVAL reads its values, with its own expressions' types resolved.
+#[test]
+fn where_after_eval_reads_its_values() {
+    let r = q("FROM people | EVAL a2 = age * 2 | WHERE a2 - 50 > 0 | KEEP name, a2");
+    assert_eq!(
+        r.values,
+        [[json!("ann"), json!(60)], [json!("cid"), json!(82)]]
+    );
+}
+
+/// An EVAL evaluates every row before the WHERE after it, so its failure on a later row wins
+/// over the WHERE's on an earlier one.
+#[test]
+fn eval_fails_before_the_where_after_it() {
+    assert_eq!(
+        run(
+            &indices(),
+            "FROM people | EVAL s = SUBSTRING(name, 1, TO_INTEGER(40 - age)) \
+             | WHERE SUBSTRING(name, 1, TO_INTEGER(age - 27)) == \"a\""
+        ),
+        Err(EsqlError::Failed {
+            status: 400,
+            kind: "illegal_argument_exception",
+            reason: "Length parameter cannot be negative, found [-1]".into()
+        })
+    );
+}
+
 /// Like Elasticsearch 9.5.5, ROUND past the long range fails the query (500
 /// `arithmetic_exception`), while integers and unsigned longs round to null (with a warning).
 #[test]

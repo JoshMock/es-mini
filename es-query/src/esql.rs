@@ -2723,6 +2723,10 @@ fn run_at(
         cmds.iter().map(|_| Default::default()).collect();
     let mut rows: Vec<Line> = groups.iter().flat_map(Group::lines).collect();
     let mut explicit_limit = false;
+    let fused = |k: usize| match (cmds.get(k), cmds.get(k + 1)) {
+        (Some(Command::Eval(named)), Some(Command::Where(e))) => Some((named, e)),
+        _ => None,
+    };
     // The rows at the cut of `load_counts`' plan, which it may reuse.
     let cut = plan_cut(&cmds);
     let mut at_cut = Vec::new();
@@ -2951,45 +2955,14 @@ fn run_at(
             return Err(problems(bad));
         }
         match cmd {
-            Command::Where(e) => {
-                rows.retain(|r| truth(e, r) == Some(true));
-            }
-            Command::Eval(named) => {
-                // A document's new values go in one block per EVAL, not an allocation per row.
-                let mut block = Vec::new();
-                let mut vals = Vec::with_capacity(named.len());
-                for r in &mut rows {
-                    vals.clear();
-                    for (_, e) in named {
-                        let names = &named[..vals.len()];
-                        let row = Pending(r, names, &vals);
-                        vals.push(eval(e, &row).unwrap_or(Value::Null));
-                    }
-                    match r {
-                        Line::Doc(..) => block.append(&mut vals),
-                        Line::Own(r) => {
-                            r.extend(named.iter().map(|(n, _)| n.clone()).zip(vals.drain(..)))
-                        }
-                    }
-                }
-                let (block_cell, added_cell) = &evals[i];
-                let block = block_cell.get_or_init(|| block);
-                let mut at = 0;
-                let added = rows.iter().filter_map(|r| match r {
-                    Line::Doc(_, _, prev) => {
-                        at += named.len();
-                        let vals = &block[at - named.len()..at];
-                        Some(Added(named, vals, *prev))
-                    }
-                    Line::Own(_) => None,
-                });
-                let mut added = added_cell.get_or_init(|| added.collect()).iter();
-                for r in &mut rows {
-                    if let Line::Doc(_, _, a) = r {
-                        *a = added.next();
-                    }
-                }
-            }
+            // An EVAL with a WHERE right after it runs once that WHERE is verified (its types
+            // resolved), with it.
+            Command::Eval(_) if fused(i).is_some() => {}
+            Command::Where(e) => match i.checked_sub(1).and_then(fused) {
+                Some((named, _)) => eval_rows(&mut rows, named, Some(e), &evals[i - 1]),
+                None => rows.retain(|r| truth(e, r) == Some(true)),
+            },
+            Command::Eval(named) => eval_rows(&mut rows, named, None, &evals[i]),
             &Command::Limit(n) => {
                 rows.truncate(n.min(MAX_LIMIT));
                 explicit_limit = true;
@@ -3290,6 +3263,62 @@ fn run_at(
             .map(|r| cols.iter().map(|c| r.field(c).clone()).collect())
             .collect(),
     })
+}
+
+/// Runs the EVAL of `named` over `rows`, its values kept in `cells`. With `filter`, the WHERE
+/// right after it, each row is filtered as soon as it has its values, so the rows it drops never
+/// store them; the EVAL's failures still come first, as if it ran over every row first.
+fn eval_rows<'a>(
+    rows: &mut Vec<Line<'a>>,
+    named: &'a [(String, Expr)],
+    filter: Option<&Expr>,
+    cells: &'a (OnceCell<Vec<Value>>, OnceCell<Vec<Added<'a>>>),
+) {
+    let mut deferred = None;
+    // A document's new values go in one block per EVAL, not an allocation per row.
+    let mut block = Vec::new();
+    let mut vals = Vec::with_capacity(named.len());
+    rows.retain_mut(|r| {
+        vals.clear();
+        for (_, e) in named {
+            let names = &named[..vals.len()];
+            let row = Pending(r, names, &vals);
+            vals.push(eval(e, &row).unwrap_or(Value::Null));
+        }
+        if let Some(w) = filter {
+            let clean = FAILURE.with_borrow(Option::is_none);
+            let keep = truth(w, &Pending(r, named, &vals)) == Some(true);
+            if clean && deferred.is_none() {
+                deferred = FAILURE.take();
+            }
+            if !keep {
+                return false;
+            }
+        }
+        match r {
+            Line::Doc(..) => block.append(&mut vals),
+            Line::Own(r) => r.extend(named.iter().map(|(n, _)| n.clone()).zip(vals.drain(..))),
+        }
+        true
+    });
+    FAILURE.with_borrow_mut(|f| *f = f.take().or(deferred));
+    let (block_cell, added_cell) = cells;
+    let block = block_cell.get_or_init(|| block);
+    let mut at = 0;
+    let added = rows.iter().filter_map(|r| match r {
+        Line::Doc(_, _, prev) => {
+            at += named.len();
+            let vals = &block[at - named.len()..at];
+            Some(Added(named, vals, *prev))
+        }
+        Line::Own(_) => None,
+    });
+    let mut added = added_cell.get_or_init(|| added.collect()).iter();
+    for r in rows {
+        if let Line::Doc(_, _, a) = r {
+            *a = added.next();
+        }
+    }
 }
 
 type Row = BTreeMap<String, Value>;
