@@ -3643,15 +3643,44 @@ fn top_rows<R: Fields>(rows: &mut Vec<R>, keys: &[SortKey], n: usize) {
             })
             .then(i.cmp(&j))
     };
-    let mut top: Vec<usize> = (0..rows.len()).collect();
-    if n > 0 {
-        top.select_nth_unstable_by(n - 1, cmp);
+    // The best n so far, worst on top of a max-heap: most rows lose to it in one comparison.
+    let mut heap = std::collections::BinaryHeap::with_capacity(n);
+    for i in 0..rows.len() {
+        if heap.len() < n {
+            heap.push(Ranked(i, &cmp));
+        } else if let Some(mut worst) = heap.peek_mut()
+            && cmp(&i, &worst.0).is_lt()
+        {
+            worst.0 = i;
+        }
     }
-    top.truncate(n);
-    top.sort_unstable_by(cmp);
+    let top: Vec<usize> = heap.into_sorted_vec().into_iter().map(|r| r.0).collect();
     let mut slots: Vec<Option<R>> = rows.drain(..).map(Some).collect();
     rows.extend(top.into_iter().filter_map(|i| slots[i].take()));
 }
+
+/// A row position ordered by a comparator, for a `BinaryHeap`.
+struct Ranked<'c, C>(usize, &'c C);
+
+impl<C: Fn(&usize, &usize) -> Ordering> Ord for Ranked<'_, C> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        (self.1)(&self.0, &other.0)
+    }
+}
+
+impl<C: Fn(&usize, &usize) -> Ordering> PartialOrd for Ranked<'_, C> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<C: Fn(&usize, &usize) -> Ordering> PartialEq for Ranked<'_, C> {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other).is_eq()
+    }
+}
+
+impl<C: Fn(&usize, &usize) -> Ordering> Eq for Ranked<'_, C> {}
 
 fn cmp_rows(a: &dyn Fields, b: &dyn Fields, keys: &[SortKey]) -> Ordering {
     keys.iter().fold(Ordering::Equal, |acc, k| {
