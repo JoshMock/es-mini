@@ -1176,9 +1176,30 @@ fn operand<'a>(e: &'a Expr, row: &'a dyn Fields) -> Option<Cow<'a, Value>> {
     .filter(|v| !v.is_null())
 }
 
+/// `f` of two operands' values, null if either is null. Fields and literals are read in place
+/// without building an `operand` per row.
+fn operands<T>(
+    a: &Expr,
+    b: &Expr,
+    row: &dyn Fields,
+    f: impl FnOnce(&Value, &Value) -> Option<T>,
+) -> Option<T> {
+    fn in_place<'a>(e: &'a Expr, row: &'a dyn Fields) -> Option<&'a Value> {
+        match e {
+            Expr::Lit(v, _) => Some(v),
+            Expr::Field(f, _) => Some(row.field(f)),
+            _ => None,
+        }
+    }
+    match (in_place(a, row), in_place(b, row)) {
+        (Some(x), Some(y)) if x.is_null() || y.is_null() => None,
+        (Some(x), Some(y)) => f(x, y),
+        _ => f(&*operand(a, row)?, &*operand(b, row)?),
+    }
+}
+
 /// Three-valued logic: `None` is SQL NULL.
 fn eval(e: &Expr, row: &dyn Fields) -> Option<Value> {
-    let truth = |e: &Expr| eval(e, row).and_then(|v| v.as_bool());
     match e {
         Expr::Lit(v, _) => Some(v.clone()).filter(|v| !v.is_null()),
         // ponytail: only DATE_TRUNC and BUCKET read a time span, straight from the literal
@@ -1195,17 +1216,9 @@ fn eval(e: &Expr, row: &dyn Fields) -> Option<Value> {
             }
             _ => None,
         },
-        Expr::Not(x, _) => truth(x).map(|b| Value::Bool(!b)),
-        Expr::And(a, b, _) => match (truth(a), truth(b)) {
-            (Some(false), _) | (_, Some(false)) => Some(false.into()),
-            (Some(true), Some(true)) => Some(true.into()),
-            _ => None,
-        },
-        Expr::Or(a, b, _) => match (truth(a), truth(b)) {
-            (Some(true), _) | (_, Some(true)) => Some(true.into()),
-            (Some(false), Some(false)) => Some(false.into()),
-            _ => None,
-        },
+        Expr::Not(..) | Expr::And(..) | Expr::Or(..) | Expr::Cmp(..) => {
+            truth(e, row).map(Value::Bool)
+        }
         Expr::Arith(op, a, b, t, _) if t.get() == Some(&"date") => match (&**a, &**b) {
             (d, Expr::Interval(n, unit, _)) => {
                 date_plus(&eval(d, row)?, n.checked_mul(op_sign(op))?, unit)
@@ -1214,12 +1227,10 @@ fn eval(e: &Expr, row: &dyn Fields) -> Option<Value> {
             // A null operand.
             _ => None,
         },
-        Expr::Arith(op, a, b, t, _) => arith(
-            op,
-            t.get().copied()?,
-            &*operand(a, row)?,
-            &*operand(b, row)?,
-        ),
+        Expr::Arith(op, a, b, t, _) => {
+            let t = t.get().copied()?;
+            operands(a, b, row, |a, b| arith(op, t, a, b))
+        }
         // Like Java's `Math.negateExact`, null on overflow; null for a multi-value too.
         Expr::Neg(x, t, _) => {
             let v = eval(x, row)?;
@@ -1297,29 +1308,45 @@ fn eval(e: &Expr, row: &dyn Fields) -> Option<Value> {
                 v => one(&v),
             }
         }
+    }
+}
+
+/// `eval` of a condition, without building a `Value` for comparisons and logic.
+fn truth(e: &Expr, row: &dyn Fields) -> Option<bool> {
+    match e {
         Expr::Cmp(op, a, b, t, _) => {
             // ponytail: multi-valued fields compare as null, like ES (which also warns)
-            let (a, b) = (operand(a, row)?, operand(b, row)?);
             let truth = |v: &Value| {
                 v.as_bool()
                     .or_else(|| Some(v.as_str()?.eq_ignore_ascii_case("true")))
             };
-            let ord = match t.get() {
-                Some(["ip", _]) => es_index::ip_bytes(&a)?.cmp(&es_index::ip_bytes(&b)?),
-                Some(["boolean", _]) => truth(&a)?.cmp(&truth(&b)?),
-                Some([ta, tb]) => epoch_nanos(ta, &a)?.cmp(&epoch_nanos(tb, &b)?),
-                None => compare(&a, &b)?,
-            };
-            let r = match *op {
+            let ord = operands(a, b, row, |a, b| match t.get() {
+                Some(["ip", _]) => Some(es_index::ip_bytes(a)?.cmp(&es_index::ip_bytes(b)?)),
+                Some(["boolean", _]) => Some(truth(a)?.cmp(&truth(b)?)),
+                Some([ta, tb]) => Some(epoch_nanos(ta, a)?.cmp(&epoch_nanos(tb, b)?)),
+                None => compare(a, b),
+            })?;
+            Some(match *op {
                 "==" => ord.is_eq(),
                 "!=" => ord.is_ne(),
                 "<" => ord.is_lt(),
                 "<=" => ord.is_le(),
                 ">" => ord.is_gt(),
                 _ => ord.is_ge(),
-            };
-            Some(r.into())
+            })
         }
+        Expr::Not(x, _) => truth(x, row).map(|b| !b),
+        Expr::And(a, b, _) => match (truth(a, row), truth(b, row)) {
+            (Some(false), _) | (_, Some(false)) => Some(false),
+            (Some(true), Some(true)) => Some(true),
+            _ => None,
+        },
+        Expr::Or(a, b, _) => match (truth(a, row), truth(b, row)) {
+            (Some(true), _) | (_, Some(true)) => Some(true),
+            (Some(false), Some(false)) => Some(false),
+            _ => None,
+        },
+        e => eval(e, row)?.as_bool(),
     }
 }
 
@@ -2925,7 +2952,7 @@ fn run_at(
         }
         match cmd {
             Command::Where(e) => {
-                rows.retain(|r| eval(e, r) == Some(Value::Bool(true)));
+                rows.retain(|r| truth(e, r) == Some(true));
             }
             Command::Eval(named) => {
                 // A document's new values go in one block per EVAL, not an allocation per row.
@@ -3662,7 +3689,7 @@ fn load_counts(
         }
     }
     let keys: BTreeSet<String> = sort.iter().map(|k| k.field.clone()).collect();
-    let passes = |r: &Line, es: &[&Expr]| es.iter().all(|e| eval(e, r) == Some(true.into()));
+    let passes = |r: &Line, es: &[&Expr]| es.iter().all(|e| truth(e, r) == Some(true));
     let values = |rows: &[Line], fields: &BTreeSet<String>| -> usize {
         let count = |v: &Value| match v {
             Value::Null => 0,
