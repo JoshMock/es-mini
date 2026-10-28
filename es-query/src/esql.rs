@@ -2975,18 +2975,19 @@ fn run_at(
                 }
             }
             Command::Stats(aggs, by) => {
-                let mut buckets: Vec<(Vec<Value>, Vec<&Line>)> = Vec::new();
+                // Each group's key and its rows' positions.
+                let mut buckets: Vec<(Vec<Value>, Vec<usize>)> = Vec::new();
                 let mut index = HashMap::new();
                 // Each row's key values, read in place where a key is a column.
                 let mut vals: Vec<Cow<Value>> = Vec::with_capacity(by.len());
-                for r in &rows {
+                for (i, r) in rows.iter().enumerate() {
                     vals.clear();
                     vals.extend(by.iter().map(|(_, e)| match e {
                         Expr::Field(f, _) => Cow::Borrowed(r.field(f)),
                         e => Cow::Owned(eval(e, r).unwrap_or(Value::Null)),
                     }));
                     if !vals.iter().any(|v| v.is_array()) {
-                        join_group(&mut buckets, &mut index, vals.iter().map(|v| &**v), r);
+                        join_group(&mut buckets, &mut index, vals.iter().map(|v| &**v), i);
                         continue;
                     }
                     // A row joins the group of every combination of its distinct key values.
@@ -3010,27 +3011,45 @@ fn run_at(
                             .collect();
                     }
                     for key in keys {
-                        join_group(&mut buckets, &mut index, key.iter(), r);
+                        join_group(&mut buckets, &mut index, key.iter(), i);
                     }
                 }
                 if by.is_empty() && buckets.is_empty() {
                     buckets.push((Vec::new(), Vec::new()));
                 }
-                let agg = |name: &str, e: &Expr, group: &[&Line]| {
-                    let (f, arg, param) = aggregate(e).expect("STATS was verified");
-                    let Some(arg) = arg else {
+                // Each aggregate's argument per row, read in row order and in place where it is
+                // a field: a group then gathers its values from these instead of chasing its
+                // rows through memory.
+                let arg = |e| aggregate(e).expect("STATS was verified").1;
+                let computed: Vec<Vec<Value>> = (aggs.iter())
+                    .map(|(_, e)| match arg(e) {
+                        Some(Expr::Field(..)) | None => Vec::new(),
+                        Some(a) => (rows.iter())
+                            .map(|r| eval(a, r).unwrap_or(Value::Null))
+                            .collect(),
+                    })
+                    .collect();
+                let args: Vec<Vec<&Value>> = (aggs.iter().zip(&computed))
+                    .map(|((_, e), c)| match arg(e) {
+                        Some(Expr::Field(f, _)) => rows.iter().map(|r| r.field(f)).collect(),
+                        _ => c.iter().collect(),
+                    })
+                    .collect();
+                let agg = |name: &str, e: &Expr, group: &[usize], arg: &[&Value]| {
+                    let (f, arg_expr, param) = aggregate(e).expect("STATS was verified");
+                    if arg_expr.is_none() {
                         return group.len().into();
-                    };
+                    }
                     // Every value in the group: multi-values count value by value.
-                    let mut all = Vec::with_capacity(group.len());
-                    for v in group.iter().filter_map(|r| eval(arg, *r)) {
+                    let mut all: Vec<&Value> = Vec::with_capacity(group.len());
+                    for v in group.iter().map(|&i| arg[i]) {
                         match v {
-                            Value::Array(a) => all.extend(a.into_iter().filter(|v| !v.is_null())),
+                            Value::Array(a) => all.extend(a.iter().filter(|v| !v.is_null())),
                             Value::Null => {}
                             v => all.push(v),
                         }
                     }
-                    let doubles = all.iter().filter_map(Value::as_f64);
+                    let doubles = all.iter().filter_map(|v| v.as_f64());
                     match f.as_str() {
                         "COUNT" => all.len().into(),
                         "COUNT_DISTINCT" => {
@@ -3069,15 +3088,16 @@ fn run_at(
                             counter.cardinality().into()
                         }
                         "MIN" | "MAX" => {
-                            mv_fn(&format!("MV_{f}"), &Value::Array(all)).unwrap_or(Value::Null)
+                            let all = Value::Array(all.into_iter().cloned().collect());
+                            mv_fn(&format!("MV_{f}"), &all).unwrap_or(Value::Null)
                         }
                         _ if all.is_empty() => Value::Null,
                         "VALUES" => {
                             // Distinct values in the order they come, like ES's BytesRefHash.
                             let mut distinct = Vec::new();
                             all.into_iter().for_each(|v| {
-                                if !distinct.contains(&v) {
-                                    distinct.push(v);
+                                if !distinct.contains(v) {
+                                    distinct.push(v.clone());
                                 }
                             });
                             match distinct.len() {
@@ -3111,9 +3131,8 @@ fn run_at(
                 rows = buckets
                     .into_iter()
                     .map(|(key, group)| {
-                        let mut r: Row = aggs
-                            .iter()
-                            .map(|(a, e)| (a.clone(), agg(a, e, &group)))
+                        let mut r: Row = (aggs.iter().zip(&args))
+                            .map(|((a, e), arg)| (a.clone(), agg(a, e, &group, arg)))
                             .collect();
                         r.extend(by.iter().map(|(b, _)| b.clone()).zip(key));
                         Line::Own(r)
