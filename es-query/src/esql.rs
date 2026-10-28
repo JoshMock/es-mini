@@ -2664,6 +2664,8 @@ fn run_at(
         table.cols.clone(),
     );
     let (groups, empty, counted) = (&table.groups, table.empty, table.counted);
+    // The columns the query reads, which a row it changes keeps: decided once, not per row.
+    let kept: Vec<&String> = table.cols.iter().filter(|c| reads(c)).collect();
     // A referenced column must exist and have one type.
     let check = |cols: &[String], conflicts: &BTreeMap<String, _>, f: &str| match conflicts.get(f) {
         _ if !cols.iter().any(|c| c == f) => Some(unknown(f)),
@@ -2902,7 +2904,7 @@ fn run_at(
             }
             Command::Eval(named) => {
                 for r in &mut rows {
-                    let r = owned(r, &reads);
+                    let r = owned(r, &kept);
                     for (name, e) in named {
                         let v = eval(e, r).unwrap_or(Value::Null);
                         r.insert(name.clone(), v);
@@ -2938,7 +2940,7 @@ fn run_at(
             },
             Command::Rename(pairs) => {
                 for r in &mut rows {
-                    let r = owned(r, &reads);
+                    let r = owned(r, &kept);
                     for ((old, _), new, _) in pairs.iter().filter(|(o, n, _)| o.0 != *n) {
                         let v = r.remove(old).unwrap_or(Value::Null);
                         r.insert(new.clone(), v);
@@ -3340,13 +3342,12 @@ fn read(cmds: &[Command]) -> impl Fn(&str) -> bool + '_ {
     }
 }
 
-/// A row to change: a shared one is copied with only the columns the query reads.
-fn owned<'r>(r: &'r mut Cow<Row>, reads: &dyn Fn(&str) -> bool) -> &'r mut Row {
+/// A row to change: a shared one is copied with only the `kept` columns.
+fn owned<'r>(r: &'r mut Cow<Row>, kept: &[&String]) -> &'r mut Row {
     if let Cow::Borrowed(b) = *r {
         *r = Cow::Owned(
-            b.iter()
-                .filter(|(c, _)| reads(c))
-                .map(|(c, v)| (c.clone(), v.clone()))
+            (kept.iter())
+                .filter_map(|&c| Some((c.clone(), b.get(c)?.clone())))
                 .collect(),
         );
     }
