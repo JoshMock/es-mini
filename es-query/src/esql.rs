@@ -2672,7 +2672,7 @@ fn run_at(
     let mut rows: Vec<Cow<Row>> = groups.iter().flatten().map(Cow::Borrowed).collect();
     let mut explicit_limit = false;
 
-    for cmd in &cmds {
+    for (i, cmd) in cmds.iter().enumerate() {
         // Like ES, report every problem of the first command that has any.
         let bad: Vec<(Pos, String)> = match cmd {
             Command::Where(e) => {
@@ -2927,9 +2927,14 @@ fn run_at(
             Command::Drop(patterns) => {
                 cols.retain(|c| !patterns.iter().any(|(p, _)| aliases::glob(p, c)));
             }
-            Command::Sort(keys) => {
-                sort_rows(&mut rows, keys);
-            }
+            // Only the rows a LIMIT keeps need sorting; KEEP, DROP and RENAME keep every row.
+            Command::Sort(keys) => match cmds[i + 1..]
+                .iter()
+                .find(|c| !matches!(c, Command::Keep(_) | Command::Drop(_) | Command::Rename(_)))
+            {
+                Some(&Command::Limit(n)) => top_rows(&mut rows, keys, n.min(MAX_LIMIT)),
+                _ => sort_rows(&mut rows, keys),
+            },
             Command::Rename(pairs) => {
                 for r in &mut rows {
                     let r = r.to_mut();
@@ -3314,35 +3319,54 @@ fn read(cmds: &[Command]) -> impl Fn(&str) -> bool + '_ {
 }
 
 fn sort_rows<R: Borrow<Row>>(rows: &mut [R], keys: &[SortKey]) {
-    rows.sort_by(|a, b| {
-        let (a, b) = (a.borrow(), b.borrow());
-        keys.iter().fold(Ordering::Equal, |acc, k| {
-            acc.then_with(|| {
-                let (x, y) = (&a[k.field.as_str()], &b[k.field.as_str()]);
-                match (x.is_null(), y.is_null()) {
-                    (true, true) => Ordering::Equal,
-                    (true, false) => {
-                        if k.nulls_first {
-                            Ordering::Less
-                        } else {
-                            Ordering::Greater
-                        }
-                    }
-                    (false, true) => {
-                        if k.nulls_first {
-                            Ordering::Greater
-                        } else {
-                            Ordering::Less
-                        }
-                    }
-                    _ => {
-                        let o = compare(x, y).unwrap_or(Ordering::Equal);
-                        if k.desc { o.reverse() } else { o }
+    rows.sort_by(|a, b| cmp_rows(a.borrow(), b.borrow(), keys));
+}
+
+/// `sort_rows` then `truncate(n)`, without sorting the rows past the first `n`.
+fn top_rows<R: Borrow<Row>>(rows: &mut Vec<R>, keys: &[SortKey], n: usize) {
+    if n >= rows.len() {
+        return sort_rows(rows, keys);
+    }
+    // Ties broken by position, as the stable sort does.
+    let cmp =
+        |&i: &usize, &j: &usize| cmp_rows(rows[i].borrow(), rows[j].borrow(), keys).then(i.cmp(&j));
+    let mut top: Vec<usize> = (0..rows.len()).collect();
+    if n > 0 {
+        top.select_nth_unstable_by(n - 1, cmp);
+    }
+    top.truncate(n);
+    top.sort_unstable_by(cmp);
+    let mut slots: Vec<Option<R>> = rows.drain(..).map(Some).collect();
+    rows.extend(top.into_iter().filter_map(|i| slots[i].take()));
+}
+
+fn cmp_rows(a: &Row, b: &Row, keys: &[SortKey]) -> Ordering {
+    keys.iter().fold(Ordering::Equal, |acc, k| {
+        acc.then_with(|| {
+            let (x, y) = (&a[k.field.as_str()], &b[k.field.as_str()]);
+            match (x.is_null(), y.is_null()) {
+                (true, true) => Ordering::Equal,
+                (true, false) => {
+                    if k.nulls_first {
+                        Ordering::Less
+                    } else {
+                        Ordering::Greater
                     }
                 }
-            })
+                (false, true) => {
+                    if k.nulls_first {
+                        Ordering::Greater
+                    } else {
+                        Ordering::Less
+                    }
+                }
+                _ => {
+                    let o = compare(x, y).unwrap_or(Ordering::Equal);
+                    if k.desc { o.reverse() } else { o }
+                }
+            }
         })
-    });
+    })
 }
 
 /// `documents_found` and `values_loaded` as Elasticsearch 9.5.5's plan counts them. Up to the
@@ -3422,8 +3446,7 @@ fn load_counts(
             true => found.flatten().take(limit).collect(),
             false => found
                 .flat_map(|mut g| {
-                    sort_rows(&mut g, sort);
-                    g.truncate(limit);
+                    top_rows(&mut g, sort, limit);
                     g
                 })
                 .collect(),
@@ -3438,8 +3461,7 @@ fn load_counts(
     rows.retain(|r| passes(r, &residual));
     n += values(&rows, &(&keys - &loaded));
     loaded.extend(keys);
-    sort_rows(&mut rows, sort);
-    rows.truncate(limit);
+    top_rows(&mut rows, sort, limit);
     n += values(&rows, &(&later - &loaded));
     (documents, n)
 }
@@ -3485,5 +3507,28 @@ mod tests {
         let r = run_at(&indices, "FROM i | EVAL t = NOW() | KEEP t", 1000).unwrap();
         let t = Value::from("1970-01-01T00:00:01.000Z");
         assert_eq!(r.values, vec![vec![t]; 3]);
+    }
+
+    /// A top N keeps the rows a stable sort and a truncation keep, ties in input order.
+    #[test]
+    fn top_rows_is_a_stable_sort_truncated() {
+        let rows: Vec<Row> = [3, 1, 2, 1, 3, 2, 1, 3]
+            .iter()
+            .enumerate()
+            .map(|(i, k)| Row::from([("k".into(), (*k).into()), ("i".into(), i.into())]))
+            .collect();
+        let keys = [SortKey {
+            field: "k".into(),
+            at: (1, 1),
+            desc: false,
+            nulls_first: false,
+        }];
+        let mut sorted = rows.clone();
+        sort_rows(&mut sorted, &keys);
+        for n in 0..=rows.len() + 1 {
+            let mut top = rows.clone();
+            top_rows(&mut top, &keys, n);
+            assert_eq!(top, sorted[..n.min(rows.len())]);
+        }
     }
 }
