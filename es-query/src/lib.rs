@@ -1444,7 +1444,8 @@ pub fn search_many<'a>(
             }
         };
         hits.extend(selected.into_iter().flatten());
-        for (id, doc) in s.docs().filter(|(_, d)| index.searchable(d.seq_no)) {
+        let visible = index.visible_seq_no();
+        for (id, doc) in s.docs().filter(|(_, d)| d.seq_no < visible) {
             let Some(score) = s.score(&query, id, &doc) else {
                 continue;
             };

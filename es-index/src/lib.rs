@@ -686,7 +686,8 @@ impl Index {
             None => self.docs.iter().collect(),
         };
         // results that depend on the visiting order (floating-point sums) are then deterministic
-        memory.sort_unstable_by_key(|(_, d)| d.seq_no);
+        // reading each key once: comparing through the Arc misses the cache on every compare
+        memory.sort_by_cached_key(|(_, d)| d.seq_no);
         on_disk
             // ponytail: open checksums the segments; documents an I/O error since makes
             // unreadable are skipped
