@@ -1333,6 +1333,23 @@ fn unary_minus_negates_expressions() {
     }
 }
 
+/// An EVAL that redefines a document's column replaces it for every command after.
+#[test]
+fn eval_redefines_a_column() {
+    let r = q(
+        "FROM people | EVAL age = age * 2, age = age + 1, x = age | RENAME age AS a \
+               | SORT a | KEEP name, a, x",
+    );
+    assert_eq!(
+        r.values,
+        [
+            [json!("bob"), json!(51), json!(51)],
+            [json!("ann"), json!(61), json!(61)],
+            [json!("cid"), json!(83), json!(83)],
+        ]
+    );
+}
+
 #[test]
 fn rename_moves_columns_in_place() {
     let r = q("FROM people | RENAME name AS who, age AS years | SORT years");

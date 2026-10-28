@@ -2906,10 +2906,15 @@ fn run_at(
             }
             Command::Eval(named) => {
                 for r in &mut rows {
-                    let r = owned(r, &kept);
+                    if let Line::Doc(_, _, added) = r {
+                        added.reserve_exact(named.len());
+                    }
                     for (name, e) in named {
                         let v = eval(e, r).unwrap_or(Value::Null);
-                        r.insert(name.clone(), v);
+                        match r {
+                            Line::Doc(_, _, added) => added.push((name, v)),
+                            Line::Own(r) => _ = r.insert(name.clone(), v),
+                        }
                     }
                 }
             }
@@ -3164,20 +3169,24 @@ struct Group {
 
 impl Group {
     fn lines(&self) -> impl Iterator<Item = Line<'_>> {
-        (0..self.len).map(move |i| Line::Doc(self, i))
+        (0..self.len).map(move |i| Line::Doc(self, i, Vec::new()))
     }
 }
 
-/// A row in a query: a document still in its group, or one a command built or changed.
+/// A row in a query: a document still in its group with the columns EVAL added (the last of a
+/// name wins), or one a command built or changed.
 enum Line<'a> {
-    Doc(&'a Group, usize),
+    Doc(&'a Group, usize, Vec<(&'a str, Value)>),
     Own(Row),
 }
 
 impl Fields for Line<'_> {
     fn field(&self, c: &str) -> &Value {
         match self {
-            Line::Doc(g, i) => g.cols.get(c).map_or(&NULL, |v| &v[*i]),
+            Line::Doc(g, i, added) => match added.iter().rev().find(|(n, _)| *n == c) {
+                Some((_, v)) => v,
+                None => g.cols.get(c).map_or(&NULL, |v| &v[*i]),
+            },
             Line::Own(r) => r.field(c),
         }
     }
@@ -3381,14 +3390,15 @@ fn read(cmds: &[Command]) -> impl Fn(&str) -> bool + '_ {
     }
 }
 
-/// A row to change: a shared one is copied with only the `kept` columns.
+/// A row to change: a document is copied with only the `kept` columns and the ones EVAL added.
 fn owned<'r>(r: &'r mut Line, kept: &[&String]) -> &'r mut Row {
-    if let Line::Doc(..) = r {
-        *r = Line::Own(
-            (kept.iter())
-                .map(|&c| (c.clone(), r.field(c).clone()))
-                .collect(),
-        );
+    if let Line::Doc(_, _, added) = r {
+        let added = std::mem::take(added);
+        let mut own: Row = (kept.iter())
+            .map(|&c| (c.clone(), r.field(c).clone()))
+            .collect();
+        own.extend(added.into_iter().map(|(n, v)| (n.to_owned(), v)));
+        *r = Line::Own(own);
     }
     let Line::Own(r) = r else { unreachable!() };
     r
