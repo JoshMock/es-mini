@@ -3582,14 +3582,13 @@ fn load_counts(
             .flat_map(|r| fields.iter().map(|f| count(r.field(f))))
             .sum()
     };
-    let found = groups
-        .iter()
-        .map(|g| g.lines().filter(|r| passes(r, &pushed)).collect::<Vec<_>>());
+    let found = (groups.iter()).map(|g| g.lines().filter(|r| passes(r, &pushed)));
     if residual.is_empty() && keys.iter().all(|k| types[k] != "text") {
         let emitted: Vec<Line> = match sort.is_empty() {
             true => found.flatten().take(limit).collect(),
             false => found
-                .flat_map(|mut g| {
+                .flat_map(|g| {
+                    let mut g: Vec<Line> = g.collect();
                     top_rows(&mut g, sort, limit);
                     g
                 })
