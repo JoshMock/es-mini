@@ -3870,6 +3870,8 @@ fn load_counts(
     }
     let keys: BTreeSet<String> = sort.iter().map(|k| k.field.clone()).collect();
     let passes = |r: &Line, es: &[&Expr]| es.iter().all(|e| truth(e, r) == Some(true));
+    // A cached table holds every column, also those the query only names as an output.
+    let reads = read(cmds);
     let values = |rows: &[Line], fields: &BTreeSet<String>| -> usize {
         let count = |v: &Value| match v {
             Value::Null => 0,
@@ -3877,7 +3879,7 @@ fn load_counts(
             _ => 1,
         };
         rows.iter()
-            .flat_map(|r| fields.iter().map(|f| count(r.field(f))))
+            .flat_map(|r| (fields.iter().filter(|f| reads(f))).map(|f| count(r.field(f))))
             .sum()
     };
     // The query's own rows at the cut are this top N when it has one index, one SORT before the

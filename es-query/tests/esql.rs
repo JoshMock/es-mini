@@ -403,6 +403,21 @@ fn documents_found_and_values_loaded_follow_the_plan() {
     }
 }
 
+/// A column the query only names as an output of EVAL or STATS is not loaded from the documents.
+#[test]
+fn values_loaded_skips_a_source_column_only_named_as_an_output() {
+    let mut t = Index::default();
+    t.put("1", json!({"k": 1, "n": 1}));
+    t.put("2", json!({"k": 2, "n": 2}));
+    let all = BTreeMap::from([("t".to_owned(), t)]);
+    for (query, values) in [
+        ("FROM t | KEEP k | EVAL n = k", 2),
+        ("FROM t | STATS n = COUNT(*)", 0),
+    ] {
+        assert_eq!(run(&all, query).unwrap().values_loaded, values, "{query}");
+    }
+}
+
 /// The counts' plan keeps only the last SORT, so ties fall in document order there even where
 /// an earlier SORT ordered the query's own rows.
 #[test]
