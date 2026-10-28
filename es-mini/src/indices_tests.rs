@@ -577,3 +577,49 @@ async fn mapping_validation_put_mapping_merges_like_elasticsearch() {
         "Mapper for [s] conflicts with existing mapper:\n\tCannot update parameter [store] from [false] to [true]"
     );
 }
+
+#[tokio::test]
+async fn api_gaps_stats_reports_all_metric_sections() {
+    let app = app();
+    call(
+        &app,
+        Method::PUT,
+        "/s/_doc/1?refresh=true",
+        Some(json!({"a": 1})),
+    )
+    .await;
+    let (s, r) = call(&app, Method::GET, "/s/_stats", None).await;
+    assert_eq!(s, StatusCode::OK);
+    let total = &r["indices"]["s"]["total"];
+    for m in [
+        "docs",
+        "store",
+        "indexing",
+        "get",
+        "search",
+        "merges",
+        "refresh",
+        "flush",
+        "warmer",
+        "query_cache",
+        "fielddata",
+        "completion",
+        "segments",
+        "translog",
+        "request_cache",
+        "recovery",
+    ] {
+        assert!(total.get(m).is_some(), "missing {m}");
+    }
+    assert_eq!(r["_all"]["primaries"], *total);
+    let (_, r) = call(&app, Method::GET, "/s/_stats/store,get", None).await;
+    let keys: Vec<_> = r["_all"]["total"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    assert_eq!(keys, ["get", "store"]);
+}

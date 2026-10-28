@@ -1,4 +1,3 @@
 # Ordered goals for the Ralph loop's `goals` suite. One line each; an iteration deletes a line
 # only when that goal's done-criteria hold. The loop then runs the line's Done-check itself and
 # rejects the iteration if it fails. Later goals assume earlier ones are done.
-api-gaps: field_caps honors `index_filter` and `runtime_mappings`; indices stats returns the store, indexing, search and other metrics Elasticsearch reports. Fix the `ponytail:` markers listed for api-gaps in ralph/ponytail-ledger.md: remove each limitation and its comment, or rewrite the comment to name the smaller ceiling left. If a marker needs a decision the standing orders reserve for a human, record it in ralph/NEEDS_HUMAN.md and do the rest. Add tests named `api_gaps_`, at least one per marker. Done-check: `ralph/ledger-check.sh api-gaps`

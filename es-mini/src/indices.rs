@@ -650,8 +650,8 @@ pub async fn get_all_mappings(
     get_mapping(state, Path("_all".to_string()), uri, Query(params)).await
 }
 
-/// `GET [/{index}]/_stats[/{metric}]`: the `docs`, `fielddata` and `request_cache` metrics.
-// ponytail: other metrics (store, indexing, search, ...) are left out of the response.
+/// `GET [/{index}]/_stats[/{metric}]`: every metric section Elasticsearch reports.
+// ponytail: only docs and request_cache are counted; the other sections report zeros (es-mini keeps no such counters)
 pub async fn stats(
     State(state): State<AppState>,
     path: Option<Path<HashMap<String, String>>>,
@@ -684,6 +684,140 @@ pub async fn stats(
         if wanted("docs") {
             s.insert("docs".into(), json!({"count": docs, "deleted": 0}));
         }
+        let zeros = |names: &[&str]| {
+            Value::Object(names.iter().map(|k| (k.to_string(), json!(0))).collect())
+        };
+        let mut zero = |m: &str, names: &[&str]| {
+            if wanted(m) {
+                s.insert(m.into(), zeros(names));
+            }
+        };
+        zero(
+            "store",
+            &[
+                "size_in_bytes",
+                "total_data_set_size_in_bytes",
+                "reserved_in_bytes",
+            ],
+        );
+        zero(
+            "indexing",
+            &[
+                "index_total",
+                "index_time_in_millis",
+                "index_current",
+                "index_failed",
+                "delete_total",
+                "delete_time_in_millis",
+                "delete_current",
+                "noop_update_total",
+                "throttle_time_in_millis",
+            ],
+        );
+        zero(
+            "get",
+            &[
+                "total",
+                "time_in_millis",
+                "exists_total",
+                "exists_time_in_millis",
+                "missing_total",
+                "missing_time_in_millis",
+                "current",
+            ],
+        );
+        zero(
+            "search",
+            &[
+                "open_contexts",
+                "query_total",
+                "query_time_in_millis",
+                "query_current",
+                "fetch_total",
+                "fetch_time_in_millis",
+                "fetch_current",
+                "scroll_total",
+                "scroll_time_in_millis",
+                "scroll_current",
+                "suggest_total",
+                "suggest_time_in_millis",
+                "suggest_current",
+            ],
+        );
+        zero(
+            "merges",
+            &[
+                "current",
+                "current_docs",
+                "current_size_in_bytes",
+                "total",
+                "total_time_in_millis",
+                "total_docs",
+                "total_size_in_bytes",
+                "total_stopped_time_in_millis",
+                "total_throttled_time_in_millis",
+                "total_auto_throttle_in_bytes",
+            ],
+        );
+        zero(
+            "refresh",
+            &[
+                "total",
+                "total_time_in_millis",
+                "external_total",
+                "external_total_time_in_millis",
+                "listeners",
+            ],
+        );
+        zero("flush", &["total", "periodic", "total_time_in_millis"]);
+        zero("warmer", &["current", "total", "total_time_in_millis"]);
+        zero(
+            "query_cache",
+            &[
+                "memory_size_in_bytes",
+                "total_count",
+                "hit_count",
+                "miss_count",
+                "cache_size",
+                "cache_count",
+                "evictions",
+            ],
+        );
+        zero("completion", &["size_in_bytes"]);
+        zero(
+            "segments",
+            &[
+                "count",
+                "memory_in_bytes",
+                "terms_memory_in_bytes",
+                "stored_fields_memory_in_bytes",
+                "term_vectors_memory_in_bytes",
+                "norms_memory_in_bytes",
+                "points_memory_in_bytes",
+                "doc_values_memory_in_bytes",
+                "index_writer_memory_in_bytes",
+                "version_map_memory_in_bytes",
+                "fixed_bit_set_memory_in_bytes",
+            ],
+        );
+        zero(
+            "translog",
+            &[
+                "operations",
+                "size_in_bytes",
+                "uncommitted_operations",
+                "uncommitted_size_in_bytes",
+                "earliest_last_modified_age",
+            ],
+        );
+        zero(
+            "recovery",
+            &[
+                "current_as_source",
+                "current_as_target",
+                "throttle_time_in_millis",
+            ],
+        );
         if wanted("fielddata") {
             // es-mini reads keyword values from doc values and builds no fielddata.
             s.insert(
