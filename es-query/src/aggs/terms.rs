@@ -361,12 +361,11 @@ fn parse_order(v: &Value, subs: &[Agg]) -> Result<Vec<(By, bool)>, QueryError> {
         let by = match key.as_str() {
             "_count" => By::Count,
             "_key" => By::Key,
-            // ponytail: no `[bucket key]` path elements
             path => {
-                let (agg, rest) = super::split_path(path);
                 let invalid = |e: String| {
                     QueryError::illegal(format!("Invalid aggregation order path [{path}]. {e}"))
                 };
+                let (agg, rest) = super::split_path(path).map_err(invalid)?;
                 let index = (subs.iter().position(|s| s.name == agg))
                     .ok_or_else(|| invalid(format!("The provided aggregation [{agg}] either does not exist, or is a pipeline aggregation and cannot be used to sort the buckets.")))?;
                 let agg = Box::new(subs[index].clone());
@@ -1088,6 +1087,37 @@ mod tests {
         assert_eq!(
             run(&[&index()], body).unwrap_err(),
             "Invalid aggregation order path [m.x]. Ordering on a single-value metrics aggregation can only be done on its value. Either drop the key (a la \"m\") or change it to \"value\" (a la \"m.value\")"
+        );
+    }
+
+    /// The keys of the `k` terms buckets in `order`, with sub-aggregations `subs`.
+    fn order(order: Value, subs: Value) -> Result<Vec<Value>, String> {
+        let body = json!({"aggs": {"t": {"terms": {"field": "k", "order": order}, "aggs": subs}}});
+        let b = run(&[&index()], body)?["t"]["buckets"].take();
+        Ok(b.as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["key"].clone())
+            .collect())
+    }
+
+    #[test]
+    fn aggs_gaps_order_paths_end_in_a_bucket_key() {
+        // the key of the last element names the metric, like `.`
+        let stats = json!({"s": {"stats": {"field": "n"}}});
+        assert_eq!(
+            order(json!({"s[sum]": "desc"}), stats).unwrap(),
+            ["b", "c", "a"]
+        );
+        let filtered = json!({"f": {"filter": {"term": {"b": false}},
+            "aggs": {"m": {"max": {"field": "n"}}}}});
+        assert_eq!(
+            order(json!({"f[doc_count]": "asc"}), filtered.clone()).unwrap(),
+            ["a", "c", "b"]
+        );
+        assert_eq!(
+            order(json!({"f[x]>m": "desc"}), filtered).unwrap_err(),
+            "Invalid aggregation order path [f[x]>m]. Key only allowed on last aggregation path element but got [f[x]]"
         );
     }
 

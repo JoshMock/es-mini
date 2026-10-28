@@ -912,13 +912,21 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
 }
 
 /// Splits an order path into its first aggregation's name and the rest: `>` and the path into
-/// that single-bucket aggregation, `.` and a metric key, or nothing.
-fn split_path(path: &str) -> (&str, &str) {
-    path.split_at(
-        path.find('>')
-            .or_else(|| path.rfind('.'))
-            .unwrap_or(path.len()),
-    )
+/// that single-bucket aggregation, `[key]` or `.` and a metric key, or nothing. Like ES's
+/// AggregationPath, only the last element may have a `[key]`.
+// ponytail: malformed elements (`[x]`, `a[`) are names, not ES's invalid path element error
+fn split_path(path: &str) -> Result<(&str, &str), String> {
+    let key = |e: &str| e.rfind('[').filter(|&k| k > 0 && e[k..].contains(']'));
+    if let Some(i) = path.find('>') {
+        let first = &path[..i];
+        return match key(first) {
+            Some(_) => Err(format!(
+                "Key only allowed on last aggregation path element but got [{first}]"
+            )),
+            None => Ok(path.split_at(i)),
+        };
+    }
+    Ok(path.split_at(key(path).or_else(|| path.rfind('.')).unwrap_or(path.len())))
 }
 
 /// The message of an order path into an aggregation that has no single value.
@@ -934,11 +942,15 @@ fn sort_value(agg: &Agg, rest: &str, st: Option<&Stats>) -> Result<f64, String> 
         if !agg.metric.single() {
             return Err(NOT_SORTABLE.into());
         }
-        let (sub, rest) = split_path(path);
+        let (sub, rest) = split_path(path)?;
         let j = (agg.subs.iter().position(|s| s.name == sub)).ok_or_else(|| format!("The provided aggregation [{sub}] either does not exist, or is a pipeline aggregation and cannot be used to sort the buckets."))?;
         return sort_value(&agg.subs[j], rest, st.and_then(|s| s.subs.get(j)));
     }
-    let key = rest.strip_prefix('.');
+    // a `[key]` wins over a `.metric` after it, as in AggregationPath.bucketComparator
+    let key = match rest.strip_prefix('[') {
+        Some(r) => r.rsplit_once(']').map(|(k, _)| k),
+        None => rest.strip_prefix('.'),
+    };
     let empty;
     let st = match st {
         Some(st) => st,
