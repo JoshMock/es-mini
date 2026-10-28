@@ -1291,6 +1291,8 @@ pub(crate) struct Collector<'s, 'a> {
     subs: Vec<Option<Collector<'s, 'a>>>,
     /// Per aggregation, with `profile: true`: where its time went.
     timings: Option<Vec<Timings>>,
+    /// The first failure collecting a document, which fails the shard.
+    failed: Option<QueryError>,
 }
 
 /// Nanoseconds one aggregation spent in each phase of ES's aggregation profile on one shard.
@@ -1332,6 +1334,7 @@ impl<'s, 'a> Collector<'s, 'a> {
             stats: vec![],
             subs: vec![],
             timings: profile.then(Vec::new),
+            failed: None,
         };
         for agg in aggs {
             let start = Instant::now();
@@ -1595,7 +1598,13 @@ impl<'s, 'a> Collector<'s, 'a> {
 
     fn add(&mut self, i: usize, vals: Vec<Value>, id: &str, doc: &Document, score: f64) {
         let vals = match &self.aggs[i].metric {
-            Metric::Histogram(h) => h.keys(vals),
+            Metric::Histogram(h) => match h.keys(vals) {
+                Ok(keys) => keys,
+                Err(e) => {
+                    self.failed.get_or_insert(e);
+                    return;
+                }
+            },
             _ => vals,
         };
         let st = &mut self.stats[i];
@@ -1635,6 +1644,11 @@ impl Collector<'_, '_> {
     /// This shard's results, and with `profile: true` its `aggregations` profile: one entry per
     /// aggregation, like ES's (post collection releases the doc values readers, building the
     /// aggregation takes its result). `match_all` if the search's query matches every document.
+    /// The first failure collecting a document, here or in a sub-aggregation.
+    pub(crate) fn failed(&mut self) -> Option<QueryError> {
+        (self.failed.take()).or_else(|| self.subs.iter_mut().flatten().find_map(Self::failed))
+    }
+
     pub(crate) fn finish(mut self, match_all: bool) -> (Vec<Stats>, Option<Value>) {
         let mut stats = std::mem::take(&mut self.stats);
         self.finish_terms(&mut stats);

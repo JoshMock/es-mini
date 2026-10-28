@@ -28,8 +28,9 @@ pub(super) struct Histogram {
     hard_bounds: Option<Bounds>,
     /// A DecimalFormat pattern for numeric keys.
     format: Option<String>,
-    /// A date_histogram's `time_zone` other than UTC.
+    /// A date_histogram's `time_zone` other than UTC, and its id.
     time_zone: Option<TimeZone>,
+    zone_id: String,
 }
 
 /// A `calendar_interval`'s Rounding.DateTimeUnit.
@@ -119,15 +120,14 @@ impl Unit {
 }
 
 /// ES's TimeIntervalRounding.JavaTimeRounding.round: the latest local multiple of `interval` at
-/// or before instant `t`.
-fn round_interval(tz: &TimeZone, t: i64, interval: i64) -> i64 {
+/// or before instant `t`; after 5,000 transitions crossed, `Err` of the instant it got to.
+fn round_interval(tz: &TimeZone, t: i64, interval: i64) -> Result<i64, i64> {
     let mut u = t;
-    // ponytail: ES fails after 5,000 attempts; this gives up on the last one
     'attempt: for _ in 0..5000 {
         let local = (u + tz.offset(u)).div_euclid(interval) * interval;
         let instants = tz.instants(local);
         let Some(&earliest) = instants.first() else {
-            return tz.gap_start(local);
+            return Ok(tz.gap_start(local));
         };
         let prev = tz.previous_transition(u + 1);
         for &i in instants.iter().rev() {
@@ -137,33 +137,33 @@ fn round_interval(tz: &TimeZone, t: i64, interval: i64) -> i64 {
                 continue 'attempt;
             }
             if i <= u {
-                return i;
+                return Ok(i);
             }
         }
-        return earliest;
+        return Ok(earliest);
     }
-    u
+    Err(u)
 }
 
 /// ES's TimeIntervalRounding.JavaTimeRounding.nextRoundingValue: a search for the smallest
 /// rounded value above `t`'s.
-fn next_interval(tz: &TimeZone, t: i64, interval: i64) -> i64 {
+fn next_interval(tz: &TimeZone, t: i64, interval: i64) -> Result<i64, i64> {
     let round = |t| round_interval(tz, t, interval);
-    let prev = round(t);
+    let prev = round(t)?;
     let (mut increment, mut from) = (interval, prev);
     for _ in 0..100 {
         from += increment;
-        let rounded = round(from);
+        let rounded = round(from)?;
         if rounded <= prev {
             if increment < 0 {
                 increment = -increment / 2;
             }
-        } else if round(rounded - 1) > prev {
+        } else if round(rounded - 1)? > prev {
             if increment > 0 {
                 increment = -increment / 2;
             }
         } else {
-            return rounded;
+            return Ok(rounded);
         }
     }
     round(from)
@@ -242,6 +242,7 @@ impl Histogram {
             hard_bounds: None,
             format: None,
             time_zone: None,
+            zone_id: String::new(),
         };
         for (k, v) in params {
             let bad = || QueryError::x_content(format!("[{ty}] failed to parse field [{k}]"));
@@ -288,7 +289,9 @@ impl Histogram {
                     }
                 }
                 "time_zone" if date => {
-                    let tz = TimeZone::parse(v.as_str().ok_or_else(bad)?).ok_or_else(bad)?;
+                    let id = v.as_str().ok_or_else(bad)?;
+                    let tz = TimeZone::parse(id).ok_or_else(bad)?;
+                    h.zone_id = id.into();
                     h.time_zone = Some(tz).filter(|tz| *tz != TimeZone::UTC);
                 }
                 "interval" if !date => {
@@ -347,32 +350,40 @@ impl Histogram {
 
     /// The bucket keys of a document's doc values (sorted, so equal keys are adjacent), as
     /// NumericHistogramAggregator collects them.
-    pub(super) fn keys(&self, vals: Vec<Value>) -> Vec<Value> {
+    pub(super) fn keys(&self, vals: Vec<Value>) -> Result<Vec<Value>, QueryError> {
         // NumericHistogramAggregator tests hard bounds on the unshifted key, DateHistogramAggregator
         // on the rounded one
         let unshifted = |k: f64| match self.date {
             true => k,
             false => k - self.offset,
         };
-        let mut keys: Vec<f64> = (vals.iter().filter_map(num))
-            .map(|x| self.round(x))
-            .filter(|&k| (self.hard_bounds).is_none_or(|b| b.contains(unshifted(k), self.date)))
-            .collect();
+        let mut keys = vec![];
+        for x in vals.iter().filter_map(num) {
+            let k = self.round(x)?;
+            if (self.hard_bounds).is_none_or(|b| b.contains(unshifted(k), self.date)) {
+                keys.push(k);
+            }
+        }
         for r in vals.iter().filter_map(Value::as_array) {
-            self.range_keys(num(&r[0]), num(&r[1]), &mut keys);
+            self.range_keys(num(&r[0]), num(&r[1]), &mut keys)?;
         }
         keys.sort_by(f64::total_cmp);
         keys.dedup();
-        keys.into_iter().map(Value::from).collect()
+        Ok(keys.into_iter().map(Value::from).collect())
     }
 
     /// The keys of every bucket a range field's `[from, to]` overlaps, clamped to the hard bounds
     /// (whose max is inclusive here), like RangeHistogramAggregator and
     /// DateRangeHistogramAggregator; at most one past [`MAX_BUCKETS`], so the render fails.
     // ponytail: a range whose keys stop advancing (f64 precision) ends there; ES loops forever
-    fn range_keys(&self, from: Option<f64>, to: Option<f64>, keys: &mut Vec<f64>) {
+    fn range_keys(
+        &self,
+        from: Option<f64>,
+        to: Option<f64>,
+        keys: &mut Vec<f64>,
+    ) -> Result<(), QueryError> {
         let (Some(mut from), Some(mut to)) = (from, to) else {
-            return;
+            return Ok(());
         };
         if let Some(b) = self.hard_bounds {
             from = b.min.map_or(from, |m| from.max(m));
@@ -383,42 +394,51 @@ impl Histogram {
             const LIMIT: f64 = (1u64 << 53) as f64;
             (from, to) = (from.max(-LIMIT), to.min(LIMIT));
         }
-        let (mut k, end, start) = (self.round(from), self.round(to), keys.len());
+        let (mut k, end, start) = (self.round(from)?, self.round(to)?, keys.len());
         while k <= end && keys.len() - start <= MAX_BUCKETS {
             keys.push(k);
-            match self.next(k) {
+            match self.next(k)? {
                 next if next > k => k = next,
                 _ => break,
             }
         }
+        Ok(())
     }
 
     /// The key of the bucket holding `key`.
-    fn round(&self, key: f64) -> f64 {
-        self.round_from(key - self.offset, false) + self.offset
+    fn round(&self, key: f64) -> Result<f64, QueryError> {
+        Ok(self.round_from(key - self.offset, false)? + self.offset)
     }
 
     /// The bucket key after `key`.
-    fn next(&self, key: f64) -> f64 {
+    fn next(&self, key: f64) -> Result<f64, QueryError> {
         match (self.calendar, &self.time_zone) {
             (None, None) => self.round(key + self.interval + self.interval / 2.0),
-            _ => self.round_from(key - self.offset, true) + self.offset,
+            _ => Ok(self.round_from(key - self.offset, true)? + self.offset),
         }
     }
 
     /// The start of the interval holding `x` without the offset, or of the `next` one.
-    fn round_from(&self, x: f64, next: bool) -> f64 {
-        match (self.calendar, &self.time_zone) {
+    fn round_from(&self, x: f64, next: bool) -> Result<f64, QueryError> {
+        Ok(match (self.calendar, &self.time_zone) {
             (Some(unit), None) => unit.round(x as i64, next) as f64,
             (Some(unit), Some(tz)) => unit.round_in(tz, x as i64, next) as f64,
             (None, Some(tz)) => {
                 let f = if next { next_interval } else { round_interval };
-                f(tz, x as i64, self.interval as i64) as f64
+                let interval = self.interval as i64;
+                f(tz, x as i64, interval).map_err(|u| {
+                    QueryError::illegal(format!(
+                        "Rounding[{interval} in {}][java.time] failed to round {u} down: \
+                         transitioned backwards through too many daylight savings time \
+                         transitions",
+                        self.zone_id
+                    ))
+                })? as f64
             }
             (None, None) => {
                 ((x / self.interval).floor() + f64::from(u8::from(next))) * self.interval
             }
-        }
+        })
     }
 
     /// The reduced result; `sub` renders a bucket's sub-aggregations into it.
@@ -441,8 +461,8 @@ impl Histogram {
             let (mut min, mut max) = (self.extended_bounds.min, self.extended_bounds.max);
             if self.date {
                 // LongBounds.round: dates round without the offset, then shift by it
-                let round = |x: f64| self.round_from(x, false) + self.offset;
-                (min, max) = (min.map(round), max.map(round));
+                let round = |x: f64| Ok::<_, QueryError>(self.round_from(x, false)? + self.offset);
+                (min, max) = (min.map(round).transpose()?, max.map(round).transpose()?);
             }
             let mut keys = vec![];
             // ES counts empty buckets before and again (per 10,000) while adding them
@@ -457,7 +477,7 @@ impl Histogram {
                         0
                     };
                     super::consume_buckets(buckets, 1 + again)?;
-                    k = self.next(k);
+                    k = self.next(k)?;
                 }
                 Ok::<_, QueryError>(())
             };
@@ -465,16 +485,18 @@ impl Histogram {
             match (v.first(), v.last()) {
                 (Some(first), Some(last)) => {
                     if let Some(min) = min {
-                        fill(self.round(min), &|k| k < first.0)?;
+                        fill(self.round(min)?, &|k| k < first.0)?;
                     }
                     for w in v.windows(2) {
-                        fill(self.next(w[0].0), &|k| k < w[1].0)?;
+                        fill(self.next(w[0].0)?, &|k| k < w[1].0)?;
                     }
-                    fill(self.next(last.0), &|k| k <= max)?;
+                    if max > last.0 {
+                        fill(self.next(last.0)?, &|k| k <= max)?;
+                    }
                 }
                 _ => {
                     if let Some(min) = min {
-                        fill(self.round(min), &|k| k <= max)?;
+                        fill(self.round(min)?, &|k| k <= max)?;
                     }
                 }
             }
@@ -902,6 +924,33 @@ mod tests {
             );
             assert_eq!(got.unwrap(), json!([[first, 1]]), "{interval}");
         }
+    }
+
+    #[test]
+    fn aggs_gaps_rounding_fails_after_5000_transitions() {
+        // 1,000,000 days is about 2,738 years: a date near the second multiple rounds back to
+        // the first across about 5,475 daylight saving transitions; ES's JavaTimeRounding
+        // gives up after 5,000
+        let agg = json!({"field": "at", "fixed_interval": "1000000d",
+            "time_zone": "America/New_York"});
+        let near = date_histo(&["4800-01-01"], agg.clone()).unwrap();
+        assert_eq!(near.as_array().unwrap().len(), 1, "{near}");
+        // it fails the shard: other indices still answer
+        let (mut near, mut far) = (index(&[]), index(&[]));
+        near.put("1", json!({"at": "4800-01-01"}));
+        far.put("1", json!({"at": "7445-01-01"}));
+        let got = run(
+            &[&near, &far],
+            json!({"h": {"date_histogram": agg.clone()}}),
+        )
+        .unwrap();
+        assert_eq!(got["h"]["buckets"][0]["doc_count"], 1, "{got}");
+        let err = date_histo(&["7445-01-01"], agg).unwrap_err();
+        let (prefix, suffix) = (
+            "Rounding[86400000000000 in America/New_York][java.time] failed to round ",
+            " down: transitioned backwards through too many daylight savings time transitions",
+        );
+        assert!(err.starts_with(prefix) && err.ends_with(suffix), "{err}");
     }
 
     #[test]

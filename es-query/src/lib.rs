@@ -1436,6 +1436,11 @@ pub fn search_many<'a>(
                 score,
             });
         }
+        if let Some(e) = collector.failed() {
+            hits.retain(|h| h.target != pos);
+            failures.push((*name, e));
+            continue;
+        }
         let (stats, p) = collector.finish(matches!(query, Query::MatchAll));
         aggs::reduce(&mut aggs, stats);
         if let (Some(all), Some(p)) = (&mut profile, p) {
