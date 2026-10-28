@@ -2,6 +2,8 @@
 //! IndexScopedSettings: how each may change after creation, its default, and how its value
 //! parses (Setting's parsers, with their messages).
 
+use serde_json::Value;
+
 /// How Elasticsearch lets a setting change after index creation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Update {
@@ -24,7 +26,10 @@ enum Kind {
     /// `Setting.enumSetting`: the enum's canonical class name and constants.
     Enum(&'static str, &'static [&'static str]),
     Codec,
-    // ponytail: byte sizes are not validated; port ByteSizeValue.parseBytesSizeValue when needed
+    /// `Setting.byteSizeSetting` with a minimum in bytes, and its `ByteSizeValue.toString`.
+    Bytes(i64, &'static str),
+    /// `Setting.listSetting`: each element goes through the parser.
+    List(fn(&str) -> Result<(), String>),
     Any,
 }
 
@@ -146,7 +151,7 @@ pub const SETTINGS: &[Setting] = &[
         TRANSLOG_FLUSH_THRESHOLD_SIZE,
         Update::Dynamic,
         Some("10gb"),
-        Kind::Any,
+        Kind::Bytes(8, "8b"),
     ),
     s(
         "index.mapping.array_objects.limit",
@@ -244,11 +249,211 @@ pub const SETTINGS: &[Setting] = &[
         Some("false"),
         Kind::Bool,
     ),
-    // ponytail: list settings without their defaults or element parsers (IndexSortConfig)
-    s("index.sort.field", Update::Final, None, Kind::Any),
-    s("index.sort.order", Update::Final, None, Kind::Any),
-    s("index.sort.mode", Update::Final, None, Kind::Any),
-    s("index.sort.missing", Update::Final, None, Kind::Any),
+    s(
+        "index.sort.field",
+        Update::Final,
+        Some("[]"),
+        Kind::List(|_| Ok(())),
+    ),
+    s(
+        "index.sort.order",
+        Update::Final,
+        Some("[]"),
+        Kind::List(sort_order),
+    ),
+    s(
+        "index.sort.mode",
+        Update::Final,
+        Some("[]"),
+        Kind::List(sort_mode),
+    ),
+    s(
+        "index.sort.missing",
+        Update::Final,
+        Some("[]"),
+        Kind::List(sort_missing),
+    ),
+    s(
+        "index.max_inner_result_window",
+        Update::Dynamic,
+        Some("100"),
+        Kind::Int(1, INT),
+    ),
+    s(
+        "index.max_rescore_window",
+        Update::Dynamic,
+        Some("10000"),
+        Kind::Int(1, INT),
+    ),
+    s(
+        "index.max_docvalue_fields_search",
+        Update::Dynamic,
+        Some("100"),
+        Kind::Int(0, INT),
+    ),
+    s(
+        "index.max_script_fields",
+        Update::Dynamic,
+        Some("32"),
+        Kind::Int(0, INT),
+    ),
+    s(
+        "index.max_ngram_diff",
+        Update::Dynamic,
+        Some("1"),
+        Kind::Int(0, INT),
+    ),
+    s(
+        "index.max_shingle_diff",
+        Update::Dynamic,
+        Some("3"),
+        Kind::Int(0, INT),
+    ),
+    s(
+        "index.max_refresh_listeners",
+        Update::Dynamic,
+        None,
+        Kind::Int(0, INT),
+    ),
+    s(
+        "index.max_terms_count",
+        Update::Dynamic,
+        Some("65536"),
+        Kind::Int(1, INT),
+    ),
+    s(
+        "index.max_regex_length",
+        Update::Dynamic,
+        Some("1000"),
+        Kind::Int(1, INT),
+    ),
+    s(
+        "index.highlight.max_analyzed_offset",
+        Update::Dynamic,
+        Some("1000000"),
+        Kind::Int(1, INT),
+    ),
+    s(
+        "index.analyze.max_token_count",
+        Update::Dynamic,
+        Some("10000"),
+        Kind::Int(1, INT),
+    ),
+    s(
+        "index.search.idle.after",
+        Update::Dynamic,
+        Some("30s"),
+        Kind::Time(0, "0s"),
+    ),
+    s(
+        "index.unassigned.node_left.delayed_timeout",
+        Update::Dynamic,
+        Some("1m"),
+        Kind::Time(0, "0s"),
+    ),
+    s(
+        "index.priority",
+        Update::Dynamic,
+        Some("1"),
+        Kind::Int(0, INT),
+    ),
+    s(
+        "index.routing.allocation.total_shards_per_node",
+        Update::Dynamic,
+        Some("-1"),
+        Kind::Int(-1, INT),
+    ),
+    s(
+        "index.queries.cache.enabled",
+        Update::Static,
+        Some("true"),
+        Kind::Bool,
+    ),
+    s(
+        "index.load_fixed_bitset_filters_eagerly",
+        Update::Dynamic,
+        Some("true"),
+        Kind::Bool,
+    ),
+    s(
+        "index.mapping.ignore_malformed",
+        Update::Dynamic,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.mapping.coerce",
+        Update::Dynamic,
+        Some("true"),
+        Kind::Bool,
+    ),
+    s(
+        "index.default_pipeline",
+        Update::Dynamic,
+        Some("_none"),
+        Kind::Any,
+    ),
+    s(
+        "index.final_pipeline",
+        Update::Dynamic,
+        Some("_none"),
+        Kind::Any,
+    ),
+    s(
+        "index.auto_expand_replicas",
+        Update::Dynamic,
+        Some("false"),
+        Kind::Any,
+    ),
+    s(
+        "index.write.wait_for_active_shards",
+        Update::Dynamic,
+        Some("1"),
+        Kind::Any,
+    ),
+    s(
+        "index.shard.check_on_startup",
+        Update::Static,
+        Some("false"),
+        Kind::Any,
+    ),
+    s("index.lifecycle.name", Update::Dynamic, None, Kind::Any),
+    s(
+        "index.lifecycle.rollover_alias",
+        Update::Dynamic,
+        None,
+        Kind::Any,
+    ),
+    s(
+        "index.lifecycle.indexing_complete",
+        Update::Dynamic,
+        None,
+        Kind::Bool,
+    ),
+    s(
+        "index.lifecycle.parse_origination_date",
+        Update::Dynamic,
+        None,
+        Kind::Bool,
+    ),
+    s(
+        "index.search.slowlog.threshold.query.",
+        Update::Dynamic,
+        None,
+        Kind::Any,
+    ),
+    s(
+        "index.search.slowlog.threshold.fetch.",
+        Update::Dynamic,
+        None,
+        Kind::Any,
+    ),
+    s(
+        "index.indexing.slowlog.threshold.index.",
+        Update::Dynamic,
+        None,
+        Kind::Any,
+    ),
     // Group and affix settings: a key ending in `.` covers every key under it.
     s("index.analysis.", Update::Static, None, Kind::Any),
     s("index.similarity.", Update::Static, None, Kind::Any),
@@ -324,20 +529,124 @@ impl Setting {
                     Err(format!("No enum constant {class}.{upper}"))
                 }
             }
-            // ponytail: Lucene's own codec names (Codec.availableCodecs) are rejected too
+            // ponytail: Lucene codec names are the Lucene9x/10x ones; SimpleText is not shipped
             Kind::Codec => match v {
                 "default"
                 | "legacy_default"
                 | "best_compression"
                 | "legacy_best_compression"
-                | "lucene_default" => Ok(()),
+                | "lucene_default"
+                | "Lucene104"
+                | "Lucene103"
+                | "Lucene101"
+                | "Lucene100"
+                | "Lucene99"
+                | "Lucene95"
+                | "Lucene94"
+                | "Lucene92"
+                | "Lucene91"
+                | "Lucene90" => Ok(()),
                 _ => Err(format!(
                     "unknown value for [index.codec] must be one of [default, best_compression] but was: {v}"
                 )),
             },
+            Kind::Bytes(min, rep) => {
+                if byte_size(v, key)? < min as i128 {
+                    return Err(format!(
+                        "failed to parse value [{v}] for setting [{key}], must be >= [{rep}]"
+                    ));
+                }
+                Ok(())
+            }
+            // A string holds a comma-separated list, as Settings.getAsList splits it.
+            Kind::List(parse) => (v.split(',').map(str::trim))
+                .filter(|e| !e.is_empty())
+                .try_for_each(parse),
             Kind::Any => Ok(()),
         }
     }
+
+    /// Like [`validate`](Self::validate), for a value as stored: a JSON list is checked per element.
+    pub fn validate_value(&self, v: &Value) -> Result<(), String> {
+        match (self.kind, v) {
+            (Kind::List(parse), Value::Array(items)) => items
+                .iter()
+                .try_for_each(|e| parse(&crate::setting_string(e))),
+            _ => self.validate(&crate::setting_string(v)),
+        }
+    }
+}
+
+fn sort_order(v: &str) -> Result<(), String> {
+    match v.to_lowercase().as_str() {
+        "asc" | "desc" => Ok(()),
+        _ => Err(format!("Illegal sort order:{v}")),
+    }
+}
+
+fn sort_mode(v: &str) -> Result<(), String> {
+    let upper = v.to_uppercase();
+    match upper.as_str() {
+        "MIN" | "MAX" => Ok(()),
+        "SUM" | "AVG" | "MEDIAN" => Err(format!(
+            "Illegal index sort mode:[{upper}], must be one of [MAX, MIN]"
+        )),
+        _ => Err(format!(
+            "No enum constant org.elasticsearch.search.MultiValueMode.{upper}"
+        )),
+    }
+}
+
+fn sort_missing(v: &str) -> Result<(), String> {
+    match v {
+        "_last" | "_first" => Ok(()),
+        _ => Err(format!(
+            "Illegal missing value:[{v}], must be one of [_last, _first]"
+        )),
+    }
+}
+
+/// `ByteSizeValue.parseBytesSizeValue`, in bytes.
+fn byte_size(v: &str, key: &str) -> Result<i128, String> {
+    let n = v.to_lowercase();
+    let n = n.trim();
+    let units: [(&str, i128); 6] = [
+        ("pb", 1 << 50),
+        ("tb", 1 << 40),
+        ("gb", 1 << 30),
+        ("mb", 1 << 20),
+        ("kb", 1 << 10),
+        ("b", 1),
+    ];
+    let Some((suffix, mult)) = units.into_iter().find(|(u, _)| n.ends_with(u)) else {
+        if n == "-1" || n == "0" {
+            return Ok(n.parse().expect("-1 or 0"));
+        }
+        return Err(format!(
+            "failed to parse setting [{key}] with value [{v}] as a size in bytes: unit is missing or unrecognized"
+        ));
+    };
+    let num = n[..n.len() - suffix.len()].trim();
+    let bytes = match num.parse::<i64>() {
+        Ok(d) => d as i128 * mult,
+        Err(_) => match num.parse::<f64>() {
+            Ok(d) => (d * mult as f64) as i128,
+            Err(_) => {
+                return Err(format!(
+                    "failed to parse setting [{key}] with value [{v}] as a size in bytes"
+                ));
+            }
+        },
+    };
+    if bytes < -1 {
+        return Err(format!("Values less than -1 bytes are not supported: {v}"));
+    }
+    if bytes > i64::MAX as i128 {
+        return Err(format!(
+            "failed to parse setting [{key}] with value [{v}] because it is larger than the max size of 9223372036854775807 bytes"
+        ));
+    }
+    Ok(bytes)
 }
 
 /// `TimeValue.parseTimeValue`, in millis.

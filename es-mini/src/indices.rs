@@ -103,13 +103,14 @@ pub async fn create(
     index.settings.record_creation(&name);
     check_setting_lists(&body["settings"])?;
     index.settings.merge(&body["settings"]);
-    // ponytail: only this setting's value is validated on create
-    let limit = "index.mapping.array_objects.limit";
-    if let Some(l) = index.settings.get(limit) {
-        index_settings::get(limit)
-            .expect("registered")
-            .validate(l)
-            .map_err(AppError::IllegalArgument)?;
+    for (key, value) in es_index::flatten_settings(&body["settings"]) {
+        let key = format!("index.{}", key.strip_prefix("index.").unwrap_or(&key));
+        if let Some(setting) = index_settings::get(&key)
+            && !value.is_null()
+        {
+            (setting.validate_value(&es_index::setting_value(value)))
+                .map_err(AppError::IllegalArgument)?;
+        }
     }
     if index.settings.get("index.soft_deletes.enabled") == Some("false") {
         return Err(AppError::IllegalArgument(
@@ -480,7 +481,7 @@ fn put_settings_on(
     let mut skipped = Vec::new();
     // Registered settings the request sets, with their new values.
     let mut values = Vec::new();
-    // ponytail: the registry models a subset of IndexScopedSettings; others fail as unknown
+    // ponytail: the registry lacks some rarely used IndexScopedSettings (merge, store, time series); they fail as unknown
     for (key, value) in es_index::flatten_settings(settings) {
         let short = key.strip_prefix("index.").unwrap_or(&key);
         let key = format!("index.{short}");
@@ -488,7 +489,7 @@ fn put_settings_on(
         let update = match index_settings::get(&key) {
             Some(s) => {
                 if let Some(v) = &value {
-                    values.push((s, es_index::setting_string(v)));
+                    values.push((s, v.clone()));
                 }
                 s.update
             }
@@ -573,7 +574,9 @@ fn put_settings_on(
         )));
     }
     for (setting, value) in &values {
-        setting.validate(value).map_err(AppError::IllegalArgument)?;
+        setting
+            .validate_value(value)
+            .map_err(AppError::IllegalArgument)?;
     }
     for n in names {
         indices

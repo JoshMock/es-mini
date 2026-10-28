@@ -100,7 +100,17 @@ impl Settings {
             index_settings::SETTINGS
                 .iter()
                 .filter(|s| !self.0.contains_key(s.key))
-                .filter_map(|s| Some((s.key.to_owned(), s.default?.into())))
+                .filter_map(|s| {
+                    let d = s.default?;
+                    Some((
+                        s.key.to_owned(),
+                        if d == "[]" {
+                            Value::Array(vec![])
+                        } else {
+                            d.into()
+                        },
+                    ))
+                })
                 .collect(),
         )
     }
