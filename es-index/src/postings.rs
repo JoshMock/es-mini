@@ -326,11 +326,8 @@ impl crate::Index {
     /// How many in-memory documents index `term` at `path`: the size of
     /// [`memory_docs`](Self::memory_docs) for one term, without collecting them.
     pub fn memory_term_count(&self, path: &str, analyzed: bool, term: &str) -> usize {
-        self.postings_for(path, analyzed, |f| {
-            (f.docs.get(term)).map_or(0, |d| {
-                d.keys().filter(|id| self.docs.contains_key(*id)).count()
-            })
-        })
+        // writes unlink replaced and deleted documents, so postings list live ones only
+        self.postings_for(path, analyzed, |f| f.docs.get(term).map_or(0, HashMap::len))
     }
 
     /// The frequency of `term` in each live document holding it in `field` (at source `path`),
