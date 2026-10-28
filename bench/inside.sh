@@ -2,7 +2,7 @@
 # Runs in the client container: loads the dataset into both servers, checks they answer alike,
 # then benchmarks each request with hyperfine. Writes to /results.
 set -euo pipefail
-SERVERS=(es es-mini)
+read -ra SERVERS <<< "${SERVERS:-es es-mini}"
 H='content-type: application/json'
 for s in "${SERVERS[@]}"; do
   until curl -sf "http://$s:9200/" >/dev/null; do sleep 1; done
@@ -17,7 +17,7 @@ for s in "${SERVERS[@]}"; do
   echo "$s: $(curl -s "http://$s:9200/bench/_count")"
 done
 mkdir -p /tmp/bodies
-grep -v '^#' /bench/requests.txt | grep . | while IFS='|' read -r name method path body; do
+grep -v '^#' /bench/requests.txt | grep . | grep -E "^(${ONLY:-.*})[^|]*\|" | while IFS='|' read -r name method path body; do
   args=(-s -o /dev/null -X "$method" -H content-type:application/json)
   [ -z "$body" ] || { printf '%s' "$body" > "/tmp/bodies/$name.json"; args+=(--data-binary "@/tmp/bodies/$name.json"); }
   echo "== $name"
@@ -26,10 +26,9 @@ grep -v '^#' /bench/requests.txt | grep . | while IFS='|' read -r name method pa
     total=$(printf '%s' "$out" | grep -oE '"(value|count)":[0-9]+' | head -1 || true)
     printf '  %-8s HTTP %s %s\n' "$s" "${out##* HTTP }" "${total:-}"
   done
+  cmds=(); for s in "${SERVERS[@]}"; do cmds+=(-n "$s" "curl ${args[*]} http://$s:9200$path"); done
   hyperfine -N --warmup "${WARMUP:-5}" --runs "${RUNS:-50}" --style basic \
-    --export-markdown "/results/$name.md" --export-json "/results/$name.json" \
-    -n es "curl ${args[*]} http://es:9200$path" \
-    -n es-mini "curl ${args[*]} http://es-mini:9200$path"
+    --export-markdown "/results/$name.md" --export-json "/results/$name.json" "${cmds[@]}"
 done
 for f in /results/*.md; do
   [ "$f" = /results/summary.md ] || printf '### %s\n\n%s\n\n' "$(basename "$f" .md)" "$(cat "$f")"
