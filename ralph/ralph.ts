@@ -45,7 +45,7 @@ const SUITES: Record<string, Suite> = {
   goals: {
     kind: "goal",
     list: "ralph/goals.txt",
-    frozen: ["ralph/ponytail-ledger.md", "ralph/ledger-check.sh"],
+    frozen: ["ralph/ponytail-ledger.md", "ralph/ledger-check.sh", "bench"],
     howTo: () =>
       "Read z_old/EXECUTION.md for the task's full definition of done. Make one coherent, verified step " +
       "of progress per iteration (it is fine if the goal needs several iterations). Delete the goal's line " +
@@ -82,7 +82,7 @@ const GOAL_MODELS: Record<string, string> = Object.fromEntries(
       "unsupported-codecs", "index-sorting", "date-semantics", "per-index-locks",
       "esql-parity-harness", "esql-eval-functions", "esql-stats",
       "disk-writer-completeness", "write-failure-handling", "memory-bounds", "date-formats",
-      "esql-es-semantics", "regexp-automaton",
+      "esql-es-semantics", "regexp-automaton", "esql-perf-100k",
     ],
     [`${OPUS}:medium`]: [
       "api-field-caps", "api-by-query", "api-scroll-pit", "api-search-template", "aggs-terms",
@@ -240,6 +240,10 @@ function verify(
   }
   const check = capped("scripts/check.sh");
   if (check.status !== 0) return "scripts/check.sh failed";
+  // A goal's Gate runs on every iteration (with START set to where it began), e.g. a benchmark
+  // that keeps only changes that make es-mini faster.
+  const gate = opts.goal?.[1].match(/Gate: `([^`]+)`/)?.[1];
+  if (gate && capped("env", `START=${start}`, "sh", "-c", gate).status !== 0) return `Gate failed: ${gate}`;
   return undefined;
 }
 
