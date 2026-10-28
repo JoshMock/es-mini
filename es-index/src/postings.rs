@@ -298,6 +298,16 @@ impl crate::Index {
         })
     }
 
+    /// How many in-memory documents index `term` at `path`: the size of
+    /// [`memory_docs`](Self::memory_docs) for one term, without collecting them.
+    pub fn memory_term_count(&self, path: &str, analyzed: bool, term: &str) -> usize {
+        self.postings_for(path, analyzed, |f| {
+            (f.docs.get(term)).map_or(0, |d| {
+                d.keys().filter(|id| self.docs.contains_key(*id)).count()
+            })
+        })
+    }
+
     /// The frequency of `term` in each live document holding it in `field` (at source `path`),
     /// with the document's field length as its norm stands for it: from postings and norms on
     /// disk, and from the in-memory postings. As in Elasticsearch, a term that is not analyzed

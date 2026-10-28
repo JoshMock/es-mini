@@ -1235,6 +1235,27 @@ impl<'a> Searcher<'a> {
         }
     }
 
+    /// [`count_many`] of a lone term on a field that is neither numeric nor `_id`, counted
+    /// from postings without collecting the matches; `None` where that cannot tell.
+    fn term_count(&self, q: &Query) -> Option<usize> {
+        let Query::Term { field, value } = q else {
+            return None;
+        };
+        let (kind, path) = self.kind(field);
+        if field == "_id" || kind == Kind::Number {
+            return None;
+        }
+        // postings still list documents a later write deleted or replaced
+        let docs = self.term_docs(field, &[text(value)], true, true)?;
+        let on_disk = if docs.is_empty() {
+            0
+        } else {
+            let live: HashSet<_> = self.index.disk_live().map(|(p, _)| p).collect();
+            docs.iter().filter(|p| live.contains(p)).count()
+        };
+        Some(on_disk + (self.index).memory_term_count(path, kind == Kind::Text, &text(value)))
+    }
+
     /// The searchable on-disk documents `q` matches, as hits of `target` ordered by `sort`
     /// values (and scores, if hits are ordered `by_score`), from postings and doc values alone;
     /// `None` if they cannot tell.
@@ -1512,6 +1533,10 @@ pub fn count_many(targets: &[Target], q: &Query) -> Result<usize, QueryError> {
         // others, like search_many
         let q = with_filter(index, q, *filter, now)?;
         let mut s = Searcher::unscored(index, &q);
+        if let Some(c) = s.term_count(&q) {
+            n += c;
+            continue;
+        }
         let (disk, memory) = index.live();
         let on_disk = exact(&q, &disk, &|c| s.disk_leaf(c));
         let in_memory = exact(&q, &memory, &|c| match c {
