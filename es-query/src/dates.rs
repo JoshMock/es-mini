@@ -134,15 +134,7 @@ pub(crate) fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, 
             tie_breaker,
         } => {
             // ES's resolveMappingFields: a field two entries name takes both boosts
-            let mapped = (index.mappings.properties.iter())
-                .filter(|(_, m)| !m.is_object())
-                .flat_map(|(f, m)| {
-                    let subs = m.fields().into_iter().flatten();
-                    [f.clone()]
-                        .into_iter()
-                        .chain(subs.map(move |(s, _)| format!("{f}.{s}")))
-                })
-                .collect::<Vec<_>>();
+            let mapped = index.mappings.names();
             let mut boosts: Vec<(String, f64)> = vec![];
             for (pattern, boost) in &fields {
                 let names = match pattern.contains('*') {

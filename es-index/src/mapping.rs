@@ -307,6 +307,19 @@ pub struct Mappings {
 }
 
 impl Mappings {
+    /// The names of the mapped leaf fields, each followed by its multi-fields.
+    pub fn names(&self) -> Vec<String> {
+        (self.properties.iter())
+            .filter(|(_, m)| !m.is_object())
+            .flat_map(|(f, m)| {
+                let subs = m.fields().into_iter().flatten();
+                [f.clone()]
+                    .into_iter()
+                    .chain(subs.map(move |(s, _)| format!("{f}.{s}")))
+            })
+            .collect()
+    }
+
     /// The mapping of `field`, including a multi-field such as `title.keyword`.
     pub fn field(&self, field: &str) -> Option<&FieldMapping> {
         self.properties.get(field).or_else(|| {
