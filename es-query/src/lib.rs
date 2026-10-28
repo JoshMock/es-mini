@@ -226,7 +226,7 @@ impl<'a> Searcher<'a> {
         let mut s = Self::unscored(index, q);
         s.gather(q);
         s.on_disk = s.candidates(q, false);
-        s.in_memory = s.memory_candidates(q);
+        s.in_memory = s.memory_candidates(q, None);
         s
     }
 
@@ -428,22 +428,39 @@ impl<'a> Searcher<'a> {
     }
 
     /// The in-memory documents `q` can match, from in-memory postings and numeric indices;
-    /// `None` if it cannot narrow them. Exact for term and match queries on other fields.
-    fn memory_candidates(&self, q: &Query) -> Option<HashSet<String>> {
+    /// `None` if it cannot narrow them. Exact for term and match queries on other fields. With
+    /// `within`, only those of `within`.
+    fn memory_candidates(
+        &self,
+        q: &Query,
+        within: Option<&HashSet<String>>,
+    ) -> Option<HashSet<String>> {
+        let narrow = |ids: HashSet<String>| match within {
+            Some(w) => ids.into_iter().filter(|id| w.contains(id)).collect(),
+            None => ids,
+        };
         let lookup = |field: &str, terms: &[String], all: bool| {
             let (kind, path) = self.kind(field);
-            match kind {
-                Kind::Number => None,
+            match (kind, within) {
+                (Kind::Number, _) => None,
+                (_, Some(w)) => {
+                    Some(
+                        self.index
+                            .memory_docs_in(path, kind == Kind::Text, terms, all, w),
+                    )
+                }
                 _ => self.index.memory_docs(path, kind == Kind::Text, terms, all),
             }
         };
         let numbers = |field: &str, bounds| {
             let (_, path) = self.kind(field);
-            self.index.memory_numbers(field, path, bounds)
+            self.index.memory_numbers(field, path, bounds).map(narrow)
         };
         match q {
             // An `_id` term matches the document's id, not a source field.
-            Query::Term { field, value } if field == "_id" => Some(HashSet::from([text(value)])),
+            Query::Term { field, value } if field == "_id" => {
+                Some(narrow(HashSet::from([text(value)])))
+            }
             Query::Term { field, value } if self.kind(field).0 == Kind::Number => {
                 numbers(field, [None, Some(value), None, Some(value)])
             }
@@ -466,10 +483,10 @@ impl<'a> Searcher<'a> {
                     .reduce(|a, b| &a & &b)
             }
             Query::Named { query, .. } | Query::Boosted { query, .. } => {
-                self.memory_candidates(query)
+                self.memory_candidates(query, within)
             }
             Query::DisMax { queries, .. } => (queries.iter())
-                .map(|c| self.memory_candidates(c))
+                .map(|c| self.memory_candidates(c, within))
                 .collect::<Option<Vec<_>>>()
                 .map(|s| s.into_iter().flatten().collect()),
             Query::Bool {
@@ -479,23 +496,23 @@ impl<'a> Searcher<'a> {
                 min_should,
                 ..
             } => {
-                let required = must
-                    .iter()
-                    .chain(filter)
-                    .filter_map(|c| self.memory_candidates(c))
-                    .reduce(|a, b| &a & &b);
+                // each required clause narrows the candidates of those before it, so the
+                // documents of a common term are never all collected
+                let mut required = None;
+                for c in must.iter().chain(filter) {
+                    if let Some(ids) = self.memory_candidates(c, required.as_ref().or(within)) {
+                        required = Some(ids);
+                    }
+                }
                 let any = match min_should {
                     0 => None,
                     _ => should
                         .iter()
-                        .map(|c| self.memory_candidates(c))
+                        .map(|c| self.memory_candidates(c, required.as_ref().or(within)))
                         .collect::<Option<Vec<_>>>()
                         .map(|s| s.into_iter().flatten().collect()),
                 };
-                match (required, any) {
-                    (Some(a), Some(b)) => Some(&a & &b),
-                    (a, b) => a.or(b),
-                }
+                any.or(required)
             }
             _ => None,
         }
@@ -1428,7 +1445,7 @@ pub fn search_many<'a>(
             Some(_) => Some(BTreeSet::new()),
             None => s.candidates(&query, false),
         };
-        s.in_memory = s.memory_candidates(&query);
+        s.in_memory = s.memory_candidates(&query, None);
         let index_aggs = match aggs::resolve_dates(&req.aggs, index, now) {
             Ok(a) => a,
             Err(e) => {
@@ -1543,7 +1560,7 @@ pub fn count_many(targets: &[Target], q: &Query) -> Result<usize, QueryError> {
         let in_memory = exact(&q, &memory, &|c| match c {
             Query::Term { field, .. } if s.kind(field).0 == Kind::Number => None,
             Query::Term { .. } | Query::Match { .. } => {
-                let ids = s.memory_candidates(c)?;
+                let ids = s.memory_candidates(c, None)?;
                 Some(
                     ids.iter()
                         .filter_map(|id| memory.get(id.as_str()).copied())
@@ -1562,7 +1579,7 @@ pub fn count_many(targets: &[Target], q: &Query) -> Result<usize, QueryError> {
         };
         s.in_memory = match in_memory {
             Some(_) => Some(HashSet::new()),
-            None => s.memory_candidates(&q),
+            None => s.memory_candidates(&q, None),
         };
         n += (s.docs())
             .filter(|(id, d)| s.score(&q, id, d).is_some())

@@ -298,6 +298,31 @@ impl crate::Index {
         })
     }
 
+    /// The documents of `within` that [`memory_docs`](Self::memory_docs) gives, without
+    /// reading the others that index the terms.
+    pub fn memory_docs_in(
+        &self,
+        path: &str,
+        analyzed: bool,
+        terms: &[String],
+        all: bool,
+        within: &HashSet<String>,
+    ) -> HashSet<String> {
+        if terms.is_empty() {
+            return HashSet::new();
+        }
+        self.postings_for(path, analyzed, |f| {
+            let has = |id: &String, t: &String| f.docs.get(t).is_some_and(|d| d.contains_key(id));
+            (within.iter())
+                .filter(|id| match all {
+                    true => terms.iter().all(|t| has(id, t)),
+                    false => terms.iter().any(|t| has(id, t)),
+                })
+                .cloned()
+                .collect()
+        })
+    }
+
     /// How many in-memory documents index `term` at `path`: the size of
     /// [`memory_docs`](Self::memory_docs) for one term, without collecting them.
     pub fn memory_term_count(&self, path: &str, analyzed: bool, term: &str) -> usize {
@@ -472,6 +497,27 @@ mod tests {
             ids(i.memory_docs("t", false, &["quick".into()], false)),
             ["2"]
         );
+    }
+
+    #[test]
+    fn memory_docs_in_narrows_given_documents() {
+        let i = index();
+        let within = HashSet::from(["2".to_owned(), "3".to_owned()]);
+        let quick = ["quick".into()];
+        let ids = |v| ids(Some(v));
+        assert_eq!(
+            ids(i.memory_docs_in("t", true, &quick, false, &within)),
+            ["2"]
+        );
+        let quick_dog = ["quick".into(), "dog".into()];
+        assert_eq!(
+            ids(i.memory_docs_in("t", true, &quick_dog, true, &within)),
+            ["2"]
+        );
+        let quick_fox = ["quick".into(), "fox".into()];
+        assert!(ids(i.memory_docs_in("t", true, &quick_fox, true, &within)).is_empty());
+        assert!(ids(i.memory_docs_in("t", true, &[], false, &within)).is_empty());
+        assert!(ids(i.memory_docs_in("t", true, &[], true, &within)).is_empty());
     }
 
     #[test]
