@@ -29,9 +29,10 @@ Single node, no security; binds `127.0.0.1` unless `ES_MINI_HOST` says otherwise
 - **Storage:** in memory by default, or an Elasticsearch-compatible Lucene 10 data directory.
   Writes are fsynced to a translog and replayed on start; segments are committed on flush, so
   Elasticsearch and es-mini can take turns on one directory.
-- **Speed:** vs Elasticsearch 9.5.5 on 100,000 documents, es-mini is about 1.1-1.4x faster on
-  document get/index, match and aggregations, 1.3-2.5x slower on `term`, `range` and `bool`, and
-  3-12x slower on `match_all`, `count` and ES|QL; see [bench/RESULTS.md](bench/RESULTS.md).
+- **Speed:** vs Elasticsearch 9.5.5 on 100,000 documents, es-mini is about 1.3-1.5x faster on
+  `match_all`, `bool`, `count`, ES|QL and most aggregations, about even on document get/index,
+  `match` and `match_phrase`, and 1.2-1.4x slower on `term` and `range` with sort; see
+  [bench/RESULTS.md](bench/RESULTS.md).
 
 Out of scope: multi-node clusters, `_cat`, ILM, vector storage, async search, scripting (Painless),
 runtime fields, ingest pipelines, highlighting, suggesters, percolator, geo queries, `nested`
