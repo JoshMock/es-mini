@@ -200,9 +200,10 @@ struct Searcher<'a> {
     index: &'a Index,
     /// Per field: (docs with the field, average length).
     field_stats: HashMap<String, (f64, f64)>,
-    doc_freq: HashMap<(String, String), f64>,
-    /// Per scored (field, term): its frequencies and field lengths (see [`Index::term_freqs`]).
-    freqs: HashMap<(String, String), TermFreqs>,
+    /// Per field, per term: its document frequency.
+    doc_freq: HashMap<String, HashMap<String, f64>>,
+    /// Per scored field, per term: its frequencies and field lengths (see [`Index::term_freqs`]).
+    freqs: HashMap<String, HashMap<String, TermFreqs>>,
     /// Resolved field types, so unmapped fields are sampled once per search.
     /// Per field: its kind, and whether a literal `x.keyword` source key overrides `x`.
     kinds: RefCell<HashMap<String, (Kind, bool)>>,
@@ -311,9 +312,9 @@ impl<'a> Searcher<'a> {
             return;
         }
         for w in &wanted {
-            let key = (field.clone(), w.clone());
             if let Some(f) = self.index.term_freqs(field, path, kind == Kind::Text, w) {
-                self.freqs.insert(key, f);
+                let freqs = self.freqs.entry(field.clone()).or_default();
+                freqs.insert(w.clone(), f);
             }
         }
         if let Some(m) = (self.index).field_stats(field, path, kind == Kind::Text, &wanted) {
@@ -323,9 +324,10 @@ impl<'a> Searcher<'a> {
                 1.0
             };
             self.field_stats.insert(field.clone(), (m.docs, avg));
-            for (w, df) in m.doc_freq {
-                self.doc_freq.insert((field.clone(), w), df);
-            }
+            self.doc_freq
+                .entry(field.clone())
+                .or_default()
+                .extend(m.doc_freq);
             return;
         }
         let (mut docs, mut len) = (0.0, 0.0);
@@ -356,11 +358,9 @@ impl<'a> Searcher<'a> {
             field.clone(),
             (docs, if docs > 0.0 { len / docs } else { 1.0 }),
         );
+        let freqs = self.doc_freq.entry(field.clone()).or_default();
         for w in &wanted {
-            self.doc_freq.insert(
-                (field.clone(), w.clone()),
-                df.get(w.as_str()).copied().unwrap_or(0.0),
-            );
+            freqs.insert(w.clone(), df.get(w.as_str()).copied().unwrap_or(0.0));
         }
     }
 
@@ -640,9 +640,7 @@ impl<'a> Searcher<'a> {
     /// `[df, docs with the field, norm length, average length, idf, tf]`.
     fn bm25_parts(&self, field: &str, term: &str, freq: f64, len: f64) -> [f64; 6] {
         let (n, avg) = self.field_stats.get(field).copied().unwrap_or((1.0, 1.0));
-        let df = self
-            .doc_freq
-            .get(&(field.to_owned(), term.to_owned()))
+        let df = (self.doc_freq.get(field).and_then(|f| f.get(term)))
             .copied()
             .unwrap_or(0.0);
         let len = f64::from(es_index::disk::norm_len(es_index::disk::norm_byte(
@@ -998,7 +996,7 @@ impl<'a> Searcher<'a> {
     /// A document's frequency of `term` in `field` and the field's length, from postings
     /// (`Some(None)` if it does not hold the term); `None` without postings (see `gather`).
     fn posting(&self, field: &str, term: &str, id: &str) -> Option<Option<(u32, u32)>> {
-        let f = self.freqs.get(&(field.to_owned(), term.to_owned()))?;
+        let f = self.freqs.get(field)?.get(term)?;
         let on_disk = || f.disk.get(&self.index.disk_pos(id)?);
         Some(f.memory.get(id).or_else(on_disk).copied())
     }
@@ -1118,6 +1116,11 @@ impl<'a> Searcher<'a> {
         d: &Document,
     ) -> Option<f64> {
         let (kind, path) = self.kind(field);
+        if !matches!(kind, Kind::Number | Kind::Bool)
+            && let Some(score) = self.postings_terms(field, wanted, all, id)
+        {
+            return score;
+        }
         let vals = values(&d.source, path);
         let matched = |w: &String| match kind {
             Kind::Number => {
@@ -1133,9 +1136,6 @@ impl<'a> Searcher<'a> {
         if matches!(kind, Kind::Number | Kind::Bool) {
             let n = wanted.iter().filter(|w| matched(w)).count();
             return (n > 0 && (!all || n == wanted.len())).then_some(1.0);
-        }
-        if let Some(score) = self.postings_terms(field, wanted, all, id) {
-            return score;
         }
         let doc_terms = terms(kind, &vals);
         let mut score = 0.0;

@@ -368,9 +368,11 @@ impl crate::Index {
         let memory = self.postings_for(path, analyzed, |f| {
             let docs = f.docs.get(term).into_iter().flatten();
             (docs.map(|(id, freq)| {
-                let len = f.live.get(id).map_or(0, |l| l.1);
                 let at = match analyzed {
-                    true => (*freq, crate::disk::norm_len(crate::disk::norm_byte(len))),
+                    true => {
+                        let len = f.live.get(id).map_or(0, |l| l.1);
+                        (*freq, crate::disk::norm_len(crate::disk::norm_byte(len)))
+                    }
                     false => (1, 1),
                 };
                 (id.clone(), at)
