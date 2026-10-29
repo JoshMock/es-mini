@@ -2240,6 +2240,24 @@ mod tests {
         assert_eq!(run(aggs, Some(1)).0, 6);
     }
 
+    /// `count` of a term reads the length of its in-memory postings, so in-memory updates and
+    /// deletes must leave them (7c45fdc).
+    #[test]
+    fn term_count_follows_in_memory_updates_and_deletes() {
+        let mut ix = Index::default();
+        for (id, tag) in [("a", "x"), ("b", "x"), ("c", "x"), ("d", "y")] {
+            ix.put(id, json!({"tag": tag}));
+        }
+        let n = |ix: &Index, tag: &str| {
+            count(ix, &parse_query(&json!({"term": {"tag": tag}})).unwrap())
+        };
+        assert_eq!((n(&ix, "x"), n(&ix, "y")), (3, 1));
+        ix.put("a", json!({"tag": "y"}));
+        ix.delete("b");
+        ix.put("c", json!({"tag": "x"}));
+        assert_eq!((n(&ix, "x"), n(&ix, "y")), (1, 2));
+    }
+
     /// The score of the only document a query matches.
     fn boost_score(q: Value) -> f64 {
         let mut ix = Index::default();
