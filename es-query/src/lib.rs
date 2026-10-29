@@ -1282,6 +1282,22 @@ impl<'a> Searcher<'a> {
         }
     }
 
+    /// The score of every in-memory candidate of `q` (see `memory_candidates`), if each one
+    /// matches and they all score alike: a term on a keyword, which postings list exactly and
+    /// which counts once per document without norms (see `score_terms`).
+    fn memory_score(&self, q: &Query) -> Option<f64> {
+        let Query::Term { field, value } = q else {
+            return None;
+        };
+        let term = text(value);
+        if field == "_id" || self.kind(field).0 != Kind::Keyword || self.in_memory.is_none() {
+            return None;
+        }
+        // the postings `score_terms` reads (see `gather`)
+        self.freqs.get(field)?.get(&term)?;
+        Some(self.bm25(field, &term, 1.0, 1.0))
+    }
+
     /// [`count_many`] of a lone term on a field that is neither numeric nor `_id`, counted
     /// from postings without collecting the matches; `None` where that cannot tell.
     fn term_count(&self, q: &Query) -> Option<usize> {
@@ -1522,12 +1538,17 @@ pub fn search_many<'a>(
             .then(|| constant_score(&query).and(req.total_up_to))
             .flatten()
             .map(|n| (n + 1).max(req.from + req.size));
+        let memory_score = s.memory_score(&query);
         for (id, doc) in s.docs().filter(|(_, d)| d.seq_no < visible) {
-            let in_order = enough.is_some() && matches!(doc, Cow::Borrowed(_));
+            let in_memory = matches!(doc, Cow::Borrowed(_));
+            let in_order = enough.is_some() && in_memory;
             if in_order && enough.is_some_and(|n| hits.len() - before + counted >= n) {
                 break;
             }
-            let Some(score) = s.score(&query, id, &doc) else {
+            let Some(score) = memory_score
+                .filter(|_| in_memory)
+                .or_else(|| s.score(&query, id, &doc))
+            else {
                 continue;
             };
             if in_order && hits.len() - before >= req.from + req.size {
