@@ -190,17 +190,24 @@ struct Numbers {
     docs: BTreeMap<i64, HashSet<String>>,
     /// Live document id → its distinct values.
     live: HashMap<String, HashSet<i64>>,
+    /// Live documents whose values do not sort as their key: more than one, or one that is not
+    /// a [`plain`] number.
+    odd: HashSet<String>,
 }
 
 impl Numbers {
-    fn add(&mut self, id: &str, values: HashSet<i64>) {
+    fn add(&mut self, id: &str, (values, plain): (HashSet<i64>, bool)) {
         for v in &values {
             self.docs.entry(*v).or_default().insert(id.to_owned());
         }
         self.live.insert(id.to_owned(), values);
+        if !plain {
+            self.odd.insert(id.to_owned());
+        }
     }
 
     fn remove(&mut self, id: &str) {
+        self.odd.remove(id);
         for v in self.live.remove(id).into_iter().flatten() {
             if let Some(ids) = self.docs.get_mut(&v) {
                 ids.remove(id);
@@ -212,11 +219,23 @@ impl Numbers {
     }
 }
 
-fn keys(key: &Key, source: &Value, path: &str) -> HashSet<i64> {
-    values(source, path)
-        .into_iter()
-        .filter_map(|v| key.read(v))
-        .collect()
+/// The keys of a document's values at `path`, and whether it has at most one, [`plain`].
+fn keys(key: &Key, source: &Value, path: &str) -> (HashSet<i64>, bool) {
+    let vals = values(source, path);
+    let plain = vals.len() <= 1 && vals.iter().all(|v| plain(v));
+    (
+        vals.into_iter().filter_map(|v| key.read(v)).collect(),
+        plain,
+    )
+}
+
+/// A JSON number an f64 holds exactly, which compares with others as its key does (as
+/// es-query's `scalar_cmp` compares sources).
+fn plain(v: &Value) -> bool {
+    match v.as_i64() {
+        Some(i) => i.unsigned_abs() <= 1 << 53,
+        None => v.is_f64(),
+    }
 }
 
 /// Built postings per (source path, analyzed), and numeric indices per (source path, key).
@@ -385,6 +404,84 @@ impl crate::Index {
         if lo > hi {
             return Some(HashSet::new());
         }
+        self.numbers_for(path, key, |numbers| {
+            let ids = numbers.docs.range(lo..=hi).flat_map(|(_, ids)| ids);
+            Some(ids.cloned().collect())
+        })
+    }
+
+    /// How many in-memory documents a range of numeric `field` (at source `path`) matches,
+    /// and the first `n` of them by value (highest first if `desc`), equal ones in write order.
+    /// `None` unless every in-memory document is visible below `visible` and every value of the
+    /// field and bound is a lone JSON number an f64 holds exactly, so keys order them as sources.
+    pub fn memory_numbers_first(
+        &self,
+        field: &str,
+        path: &str,
+        [gt, gte, lt, lte]: [Option<&Value>; 4],
+        desc: bool,
+        n: usize,
+        visible: u64,
+    ) -> Option<(usize, Vec<(&str, &crate::Document)>)> {
+        use std::ops::Bound::{Excluded, Included, Unbounded};
+        let key = Key::of(self.mappings.field(field)?)?;
+        let all_visible = self
+            .by_seq_no
+            .keys()
+            .next_back()
+            .is_none_or(|&s| s < visible);
+        let plain_bounds = [gt, gte, lt, lte].into_iter().flatten().all(plain);
+        if key != Key::Number || !all_visible || !plain_bounds {
+            return None;
+        }
+        let read = |b: Option<&Value>| b.and_then(|b| key.read(b));
+        // the tighter bound of each side; at the same key, the strict one
+        let lo = [read(gt).map(|k| (k, true)), read(gte).map(|k| (k, false))];
+        let hi = [read(lt).map(|k| (k, false)), read(lte).map(|k| (k, true))];
+        let (lo, hi) = (
+            lo.into_iter().flatten().max(),
+            hi.into_iter().flatten().min(),
+        );
+        if let (Some((a, strict)), Some((b, inclusive))) = (lo, hi)
+            && (a > b || (a == b && (strict || !inclusive)))
+        {
+            return Some((0, vec![]));
+        }
+        let lo = lo.map_or(
+            Unbounded,
+            |(k, strict)| if strict { Excluded(k) } else { Included(k) },
+        );
+        let hi = hi.map_or(
+            Unbounded,
+            |(k, inc)| if inc { Included(k) } else { Excluded(k) },
+        );
+        self.numbers_for(path, key, |numbers| {
+            if !numbers.odd.is_empty() {
+                return None;
+            }
+            let (mut count, mut first) = (0, vec![]);
+            let mut visit = |ids: &HashSet<String>| {
+                count += ids.len();
+                if first.len() < n {
+                    let mut docs: Vec<_> = (ids.iter())
+                        .filter_map(|id| self.docs.get_key_value(id))
+                        .map(|(id, d)| (id.as_str(), &**d))
+                        .collect();
+                    docs.sort_unstable_by_key(|(_, d)| d.seq_no);
+                    first.extend(docs.into_iter().take(n - first.len()));
+                }
+            };
+            let range = numbers.docs.range((lo, hi));
+            match desc {
+                true => range.rev().for_each(|(_, ids)| visit(ids)),
+                false => range.for_each(|(_, ids)| visit(ids)),
+            }
+            Some((count, first))
+        })
+    }
+
+    /// Reads the numeric index of `path` by `key`, built from the in-memory documents if new.
+    fn numbers_for<R>(&self, path: &str, key: Key, read: impl FnOnce(&Numbers) -> R) -> R {
         let mut postings =
             (self.postings.lock()).unwrap_or_else(std::sync::PoisonError::into_inner);
         let numbers = (postings.1)
@@ -396,8 +493,7 @@ impl crate::Index {
                 }
                 n
             });
-        let ids = numbers.docs.range(lo..=hi).flat_map(|(_, ids)| ids);
-        Some(ids.cloned().collect())
+        read(numbers)
     }
 
     /// The first `max` terms of analyzed `field` (at source `path`) starting with `prefix`, in
@@ -577,6 +673,49 @@ mod tests {
             i.memory_numbers("n", "n", [None, Some(&json!("x")), None, None]),
             None
         );
+    }
+
+    /// Only lone numbers an f64 holds order as their keys, so others leave paging by value
+    /// to the sources, as do unrefreshed documents.
+    #[test]
+    fn ranges_page_by_value_only_where_keys_order_documents() {
+        let mut i = Index::default();
+        i.mappings
+            .properties
+            .insert("n".into(), crate::FieldMapping::Long);
+        i.put("1", json!({"n": 5}));
+        i.put("2", json!({"n": 3.5}));
+        i.put("3", json!({"n": 5}));
+        let first = |i: &Index, b: [Option<serde_json::Value>; 4], desc, visible| {
+            let b = b.each_ref().map(Option::as_ref);
+            let r = i.memory_numbers_first("n", "n", b, desc, 2, visible)?;
+            Some((
+                r.0,
+                r.1.iter().map(|(id, _)| *id).collect::<Vec<_>>().join(","),
+            ))
+        };
+        let all = [None, None, None, None];
+        assert_eq!(first(&i, all.clone(), false, 3), Some((3, "2,1".into())));
+        assert_eq!(first(&i, all.clone(), true, 3), Some((3, "1,3".into())));
+        assert_eq!(
+            first(&i, [None, Some(json!(3.5)), Some(json!(5)), None], false, 3),
+            Some((1, "2".into()))
+        );
+        assert_eq!(first(&i, all.clone(), false, 2), None);
+        assert_eq!(
+            first(&i, [Some(json!("1")), None, None, None], false, 3),
+            None
+        );
+        assert_eq!(
+            first(&i, [Some(json!(1u64 << 60)), None, None, None], false, 3),
+            None
+        );
+        for odd in [json!([1, 2]), json!("4"), json!(1u64 << 60)] {
+            i.put("4", json!({"n": odd}));
+            assert_eq!(first(&i, all.clone(), false, 9), None, "{odd}");
+        }
+        i.put("4", json!({"n": [7]}));
+        assert_eq!(first(&i, all, true, 9), Some((4, "4,1".into())));
     }
 
     /// Like Elasticsearch's soft deletes, replaced and deleted docs still count: merges keep

@@ -518,6 +518,36 @@ impl<'a> Searcher<'a> {
         }
     }
 
+    /// How many in-memory documents a range query sorted by its own field alone matches, and
+    /// the first `n` of them in order (see [`Index::memory_numbers_first`]).
+    fn memory_sorted(
+        &self,
+        q: &Query,
+        sort: &[SortField],
+        n: usize,
+        visible: u64,
+    ) -> Option<(usize, Vec<(&'a str, &'a Document)>)> {
+        let (
+            Query::Range {
+                field,
+                gt,
+                gte,
+                lt,
+                lte,
+                ..
+            },
+            [f],
+        ) = (q, sort)
+        else {
+            return None;
+        };
+        let bounds = [gt, gte, lt, lte].map(Option::as_deref);
+        let path = self.kind(field).1;
+        (f.field == *field)
+            .then(|| (self.index).memory_numbers_first(field, path, bounds, f.desc, n, visible))
+            .flatten()
+    }
+
     /// The on-disk documents indexing all (or any) of `terms` in `field` (see
     /// [`Index::disk_term`]).
     fn term_docs(
@@ -1447,7 +1477,16 @@ pub fn search_many<'a>(
             Some(_) => Some(BTreeSet::new()),
             None => s.candidates(&query, false),
         };
-        s.in_memory = s.memory_candidates(&query, None);
+        let visible = index.visible_seq_no();
+        // a range sorted by its own field pages its in-memory hits from the numeric index
+        let n = req.from.saturating_add(req.size);
+        let memory_page = (req.aggs.is_empty() && !req.profile)
+            .then(|| s.memory_sorted(&query, &req.sort, n, visible))
+            .flatten();
+        s.in_memory = match memory_page {
+            Some(_) => Some(HashSet::new()),
+            None => s.memory_candidates(&query, None),
+        };
         let index_aggs = match aggs::resolve_dates(&req.aggs, index, now) {
             Ok(a) => a,
             Err(e) => {
@@ -1464,6 +1503,18 @@ pub fn search_many<'a>(
         };
         let before = hits.len();
         hits.extend(selected.into_iter().flatten());
+        let mut counted = 0;
+        if let Some((count, page)) = memory_page {
+            counted = count - page.len();
+            hits.extend(page.into_iter().map(|(id, doc)| Found {
+                target: pos,
+                id,
+                seq_no: doc.seq_no,
+                sort: s.sort_values(&req.sort, 1.0, doc),
+                doc: Some(Cow::Borrowed(doc)),
+                score: 1.0,
+            }));
+        }
         // With one score for all, hits rank in write order, so once enough are counted the
         // rest of those in memory (borrowed: `docs_at` gives them last, in write order) change
         // neither the page nor a total past the limit. Those past the page are only counted.
@@ -1471,8 +1522,6 @@ pub fn search_many<'a>(
             .then(|| constant_score(&query).and(req.total_up_to))
             .flatten()
             .map(|n| (n + 1).max(req.from + req.size));
-        let visible = index.visible_seq_no();
-        let mut counted = 0;
         for (id, doc) in s.docs().filter(|(_, d)| d.seq_no < visible) {
             let in_order = enough.is_some() && matches!(doc, Cow::Borrowed(_));
             if in_order && enough.is_some_and(|n| hits.len() - before + counted >= n) {
@@ -2256,6 +2305,66 @@ mod tests {
         ix.delete("b");
         ix.put("c", json!({"tag": "x"}));
         assert_eq!((n(&ix, "x"), n(&ix, "y")), (1, 2));
+    }
+
+    /// A range sorted by its own field pages its in-memory hits from the numeric index while
+    /// every value orders as its key; arrays and strings, which sort by source, still do.
+    #[test]
+    fn range_sorted_by_its_field_pages_in_memory_hits_in_value_order() {
+        let mut ix = Index::default();
+        ix.mappings
+            .properties
+            .insert("n".into(), FieldMapping::Long);
+        for (id, n) in [
+            ("a", json!(5)),
+            ("b", json!(3)),
+            ("c", json!(5)),
+            ("f", json!(2)),
+        ] {
+            ix.put(id, json!({"n": n}));
+        }
+        for (id, n) in [
+            ("g", json!(7)),
+            ("h", json!(6)),
+            ("i", json!(4.5)),
+            ("a", json!(5)),
+        ] {
+            ix.put(id, json!({"n": n}));
+        }
+        ix.refresh();
+        let run = |ix: &Index, range: Value, desc: bool, from: usize| {
+            let order = if desc { "desc" } else { "asc" };
+            let body = json!({"query": {"range": {"n": range}}, "sort": [{"n": order}],
+                "from": from, "size": 3});
+            let r = search(ix, &SearchRequest::parse(&body).unwrap());
+            let ids: Vec<_> = r.hits.iter().map(|h| h.id).collect();
+            (r.total, ids.join(","))
+        };
+        let open = json!({"gt": 2, "lt": 7});
+        // ties in write order: "a" was rewritten after "c"
+        assert_eq!(run(&ix, open.clone(), false, 0), (5, "b,i,c".into()));
+        assert_eq!(run(&ix, open.clone(), false, 3), (5, "a,h".into()));
+        assert_eq!(run(&ix, open.clone(), true, 0), (5, "h,c,a".into()));
+        assert_eq!(
+            run(&ix, json!({"gte": 2, "lte": 7}), true, 0),
+            (7, "g,h,c".into())
+        );
+        assert_eq!(run(&ix, json!({"gte": 4.5}), false, 0), (5, "i,c,a".into()));
+        assert_eq!(run(&ix, json!({"gt": 4.5}), false, 0), (4, "c,a,h".into()));
+        assert_eq!(
+            run(&ix, json!({"gt": 5, "lt": 5}), false, 0),
+            (0, "".into())
+        );
+        // an array sorts by its lowest value ascending, its highest descending; a string by source
+        ix.put("d", json!({"n": [1, 4]}));
+        ix.put("e", json!({"n": "4"}));
+        ix.refresh();
+        assert_eq!(run(&ix, open.clone(), false, 0), (7, "d,b,e".into()));
+        assert_eq!(run(&ix, open.clone(), true, 3), (7, "i,d,e".into()));
+        ix.delete("d");
+        ix.delete("e");
+        ix.refresh();
+        assert_eq!(run(&ix, open, false, 0), (5, "b,i,c".into()));
     }
 
     /// The score of the only document a query matches.
