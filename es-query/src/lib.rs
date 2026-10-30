@@ -1508,7 +1508,7 @@ pub fn search_many<'a>(
         let visible = index.visible_seq_no();
         // a range sorted by its own field, or a keyword term by score, pages its in-memory hits
         let n = req.from.saturating_add(req.size);
-        let memory_page = (req.aggs.is_empty() && !req.profile)
+        let memory_page = (req.aggs.is_empty() && !req.profile && req.search_after.is_none())
             .then(|| s.memory_sorted(&query, &req.sort, n, visible))
             .flatten();
         s.in_memory = match memory_page {
@@ -1596,6 +1596,13 @@ pub fn search_many<'a>(
             .then(a.target.cmp(&b.target))
             .then(a.seq_no.cmp(&b.seq_no))
     });
+    // counted in the total, but not hits
+    let mut skipped = 0;
+    if let Some(after) = &req.search_after {
+        let n = hits.len();
+        hits.retain(|h| cmp_sorted(&req.sort, (&h.sort, h.score), (after, 0.0)).is_gt());
+        skipped = n - hits.len();
+    }
     if !failures.is_empty() && failures.len() == targets.len() {
         let shards = (failures.iter()).map(|(n, e)| (n.to_string(), e.clone()));
         let shards = shards.collect();
@@ -1614,7 +1621,7 @@ pub fn search_many<'a>(
             .then(|| aggs::render(&req.aggs, &req.pipelines, &mut aggs, req.typed_keys))
             .transpose()?,
         profile,
-        total: total + hits.len(),
+        total: total + skipped + hits.len(),
         max_score,
         hits: hits
             .into_iter()

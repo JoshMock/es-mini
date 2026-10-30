@@ -36,6 +36,8 @@ pub struct SearchRequest {
     pub fields: Vec<crate::aggs::FieldSpec>,
     /// Body `runtime_mappings`: names of the fields that emit the hit's `_source` as a string.
     pub runtime_source: Vec<String>,
+    /// Body `search_after`: only hits that sort after these values, one per `sort` field.
+    pub search_after: Option<Vec<Value>>,
 }
 
 /// Which Elasticsearch error type a query failure maps to.
@@ -117,6 +119,7 @@ impl SearchRequest {
                     "profile",
                     "fields",
                     "runtime_mappings",
+                    "search_after",
                 ]
                 .contains(&k.as_str())
             })
@@ -155,7 +158,23 @@ impl SearchRequest {
         let runtime_source = body
             .get("runtime_mappings")
             .map_or(Ok(vec![]), parse_runtime_mappings)?;
+        let search_after = match body.get("search_after") {
+            None => None,
+            Some(Value::Array(_)) if sort.is_empty() => {
+                return Err(QueryError::illegal("Sort must contain at least one field."));
+            }
+            Some(Value::Array(a)) if a.len() != sort.len() => {
+                return Err(QueryError::illegal(format!(
+                    "search_after has {} value(s) but sort has {}.",
+                    a.len(),
+                    sort.len()
+                )));
+            }
+            Some(Value::Array(a)) => Some(a.clone()),
+            Some(_) => return Err("[search_after] must be an array".into()),
+        };
         Ok(Self {
+            search_after,
             runtime_source,
             fields,
             aggs,

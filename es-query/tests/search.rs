@@ -1611,3 +1611,25 @@ fn error_shapes_a_query_failing_on_some_indices_fails_only_their_shards() {
         .collect();
     assert_eq!(shards, [("d", true), ("e", true)]);
 }
+
+#[test]
+fn search_after_needs_one_value_per_sort_field() {
+    let msg = |body| SearchRequest::parse(&body).unwrap_err().msg;
+    assert_eq!(
+        msg(json!({"search_after": [1]})),
+        "Sort must contain at least one field."
+    );
+    assert_eq!(
+        msg(json!({"sort": ["n"], "search_after": [1, 2]})),
+        "search_after has 2 value(s) but sort has 1."
+    );
+}
+
+#[test]
+fn search_after_keeps_hits_sorted_after_its_values() {
+    let idx = index();
+    let req = SearchRequest::parse(&json!({"sort": ["n"], "search_after": [5]})).unwrap();
+    let r = search(&idx, &req);
+    let ids: Vec<_> = r.hits.iter().map(|h| h.id).collect();
+    assert_eq!((ids, r.total), (vec!["4", "2"], 4));
+}
