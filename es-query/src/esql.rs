@@ -3631,11 +3631,30 @@ fn table_of(
     // Per column: its ES|QL type, and the indices for each mapping type (named like ES|QL does).
     let mut mapped: BTreeMap<String, (String, BTreeMap<String, Vec<String>>)> = BTreeMap::new();
     let mut docs = Vec::new();
-    for (t, filter) in targets.iter().zip(filters) {
+    // A searcher reads one shard's postings, so a filter matches each shard of an index alone.
+    let split: Vec<_> = (targets.iter().zip(filters))
+        .map(|(t, f)| {
+            let index: &Index = indices[&t.index].borrow();
+            match (f, index.shards().len()) {
+                (Some(_), 2..) => index.shard_snapshots(),
+                _ => vec![],
+            }
+        })
+        .collect();
+    for ((t, filter), split) in targets.iter().zip(filters).zip(&split) {
         let index: &Index = indices[&t.index].borrow();
+        let parts: Vec<&Index> = match &split[..] {
+            [] => vec![index],
+            s => s.iter().collect(),
+        };
+        let searchers: Vec<_> = (parts.iter())
+            .map(|p| filter.as_ref().map(|f| (crate::Searcher::new(p, f), f)))
+            .collect();
         // Read once: on-disk documents are decoded on every read.
-        let mut mine: Vec<_> = index.docs().collect();
-        for (c, (es_type, ty)) in columns(index, mine.iter().map(|(_, d)| &d.source)) {
+        let mut mine: Vec<_> = (parts.iter().enumerate())
+            .flat_map(|(n, p)| p.docs().map(move |(id, d)| (n, id, d)))
+            .collect();
+        for (c, (es_type, ty)) in columns(index, mine.iter().map(|(.., d)| &d.source)) {
             let es_type = if es_type == "date" {
                 "datetime".into()
             } else {
@@ -3644,14 +3663,17 @@ fn table_of(
             let e = mapped.entry(c).or_insert_with(|| (ty, BTreeMap::new()));
             e.1.entry(es_type).or_default().push(t.index.clone());
         }
-        let searcher = filter.as_ref().map(|f| (crate::Searcher::new(index, f), f));
-        mine.retain(|(id, d)| {
-            searcher
+        mine.retain(|(n, id, d)| {
+            searchers[*n]
                 .as_ref()
                 .is_none_or(|(s, f)| s.score(f, id, d).is_some())
         });
-        mine.sort_by_key(|(_, d)| d.seq_no);
-        docs.push(mine);
+        mine.sort_by_key(|(.., d)| d.seq_no);
+        docs.push(
+            mine.into_iter()
+                .map(|(_, id, d)| (id, d))
+                .collect::<Vec<_>>(),
+        );
     }
     let conflicts: BTreeMap<String, BTreeMap<String, Vec<String>>> = mapped
         .iter_mut()

@@ -203,6 +203,23 @@ fn from_aliases_and_multiple_sources_with_filters() {
 }
 
 #[test]
+fn filtered_alias_matches_in_every_shard() {
+    use es_index::aliases::Alias;
+    let mut i = Index::default();
+    (i.settings).merge(&json!({"index.number_of_shards": "3"}));
+    for n in 0..12 {
+        i.map_dynamic(&n.to_string(), &json!({"t": "a"})).unwrap();
+        i.put(&n.to_string(), json!({"t": "a"}));
+    }
+    assert!(i.shards().len() > 1);
+    let filter = json!({"filter": {"term": {"t.keyword": "a"}}});
+    i.aliases.insert("f".into(), Alias::parse(&filter).unwrap());
+    let all = BTreeMap::from([("i".to_owned(), i)]);
+    let r = run(&all, "FROM f | STATS c = COUNT(*)").unwrap();
+    assert_eq!(r.values, vec![vec![json!(12)]]);
+}
+
+#[test]
 fn text_with_keyword_subfield_keeps_both_columns() {
     let mut i = Index::default();
     i.map_dynamic("1", &json!({"t": "Hello"})).unwrap();
