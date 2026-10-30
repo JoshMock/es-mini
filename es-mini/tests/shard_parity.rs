@@ -15,8 +15,6 @@ use std::{collections::BTreeSet, fs};
 const XFAIL: &[&str] = &[
     "search_after",
     "search_after_ties",
-    "two_indices",
-    "two_indices_sorted",
     "dfs",
     "terms_error",
     "scroll_doc",

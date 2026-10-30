@@ -1591,7 +1591,7 @@ pub fn search_many<'a>(
         searchers.insert(pos, s);
     }
     hits.sort_by(|a, b| {
-        // ponytail: ties fall back to index order then write order, standing in for shard/doc order
+        // ties fall back to target (shard) order, then write order standing in for doc order
         cmp_sorted(&req.sort, (&a.sort, a.score), (&b.sort, b.score))
             .then(a.target.cmp(&b.target))
             .then(a.seq_no.cmp(&b.seq_no))

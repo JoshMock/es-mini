@@ -113,15 +113,15 @@ pub(crate) fn snapshot(
     let shared = state.read();
     let resolved = crate::indices::data_targets(&*shared, name, params)?;
     let indices = shared.lock(resolved.iter().map(|t| &t.index));
-    Ok(Arc::new(
-        resolved
-            .into_iter()
-            .flat_map(|t| {
-                let shards = indices[&t.index].shard_snapshots().into_iter();
-                shards.map(move |s| (t.index.clone(), s, t.filter.clone()))
-            })
-            .collect(),
-    ))
+    let mut shards: Vec<_> = (resolved.into_iter())
+        .flat_map(|t| {
+            let shards = indices[&t.index].shard_snapshots().into_iter().enumerate();
+            shards.map(move |(n, s)| (n, (t.index.clone(), s, t.filter.clone())))
+        })
+        .collect();
+    // in shard order, as crate::search::targets
+    shards.sort_by(|(n, (a, ..)), (m, (b, ..))| (n, a).cmp(&(m, b)));
+    Ok(Arc::new(shards.into_iter().map(|(_, s)| s).collect()))
 }
 
 // ponytail: ids are opaque to clients, so a prefixed counter stands in for ES's base64 encoding

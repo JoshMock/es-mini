@@ -32,21 +32,26 @@ pub(crate) fn split(
         .collect()
 }
 
-/// A search target per shard of `resolved`, from `split` where it has them.
+/// A search target per shard of `resolved`, from `split` where it has them, in Elasticsearch's
+/// shard order (shard number, then index name), which breaks ties between hits.
 pub(crate) fn targets<'a>(
     indices: &'a aliases::Map<impl Borrow<es_index::Index>>,
     resolved: &'a [aliases::Target],
     split: &'a [Vec<es_index::Index>],
 ) -> Vec<es_query::Target<'a>> {
-    (resolved.iter().zip(split))
+    let mut targets: Vec<_> = (resolved.iter().zip(split))
         .flat_map(|(t, shards)| {
             let (name, filter) = (t.index.as_str(), t.filter.as_ref());
             match &shards[..] {
-                [] => vec![(name, indices[&t.index].borrow(), filter)],
-                _ => shards.iter().map(|s| (name, s, filter)).collect(),
+                [] => vec![(0, (name, indices[&t.index].borrow(), filter))],
+                _ => (shards.iter().enumerate())
+                    .map(|(n, s)| (n, (name, s, filter)))
+                    .collect(),
             }
         })
-        .collect()
+        .collect();
+    targets.sort_by_key(|&(n, (name, ..))| (n, name));
+    targets.into_iter().map(|(_, t)| t).collect()
 }
 
 const SEARCH_PARAMS: [&str; 46] = [
