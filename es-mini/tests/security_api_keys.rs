@@ -1,5 +1,5 @@
-//! The API key lifecycle (create, get, update, invalidate) with security on. Expected bodies were
-//! recorded from a live Elasticsearch 9.5.5 (`xpack.security.enabled=true`).
+//! The API key lifecycle (create, get, query, update, invalidate) with security on. Expected
+//! bodies were recorded from a live Elasticsearch 9.5.5 (`xpack.security.enabled=true`).
 
 use axum::{body::Body, http::Request};
 use http_body_util::BodyExt;
@@ -924,4 +924,343 @@ async fn keys_survive_restart_in_a_hidden_index() {
     let got = call(&app, ELASTIC, "PUT", "/.security-7", None).await;
     let reason = "action [indices:admin/create] is unauthorized for user [elastic] with effective roles [superuser] on restricted indices [.security-7], this action is granted by the index privileges [create_index,manage,all]";
     assert_eq!(got, (403, error(403, &[("security_exception", reason)], 0)));
+}
+
+/// `POST /_security/_query/api_key{params}` with `body` as `auth`.
+async fn query(app: &axum::Router, auth: &str, params: &str, body: Option<Value>) -> (u16, Value) {
+    let uri = format!("/_security/_query/api_key{params}");
+    call(app, auth, "POST", &uri, body).await
+}
+
+/// The keys k1, k2 (expiring), other-3 and Gone (invalidated), in that order, as Elasticsearch
+/// 9.5.5's query recordings were made.
+async fn query_fixture(app: &axum::Router) -> Vec<Value> {
+    let bodies = [
+        json!({"name": "k1", "metadata": {"env": "prod", "n": 5}}),
+        json!({"name": "k2", "expiration": "1d", "metadata": {"env": "dev", "tags": ["x", "y"]}}),
+        json!({"name": "other-3"}),
+        json!({"name": "Gone"}),
+    ];
+    let mut keys = vec![];
+    for body in bodies {
+        let (key, _) = create(app, ELASTIC, body).await;
+        // Distinct creation times, so sorts by creation are stable.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        keys.push(key);
+    }
+    let ids = json!({"ids": [keys[3]["id"]]});
+    let got = call(app, ELASTIC, "DELETE", "/_security/api_key", Some(ids)).await;
+    assert_eq!(got.0, 200, "{}", got.1);
+    let (_, all) = call(app, ELASTIC, "GET", "/_security/api_key", None).await;
+    all["api_keys"].as_array().unwrap().clone()
+}
+
+#[tokio::test]
+async fn keys_are_queried() {
+    let app = secured();
+    let empty = json!({"total": 0, "count": 0, "api_keys": []});
+    assert_eq!(query(&app, ELASTIC, "", None).await, (200, empty.clone()));
+    let term = json!({"query": {"term": {"name": "k1"}}});
+    assert_eq!(query(&app, ELASTIC, "", Some(term)).await, (200, empty));
+
+    let keys = query_fixture(&app).await;
+    let all = json!({"total": 4, "count": 4, "api_keys": keys});
+    assert_eq!(query(&app, ELASTIC, "", None).await, (200, all.clone()));
+    assert_eq!(query(&app, ELASTIC, "", Some(json!({}))).await, (200, all));
+    let got = call(&app, ELASTIC, "GET", "/_security/_query/api_key", None).await;
+    assert_eq!(got.1["count"], 4, "{}", got.1);
+
+    let names = |v: &Value| -> Vec<Value> {
+        let keys = v["api_keys"].as_array().unwrap();
+        keys.iter().map(|k| k["name"].clone()).collect()
+    };
+    let creation = |i: usize| keys[i]["creation"].clone();
+    let max = json!(i64::MAX);
+    // (body, total, names, each key's _sort when sorted)
+    let cases = [
+        (
+            json!({"query": {"term": {"name": "k1"}}}),
+            1,
+            vec!["k1"],
+            None,
+        ),
+        (
+            json!({"query": {"prefix": {"name": "k"}}, "sort": ["name"]}),
+            2,
+            vec!["k1", "k2"],
+            Some(json!([["k1"], ["k2"]])),
+        ),
+        (
+            json!({"query": {"term": {"metadata.env": "prod"}}}),
+            1,
+            vec!["k1"],
+            None,
+        ),
+        (
+            json!({"query": {"term": {"metadata.n": 5}}}),
+            1,
+            vec!["k1"],
+            None,
+        ),
+        (
+            json!({"query": {"range": {"expiration": {"gte": "now"}}}}),
+            1,
+            vec!["k2"],
+            None,
+        ),
+        (
+            json!({"query": {"exists": {"field": "expiration"}}}),
+            1,
+            vec!["k2"],
+            None,
+        ),
+        (
+            json!({"query": {"wildcard": {"name": "*-3"}}}),
+            1,
+            vec!["other-3"],
+            None,
+        ),
+        (
+            json!({"query": {"match": {"name": "k2"}}}),
+            1,
+            vec!["k2"],
+            None,
+        ),
+        (
+            json!({"query": {"term": {"name": "gone"}}}),
+            0,
+            vec![],
+            None,
+        ),
+        (
+            json!({"query": {"term": {"name": {"value": "gone", "case_insensitive": true}}}}),
+            1,
+            vec!["Gone"],
+            None,
+        ),
+        (
+            json!({"query": {"terms": {"username": ["elastic"]}}, "sort": ["name"], "search_after": ["k1"]}),
+            4,
+            vec!["k2", "other-3"],
+            Some(json!([["k2"], ["other-3"]])),
+        ),
+        (
+            json!({"query": {"ids": {"values": [keys[0]["id"]]}}}),
+            1,
+            vec!["k1"],
+            None,
+        ),
+        (
+            json!({"query": {"simple_query_string": {"query": "k1"}}}),
+            1,
+            vec!["k1"],
+            None,
+        ),
+        (
+            json!({"query": {"simple_query_string": {"query": "k2", "fields": ["name", "nope"]}}}),
+            1,
+            vec!["k2"],
+            None,
+        ),
+        (
+            json!({"query": {"simple_query_string": {"query": "k1", "fields": ["nope"]}}}),
+            0,
+            vec![],
+            None,
+        ),
+        (
+            json!({"query": {"bool": {"filter": [{"match_all": {}}], "should": [{"term": {"name": "k1"}}, {"term": {"name": "k2"}}], "minimum_should_match": 1}}}),
+            2,
+            vec!["k1", "k2"],
+            None,
+        ),
+        (
+            json!({"query": {"bool": {"must": [{"term": {"invalidated": false}}], "must_not": [{"term": {"name": "k1"}}]}}, "sort": [{"creation": {"order": "desc"}}], "size": 1}),
+            2,
+            vec!["other-3"],
+            Some(json!([[creation(2)]])),
+        ),
+        (
+            json!({"sort": [{"name": {"order": "desc"}}, "creation"]}),
+            4,
+            vec!["other-3", "k2", "k1", "Gone"],
+            Some(json!([
+                ["other-3", creation(2)],
+                ["k2", creation(1)],
+                ["k1", creation(0)],
+                ["Gone", creation(3)]
+            ])),
+        ),
+        (
+            json!({"sort": ["type", "invalidated", "username", "realm_name", "expiration", "invalidation"]}),
+            4,
+            vec!["k2", "k1", "other-3", "Gone"],
+            Some(json!([
+                ["rest", 0, "elastic", "reserved", keys[1]["expiration"], max],
+                ["rest", 0, "elastic", "reserved", max, max],
+                ["rest", 0, "elastic", "reserved", max, max],
+                [
+                    "rest",
+                    1,
+                    "elastic",
+                    "reserved",
+                    max,
+                    keys[3]["invalidation"]
+                ],
+            ])),
+        ),
+        (
+            json!({"sort": ["metadata.env"]}),
+            4,
+            vec!["k2", "k1", "other-3", "Gone"],
+            Some(json!([["dev"], ["prod"], [null], [null]])),
+        ),
+        (
+            json!({"query": {"term": {"type": "rest"}}, "size": 1}),
+            4,
+            vec!["k1"],
+            None,
+        ),
+    ];
+    for (body, total, expected, sorts) in cases {
+        let (status, got) = query(&app, ELASTIC, "", Some(body.clone())).await;
+        assert_eq!(status, 200, "{body}: {got}");
+        assert_eq!(
+            (got["total"].clone(), names(&got)),
+            (json!(total), json!(expected).as_array().unwrap().clone()),
+            "{body}"
+        );
+        assert_eq!(got["count"], expected.len(), "{body}");
+        let got_sorts: Vec<Value> = (got["api_keys"].as_array().unwrap().iter())
+            .map(|k| k["_sort"].clone())
+            .collect();
+        match sorts {
+            Some(sorts) => assert_eq!(json!(got_sorts), sorts, "{body}"),
+            None => assert!(got_sorts.iter().all(Value::is_null), "{body}: {got}"),
+        }
+        // Each key is shown as the get API shows it, then its _sort.
+        for k in got["api_keys"].as_array().unwrap() {
+            let mut k = k.clone();
+            k.as_object_mut().unwrap().remove("_sort");
+            assert!(keys.contains(&k), "{body}: {k}");
+        }
+    }
+
+    let mut limited = keys[0].clone();
+    limited["limited_by"] = json!([superuser()]);
+    let body = json!({"query": {"term": {"name": "k1"}}});
+    let got = query(&app, ELASTIC, "?with_limited_by=true", Some(body)).await;
+    let expected = json!({"total": 1, "count": 1, "api_keys": [limited]});
+    assert_eq!(got.1.to_string(), expected.to_string());
+
+    // A key with its owner's privileges sees every key too.
+    let (_, auth) = create(&app, ELASTIC, json!({"name": "k5"})).await;
+    let got = query(&app, &auth, "", None).await;
+    assert_eq!(
+        (got.0, got.1["total"].clone()),
+        (200, json!(5)),
+        "{}",
+        got.1
+    );
+}
+
+#[tokio::test]
+async fn query_requests_are_validated() {
+    let app = secured();
+    query_fixture(&app).await;
+    let illegal = |reason: &str| error(400, &[("illegal_argument_exception", reason)], 0);
+    let x_content = |reason: &str| error(400, &[("x_content_parse_exception", reason)], 0);
+    let cases = [
+        (
+            json!({"query": {"term": {"api_key_hash": "x"}}}),
+            illegal("Field [api_key_hash] is not allowed for querying or aggregation"),
+        ),
+        (
+            json!({"query": {"term": {"_id": "x"}}}),
+            illegal("Field [_id] is not allowed for querying or aggregation"),
+        ),
+        (
+            json!({"query": {"fuzzy": {"name": "k1"}}}),
+            illegal("Query type [fuzzy] is not currently supported in this context"),
+        ),
+        (
+            json!({"query": {"match_none": {}}}),
+            illegal("Query type [match_none] is not currently supported in this context"),
+        ),
+        (
+            json!({"query": {"bool": {"must": {"fuzzy": {"name": "k1"}}}}}),
+            illegal("Query type [fuzzy] is not currently supported in this context"),
+        ),
+        (
+            json!({"query": {"term": {"na*": "k1"}}}),
+            illegal("Field name pattern [na*] is not allowed for querying or aggregation"),
+        ),
+        (
+            json!({"query": {"range": {"creation": {"gte": "now-1d", "relation": "within"}}}}),
+            illegal("range query with relation is not currently supported in this context"),
+        ),
+        (
+            json!({"from": -1, "size": -2}),
+            validation(
+                "Validation Failed: 1: [from] parameter cannot be negative but was [-1];2: [size] parameter cannot be negative but was [-2];",
+            ),
+        ),
+        (
+            json!({"sort": ["api_key_hash"]}),
+            illegal("Field [api_key_hash] is not allowed for querying or aggregation"),
+        ),
+        (
+            json!({"sort": [{"name": {"nested": {"path": "x"}}}]}),
+            illegal("nested sorting is not currently supported in this context"),
+        ),
+        (
+            json!({"sort": "name"}),
+            x_content(
+                "[query_api_key_request_payload] sort doesn't support values of type: VALUE_STRING",
+            ),
+        ),
+        (
+            json!({"sort": [{"creation": "desc"}]}),
+            error(
+                400,
+                &[
+                    (
+                        "x_content_parse_exception",
+                        "[query_api_key_request_payload] failed to parse field [sort]",
+                    ),
+                    (
+                        "x_content_parse_exception",
+                        "[field_sort] Expected START_OBJECT but was: VALUE_STRING",
+                    ),
+                ],
+                1,
+            ),
+        ),
+        (
+            json!({"foo": 1}),
+            x_content("[query_api_key_request_payload] unknown field [foo]"),
+        ),
+        (
+            // ponytail: ES also gives the parsing_exception's line and col
+            json!({"query": {"term": {"name": {"nope": 1}}}}),
+            error(
+                400,
+                &[
+                    (
+                        "x_content_parse_exception",
+                        "[query_api_key_request_payload] failed to parse field [query]",
+                    ),
+                    ("parsing_exception", "[term] query does not support [nope]"),
+                ],
+                1,
+            ),
+        ),
+    ];
+    for (body, expected) in cases {
+        let got = query(&app, ELASTIC, "", Some(body.clone())).await;
+        assert_eq!(got, (400, expected), "{body}");
+    }
+    let got = query(&app, ELASTIC, "?foo=1", None).await;
+    let reason = "request [/_security/_query/api_key] contains unrecognized parameter: [foo]";
+    assert_eq!(got, (400, illegal(reason)));
 }

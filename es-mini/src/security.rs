@@ -14,9 +14,12 @@ use axum::{
 };
 use es_index::es_codec::{base64, sha256::sha256_base64};
 use es_index::{Index, Indices};
+use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
+
+mod query;
 
 /// The system index keys are stored in, as Elasticsearch names it, behind the [`ALIAS`] alias.
 pub(crate) const INDEX: &str = ".security-7";
@@ -75,6 +78,10 @@ pub fn routes<S>(security: Arc<Security>) -> Router<S> {
         )
         .route("/_security/api_key/{id}", put(update_key))
         .route("/_security/api_key/_bulk_update", post(bulk_update_keys))
+        .route(
+            "/_security/_query/api_key",
+            get(query::query_keys).post(query::query_keys),
+        )
         .with_state(security)
 }
 
@@ -132,6 +139,23 @@ fn put_key(system: &mut Indices, id: &str, doc: Value) {
             json!({"hidden": "true", "number_of_shards": "1", "auto_expand_replicas": "0-1"});
         index.settings.merge(&settings);
         index.settings.record_creation(INDEX);
+        // Elasticsearch's mapping of the fields the query API reads.
+        let date = json!({"type": "date", "format": "epoch_millis"});
+        let mappings = json!({"properties": {
+            "doc_type": {"type": "keyword"},
+            "name": {"type": "keyword"},
+            "type": {"type": "keyword"},
+            "creation_time": date,
+            "expiration_time": date,
+            "invalidation_time": date,
+            "api_key_invalidated": {"type": "boolean"},
+            "creator": {"properties": {
+                "principal": {"type": "keyword"},
+                "realm": {"type": "keyword"},
+                "realm_type": {"type": "keyword"},
+            }},
+        }});
+        index.mappings = es_index::Mappings::deserialize(&mappings).expect("valid mappings");
         let alias = es_index::aliases::Alias::parse(&json!({"is_hidden": true}));
         index
             .aliases

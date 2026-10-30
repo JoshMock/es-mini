@@ -1,0 +1,312 @@
+//! `GET|POST /_security/_query/api_key`: the query DSL over API keys, as Elasticsearch's
+//! `RestQueryApiKeyAction` and `TransportQueryApiKeyAction` run it: the request's field names are
+//! translated to [`INDEX`]'s (`FieldNameTranslators`), and the search runs there.
+
+use super::{INDEX, Security, info, validate};
+use crate::error::AppError;
+use axum::{
+    Json,
+    body::Bytes,
+    extract::{Query, State},
+    http::Uri,
+};
+use serde_json::{Map, Value, json};
+use std::collections::HashMap;
+use std::sync::Arc;
+
+const REQUEST: &str = "query_api_key_request_payload";
+
+/// The fields a query names and the [`INDEX`] fields they read, as `FieldNameTranslators`
+/// lists them; `metadata` is the flattened `metadata_flattened` (see [`translate`]).
+const FIELDS: [(&str, &str); 9] = [
+    ("username", "creator.principal"),
+    ("realm_name", "creator.realm"),
+    ("name", "name"),
+    ("type", "type"),
+    ("creation", "creation_time"),
+    ("expiration", "expiration_time"),
+    ("invalidated", "api_key_invalidated"),
+    ("invalidation", "invalidation_time"),
+    ("metadata", "metadata_flattened"),
+];
+
+pub(super) async fn query_keys(
+    State(security): State<Arc<Security>>,
+    uri: Uri,
+    Query(params): Query<HashMap<String, String>>,
+    body: Bytes,
+) -> Result<Json<Value>, AppError> {
+    let allowed = ["with_limited_by", "with_profile_uid", "typed_keys"];
+    crate::params::check(&uri, &params, &allowed)?;
+    let flag = |k: &str| params.get(k).is_some_and(|v| v.is_empty() || v == "true");
+    let body = match body.is_empty() {
+        true => json!({}),
+        false => crate::docs::parse_json(&body)?,
+    };
+    let mut search = json!({"track_total_hits": true});
+    // ponytail: aggs/aggregations are refused as unknown fields until ApiKeyAggregationsBuilder
+    // is ported
+    for (k, v) in body.as_object().into_iter().flatten() {
+        let wrong = || {
+            let token = es_index::json_token(v);
+            AppError::XContentParse(format!(
+                "[{REQUEST}] {k} doesn't support values of type: {token}"
+            ))
+        };
+        match k.as_str() {
+            // ponytail: translated before it is parsed, so an unknown query type gets the
+            // error of an unsupported one where ES gives a parsing_exception
+            "query" => {
+                let q = translate_query(v)?;
+                es_query::parse_query(&q).map_err(|e| {
+                    let kind = match e.kind {
+                        es_query::ErrorKind::Parsing => "parsing_exception",
+                        es_query::ErrorKind::IllegalArgument => "illegal_argument_exception",
+                        _ => "x_content_parse_exception",
+                    };
+                    failed_field(k, (kind, e.msg))
+                })?;
+                search[k] = q;
+                continue;
+            }
+            "from" | "size" if !v.is_i64() => return Err(wrong()),
+            "from" | "size" => {}
+            "sort" => {
+                for s in v.as_array().ok_or_else(wrong)? {
+                    sort_form(k, s)?;
+                }
+            }
+            "search_after" if !v.is_array() => return Err(wrong()),
+            "search_after" => {}
+            _ => {
+                return Err(AppError::XContentParse(format!(
+                    "[{REQUEST}] unknown field [{k}]"
+                )));
+            }
+        }
+        search[k] = v.clone();
+    }
+    let negative = ["from", "size"].into_iter().filter_map(|k| {
+        let n = search[k].as_i64().filter(|n| *n < 0)?;
+        Some(format!("[{k}] parameter cannot be negative but was [{n}]"))
+    });
+    validate(negative.collect())?;
+
+    let mut query = json!({"bool": {"filter": [{"term": {"doc_type": "api_key"}}]}});
+    if let Some(q) = search.get("query") {
+        query["bool"]["must"] = json!([q]);
+    }
+    search["query"] = query;
+    if let Some(sort) = search.get("sort") {
+        let sort: Vec<Value> = (sort.as_array().into_iter().flatten())
+            .map(translate_sort)
+            .collect::<Result<_, _>>()?;
+        search["sort"] = sort.into();
+    }
+
+    let system = security.store.system();
+    let Some(index) = system.get(INDEX) else {
+        return Ok(Json(json!({"total": 0, "count": 0, "api_keys": []})));
+    };
+    let req = es_query::SearchRequest::parse(&search)?;
+    let r = es_query::search_many(&[(INDEX, index, None)], &req)?;
+    let keys: Vec<Value> = (r.hits.iter())
+        .map(|h| {
+            let mut key = info(h.id, &h.doc.source, flag("with_limited_by"));
+            if !h.sort.is_empty() {
+                key["_sort"] = h.sort.clone().into();
+            }
+            key
+        })
+        .collect();
+    Ok(Json(
+        json!({"total": r.total, "count": keys.len(), "api_keys": keys}),
+    ))
+}
+
+/// Elasticsearch's error for body field `k` that failed with `cause` (type, reason).
+fn failed_field(k: &str, cause: (&'static str, String)) -> AppError {
+    let outer = format!("[{REQUEST}] failed to parse field [{k}]");
+    AppError::Chain(vec![("x_content_parse_exception", outer), cause])
+}
+
+/// Checks that `s` is a sort the request parser reads: a field name, or `{field: {options}}`.
+fn sort_form(k: &str, s: &Value) -> Result<(), AppError> {
+    match s {
+        Value::String(_) => Ok(()),
+        Value::Object(o) => match o.values().next() {
+            Some(Value::Object(_)) | None => Ok(()),
+            Some(v) => {
+                let token = es_index::json_token(v);
+                let reason = format!("[field_sort] Expected START_OBJECT but was: {token}");
+                Err(failed_field(k, ("x_content_parse_exception", reason)))
+            }
+        },
+        _ => {
+            let cause = (
+                "illegal_argument_exception",
+                "mal-formatted sort object".into(),
+            );
+            Err(failed_field(k, cause))
+        }
+    }
+}
+
+fn illegal(reason: impl Into<String>) -> AppError {
+    AppError::IllegalArgument(reason.into())
+}
+
+/// Index field name of query field `field`, as `FieldNameTranslators.translate`.
+fn translate(field: &str) -> Result<String, AppError> {
+    if field.contains('*') {
+        return Err(illegal(format!(
+            "Field name pattern [{field}] is not allowed for querying or aggregation"
+        )));
+    }
+    if let Some(sub) = field.strip_prefix("metadata.") {
+        // ponytail: es-mini has no flattened type; a metadata subfield reads as an unmapped
+        // keyword (`.keyword`), and the whole of `metadata` matches nothing
+        return Ok(format!("metadata_flattened.{sub}.keyword"));
+    }
+    match FIELDS.iter().find(|(q, _)| *q == field) {
+        Some((_, index)) => Ok((*index).to_owned()),
+        None => Err(illegal(format!(
+            "Field [{field}] is not allowed for querying or aggregation"
+        ))),
+    }
+}
+
+/// `q` with its field names translated, refusing query types Elasticsearch does not allow
+/// here, as `FieldNameTranslators.translateQueryBuilderFields`.
+fn translate_query(q: &Value) -> Result<Value, AppError> {
+    let Some((kind, body)) = q.as_object().and_then(|o| o.iter().next()) else {
+        return Ok(q.clone());
+    };
+    let mut body = body.clone();
+    let renamed = |body: &Value, skip: &[&str]| -> Result<Value, AppError> {
+        let Some(body) = body.as_object() else {
+            return Ok(body.clone());
+        };
+        let fields = body.iter().map(|(f, v)| {
+            Ok(match skip.contains(&f.as_str()) {
+                true => (f.clone(), v.clone()),
+                false => (translate(f)?, v.clone()),
+            })
+        });
+        Ok(Value::Object(fields.collect::<Result<_, AppError>>()?))
+    };
+    let out = match kind.as_str() {
+        "match_all" | "ids" => body,
+        "bool" => {
+            for clause in ["must", "should", "must_not", "filter"] {
+                if let Some(c) = body.get_mut(clause) {
+                    *c = match &*c {
+                        Value::Array(qs) => (qs.iter().map(translate_query))
+                            .collect::<Result<Vec<_>, _>>()?
+                            .into(),
+                        q => translate_query(q)?,
+                    };
+                }
+            }
+            body
+        }
+        "term" | "prefix" | "wildcard" | "match" => renamed(&body, &[])?,
+        "terms" => {
+            let skip = ["boost", "_name"];
+            let lookup = (body.as_object().into_iter().flatten())
+                .any(|(f, v)| !skip.contains(&f.as_str()) && v.is_object());
+            if lookup {
+                return Err(illegal(
+                    "terms query with terms lookup is not currently supported in this context",
+                ));
+            }
+            renamed(&body, &skip)?
+        }
+        "range" => {
+            if (body.as_object().into_iter().flatten()).any(|(_, v)| v.get("relation").is_some()) {
+                return Err(illegal(
+                    "range query with relation is not currently supported in this context",
+                ));
+            }
+            renamed(&body, &[])?
+        }
+        "exists" => {
+            body["field"] = translate(body["field"].as_str().unwrap_or_default())?.into();
+            body
+        }
+        "simple_query_string" => return simple_query_string(body),
+        _ => {
+            return Err(illegal(format!(
+                "Query type [{kind}] is not currently supported in this context"
+            )));
+        }
+    };
+    Ok(json!({kind: out}))
+}
+
+/// A simple_query_string query with its field patterns translated to the index fields they
+/// match (unknown ones dropped), as `FieldNameTranslators`; none left matches nothing.
+fn simple_query_string(mut body: Value) -> Result<Value, AppError> {
+    let mut fields: Vec<String> = (body["fields"].as_array().into_iter().flatten())
+        .filter_map(|f| f.as_str().map(str::to_owned))
+        .collect();
+    if fields.is_empty() {
+        fields.push("*".into());
+    }
+    // ponytail: ES turns on `lenient` for `*`, so values a field cannot hold match nothing
+    // there; es-mini's simple_query_string has no `lenient`, so `*` leaves out the date and
+    // boolean fields instead (a query for a creation time's millis does not find the key)
+    let lenient = fields.iter().any(|f| f == "*");
+    let text = |index: &str| !index.ends_with("_time") && index != "api_key_invalidated";
+    let mut out: Vec<(String, f64)> = vec![];
+    for f in fields {
+        let (pattern, boost) = match f.split_once('^') {
+            Some((p, b)) => (p.to_owned(), b.parse().unwrap_or(1.0)),
+            None => (f, 1.0),
+        };
+        for (q, index) in FIELDS {
+            let index = match pattern.strip_prefix("metadata.") {
+                Some(sub) if q == "metadata" && !pattern.contains('*') => {
+                    format!("metadata_flattened.{sub}.keyword")
+                }
+                _ if lenient && !text(index) => continue,
+                _ if es_index::aliases::glob(&pattern, q) => index.to_owned(),
+                _ => continue,
+            };
+            match out.iter_mut().find(|(f, _)| *f == index) {
+                Some((_, b)) => *b *= boost,
+                None => out.push((index, boost)),
+            }
+        }
+    }
+    if out.is_empty() {
+        return Ok(json!({"bool": {"must_not": {"match_all": {}}}}));
+    }
+    let fields: Vec<String> = (out.into_iter())
+        .map(|(f, b)| if b == 1.0 { f } else { format!("{f}^{b}") })
+        .collect();
+    body["fields"] = fields.into();
+    Ok(json!({"simple_query_string": body}))
+}
+
+/// A sort with its field translated, as `FieldNameTranslators.translateFieldSortBuilders`.
+fn translate_sort(s: &Value) -> Result<Value, AppError> {
+    let (field, options) = match s {
+        Value::String(f) => (f.as_str(), json!({})),
+        _ => match s.as_object().and_then(|o| o.iter().next()) {
+            Some((f, o)) => (f.as_str(), o.clone()),
+            None => return Ok(s.clone()),
+        },
+    };
+    if options.get("nested").is_some() {
+        return Err(illegal(
+            "nested sorting is not currently supported in this context",
+        ));
+    }
+    if field == "_doc" {
+        return Ok(s.clone());
+    }
+    let mut out = Map::new();
+    out.insert(translate(field)?, options);
+    Ok(out.into())
+}
