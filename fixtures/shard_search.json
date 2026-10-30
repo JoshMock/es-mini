@@ -1,0 +1,9598 @@
+{
+ "setup": [
+  {
+   "method": "PUT",
+   "path": "/ss",
+   "body": {
+    "settings": {
+     "number_of_shards": 3,
+     "number_of_replicas": 0
+    },
+    "mappings": {
+     "properties": {
+      "title": {
+       "type": "text"
+      },
+      "tag": {
+       "type": "keyword"
+      },
+      "n": {
+       "type": "long"
+      },
+      "seq": {
+       "type": "long"
+      },
+      "x": {
+       "type": "double"
+      }
+     }
+    }
+   }
+  },
+  {
+   "method": "PUT",
+   "path": "/ss2",
+   "body": {
+    "settings": {
+     "number_of_shards": 3,
+     "number_of_replicas": 0
+    },
+    "mappings": {
+     "properties": {
+      "title": {
+       "type": "text"
+      },
+      "tag": {
+       "type": "keyword"
+      },
+      "n": {
+       "type": "long"
+      },
+      "seq": {
+       "type": "long"
+      },
+      "x": {
+       "type": "double"
+      }
+     }
+    }
+   }
+  },
+  {
+   "method": "POST",
+   "path": "/_bulk?refresh=true",
+   "body": "{\"index\": {\"_index\": \"ss\", \"_id\": \"1\"}}\n{\"title\": \"quick red fox\", \"tag\": \"a\", \"n\": 1, \"seq\": 1, \"x\": 53.59}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"2\"}}\n{\"title\": \"fox brown fox\", \"tag\": \"a\", \"n\": 2, \"seq\": 2, \"x\": 41.82}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"3\"}}\n{\"title\": \"dog red\", \"tag\": \"a\", \"n\": 3, \"seq\": 3, \"x\": 56.55}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"4\"}}\n{\"title\": \"fox red\", \"tag\": \"a\", \"n\": 4, \"seq\": 4, \"x\": 22.11}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"5\"}}\n{\"title\": \"quick lazy red quick dog\", \"tag\": \"c\", \"n\": 0, \"seq\": 5, \"x\": 56.03}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"6\"}}\n{\"title\": \"quick dog brown cat dog dog\", \"tag\": \"c\", \"n\": 1, \"seq\": 6, \"x\": 61.9}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"7\"}}\n{\"title\": \"red cat jumps jumps\", \"tag\": \"b\", \"n\": 2, \"seq\": 7, \"x\": 24.84}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"8\"}}\n{\"title\": \"brown dog\", \"tag\": \"c\", \"n\": 3, \"seq\": 8, \"x\": 52.52}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"9\"}}\n{\"title\": \"jumps lazy dog\", \"tag\": \"a\", \"n\": 4, \"seq\": 9, \"x\": 41.81}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"10\"}}\n{\"title\": \"quick jumps red\", \"tag\": \"a\", \"n\": 0, \"seq\": 10, \"x\": 66.82}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"11\"}}\n{\"title\": \"cat cat cat jumps jumps\", \"tag\": \"a\", \"n\": 1, \"seq\": 11, \"x\": 9.36}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"12\"}}\n{\"title\": \"jumps dog fox\", \"tag\": \"d\", \"n\": 2, \"seq\": 12, \"x\": 30.96}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"13\"}}\n{\"title\": \"jumps lazy red cat fox\", \"tag\": \"h\", \"n\": 3, \"seq\": 13, \"x\": 35.55}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"14\"}}\n{\"title\": \"dog jumps fox brown lazy\", \"tag\": \"a\", \"n\": 4, \"seq\": 14, \"x\": 24.76}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"15\"}}\n{\"title\": \"jumps dog quick jumps\", \"tag\": \"b\", \"n\": 0, \"seq\": 15, \"x\": 27.78}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"16\"}}\n{\"title\": \"red lazy\", \"tag\": \"d\", \"n\": 1, \"seq\": 16, \"x\": 98.65}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"17\"}}\n{\"title\": \"red brown quick dog quick quick\", \"tag\": \"a\", \"n\": 2, \"seq\": 17, \"x\": 23.33}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"18\"}}\n{\"title\": \"quick lazy lazy fox\", \"tag\": \"a\", \"n\": 3, \"seq\": 18, \"x\": 53.46}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"19\"}}\n{\"title\": \"cat quick fox jumps red\", \"tag\": \"b\", \"n\": 4, \"seq\": 19, \"x\": 39.41}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"20\"}}\n{\"title\": \"red fox brown dog\", \"tag\": \"j\", \"n\": 0, \"seq\": 20, \"x\": 44.06}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"21\"}}\n{\"title\": \"cat\", \"tag\": \"c\", \"n\": 1, \"seq\": 21, \"x\": 10.24}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"22\"}}\n{\"title\": \"quick dog cat fox dog\", \"tag\": \"f\", \"n\": 2, \"seq\": 22, \"x\": 61.41}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"23\"}}\n{\"title\": \"lazy cat\", \"tag\": \"c\", \"n\": 3, \"seq\": 23, \"x\": 47.42}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"24\"}}\n{\"title\": \"jumps\", \"tag\": \"j\", \"n\": 4, \"seq\": 24, \"x\": 46.6}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"25\"}}\n{\"title\": \"lazy dog quick dog\", \"tag\": \"e\", \"n\": 0, \"seq\": 25, \"x\": 74.04}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"26\"}}\n{\"title\": \"quick fox brown cat\", \"tag\": \"a\", \"n\": 1, \"seq\": 26, \"x\": 54.32}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"27\"}}\n{\"title\": \"lazy\", \"tag\": \"i\", \"n\": 2, \"seq\": 27, \"x\": 86.33}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"28\"}}\n{\"title\": \"lazy cat quick cat brown cat\", \"tag\": \"c\", \"n\": 3, \"seq\": 28, \"x\": 61.32}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"29\"}}\n{\"title\": \"brown red\", \"tag\": \"d\", \"n\": 4, \"seq\": 29, \"x\": 22.67}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"30\"}}\n{\"title\": \"jumps cat fox fox lazy\", \"tag\": \"b\", \"n\": 0, \"seq\": 30, \"x\": 19.36}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"31\"}}\n{\"title\": \"cat jumps cat cat dog\", \"tag\": \"a\", \"n\": 1, \"seq\": 31, \"x\": 22.68}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"32\"}}\n{\"title\": \"cat brown\", \"tag\": \"b\", \"n\": 2, \"seq\": 32, \"x\": 98.52}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"33\"}}\n{\"title\": \"fox jumps cat dog dog\", \"tag\": \"g\", \"n\": 3, \"seq\": 33, \"x\": 78.23}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"34\"}}\n{\"title\": \"jumps quick\", \"tag\": \"b\", \"n\": 4, \"seq\": 34, \"x\": 63.58}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"35\"}}\n{\"title\": \"red\", \"tag\": \"b\", \"n\": 0, \"seq\": 35, \"x\": 74.34}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"36\"}}\n{\"title\": \"quick\", \"tag\": \"a\", \"n\": 1, \"seq\": 36, \"x\": 12.7}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"37\"}}\n{\"title\": \"jumps quick\", \"tag\": \"c\", \"n\": 2, \"seq\": 37, \"x\": 59.59}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"38\"}}\n{\"title\": \"cat quick quick fox\", \"tag\": \"a\", \"n\": 3, \"seq\": 38, \"x\": 97.09}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"39\"}}\n{\"title\": \"dog quick red brown brown fox\", \"tag\": \"a\", \"n\": 4, \"seq\": 39, \"x\": 29.3}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"40\"}}\n{\"title\": \"cat lazy\", \"tag\": \"c\", \"n\": 0, \"seq\": 40, \"x\": 83.42}\n"
+  },
+  {
+   "method": "POST",
+   "path": "/_bulk?refresh=true",
+   "body": "{\"index\": {\"_index\": \"ss\", \"_id\": \"41\"}}\n{\"title\": \"cat\", \"tag\": \"g\", \"n\": 1, \"seq\": 41, \"x\": 66.25}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"42\"}}\n{\"title\": \"red quick quick fox jumps\", \"tag\": \"e\", \"n\": 2, \"seq\": 42, \"x\": 60.86}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"43\"}}\n{\"title\": \"quick quick\", \"tag\": \"b\", \"n\": 3, \"seq\": 43, \"x\": 72.52}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"44\"}}\n{\"title\": \"fox cat jumps dog fox\", \"tag\": \"a\", \"n\": 4, \"seq\": 44, \"x\": 27.69}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"45\"}}\n{\"title\": \"jumps\", \"tag\": \"c\", \"n\": 0, \"seq\": 45, \"x\": 76.0}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"46\"}}\n{\"title\": \"jumps\", \"tag\": \"b\", \"n\": 1, \"seq\": 46, \"x\": 97.34}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"47\"}}\n{\"title\": \"brown lazy jumps jumps brown\", \"tag\": \"d\", \"n\": 2, \"seq\": 47, \"x\": 87.65}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"48\"}}\n{\"title\": \"brown jumps quick\", \"tag\": \"b\", \"n\": 3, \"seq\": 48, \"x\": 39.24}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"49\"}}\n{\"title\": \"dog brown red\", \"tag\": \"a\", \"n\": 4, \"seq\": 49, \"x\": 66.95}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"50\"}}\n{\"title\": \"quick\", \"tag\": \"h\", \"n\": 0, \"seq\": 50, \"x\": 64.35}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"51\"}}\n{\"title\": \"quick lazy quick\", \"tag\": \"i\", \"n\": 1, \"seq\": 51, \"x\": 21.96}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"52\"}}\n{\"title\": \"red\", \"tag\": \"g\", \"n\": 2, \"seq\": 52, \"x\": 16.28}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"53\"}}\n{\"title\": \"brown quick red red cat red\", \"tag\": \"a\", \"n\": 3, \"seq\": 53, \"x\": 31.85}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"54\"}}\n{\"title\": \"cat fox cat jumps jumps fox\", \"tag\": \"b\", \"n\": 4, \"seq\": 54, \"x\": 51.74}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"55\"}}\n{\"title\": \"dog dog brown\", \"tag\": \"i\", \"n\": 0, \"seq\": 55, \"x\": 10.48}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"56\"}}\n{\"title\": \"lazy fox quick\", \"tag\": \"a\", \"n\": 1, \"seq\": 56, \"x\": 12.96}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"57\"}}\n{\"title\": \"lazy red quick jumps\", \"tag\": \"d\", \"n\": 2, \"seq\": 57, \"x\": 8.95}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"58\"}}\n{\"title\": \"quick\", \"tag\": \"b\", \"n\": 3, \"seq\": 58, \"x\": 7.24}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"59\"}}\n{\"title\": \"dog\", \"tag\": \"e\", \"n\": 4, \"seq\": 59, \"x\": 8.37}\n{\"index\": {\"_index\": \"ss\", \"_id\": \"60\"}}\n{\"title\": \"dog lazy\", \"tag\": \"f\", \"n\": 0, \"seq\": 60, \"x\": 45.38}\n"
+  },
+  {
+   "method": "POST",
+   "path": "/_bulk?refresh=true",
+   "body": "{\"index\": {\"_index\": \"ss2\", \"_id\": \"1\"}}\n{\"title\": \"red lazy quick\", \"tag\": \"a\", \"n\": 1, \"seq\": 1, \"x\": 70.95}\n{\"index\": {\"_index\": \"ss2\", \"_id\": \"2\"}}\n{\"title\": \"quick\", \"tag\": \"a\", \"n\": 2, \"seq\": 2, \"x\": 18.11}\n{\"index\": {\"_index\": \"ss2\", \"_id\": \"3\"}}\n{\"title\": \"lazy brown lazy\", \"tag\": \"b\", \"n\": 3, \"seq\": 3, \"x\": 67.22}\n{\"index\": {\"_index\": \"ss2\", \"_id\": \"4\"}}\n{\"title\": \"cat fox lazy\", \"tag\": \"a\", \"n\": 4, \"seq\": 4, \"x\": 1.84}\n{\"index\": {\"_index\": \"ss2\", \"_id\": \"5\"}}\n{\"title\": \"brown jumps brown jumps dog\", \"tag\": \"d\", \"n\": 0, \"seq\": 5, \"x\": 65.01}\n{\"index\": {\"_index\": \"ss2\", \"_id\": \"6\"}}\n{\"title\": \"jumps red lazy brown brown cat\", \"tag\": \"a\", \"n\": 1, \"seq\": 6, \"x\": 88.19}\n{\"index\": {\"_index\": \"ss2\", \"_id\": \"7\"}}\n{\"title\": \"quick red cat fox quick fox\", \"tag\": \"a\", \"n\": 2, \"seq\": 7, \"x\": 74.09}\n{\"index\": {\"_index\": \"ss2\", \"_id\": \"8\"}}\n{\"title\": \"red quick fox\", \"tag\": \"a\", \"n\": 3, \"seq\": 8, \"x\": 84.13}\n{\"index\": {\"_index\": \"ss2\", \"_id\": \"9\"}}\n{\"title\": \"lazy brown lazy fox jumps\", \"tag\": \"a\", \"n\": 4, \"seq\": 9, \"x\": 26.9}\n{\"index\": {\"_index\": \"ss2\", \"_id\": \"10\"}}\n{\"title\": \"lazy\", \"tag\": \"b\", \"n\": 0, \"seq\": 10, \"x\": 32.89}\n{\"index\": {\"_index\": \"ss2\", \"_id\": \"11\"}}\n{\"title\": \"cat brown fox lazy brown\", \"tag\": \"b\", \"n\": 1, \"seq\": 11, \"x\": 0.11}\n{\"index\": {\"_index\": \"ss2\", \"_id\": \"12\"}}\n{\"title\": \"dog jumps lazy brown\", \"tag\": \"a\", \"n\": 2, \"seq\": 12, \"x\": 77.62}\n"
+  }
+ ],
+ "cases": [
+  {
+   "name": "match_all",
+   "kind": "search",
+   "path": "/ss/_search",
+   "body": {
+    "size": 100
+   },
+   "responses": [
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 3,
+      "successful": 3,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 60,
+       "relation": "eq"
+      },
+      "max_score": 1.0,
+      "hits": [
+       {
+        "_index": "ss",
+        "_id": "2",
+        "_score": 1.0,
+        "_source": {
+         "title": "fox brown fox",
+         "tag": "a",
+         "n": 2,
+         "seq": 2,
+         "x": 41.82
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "4",
+        "_score": 1.0,
+        "_source": {
+         "title": "fox red",
+         "tag": "a",
+         "n": 4,
+         "seq": 4,
+         "x": 22.11
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "5",
+        "_score": 1.0,
+        "_source": {
+         "title": "quick lazy red quick dog",
+         "tag": "c",
+         "n": 0,
+         "seq": 5,
+         "x": 56.03
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "6",
+        "_score": 1.0,
+        "_source": {
+         "title": "quick dog brown cat dog dog",
+         "tag": "c",
+         "n": 1,
+         "seq": 6,
+         "x": 61.9
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "7",
+        "_score": 1.0,
+        "_source": {
+         "title": "red cat jumps jumps",
+         "tag": "b",
+         "n": 2,
+         "seq": 7,
+         "x": 24.84
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "11",
+        "_score": 1.0,
+        "_source": {
+         "title": "cat cat cat jumps jumps",
+         "tag": "a",
+         "n": 1,
+         "seq": 11,
+         "x": 9.36
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "13",
+        "_score": 1.0,
+        "_source": {
+         "title": "jumps lazy red cat fox",
+         "tag": "h",
+         "n": 3,
+         "seq": 13,
+         "x": 35.55
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "18",
+        "_score": 1.0,
+        "_source": {
+         "title": "quick lazy lazy fox",
+         "tag": "a",
+         "n": 3,
+         "seq": 18,
+         "x": 53.46
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "20",
+        "_score": 1.0,
+        "_source": {
+         "title": "red fox brown dog",
+         "tag": "j",
+         "n": 0,
+         "seq": 20,
+         "x": 44.06
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "21",
+        "_score": 1.0,
+        "_source": {
+         "title": "cat",
+         "tag": "c",
+         "n": 1,
+         "seq": 21,
+         "x": 10.24
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "24",
+        "_score": 1.0,
+        "_source": {
+         "title": "jumps",
+         "tag": "j",
+         "n": 4,
+         "seq": 24,
+         "x": 46.6
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "28",
+        "_score": 1.0,
+        "_source": {
+         "title": "lazy cat quick cat brown cat",
+         "tag": "c",
+         "n": 3,
+         "seq": 28,
+         "x": 61.32
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "31",
+        "_score": 1.0,
+        "_source": {
+         "title": "cat jumps cat cat dog",
+         "tag": "a",
+         "n": 1,
+         "seq": 31,
+         "x": 22.68
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "36",
+        "_score": 1.0,
+        "_source": {
+         "title": "quick",
+         "tag": "a",
+         "n": 1,
+         "seq": 36,
+         "x": 12.7
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "38",
+        "_score": 1.0,
+        "_source": {
+         "title": "cat quick quick fox",
+         "tag": "a",
+         "n": 3,
+         "seq": 38,
+         "x": 97.09
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "40",
+        "_score": 1.0,
+        "_source": {
+         "title": "cat lazy",
+         "tag": "c",
+         "n": 0,
+         "seq": 40,
+         "x": 83.42
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "42",
+        "_score": 1.0,
+        "_source": {
+         "title": "red quick quick fox jumps",
+         "tag": "e",
+         "n": 2,
+         "seq": 42,
+         "x": 60.86
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "44",
+        "_score": 1.0,
+        "_source": {
+         "title": "fox cat jumps dog fox",
+         "tag": "a",
+         "n": 4,
+         "seq": 44,
+         "x": 27.69
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "45",
+        "_score": 1.0,
+        "_source": {
+         "title": "jumps",
+         "tag": "c",
+         "n": 0,
+         "seq": 45,
+         "x": 76.0
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "48",
+        "_score": 1.0,
+        "_source": {
+         "title": "brown jumps quick",
+         "tag": "b",
+         "n": 3,
+         "seq": 48,
+         "x": 39.24
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "50",
+        "_score": 1.0,
+        "_source": {
+         "title": "quick",
+         "tag": "h",
+         "n": 0,
+         "seq": 50,
+         "x": 64.35
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "51",
+        "_score": 1.0,
+        "_source": {
+         "title": "quick lazy quick",
+         "tag": "i",
+         "n": 1,
+         "seq": 51,
+         "x": 21.96
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "53",
+        "_score": 1.0,
+        "_source": {
+         "title": "brown quick red red cat red",
+         "tag": "a",
+         "n": 3,
+         "seq": 53,
+         "x": 31.85
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "55",
+        "_score": 1.0,
+        "_source": {
+         "title": "dog dog brown",
+         "tag": "i",
+         "n": 0,
+         "seq": 55,
+         "x": 10.48
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "8",
+        "_score": 1.0,
+        "_source": {
+         "title": "brown dog",
+         "tag": "c",
+         "n": 3,
+         "seq": 8,
+         "x": 52.52
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "12",
+        "_score": 1.0,
+        "_source": {
+         "title": "jumps dog fox",
+         "tag": "d",
+         "n": 2,
+         "seq": 12,
+         "x": 30.96
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "14",
+        "_score": 1.0,
+        "_source": {
+         "title": "dog jumps fox brown lazy",
+         "tag": "a",
+         "n": 4,
+         "seq": 14,
+         "x": 24.76
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "15",
+        "_score": 1.0,
+        "_source": {
+         "title": "jumps dog quick jumps",
+         "tag": "b",
+         "n": 0,
+         "seq": 15,
+         "x": 27.78
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "16",
+        "_score": 1.0,
+        "_source": {
+         "title": "red lazy",
+         "tag": "d",
+         "n": 1,
+         "seq": 16,
+         "x": 98.65
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "17",
+        "_score": 1.0,
+        "_source": {
+         "title": "red brown quick dog quick quick",
+         "tag": "a",
+         "n": 2,
+         "seq": 17,
+         "x": 23.33
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "26",
+        "_score": 1.0,
+        "_source": {
+         "title": "quick fox brown cat",
+         "tag": "a",
+         "n": 1,
+         "seq": 26,
+         "x": 54.32
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "29",
+        "_score": 1.0,
+        "_source": {
+         "title": "brown red",
+         "tag": "d",
+         "n": 4,
+         "seq": 29,
+         "x": 22.67
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "30",
+        "_score": 1.0,
+        "_source": {
+         "title": "jumps cat fox fox lazy",
+         "tag": "b",
+         "n": 0,
+         "seq": 30,
+         "x": 19.36
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "35",
+        "_score": 1.0,
+        "_source": {
+         "title": "red",
+         "tag": "b",
+         "n": 0,
+         "seq": 35,
+         "x": 74.34
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "43",
+        "_score": 1.0,
+        "_source": {
+         "title": "quick quick",
+         "tag": "b",
+         "n": 3,
+         "seq": 43,
+         "x": 72.52
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "56",
+        "_score": 1.0,
+        "_source": {
+         "title": "lazy fox quick",
+         "tag": "a",
+         "n": 1,
+         "seq": 56,
+         "x": 12.96
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "59",
+        "_score": 1.0,
+        "_source": {
+         "title": "dog",
+         "tag": "e",
+         "n": 4,
+         "seq": 59,
+         "x": 8.37
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "60",
+        "_score": 1.0,
+        "_source": {
+         "title": "dog lazy",
+         "tag": "f",
+         "n": 0,
+         "seq": 60,
+         "x": 45.38
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "1",
+        "_score": 1.0,
+        "_source": {
+         "title": "quick red fox",
+         "tag": "a",
+         "n": 1,
+         "seq": 1,
+         "x": 53.59
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "3",
+        "_score": 1.0,
+        "_source": {
+         "title": "dog red",
+         "tag": "a",
+         "n": 3,
+         "seq": 3,
+         "x": 56.55
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "9",
+        "_score": 1.0,
+        "_source": {
+         "title": "jumps lazy dog",
+         "tag": "a",
+         "n": 4,
+         "seq": 9,
+         "x": 41.81
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "10",
+        "_score": 1.0,
+        "_source": {
+         "title": "quick jumps red",
+         "tag": "a",
+         "n": 0,
+         "seq": 10,
+         "x": 66.82
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "19",
+        "_score": 1.0,
+        "_source": {
+         "title": "cat quick fox jumps red",
+         "tag": "b",
+         "n": 4,
+         "seq": 19,
+         "x": 39.41
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "22",
+        "_score": 1.0,
+        "_source": {
+         "title": "quick dog cat fox dog",
+         "tag": "f",
+         "n": 2,
+         "seq": 22,
+         "x": 61.41
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "23",
+        "_score": 1.0,
+        "_source": {
+         "title": "lazy cat",
+         "tag": "c",
+         "n": 3,
+         "seq": 23,
+         "x": 47.42
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "25",
+        "_score": 1.0,
+        "_source": {
+         "title": "lazy dog quick dog",
+         "tag": "e",
+         "n": 0,
+         "seq": 25,
+         "x": 74.04
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "27",
+        "_score": 1.0,
+        "_source": {
+         "title": "lazy",
+         "tag": "i",
+         "n": 2,
+         "seq": 27,
+         "x": 86.33
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "32",
+        "_score": 1.0,
+        "_source": {
+         "title": "cat brown",
+         "tag": "b",
+         "n": 2,
+         "seq": 32,
+         "x": 98.52
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "33",
+        "_score": 1.0,
+        "_source": {
+         "title": "fox jumps cat dog dog",
+         "tag": "g",
+         "n": 3,
+         "seq": 33,
+         "x": 78.23
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "34",
+        "_score": 1.0,
+        "_source": {
+         "title": "jumps quick",
+         "tag": "b",
+         "n": 4,
+         "seq": 34,
+         "x": 63.58
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "37",
+        "_score": 1.0,
+        "_source": {
+         "title": "jumps quick",
+         "tag": "c",
+         "n": 2,
+         "seq": 37,
+         "x": 59.59
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "39",
+        "_score": 1.0,
+        "_source": {
+         "title": "dog quick red brown brown fox",
+         "tag": "a",
+         "n": 4,
+         "seq": 39,
+         "x": 29.3
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "41",
+        "_score": 1.0,
+        "_source": {
+         "title": "cat",
+         "tag": "g",
+         "n": 1,
+         "seq": 41,
+         "x": 66.25
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "46",
+        "_score": 1.0,
+        "_source": {
+         "title": "jumps",
+         "tag": "b",
+         "n": 1,
+         "seq": 46,
+         "x": 97.34
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "47",
+        "_score": 1.0,
+        "_source": {
+         "title": "brown lazy jumps jumps brown",
+         "tag": "d",
+         "n": 2,
+         "seq": 47,
+         "x": 87.65
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "49",
+        "_score": 1.0,
+        "_source": {
+         "title": "dog brown red",
+         "tag": "a",
+         "n": 4,
+         "seq": 49,
+         "x": 66.95
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "52",
+        "_score": 1.0,
+        "_source": {
+         "title": "red",
+         "tag": "g",
+         "n": 2,
+         "seq": 52,
+         "x": 16.28
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "54",
+        "_score": 1.0,
+        "_source": {
+         "title": "cat fox cat jumps jumps fox",
+         "tag": "b",
+         "n": 4,
+         "seq": 54,
+         "x": 51.74
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "57",
+        "_score": 1.0,
+        "_source": {
+         "title": "lazy red quick jumps",
+         "tag": "d",
+         "n": 2,
+         "seq": 57,
+         "x": 8.95
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "58",
+        "_score": 1.0,
+        "_source": {
+         "title": "quick",
+         "tag": "b",
+         "n": 3,
+         "seq": 58,
+         "x": 7.24
+        }
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "match",
+   "kind": "search",
+   "path": "/ss/_search",
+   "body": {
+    "size": 100,
+    "query": {
+     "match": {
+      "title": "fox"
+     }
+    }
+   },
+   "responses": [
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 3,
+      "successful": 3,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 19,
+       "relation": "eq"
+      },
+      "max_score": 1.5500376,
+      "hits": [
+       {
+        "_index": "ss",
+        "_id": "2",
+        "_score": 1.5500376,
+        "_source": {
+         "title": "fox brown fox",
+         "tag": "a",
+         "n": 2,
+         "seq": 2,
+         "x": 41.82
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "54",
+        "_score": 1.3651023,
+        "_source": {
+         "title": "cat fox cat jumps jumps fox",
+         "tag": "b",
+         "n": 4,
+         "seq": 54,
+         "x": 51.74
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "44",
+        "_score": 1.3294063,
+        "_source": {
+         "title": "fox cat jumps dog fox",
+         "tag": "a",
+         "n": 4,
+         "seq": 44,
+         "x": 27.69
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "4",
+        "_score": 1.3125399,
+        "_source": {
+         "title": "fox red",
+         "tag": "a",
+         "n": 4,
+         "seq": 4,
+         "x": 22.11
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "1",
+        "_score": 1.2714553,
+        "_source": {
+         "title": "quick red fox",
+         "tag": "a",
+         "n": 1,
+         "seq": 1,
+         "x": 53.59
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "30",
+        "_score": 1.1617182,
+        "_source": {
+         "title": "jumps cat fox fox lazy",
+         "tag": "b",
+         "n": 0,
+         "seq": 30,
+         "x": 19.36
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "18",
+        "_score": 1.0245678,
+        "_source": {
+         "title": "quick lazy lazy fox",
+         "tag": "a",
+         "n": 3,
+         "seq": 18,
+         "x": 53.46
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "20",
+        "_score": 1.0245678,
+        "_source": {
+         "title": "red fox brown dog",
+         "tag": "j",
+         "n": 0,
+         "seq": 20,
+         "x": 44.06
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "38",
+        "_score": 1.0245678,
+        "_source": {
+         "title": "cat quick quick fox",
+         "tag": "a",
+         "n": 3,
+         "seq": 38,
+         "x": 97.09
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "12",
+        "_score": 1.0033021,
+        "_source": {
+         "title": "jumps dog fox",
+         "tag": "d",
+         "n": 2,
+         "seq": 12,
+         "x": 30.96
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "56",
+        "_score": 1.0033021,
+        "_source": {
+         "title": "lazy fox quick",
+         "tag": "a",
+         "n": 1,
+         "seq": 56,
+         "x": 12.96
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "19",
+        "_score": 1.0009038,
+        "_source": {
+         "title": "cat quick fox jumps red",
+         "tag": "b",
+         "n": 4,
+         "seq": 19,
+         "x": 39.41
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "22",
+        "_score": 1.0009038,
+        "_source": {
+         "title": "quick dog cat fox dog",
+         "tag": "f",
+         "n": 2,
+         "seq": 22,
+         "x": 61.41
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "33",
+        "_score": 1.0009038,
+        "_source": {
+         "title": "fox jumps cat dog dog",
+         "tag": "g",
+         "n": 3,
+         "seq": 33,
+         "x": 78.23
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "13",
+        "_score": 0.92328334,
+        "_source": {
+         "title": "jumps lazy red cat fox",
+         "tag": "h",
+         "n": 3,
+         "seq": 13,
+         "x": 35.55
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "42",
+        "_score": 0.92328334,
+        "_source": {
+         "title": "red quick quick fox jumps",
+         "tag": "e",
+         "n": 2,
+         "seq": 42,
+         "x": 60.86
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "39",
+        "_score": 0.90465367,
+        "_source": {
+         "title": "dog quick red brown brown fox",
+         "tag": "a",
+         "n": 4,
+         "seq": 39,
+         "x": 29.3
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "26",
+        "_score": 0.88290596,
+        "_source": {
+         "title": "quick fox brown cat",
+         "tag": "a",
+         "n": 1,
+         "seq": 26,
+         "x": 54.32
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "14",
+        "_score": 0.78830886,
+        "_source": {
+         "title": "dog jumps fox brown lazy",
+         "tag": "a",
+         "n": 4,
+         "seq": 14,
+         "x": 24.76
+        }
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "match_two_terms",
+   "kind": "search",
+   "path": "/ss/_search",
+   "body": {
+    "size": 100,
+    "query": {
+     "match": {
+      "title": "fox lazy"
+     }
+    }
+   },
+   "responses": [
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 3,
+      "successful": 3,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 31,
+       "relation": "eq"
+      },
+      "max_score": 2.8117461,
+      "hits": [
+       {
+        "_index": "ss",
+        "_id": "18",
+        "_score": 2.8117461,
+        "_source": {
+         "title": "quick lazy lazy fox",
+         "tag": "a",
+         "n": 3,
+         "seq": 18,
+         "x": 53.46
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "13",
+        "_score": 2.0761566,
+        "_source": {
+         "title": "jumps lazy red cat fox",
+         "tag": "h",
+         "n": 3,
+         "seq": 13,
+         "x": 35.55
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "56",
+        "_score": 2.0066042,
+        "_source": {
+         "title": "lazy fox quick",
+         "tag": "a",
+         "n": 1,
+         "seq": 56,
+         "x": 12.96
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "30",
+        "_score": 1.9500271,
+        "_source": {
+         "title": "jumps cat fox fox lazy",
+         "tag": "b",
+         "n": 0,
+         "seq": 30,
+         "x": 19.36
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "27",
+        "_score": 1.7424527,
+        "_source": {
+         "title": "lazy",
+         "tag": "i",
+         "n": 2,
+         "seq": 27,
+         "x": 86.33
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "40",
+        "_score": 1.6389251,
+        "_source": {
+         "title": "cat lazy",
+         "tag": "c",
+         "n": 0,
+         "seq": 40,
+         "x": 83.42
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "14",
+        "_score": 1.5766177,
+        "_source": {
+         "title": "dog jumps fox brown lazy",
+         "tag": "a",
+         "n": 4,
+         "seq": 14,
+         "x": 24.76
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "2",
+        "_score": 1.5500376,
+        "_source": {
+         "title": "fox brown fox",
+         "tag": "a",
+         "n": 2,
+         "seq": 2,
+         "x": 41.82
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "23",
+        "_score": 1.4701515,
+        "_source": {
+         "title": "lazy cat",
+         "tag": "c",
+         "n": 3,
+         "seq": 23,
+         "x": 47.42
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "51",
+        "_score": 1.4369812,
+        "_source": {
+         "title": "quick lazy quick",
+         "tag": "i",
+         "n": 1,
+         "seq": 51,
+         "x": 21.96
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "54",
+        "_score": 1.3651023,
+        "_source": {
+         "title": "cat fox cat jumps jumps fox",
+         "tag": "b",
+         "n": 4,
+         "seq": 54,
+         "x": 51.74
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "44",
+        "_score": 1.3294063,
+        "_source": {
+         "title": "fox cat jumps dog fox",
+         "tag": "a",
+         "n": 4,
+         "seq": 44,
+         "x": 27.69
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "4",
+        "_score": 1.3125399,
+        "_source": {
+         "title": "fox red",
+         "tag": "a",
+         "n": 4,
+         "seq": 4,
+         "x": 22.11
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "1",
+        "_score": 1.2714553,
+        "_source": {
+         "title": "quick red fox",
+         "tag": "a",
+         "n": 1,
+         "seq": 1,
+         "x": 53.59
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "9",
+        "_score": 1.2714553,
+        "_source": {
+         "title": "jumps lazy dog",
+         "tag": "a",
+         "n": 4,
+         "seq": 9,
+         "x": 41.81
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "16",
+        "_score": 1.1617182,
+        "_source": {
+         "title": "red lazy",
+         "tag": "d",
+         "n": 1,
+         "seq": 16,
+         "x": 98.65
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "60",
+        "_score": 1.1617182,
+        "_source": {
+         "title": "dog lazy",
+         "tag": "f",
+         "n": 0,
+         "seq": 60,
+         "x": 45.38
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "5",
+        "_score": 1.1528733,
+        "_source": {
+         "title": "quick lazy red quick dog",
+         "tag": "c",
+         "n": 0,
+         "seq": 5,
+         "x": 56.03
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "25",
+        "_score": 1.1200734,
+        "_source": {
+         "title": "lazy dog quick dog",
+         "tag": "e",
+         "n": 0,
+         "seq": 25,
+         "x": 74.04
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "57",
+        "_score": 1.1200734,
+        "_source": {
+         "title": "lazy red quick jumps",
+         "tag": "d",
+         "n": 2,
+         "seq": 57,
+         "x": 8.95
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "28",
+        "_score": 1.0491577,
+        "_source": {
+         "title": "lazy cat quick cat brown cat",
+         "tag": "c",
+         "n": 3,
+         "seq": 28,
+         "x": 61.32
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "20",
+        "_score": 1.0245678,
+        "_source": {
+         "title": "red fox brown dog",
+         "tag": "j",
+         "n": 0,
+         "seq": 20,
+         "x": 44.06
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "38",
+        "_score": 1.0245678,
+        "_source": {
+         "title": "cat quick quick fox",
+         "tag": "a",
+         "n": 3,
+         "seq": 38,
+         "x": 97.09
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "12",
+        "_score": 1.0033021,
+        "_source": {
+         "title": "jumps dog fox",
+         "tag": "d",
+         "n": 2,
+         "seq": 12,
+         "x": 30.96
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "19",
+        "_score": 1.0009038,
+        "_source": {
+         "title": "cat quick fox jumps red",
+         "tag": "b",
+         "n": 4,
+         "seq": 19,
+         "x": 39.41
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "22",
+        "_score": 1.0009038,
+        "_source": {
+         "title": "quick dog cat fox dog",
+         "tag": "f",
+         "n": 2,
+         "seq": 22,
+         "x": 61.41
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "33",
+        "_score": 1.0009038,
+        "_source": {
+         "title": "fox jumps cat dog dog",
+         "tag": "g",
+         "n": 3,
+         "seq": 33,
+         "x": 78.23
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "47",
+        "_score": 1.0009038,
+        "_source": {
+         "title": "brown lazy jumps jumps brown",
+         "tag": "d",
+         "n": 2,
+         "seq": 47,
+         "x": 87.65
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "42",
+        "_score": 0.92328334,
+        "_source": {
+         "title": "red quick quick fox jumps",
+         "tag": "e",
+         "n": 2,
+         "seq": 42,
+         "x": 60.86
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "39",
+        "_score": 0.90465367,
+        "_source": {
+         "title": "dog quick red brown brown fox",
+         "tag": "a",
+         "n": 4,
+         "seq": 39,
+         "x": 29.3
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "26",
+        "_score": 0.88290596,
+        "_source": {
+         "title": "quick fox brown cat",
+         "tag": "a",
+         "n": 1,
+         "seq": 26,
+         "x": 54.32
+        }
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "dfs",
+   "kind": "search",
+   "path": "/ss/_search?search_type=dfs_query_then_fetch",
+   "body": {
+    "size": 100,
+    "query": {
+     "match": {
+      "title": "fox lazy"
+     }
+    }
+   },
+   "responses": [
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 3,
+      "successful": 3,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 31,
+       "relation": "eq"
+      },
+      "max_score": 2.649201,
+      "hits": [
+       {
+        "_index": "ss",
+        "_id": "18",
+        "_score": 2.649201,
+        "_source": {
+         "title": "quick lazy lazy fox",
+         "tag": "a",
+         "n": 3,
+         "seq": 18,
+         "x": 53.46
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "56",
+        "_score": 2.46181,
+        "_source": {
+         "title": "lazy fox quick",
+         "tag": "a",
+         "n": 1,
+         "seq": 56,
+         "x": 12.96
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "30",
+        "_score": 2.3798065,
+        "_source": {
+         "title": "jumps cat fox fox lazy",
+         "tag": "b",
+         "n": 0,
+         "seq": 30,
+         "x": 19.36
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "13",
+        "_score": 1.9526651,
+        "_source": {
+         "title": "jumps lazy red cat fox",
+         "tag": "h",
+         "n": 3,
+         "seq": 13,
+         "x": 35.55
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "14",
+        "_score": 1.9526651,
+        "_source": {
+         "title": "dog jumps fox brown lazy",
+         "tag": "a",
+         "n": 4,
+         "seq": 14,
+         "x": 24.76
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "27",
+        "_score": 1.7404755,
+        "_source": {
+         "title": "lazy",
+         "tag": "i",
+         "n": 2,
+         "seq": 27,
+         "x": 86.33
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "2",
+        "_score": 1.6006185,
+        "_source": {
+         "title": "fox brown fox",
+         "tag": "a",
+         "n": 2,
+         "seq": 2,
+         "x": 41.82
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "40",
+        "_score": 1.4795492,
+        "_source": {
+         "title": "cat lazy",
+         "tag": "c",
+         "n": 0,
+         "seq": 40,
+         "x": 83.42
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "16",
+        "_score": 1.4795492,
+        "_source": {
+         "title": "red lazy",
+         "tag": "d",
+         "n": 1,
+         "seq": 16,
+         "x": 98.65
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "60",
+        "_score": 1.4795492,
+        "_source": {
+         "title": "dog lazy",
+         "tag": "f",
+         "n": 0,
+         "seq": 60,
+         "x": 45.38
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "23",
+        "_score": 1.4795492,
+        "_source": {
+         "title": "lazy cat",
+         "tag": "c",
+         "n": 3,
+         "seq": 23,
+         "x": 47.42
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "44",
+        "_score": 1.3592519,
+        "_source": {
+         "title": "fox cat jumps dog fox",
+         "tag": "a",
+         "n": 4,
+         "seq": 44,
+         "x": 27.69
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "4",
+        "_score": 1.3513273,
+        "_source": {
+         "title": "fox red",
+         "tag": "a",
+         "n": 4,
+         "seq": 4,
+         "x": 22.11
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "51",
+        "_score": 1.2866577,
+        "_source": {
+         "title": "quick lazy quick",
+         "tag": "i",
+         "n": 1,
+         "seq": 51,
+         "x": 21.96
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "9",
+        "_score": 1.2866577,
+        "_source": {
+         "title": "jumps lazy dog",
+         "tag": "a",
+         "n": 4,
+         "seq": 9,
+         "x": 41.81
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "54",
+        "_score": 1.2639525,
+        "_source": {
+         "title": "cat fox cat jumps jumps fox",
+         "tag": "b",
+         "n": 4,
+         "seq": 54,
+         "x": 51.74
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "12",
+        "_score": 1.1751523,
+        "_source": {
+         "title": "jumps dog fox",
+         "tag": "d",
+         "n": 2,
+         "seq": 12,
+         "x": 30.96
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "1",
+        "_score": 1.1751523,
+        "_source": {
+         "title": "quick red fox",
+         "tag": "a",
+         "n": 1,
+         "seq": 1,
+         "x": 53.59
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "25",
+        "_score": 1.1382606,
+        "_source": {
+         "title": "lazy dog quick dog",
+         "tag": "e",
+         "n": 0,
+         "seq": 25,
+         "x": 74.04
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "57",
+        "_score": 1.1382606,
+        "_source": {
+         "title": "lazy red quick jumps",
+         "tag": "d",
+         "n": 2,
+         "seq": 57,
+         "x": 8.95
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "20",
+        "_score": 1.0396158,
+        "_source": {
+         "title": "red fox brown dog",
+         "tag": "j",
+         "n": 0,
+         "seq": 20,
+         "x": 44.06
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "38",
+        "_score": 1.0396158,
+        "_source": {
+         "title": "cat quick quick fox",
+         "tag": "a",
+         "n": 3,
+         "seq": 38,
+         "x": 97.09
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "26",
+        "_score": 1.0396158,
+        "_source": {
+         "title": "quick fox brown cat",
+         "tag": "a",
+         "n": 1,
+         "seq": 26,
+         "x": 54.32
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "5",
+        "_score": 1.0205547,
+        "_source": {
+         "title": "quick lazy red quick dog",
+         "tag": "c",
+         "n": 0,
+         "seq": 5,
+         "x": 56.03
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "47",
+        "_score": 1.0205547,
+        "_source": {
+         "title": "brown lazy jumps jumps brown",
+         "tag": "d",
+         "n": 2,
+         "seq": 47,
+         "x": 87.65
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "42",
+        "_score": 0.9321104,
+        "_source": {
+         "title": "red quick quick fox jumps",
+         "tag": "e",
+         "n": 2,
+         "seq": 42,
+         "x": 60.86
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "19",
+        "_score": 0.9321104,
+        "_source": {
+         "title": "cat quick fox jumps red",
+         "tag": "b",
+         "n": 4,
+         "seq": 19,
+         "x": 39.41
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "22",
+        "_score": 0.9321104,
+        "_source": {
+         "title": "quick dog cat fox dog",
+         "tag": "f",
+         "n": 2,
+         "seq": 22,
+         "x": 61.41
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "33",
+        "_score": 0.9321104,
+        "_source": {
+         "title": "fox jumps cat dog dog",
+         "tag": "g",
+         "n": 3,
+         "seq": 33,
+         "x": 78.23
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "28",
+        "_score": 0.9249109,
+        "_source": {
+         "title": "lazy cat quick cat brown cat",
+         "tag": "c",
+         "n": 3,
+         "seq": 28,
+         "x": 61.32
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "39",
+        "_score": 0.84475553,
+        "_source": {
+         "title": "dog quick red brown brown fox",
+         "tag": "a",
+         "n": 4,
+         "seq": 39,
+         "x": 29.3
+        }
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "from_size",
+   "kind": "search",
+   "path": "/ss/_search",
+   "body": {
+    "from": 7,
+    "size": 9,
+    "query": {
+     "match": {
+      "title": "dog"
+     }
+    }
+   },
+   "responses": [
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 3,
+      "successful": 3,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 20,
+       "relation": "eq"
+      },
+      "max_score": 1.9354806,
+      "hits": [
+       {
+        "_index": "ss",
+        "_id": "5",
+        "_score": 1.1528733,
+        "_source": {
+         "title": "quick lazy red quick dog",
+         "tag": "c",
+         "n": 0,
+         "seq": 5,
+         "x": 56.03
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "31",
+        "_score": 1.1528733,
+        "_source": {
+         "title": "cat jumps cat cat dog",
+         "tag": "a",
+         "n": 1,
+         "seq": 31,
+         "x": 22.68
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "44",
+        "_score": 1.1528733,
+        "_source": {
+         "title": "fox cat jumps dog fox",
+         "tag": "a",
+         "n": 4,
+         "seq": 44,
+         "x": 27.69
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "9",
+        "_score": 1.1274753,
+        "_source": {
+         "title": "jumps lazy dog",
+         "tag": "a",
+         "n": 4,
+         "seq": 9,
+         "x": 41.81
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "49",
+        "_score": 1.1274753,
+        "_source": {
+         "title": "dog brown red",
+         "tag": "a",
+         "n": 4,
+         "seq": 49,
+         "x": 66.95
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "59",
+        "_score": 0.9530773,
+        "_source": {
+         "title": "dog",
+         "tag": "e",
+         "n": 4,
+         "seq": 59,
+         "x": 8.37
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "8",
+        "_score": 0.8025915,
+        "_source": {
+         "title": "brown dog",
+         "tag": "c",
+         "n": 3,
+         "seq": 8,
+         "x": 52.52
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "60",
+        "_score": 0.8025915,
+        "_source": {
+         "title": "dog lazy",
+         "tag": "f",
+         "n": 0,
+         "seq": 60,
+         "x": 45.38
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "39",
+        "_score": 0.80221033,
+        "_source": {
+         "title": "dog quick red brown brown fox",
+         "tag": "a",
+         "n": 4,
+         "seq": 39,
+         "x": 29.3
+        }
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "constant_from_size",
+   "kind": "search",
+   "path": "/ss/_search",
+   "body": {
+    "from": 20,
+    "size": 15,
+    "query": {
+     "term": {
+      "tag": "a"
+     }
+    }
+   },
+   "responses": [
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 3,
+      "successful": 3,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 19,
+       "relation": "eq"
+      },
+      "max_score": 1.263692,
+      "hits": []
+     }
+    }
+   ]
+  },
+  {
+   "name": "sort_ties",
+   "kind": "search",
+   "path": "/ss/_search",
+   "body": {
+    "size": 30,
+    "sort": [
+     {
+      "n": "asc"
+     }
+    ]
+   },
+   "responses": [
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 3,
+      "successful": 3,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 60,
+       "relation": "eq"
+      },
+      "max_score": null,
+      "hits": [
+       {
+        "_index": "ss",
+        "_id": "5",
+        "_score": null,
+        "_source": {
+         "title": "quick lazy red quick dog",
+         "tag": "c",
+         "n": 0,
+         "seq": 5,
+         "x": 56.03
+        },
+        "sort": [
+         0
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "20",
+        "_score": null,
+        "_source": {
+         "title": "red fox brown dog",
+         "tag": "j",
+         "n": 0,
+         "seq": 20,
+         "x": 44.06
+        },
+        "sort": [
+         0
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "40",
+        "_score": null,
+        "_source": {
+         "title": "cat lazy",
+         "tag": "c",
+         "n": 0,
+         "seq": 40,
+         "x": 83.42
+        },
+        "sort": [
+         0
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "45",
+        "_score": null,
+        "_source": {
+         "title": "jumps",
+         "tag": "c",
+         "n": 0,
+         "seq": 45,
+         "x": 76.0
+        },
+        "sort": [
+         0
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "50",
+        "_score": null,
+        "_source": {
+         "title": "quick",
+         "tag": "h",
+         "n": 0,
+         "seq": 50,
+         "x": 64.35
+        },
+        "sort": [
+         0
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "55",
+        "_score": null,
+        "_source": {
+         "title": "dog dog brown",
+         "tag": "i",
+         "n": 0,
+         "seq": 55,
+         "x": 10.48
+        },
+        "sort": [
+         0
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "15",
+        "_score": null,
+        "_source": {
+         "title": "jumps dog quick jumps",
+         "tag": "b",
+         "n": 0,
+         "seq": 15,
+         "x": 27.78
+        },
+        "sort": [
+         0
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "30",
+        "_score": null,
+        "_source": {
+         "title": "jumps cat fox fox lazy",
+         "tag": "b",
+         "n": 0,
+         "seq": 30,
+         "x": 19.36
+        },
+        "sort": [
+         0
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "35",
+        "_score": null,
+        "_source": {
+         "title": "red",
+         "tag": "b",
+         "n": 0,
+         "seq": 35,
+         "x": 74.34
+        },
+        "sort": [
+         0
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "60",
+        "_score": null,
+        "_source": {
+         "title": "dog lazy",
+         "tag": "f",
+         "n": 0,
+         "seq": 60,
+         "x": 45.38
+        },
+        "sort": [
+         0
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "10",
+        "_score": null,
+        "_source": {
+         "title": "quick jumps red",
+         "tag": "a",
+         "n": 0,
+         "seq": 10,
+         "x": 66.82
+        },
+        "sort": [
+         0
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "25",
+        "_score": null,
+        "_source": {
+         "title": "lazy dog quick dog",
+         "tag": "e",
+         "n": 0,
+         "seq": 25,
+         "x": 74.04
+        },
+        "sort": [
+         0
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "6",
+        "_score": null,
+        "_source": {
+         "title": "quick dog brown cat dog dog",
+         "tag": "c",
+         "n": 1,
+         "seq": 6,
+         "x": 61.9
+        },
+        "sort": [
+         1
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "11",
+        "_score": null,
+        "_source": {
+         "title": "cat cat cat jumps jumps",
+         "tag": "a",
+         "n": 1,
+         "seq": 11,
+         "x": 9.36
+        },
+        "sort": [
+         1
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "21",
+        "_score": null,
+        "_source": {
+         "title": "cat",
+         "tag": "c",
+         "n": 1,
+         "seq": 21,
+         "x": 10.24
+        },
+        "sort": [
+         1
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "31",
+        "_score": null,
+        "_source": {
+         "title": "cat jumps cat cat dog",
+         "tag": "a",
+         "n": 1,
+         "seq": 31,
+         "x": 22.68
+        },
+        "sort": [
+         1
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "36",
+        "_score": null,
+        "_source": {
+         "title": "quick",
+         "tag": "a",
+         "n": 1,
+         "seq": 36,
+         "x": 12.7
+        },
+        "sort": [
+         1
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "51",
+        "_score": null,
+        "_source": {
+         "title": "quick lazy quick",
+         "tag": "i",
+         "n": 1,
+         "seq": 51,
+         "x": 21.96
+        },
+        "sort": [
+         1
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "16",
+        "_score": null,
+        "_source": {
+         "title": "red lazy",
+         "tag": "d",
+         "n": 1,
+         "seq": 16,
+         "x": 98.65
+        },
+        "sort": [
+         1
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "26",
+        "_score": null,
+        "_source": {
+         "title": "quick fox brown cat",
+         "tag": "a",
+         "n": 1,
+         "seq": 26,
+         "x": 54.32
+        },
+        "sort": [
+         1
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "56",
+        "_score": null,
+        "_source": {
+         "title": "lazy fox quick",
+         "tag": "a",
+         "n": 1,
+         "seq": 56,
+         "x": 12.96
+        },
+        "sort": [
+         1
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "1",
+        "_score": null,
+        "_source": {
+         "title": "quick red fox",
+         "tag": "a",
+         "n": 1,
+         "seq": 1,
+         "x": 53.59
+        },
+        "sort": [
+         1
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "41",
+        "_score": null,
+        "_source": {
+         "title": "cat",
+         "tag": "g",
+         "n": 1,
+         "seq": 41,
+         "x": 66.25
+        },
+        "sort": [
+         1
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "46",
+        "_score": null,
+        "_source": {
+         "title": "jumps",
+         "tag": "b",
+         "n": 1,
+         "seq": 46,
+         "x": 97.34
+        },
+        "sort": [
+         1
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "2",
+        "_score": null,
+        "_source": {
+         "title": "fox brown fox",
+         "tag": "a",
+         "n": 2,
+         "seq": 2,
+         "x": 41.82
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "7",
+        "_score": null,
+        "_source": {
+         "title": "red cat jumps jumps",
+         "tag": "b",
+         "n": 2,
+         "seq": 7,
+         "x": 24.84
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "42",
+        "_score": null,
+        "_source": {
+         "title": "red quick quick fox jumps",
+         "tag": "e",
+         "n": 2,
+         "seq": 42,
+         "x": 60.86
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "12",
+        "_score": null,
+        "_source": {
+         "title": "jumps dog fox",
+         "tag": "d",
+         "n": 2,
+         "seq": 12,
+         "x": 30.96
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "17",
+        "_score": null,
+        "_source": {
+         "title": "red brown quick dog quick quick",
+         "tag": "a",
+         "n": 2,
+         "seq": 17,
+         "x": 23.33
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "22",
+        "_score": null,
+        "_source": {
+         "title": "quick dog cat fox dog",
+         "tag": "f",
+         "n": 2,
+         "seq": 22,
+         "x": 61.41
+        },
+        "sort": [
+         2
+        ]
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "sort_desc_ties",
+   "kind": "search",
+   "path": "/ss/_search",
+   "body": {
+    "size": 30,
+    "sort": [
+     {
+      "n": "desc"
+     },
+     {
+      "tag": "asc"
+     }
+    ]
+   },
+   "responses": [
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 3,
+      "successful": 3,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 60,
+       "relation": "eq"
+      },
+      "max_score": null,
+      "hits": [
+       {
+        "_index": "ss",
+        "_id": "4",
+        "_score": null,
+        "_source": {
+         "title": "fox red",
+         "tag": "a",
+         "n": 4,
+         "seq": 4,
+         "x": 22.11
+        },
+        "sort": [
+         4,
+         "a"
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "44",
+        "_score": null,
+        "_source": {
+         "title": "fox cat jumps dog fox",
+         "tag": "a",
+         "n": 4,
+         "seq": 44,
+         "x": 27.69
+        },
+        "sort": [
+         4,
+         "a"
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "14",
+        "_score": null,
+        "_source": {
+         "title": "dog jumps fox brown lazy",
+         "tag": "a",
+         "n": 4,
+         "seq": 14,
+         "x": 24.76
+        },
+        "sort": [
+         4,
+         "a"
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "9",
+        "_score": null,
+        "_source": {
+         "title": "jumps lazy dog",
+         "tag": "a",
+         "n": 4,
+         "seq": 9,
+         "x": 41.81
+        },
+        "sort": [
+         4,
+         "a"
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "39",
+        "_score": null,
+        "_source": {
+         "title": "dog quick red brown brown fox",
+         "tag": "a",
+         "n": 4,
+         "seq": 39,
+         "x": 29.3
+        },
+        "sort": [
+         4,
+         "a"
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "49",
+        "_score": null,
+        "_source": {
+         "title": "dog brown red",
+         "tag": "a",
+         "n": 4,
+         "seq": 49,
+         "x": 66.95
+        },
+        "sort": [
+         4,
+         "a"
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "19",
+        "_score": null,
+        "_source": {
+         "title": "cat quick fox jumps red",
+         "tag": "b",
+         "n": 4,
+         "seq": 19,
+         "x": 39.41
+        },
+        "sort": [
+         4,
+         "b"
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "34",
+        "_score": null,
+        "_source": {
+         "title": "jumps quick",
+         "tag": "b",
+         "n": 4,
+         "seq": 34,
+         "x": 63.58
+        },
+        "sort": [
+         4,
+         "b"
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "54",
+        "_score": null,
+        "_source": {
+         "title": "cat fox cat jumps jumps fox",
+         "tag": "b",
+         "n": 4,
+         "seq": 54,
+         "x": 51.74
+        },
+        "sort": [
+         4,
+         "b"
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "29",
+        "_score": null,
+        "_source": {
+         "title": "brown red",
+         "tag": "d",
+         "n": 4,
+         "seq": 29,
+         "x": 22.67
+        },
+        "sort": [
+         4,
+         "d"
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "59",
+        "_score": null,
+        "_source": {
+         "title": "dog",
+         "tag": "e",
+         "n": 4,
+         "seq": 59,
+         "x": 8.37
+        },
+        "sort": [
+         4,
+         "e"
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "24",
+        "_score": null,
+        "_source": {
+         "title": "jumps",
+         "tag": "j",
+         "n": 4,
+         "seq": 24,
+         "x": 46.6
+        },
+        "sort": [
+         4,
+         "j"
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "18",
+        "_score": null,
+        "_source": {
+         "title": "quick lazy lazy fox",
+         "tag": "a",
+         "n": 3,
+         "seq": 18,
+         "x": 53.46
+        },
+        "sort": [
+         3,
+         "a"
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "38",
+        "_score": null,
+        "_source": {
+         "title": "cat quick quick fox",
+         "tag": "a",
+         "n": 3,
+         "seq": 38,
+         "x": 97.09
+        },
+        "sort": [
+         3,
+         "a"
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "53",
+        "_score": null,
+        "_source": {
+         "title": "brown quick red red cat red",
+         "tag": "a",
+         "n": 3,
+         "seq": 53,
+         "x": 31.85
+        },
+        "sort": [
+         3,
+         "a"
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "3",
+        "_score": null,
+        "_source": {
+         "title": "dog red",
+         "tag": "a",
+         "n": 3,
+         "seq": 3,
+         "x": 56.55
+        },
+        "sort": [
+         3,
+         "a"
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "48",
+        "_score": null,
+        "_source": {
+         "title": "brown jumps quick",
+         "tag": "b",
+         "n": 3,
+         "seq": 48,
+         "x": 39.24
+        },
+        "sort": [
+         3,
+         "b"
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "43",
+        "_score": null,
+        "_source": {
+         "title": "quick quick",
+         "tag": "b",
+         "n": 3,
+         "seq": 43,
+         "x": 72.52
+        },
+        "sort": [
+         3,
+         "b"
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "58",
+        "_score": null,
+        "_source": {
+         "title": "quick",
+         "tag": "b",
+         "n": 3,
+         "seq": 58,
+         "x": 7.24
+        },
+        "sort": [
+         3,
+         "b"
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "28",
+        "_score": null,
+        "_source": {
+         "title": "lazy cat quick cat brown cat",
+         "tag": "c",
+         "n": 3,
+         "seq": 28,
+         "x": 61.32
+        },
+        "sort": [
+         3,
+         "c"
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "8",
+        "_score": null,
+        "_source": {
+         "title": "brown dog",
+         "tag": "c",
+         "n": 3,
+         "seq": 8,
+         "x": 52.52
+        },
+        "sort": [
+         3,
+         "c"
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "23",
+        "_score": null,
+        "_source": {
+         "title": "lazy cat",
+         "tag": "c",
+         "n": 3,
+         "seq": 23,
+         "x": 47.42
+        },
+        "sort": [
+         3,
+         "c"
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "33",
+        "_score": null,
+        "_source": {
+         "title": "fox jumps cat dog dog",
+         "tag": "g",
+         "n": 3,
+         "seq": 33,
+         "x": 78.23
+        },
+        "sort": [
+         3,
+         "g"
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "13",
+        "_score": null,
+        "_source": {
+         "title": "jumps lazy red cat fox",
+         "tag": "h",
+         "n": 3,
+         "seq": 13,
+         "x": 35.55
+        },
+        "sort": [
+         3,
+         "h"
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "2",
+        "_score": null,
+        "_source": {
+         "title": "fox brown fox",
+         "tag": "a",
+         "n": 2,
+         "seq": 2,
+         "x": 41.82
+        },
+        "sort": [
+         2,
+         "a"
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "17",
+        "_score": null,
+        "_source": {
+         "title": "red brown quick dog quick quick",
+         "tag": "a",
+         "n": 2,
+         "seq": 17,
+         "x": 23.33
+        },
+        "sort": [
+         2,
+         "a"
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "7",
+        "_score": null,
+        "_source": {
+         "title": "red cat jumps jumps",
+         "tag": "b",
+         "n": 2,
+         "seq": 7,
+         "x": 24.84
+        },
+        "sort": [
+         2,
+         "b"
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "32",
+        "_score": null,
+        "_source": {
+         "title": "cat brown",
+         "tag": "b",
+         "n": 2,
+         "seq": 32,
+         "x": 98.52
+        },
+        "sort": [
+         2,
+         "b"
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "37",
+        "_score": null,
+        "_source": {
+         "title": "jumps quick",
+         "tag": "c",
+         "n": 2,
+         "seq": 37,
+         "x": 59.59
+        },
+        "sort": [
+         2,
+         "c"
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "12",
+        "_score": null,
+        "_source": {
+         "title": "jumps dog fox",
+         "tag": "d",
+         "n": 2,
+         "seq": 12,
+         "x": 30.96
+        },
+        "sort": [
+         2,
+         "d"
+        ]
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "search_after",
+   "kind": "search",
+   "path": "/ss/_search",
+   "body": {
+    "size": 10,
+    "sort": [
+     {
+      "n": "asc"
+     },
+     {
+      "seq": "desc"
+     }
+    ],
+    "search_after": [
+     2,
+     33
+    ]
+   },
+   "responses": [
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 3,
+      "successful": 3,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 60,
+       "relation": "eq"
+      },
+      "max_score": null,
+      "hits": [
+       {
+        "_index": "ss",
+        "_id": "32",
+        "_score": null,
+        "_source": {
+         "title": "cat brown",
+         "tag": "b",
+         "n": 2,
+         "seq": 32,
+         "x": 98.52
+        },
+        "sort": [
+         2,
+         32
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "27",
+        "_score": null,
+        "_source": {
+         "title": "lazy",
+         "tag": "i",
+         "n": 2,
+         "seq": 27,
+         "x": 86.33
+        },
+        "sort": [
+         2,
+         27
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "22",
+        "_score": null,
+        "_source": {
+         "title": "quick dog cat fox dog",
+         "tag": "f",
+         "n": 2,
+         "seq": 22,
+         "x": 61.41
+        },
+        "sort": [
+         2,
+         22
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "17",
+        "_score": null,
+        "_source": {
+         "title": "red brown quick dog quick quick",
+         "tag": "a",
+         "n": 2,
+         "seq": 17,
+         "x": 23.33
+        },
+        "sort": [
+         2,
+         17
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "12",
+        "_score": null,
+        "_source": {
+         "title": "jumps dog fox",
+         "tag": "d",
+         "n": 2,
+         "seq": 12,
+         "x": 30.96
+        },
+        "sort": [
+         2,
+         12
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "7",
+        "_score": null,
+        "_source": {
+         "title": "red cat jumps jumps",
+         "tag": "b",
+         "n": 2,
+         "seq": 7,
+         "x": 24.84
+        },
+        "sort": [
+         2,
+         7
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "2",
+        "_score": null,
+        "_source": {
+         "title": "fox brown fox",
+         "tag": "a",
+         "n": 2,
+         "seq": 2,
+         "x": 41.82
+        },
+        "sort": [
+         2,
+         2
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "58",
+        "_score": null,
+        "_source": {
+         "title": "quick",
+         "tag": "b",
+         "n": 3,
+         "seq": 58,
+         "x": 7.24
+        },
+        "sort": [
+         3,
+         58
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "53",
+        "_score": null,
+        "_source": {
+         "title": "brown quick red red cat red",
+         "tag": "a",
+         "n": 3,
+         "seq": 53,
+         "x": 31.85
+        },
+        "sort": [
+         3,
+         53
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "48",
+        "_score": null,
+        "_source": {
+         "title": "brown jumps quick",
+         "tag": "b",
+         "n": 3,
+         "seq": 48,
+         "x": 39.24
+        },
+        "sort": [
+         3,
+         48
+        ]
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "search_after_ties",
+   "kind": "search",
+   "path": "/ss/_search",
+   "body": {
+    "size": 15,
+    "sort": [
+     {
+      "n": "asc"
+     }
+    ],
+    "search_after": [
+     1
+    ]
+   },
+   "responses": [
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 3,
+      "successful": 3,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 60,
+       "relation": "eq"
+      },
+      "max_score": null,
+      "hits": [
+       {
+        "_index": "ss",
+        "_id": "2",
+        "_score": null,
+        "_source": {
+         "title": "fox brown fox",
+         "tag": "a",
+         "n": 2,
+         "seq": 2,
+         "x": 41.82
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "7",
+        "_score": null,
+        "_source": {
+         "title": "red cat jumps jumps",
+         "tag": "b",
+         "n": 2,
+         "seq": 7,
+         "x": 24.84
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "42",
+        "_score": null,
+        "_source": {
+         "title": "red quick quick fox jumps",
+         "tag": "e",
+         "n": 2,
+         "seq": 42,
+         "x": 60.86
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "12",
+        "_score": null,
+        "_source": {
+         "title": "jumps dog fox",
+         "tag": "d",
+         "n": 2,
+         "seq": 12,
+         "x": 30.96
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "17",
+        "_score": null,
+        "_source": {
+         "title": "red brown quick dog quick quick",
+         "tag": "a",
+         "n": 2,
+         "seq": 17,
+         "x": 23.33
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "22",
+        "_score": null,
+        "_source": {
+         "title": "quick dog cat fox dog",
+         "tag": "f",
+         "n": 2,
+         "seq": 22,
+         "x": 61.41
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "27",
+        "_score": null,
+        "_source": {
+         "title": "lazy",
+         "tag": "i",
+         "n": 2,
+         "seq": 27,
+         "x": 86.33
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "32",
+        "_score": null,
+        "_source": {
+         "title": "cat brown",
+         "tag": "b",
+         "n": 2,
+         "seq": 32,
+         "x": 98.52
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "37",
+        "_score": null,
+        "_source": {
+         "title": "jumps quick",
+         "tag": "c",
+         "n": 2,
+         "seq": 37,
+         "x": 59.59
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "47",
+        "_score": null,
+        "_source": {
+         "title": "brown lazy jumps jumps brown",
+         "tag": "d",
+         "n": 2,
+         "seq": 47,
+         "x": 87.65
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "52",
+        "_score": null,
+        "_source": {
+         "title": "red",
+         "tag": "g",
+         "n": 2,
+         "seq": 52,
+         "x": 16.28
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "57",
+        "_score": null,
+        "_source": {
+         "title": "lazy red quick jumps",
+         "tag": "d",
+         "n": 2,
+         "seq": 57,
+         "x": 8.95
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "13",
+        "_score": null,
+        "_source": {
+         "title": "jumps lazy red cat fox",
+         "tag": "h",
+         "n": 3,
+         "seq": 13,
+         "x": 35.55
+        },
+        "sort": [
+         3
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "18",
+        "_score": null,
+        "_source": {
+         "title": "quick lazy lazy fox",
+         "tag": "a",
+         "n": 3,
+         "seq": 18,
+         "x": 53.46
+        },
+        "sort": [
+         3
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "28",
+        "_score": null,
+        "_source": {
+         "title": "lazy cat quick cat brown cat",
+         "tag": "c",
+         "n": 3,
+         "seq": 28,
+         "x": 61.32
+        },
+        "sort": [
+         3
+        ]
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "two_indices",
+   "kind": "search",
+   "path": "/ss,ss2/_search",
+   "body": {
+    "size": 100
+   },
+   "responses": [
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 6,
+      "successful": 6,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 72,
+       "relation": "eq"
+      },
+      "max_score": 1.0,
+      "hits": [
+       {
+        "_index": "ss",
+        "_id": "2",
+        "_score": 1.0,
+        "_source": {
+         "title": "fox brown fox",
+         "tag": "a",
+         "n": 2,
+         "seq": 2,
+         "x": 41.82
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "4",
+        "_score": 1.0,
+        "_source": {
+         "title": "fox red",
+         "tag": "a",
+         "n": 4,
+         "seq": 4,
+         "x": 22.11
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "5",
+        "_score": 1.0,
+        "_source": {
+         "title": "quick lazy red quick dog",
+         "tag": "c",
+         "n": 0,
+         "seq": 5,
+         "x": 56.03
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "6",
+        "_score": 1.0,
+        "_source": {
+         "title": "quick dog brown cat dog dog",
+         "tag": "c",
+         "n": 1,
+         "seq": 6,
+         "x": 61.9
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "7",
+        "_score": 1.0,
+        "_source": {
+         "title": "red cat jumps jumps",
+         "tag": "b",
+         "n": 2,
+         "seq": 7,
+         "x": 24.84
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "11",
+        "_score": 1.0,
+        "_source": {
+         "title": "cat cat cat jumps jumps",
+         "tag": "a",
+         "n": 1,
+         "seq": 11,
+         "x": 9.36
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "13",
+        "_score": 1.0,
+        "_source": {
+         "title": "jumps lazy red cat fox",
+         "tag": "h",
+         "n": 3,
+         "seq": 13,
+         "x": 35.55
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "18",
+        "_score": 1.0,
+        "_source": {
+         "title": "quick lazy lazy fox",
+         "tag": "a",
+         "n": 3,
+         "seq": 18,
+         "x": 53.46
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "20",
+        "_score": 1.0,
+        "_source": {
+         "title": "red fox brown dog",
+         "tag": "j",
+         "n": 0,
+         "seq": 20,
+         "x": 44.06
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "21",
+        "_score": 1.0,
+        "_source": {
+         "title": "cat",
+         "tag": "c",
+         "n": 1,
+         "seq": 21,
+         "x": 10.24
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "24",
+        "_score": 1.0,
+        "_source": {
+         "title": "jumps",
+         "tag": "j",
+         "n": 4,
+         "seq": 24,
+         "x": 46.6
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "28",
+        "_score": 1.0,
+        "_source": {
+         "title": "lazy cat quick cat brown cat",
+         "tag": "c",
+         "n": 3,
+         "seq": 28,
+         "x": 61.32
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "31",
+        "_score": 1.0,
+        "_source": {
+         "title": "cat jumps cat cat dog",
+         "tag": "a",
+         "n": 1,
+         "seq": 31,
+         "x": 22.68
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "36",
+        "_score": 1.0,
+        "_source": {
+         "title": "quick",
+         "tag": "a",
+         "n": 1,
+         "seq": 36,
+         "x": 12.7
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "38",
+        "_score": 1.0,
+        "_source": {
+         "title": "cat quick quick fox",
+         "tag": "a",
+         "n": 3,
+         "seq": 38,
+         "x": 97.09
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "40",
+        "_score": 1.0,
+        "_source": {
+         "title": "cat lazy",
+         "tag": "c",
+         "n": 0,
+         "seq": 40,
+         "x": 83.42
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "42",
+        "_score": 1.0,
+        "_source": {
+         "title": "red quick quick fox jumps",
+         "tag": "e",
+         "n": 2,
+         "seq": 42,
+         "x": 60.86
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "44",
+        "_score": 1.0,
+        "_source": {
+         "title": "fox cat jumps dog fox",
+         "tag": "a",
+         "n": 4,
+         "seq": 44,
+         "x": 27.69
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "45",
+        "_score": 1.0,
+        "_source": {
+         "title": "jumps",
+         "tag": "c",
+         "n": 0,
+         "seq": 45,
+         "x": 76.0
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "48",
+        "_score": 1.0,
+        "_source": {
+         "title": "brown jumps quick",
+         "tag": "b",
+         "n": 3,
+         "seq": 48,
+         "x": 39.24
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "50",
+        "_score": 1.0,
+        "_source": {
+         "title": "quick",
+         "tag": "h",
+         "n": 0,
+         "seq": 50,
+         "x": 64.35
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "51",
+        "_score": 1.0,
+        "_source": {
+         "title": "quick lazy quick",
+         "tag": "i",
+         "n": 1,
+         "seq": 51,
+         "x": 21.96
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "53",
+        "_score": 1.0,
+        "_source": {
+         "title": "brown quick red red cat red",
+         "tag": "a",
+         "n": 3,
+         "seq": 53,
+         "x": 31.85
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "55",
+        "_score": 1.0,
+        "_source": {
+         "title": "dog dog brown",
+         "tag": "i",
+         "n": 0,
+         "seq": 55,
+         "x": 10.48
+        }
+       },
+       {
+        "_index": "ss2",
+        "_id": "2",
+        "_score": 1.0,
+        "_source": {
+         "title": "quick",
+         "tag": "a",
+         "n": 2,
+         "seq": 2,
+         "x": 18.11
+        }
+       },
+       {
+        "_index": "ss2",
+        "_id": "4",
+        "_score": 1.0,
+        "_source": {
+         "title": "cat fox lazy",
+         "tag": "a",
+         "n": 4,
+         "seq": 4,
+         "x": 1.84
+        }
+       },
+       {
+        "_index": "ss2",
+        "_id": "5",
+        "_score": 1.0,
+        "_source": {
+         "title": "brown jumps brown jumps dog",
+         "tag": "d",
+         "n": 0,
+         "seq": 5,
+         "x": 65.01
+        }
+       },
+       {
+        "_index": "ss2",
+        "_id": "6",
+        "_score": 1.0,
+        "_source": {
+         "title": "jumps red lazy brown brown cat",
+         "tag": "a",
+         "n": 1,
+         "seq": 6,
+         "x": 88.19
+        }
+       },
+       {
+        "_index": "ss2",
+        "_id": "7",
+        "_score": 1.0,
+        "_source": {
+         "title": "quick red cat fox quick fox",
+         "tag": "a",
+         "n": 2,
+         "seq": 7,
+         "x": 74.09
+        }
+       },
+       {
+        "_index": "ss2",
+        "_id": "11",
+        "_score": 1.0,
+        "_source": {
+         "title": "cat brown fox lazy brown",
+         "tag": "b",
+         "n": 1,
+         "seq": 11,
+         "x": 0.11
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "8",
+        "_score": 1.0,
+        "_source": {
+         "title": "brown dog",
+         "tag": "c",
+         "n": 3,
+         "seq": 8,
+         "x": 52.52
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "12",
+        "_score": 1.0,
+        "_source": {
+         "title": "jumps dog fox",
+         "tag": "d",
+         "n": 2,
+         "seq": 12,
+         "x": 30.96
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "14",
+        "_score": 1.0,
+        "_source": {
+         "title": "dog jumps fox brown lazy",
+         "tag": "a",
+         "n": 4,
+         "seq": 14,
+         "x": 24.76
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "15",
+        "_score": 1.0,
+        "_source": {
+         "title": "jumps dog quick jumps",
+         "tag": "b",
+         "n": 0,
+         "seq": 15,
+         "x": 27.78
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "16",
+        "_score": 1.0,
+        "_source": {
+         "title": "red lazy",
+         "tag": "d",
+         "n": 1,
+         "seq": 16,
+         "x": 98.65
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "17",
+        "_score": 1.0,
+        "_source": {
+         "title": "red brown quick dog quick quick",
+         "tag": "a",
+         "n": 2,
+         "seq": 17,
+         "x": 23.33
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "26",
+        "_score": 1.0,
+        "_source": {
+         "title": "quick fox brown cat",
+         "tag": "a",
+         "n": 1,
+         "seq": 26,
+         "x": 54.32
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "29",
+        "_score": 1.0,
+        "_source": {
+         "title": "brown red",
+         "tag": "d",
+         "n": 4,
+         "seq": 29,
+         "x": 22.67
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "30",
+        "_score": 1.0,
+        "_source": {
+         "title": "jumps cat fox fox lazy",
+         "tag": "b",
+         "n": 0,
+         "seq": 30,
+         "x": 19.36
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "35",
+        "_score": 1.0,
+        "_source": {
+         "title": "red",
+         "tag": "b",
+         "n": 0,
+         "seq": 35,
+         "x": 74.34
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "43",
+        "_score": 1.0,
+        "_source": {
+         "title": "quick quick",
+         "tag": "b",
+         "n": 3,
+         "seq": 43,
+         "x": 72.52
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "56",
+        "_score": 1.0,
+        "_source": {
+         "title": "lazy fox quick",
+         "tag": "a",
+         "n": 1,
+         "seq": 56,
+         "x": 12.96
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "59",
+        "_score": 1.0,
+        "_source": {
+         "title": "dog",
+         "tag": "e",
+         "n": 4,
+         "seq": 59,
+         "x": 8.37
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "60",
+        "_score": 1.0,
+        "_source": {
+         "title": "dog lazy",
+         "tag": "f",
+         "n": 0,
+         "seq": 60,
+         "x": 45.38
+        }
+       },
+       {
+        "_index": "ss2",
+        "_id": "8",
+        "_score": 1.0,
+        "_source": {
+         "title": "red quick fox",
+         "tag": "a",
+         "n": 3,
+         "seq": 8,
+         "x": 84.13
+        }
+       },
+       {
+        "_index": "ss2",
+        "_id": "12",
+        "_score": 1.0,
+        "_source": {
+         "title": "dog jumps lazy brown",
+         "tag": "a",
+         "n": 2,
+         "seq": 12,
+         "x": 77.62
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "1",
+        "_score": 1.0,
+        "_source": {
+         "title": "quick red fox",
+         "tag": "a",
+         "n": 1,
+         "seq": 1,
+         "x": 53.59
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "3",
+        "_score": 1.0,
+        "_source": {
+         "title": "dog red",
+         "tag": "a",
+         "n": 3,
+         "seq": 3,
+         "x": 56.55
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "9",
+        "_score": 1.0,
+        "_source": {
+         "title": "jumps lazy dog",
+         "tag": "a",
+         "n": 4,
+         "seq": 9,
+         "x": 41.81
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "10",
+        "_score": 1.0,
+        "_source": {
+         "title": "quick jumps red",
+         "tag": "a",
+         "n": 0,
+         "seq": 10,
+         "x": 66.82
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "19",
+        "_score": 1.0,
+        "_source": {
+         "title": "cat quick fox jumps red",
+         "tag": "b",
+         "n": 4,
+         "seq": 19,
+         "x": 39.41
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "22",
+        "_score": 1.0,
+        "_source": {
+         "title": "quick dog cat fox dog",
+         "tag": "f",
+         "n": 2,
+         "seq": 22,
+         "x": 61.41
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "23",
+        "_score": 1.0,
+        "_source": {
+         "title": "lazy cat",
+         "tag": "c",
+         "n": 3,
+         "seq": 23,
+         "x": 47.42
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "25",
+        "_score": 1.0,
+        "_source": {
+         "title": "lazy dog quick dog",
+         "tag": "e",
+         "n": 0,
+         "seq": 25,
+         "x": 74.04
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "27",
+        "_score": 1.0,
+        "_source": {
+         "title": "lazy",
+         "tag": "i",
+         "n": 2,
+         "seq": 27,
+         "x": 86.33
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "32",
+        "_score": 1.0,
+        "_source": {
+         "title": "cat brown",
+         "tag": "b",
+         "n": 2,
+         "seq": 32,
+         "x": 98.52
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "33",
+        "_score": 1.0,
+        "_source": {
+         "title": "fox jumps cat dog dog",
+         "tag": "g",
+         "n": 3,
+         "seq": 33,
+         "x": 78.23
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "34",
+        "_score": 1.0,
+        "_source": {
+         "title": "jumps quick",
+         "tag": "b",
+         "n": 4,
+         "seq": 34,
+         "x": 63.58
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "37",
+        "_score": 1.0,
+        "_source": {
+         "title": "jumps quick",
+         "tag": "c",
+         "n": 2,
+         "seq": 37,
+         "x": 59.59
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "39",
+        "_score": 1.0,
+        "_source": {
+         "title": "dog quick red brown brown fox",
+         "tag": "a",
+         "n": 4,
+         "seq": 39,
+         "x": 29.3
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "41",
+        "_score": 1.0,
+        "_source": {
+         "title": "cat",
+         "tag": "g",
+         "n": 1,
+         "seq": 41,
+         "x": 66.25
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "46",
+        "_score": 1.0,
+        "_source": {
+         "title": "jumps",
+         "tag": "b",
+         "n": 1,
+         "seq": 46,
+         "x": 97.34
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "47",
+        "_score": 1.0,
+        "_source": {
+         "title": "brown lazy jumps jumps brown",
+         "tag": "d",
+         "n": 2,
+         "seq": 47,
+         "x": 87.65
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "49",
+        "_score": 1.0,
+        "_source": {
+         "title": "dog brown red",
+         "tag": "a",
+         "n": 4,
+         "seq": 49,
+         "x": 66.95
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "52",
+        "_score": 1.0,
+        "_source": {
+         "title": "red",
+         "tag": "g",
+         "n": 2,
+         "seq": 52,
+         "x": 16.28
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "54",
+        "_score": 1.0,
+        "_source": {
+         "title": "cat fox cat jumps jumps fox",
+         "tag": "b",
+         "n": 4,
+         "seq": 54,
+         "x": 51.74
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "57",
+        "_score": 1.0,
+        "_source": {
+         "title": "lazy red quick jumps",
+         "tag": "d",
+         "n": 2,
+         "seq": 57,
+         "x": 8.95
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "58",
+        "_score": 1.0,
+        "_source": {
+         "title": "quick",
+         "tag": "b",
+         "n": 3,
+         "seq": 58,
+         "x": 7.24
+        }
+       },
+       {
+        "_index": "ss2",
+        "_id": "1",
+        "_score": 1.0,
+        "_source": {
+         "title": "red lazy quick",
+         "tag": "a",
+         "n": 1,
+         "seq": 1,
+         "x": 70.95
+        }
+       },
+       {
+        "_index": "ss2",
+        "_id": "3",
+        "_score": 1.0,
+        "_source": {
+         "title": "lazy brown lazy",
+         "tag": "b",
+         "n": 3,
+         "seq": 3,
+         "x": 67.22
+        }
+       },
+       {
+        "_index": "ss2",
+        "_id": "9",
+        "_score": 1.0,
+        "_source": {
+         "title": "lazy brown lazy fox jumps",
+         "tag": "a",
+         "n": 4,
+         "seq": 9,
+         "x": 26.9
+        }
+       },
+       {
+        "_index": "ss2",
+        "_id": "10",
+        "_score": 1.0,
+        "_source": {
+         "title": "lazy",
+         "tag": "b",
+         "n": 0,
+         "seq": 10,
+         "x": 32.89
+        }
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "two_indices_sorted",
+   "kind": "search",
+   "path": "/ss2,ss/_search",
+   "body": {
+    "size": 40,
+    "sort": [
+     {
+      "n": "desc"
+     }
+    ]
+   },
+   "responses": [
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 6,
+      "successful": 6,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 72,
+       "relation": "eq"
+      },
+      "max_score": null,
+      "hits": [
+       {
+        "_index": "ss",
+        "_id": "4",
+        "_score": null,
+        "_source": {
+         "title": "fox red",
+         "tag": "a",
+         "n": 4,
+         "seq": 4,
+         "x": 22.11
+        },
+        "sort": [
+         4
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "24",
+        "_score": null,
+        "_source": {
+         "title": "jumps",
+         "tag": "j",
+         "n": 4,
+         "seq": 24,
+         "x": 46.6
+        },
+        "sort": [
+         4
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "44",
+        "_score": null,
+        "_source": {
+         "title": "fox cat jumps dog fox",
+         "tag": "a",
+         "n": 4,
+         "seq": 44,
+         "x": 27.69
+        },
+        "sort": [
+         4
+        ]
+       },
+       {
+        "_index": "ss2",
+        "_id": "4",
+        "_score": null,
+        "_source": {
+         "title": "cat fox lazy",
+         "tag": "a",
+         "n": 4,
+         "seq": 4,
+         "x": 1.84
+        },
+        "sort": [
+         4
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "14",
+        "_score": null,
+        "_source": {
+         "title": "dog jumps fox brown lazy",
+         "tag": "a",
+         "n": 4,
+         "seq": 14,
+         "x": 24.76
+        },
+        "sort": [
+         4
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "29",
+        "_score": null,
+        "_source": {
+         "title": "brown red",
+         "tag": "d",
+         "n": 4,
+         "seq": 29,
+         "x": 22.67
+        },
+        "sort": [
+         4
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "59",
+        "_score": null,
+        "_source": {
+         "title": "dog",
+         "tag": "e",
+         "n": 4,
+         "seq": 59,
+         "x": 8.37
+        },
+        "sort": [
+         4
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "9",
+        "_score": null,
+        "_source": {
+         "title": "jumps lazy dog",
+         "tag": "a",
+         "n": 4,
+         "seq": 9,
+         "x": 41.81
+        },
+        "sort": [
+         4
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "19",
+        "_score": null,
+        "_source": {
+         "title": "cat quick fox jumps red",
+         "tag": "b",
+         "n": 4,
+         "seq": 19,
+         "x": 39.41
+        },
+        "sort": [
+         4
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "34",
+        "_score": null,
+        "_source": {
+         "title": "jumps quick",
+         "tag": "b",
+         "n": 4,
+         "seq": 34,
+         "x": 63.58
+        },
+        "sort": [
+         4
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "39",
+        "_score": null,
+        "_source": {
+         "title": "dog quick red brown brown fox",
+         "tag": "a",
+         "n": 4,
+         "seq": 39,
+         "x": 29.3
+        },
+        "sort": [
+         4
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "49",
+        "_score": null,
+        "_source": {
+         "title": "dog brown red",
+         "tag": "a",
+         "n": 4,
+         "seq": 49,
+         "x": 66.95
+        },
+        "sort": [
+         4
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "54",
+        "_score": null,
+        "_source": {
+         "title": "cat fox cat jumps jumps fox",
+         "tag": "b",
+         "n": 4,
+         "seq": 54,
+         "x": 51.74
+        },
+        "sort": [
+         4
+        ]
+       },
+       {
+        "_index": "ss2",
+        "_id": "9",
+        "_score": null,
+        "_source": {
+         "title": "lazy brown lazy fox jumps",
+         "tag": "a",
+         "n": 4,
+         "seq": 9,
+         "x": 26.9
+        },
+        "sort": [
+         4
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "13",
+        "_score": null,
+        "_source": {
+         "title": "jumps lazy red cat fox",
+         "tag": "h",
+         "n": 3,
+         "seq": 13,
+         "x": 35.55
+        },
+        "sort": [
+         3
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "18",
+        "_score": null,
+        "_source": {
+         "title": "quick lazy lazy fox",
+         "tag": "a",
+         "n": 3,
+         "seq": 18,
+         "x": 53.46
+        },
+        "sort": [
+         3
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "28",
+        "_score": null,
+        "_source": {
+         "title": "lazy cat quick cat brown cat",
+         "tag": "c",
+         "n": 3,
+         "seq": 28,
+         "x": 61.32
+        },
+        "sort": [
+         3
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "38",
+        "_score": null,
+        "_source": {
+         "title": "cat quick quick fox",
+         "tag": "a",
+         "n": 3,
+         "seq": 38,
+         "x": 97.09
+        },
+        "sort": [
+         3
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "48",
+        "_score": null,
+        "_source": {
+         "title": "brown jumps quick",
+         "tag": "b",
+         "n": 3,
+         "seq": 48,
+         "x": 39.24
+        },
+        "sort": [
+         3
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "53",
+        "_score": null,
+        "_source": {
+         "title": "brown quick red red cat red",
+         "tag": "a",
+         "n": 3,
+         "seq": 53,
+         "x": 31.85
+        },
+        "sort": [
+         3
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "8",
+        "_score": null,
+        "_source": {
+         "title": "brown dog",
+         "tag": "c",
+         "n": 3,
+         "seq": 8,
+         "x": 52.52
+        },
+        "sort": [
+         3
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "43",
+        "_score": null,
+        "_source": {
+         "title": "quick quick",
+         "tag": "b",
+         "n": 3,
+         "seq": 43,
+         "x": 72.52
+        },
+        "sort": [
+         3
+        ]
+       },
+       {
+        "_index": "ss2",
+        "_id": "8",
+        "_score": null,
+        "_source": {
+         "title": "red quick fox",
+         "tag": "a",
+         "n": 3,
+         "seq": 8,
+         "x": 84.13
+        },
+        "sort": [
+         3
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "3",
+        "_score": null,
+        "_source": {
+         "title": "dog red",
+         "tag": "a",
+         "n": 3,
+         "seq": 3,
+         "x": 56.55
+        },
+        "sort": [
+         3
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "23",
+        "_score": null,
+        "_source": {
+         "title": "lazy cat",
+         "tag": "c",
+         "n": 3,
+         "seq": 23,
+         "x": 47.42
+        },
+        "sort": [
+         3
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "33",
+        "_score": null,
+        "_source": {
+         "title": "fox jumps cat dog dog",
+         "tag": "g",
+         "n": 3,
+         "seq": 33,
+         "x": 78.23
+        },
+        "sort": [
+         3
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "58",
+        "_score": null,
+        "_source": {
+         "title": "quick",
+         "tag": "b",
+         "n": 3,
+         "seq": 58,
+         "x": 7.24
+        },
+        "sort": [
+         3
+        ]
+       },
+       {
+        "_index": "ss2",
+        "_id": "3",
+        "_score": null,
+        "_source": {
+         "title": "lazy brown lazy",
+         "tag": "b",
+         "n": 3,
+         "seq": 3,
+         "x": 67.22
+        },
+        "sort": [
+         3
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "2",
+        "_score": null,
+        "_source": {
+         "title": "fox brown fox",
+         "tag": "a",
+         "n": 2,
+         "seq": 2,
+         "x": 41.82
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "7",
+        "_score": null,
+        "_source": {
+         "title": "red cat jumps jumps",
+         "tag": "b",
+         "n": 2,
+         "seq": 7,
+         "x": 24.84
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "42",
+        "_score": null,
+        "_source": {
+         "title": "red quick quick fox jumps",
+         "tag": "e",
+         "n": 2,
+         "seq": 42,
+         "x": 60.86
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss2",
+        "_id": "2",
+        "_score": null,
+        "_source": {
+         "title": "quick",
+         "tag": "a",
+         "n": 2,
+         "seq": 2,
+         "x": 18.11
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss2",
+        "_id": "7",
+        "_score": null,
+        "_source": {
+         "title": "quick red cat fox quick fox",
+         "tag": "a",
+         "n": 2,
+         "seq": 7,
+         "x": 74.09
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "12",
+        "_score": null,
+        "_source": {
+         "title": "jumps dog fox",
+         "tag": "d",
+         "n": 2,
+         "seq": 12,
+         "x": 30.96
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "17",
+        "_score": null,
+        "_source": {
+         "title": "red brown quick dog quick quick",
+         "tag": "a",
+         "n": 2,
+         "seq": 17,
+         "x": 23.33
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss2",
+        "_id": "12",
+        "_score": null,
+        "_source": {
+         "title": "dog jumps lazy brown",
+         "tag": "a",
+         "n": 2,
+         "seq": 12,
+         "x": 77.62
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "22",
+        "_score": null,
+        "_source": {
+         "title": "quick dog cat fox dog",
+         "tag": "f",
+         "n": 2,
+         "seq": 22,
+         "x": 61.41
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "27",
+        "_score": null,
+        "_source": {
+         "title": "lazy",
+         "tag": "i",
+         "n": 2,
+         "seq": 27,
+         "x": 86.33
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "32",
+        "_score": null,
+        "_source": {
+         "title": "cat brown",
+         "tag": "b",
+         "n": 2,
+         "seq": 32,
+         "x": 98.52
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "37",
+        "_score": null,
+        "_source": {
+         "title": "jumps quick",
+         "tag": "c",
+         "n": 2,
+         "seq": 37,
+         "x": 59.59
+        },
+        "sort": [
+         2
+        ]
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "terms_shard_size",
+   "kind": "search",
+   "path": "/ss/_search",
+   "body": {
+    "size": 0,
+    "aggs": {
+     "t": {
+      "terms": {
+       "field": "tag",
+       "size": 3,
+       "shard_size": 3
+      }
+     }
+    }
+   },
+   "responses": [
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 3,
+      "successful": 3,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 60,
+       "relation": "eq"
+      },
+      "max_score": null,
+      "hits": []
+     },
+     "aggregations": {
+      "t": {
+       "doc_count_error_upper_bound": 8,
+       "sum_other_doc_count": 23,
+       "buckets": [
+        {
+         "key": "a",
+         "doc_count": 19
+        },
+        {
+         "key": "b",
+         "doc_count": 12
+        },
+        {
+         "key": "c",
+         "doc_count": 6
+        }
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "terms_error",
+   "kind": "search",
+   "path": "/ss/_search",
+   "body": {
+    "size": 0,
+    "aggs": {
+     "t": {
+      "terms": {
+       "field": "tag",
+       "size": 2,
+       "shard_size": 2,
+       "show_term_doc_count_error": true
+      }
+     }
+    }
+   },
+   "responses": [
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 3,
+      "successful": 3,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 60,
+       "relation": "eq"
+      },
+      "max_score": null,
+      "hits": []
+     },
+     "aggregations": {
+      "t": {
+       "doc_count_error_upper_bound": 16,
+       "sum_other_doc_count": 31,
+       "buckets": [
+        {
+         "key": "a",
+         "doc_count": 19,
+         "doc_count_error_upper_bound": 0
+        },
+        {
+         "key": "b",
+         "doc_count": 10,
+         "doc_count_error_upper_bound": 6
+        }
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "terms_default",
+   "kind": "search",
+   "path": "/ss/_search",
+   "body": {
+    "size": 0,
+    "aggs": {
+     "t": {
+      "terms": {
+       "field": "tag",
+       "size": 4
+      }
+     },
+     "n": {
+      "terms": {
+       "field": "n",
+       "size": 2,
+       "shard_size": 2
+      }
+     }
+    }
+   },
+   "responses": [
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 3,
+      "successful": 3,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 60,
+       "relation": "eq"
+      },
+      "max_score": null,
+      "hits": []
+     },
+     "aggregations": {
+      "t": {
+       "doc_count_error_upper_bound": 0,
+       "sum_other_doc_count": 15,
+       "buckets": [
+        {
+         "key": "a",
+         "doc_count": 19
+        },
+        {
+         "key": "b",
+         "doc_count": 12
+        },
+        {
+         "key": "c",
+         "doc_count": 9
+        },
+        {
+         "key": "d",
+         "doc_count": 5
+        }
+       ]
+      },
+      "n": {
+       "doc_count_error_upper_bound": 15,
+       "sum_other_doc_count": 41,
+       "buckets": [
+        {
+         "key": 0,
+         "doc_count": 10
+        },
+        {
+         "key": 1,
+         "doc_count": 9
+        }
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "terms_asc",
+   "kind": "search",
+   "path": "/ss/_search",
+   "body": {
+    "size": 0,
+    "aggs": {
+     "t": {
+      "terms": {
+       "field": "tag",
+       "size": 3,
+       "shard_size": 3,
+       "order": {
+        "_count": "asc"
+       }
+      }
+     }
+    }
+   },
+   "responses": [
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 3,
+      "successful": 3,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 60,
+       "relation": "eq"
+      },
+      "max_score": null,
+      "hits": []
+     },
+     "aggregations": {
+      "t": {
+       "doc_count_error_upper_bound": -1,
+       "sum_other_doc_count": 56,
+       "buckets": [
+        {
+         "key": "c",
+         "doc_count": 1
+        },
+        {
+         "key": "i",
+         "doc_count": 1
+        },
+        {
+         "key": "b",
+         "doc_count": 2
+        }
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "terms_sub",
+   "kind": "search",
+   "path": "/ss/_search",
+   "body": {
+    "size": 0,
+    "query": {
+     "match": {
+      "title": "dog"
+     }
+    },
+    "aggs": {
+     "t": {
+      "terms": {
+       "field": "tag",
+       "size": 3,
+       "shard_size": 4
+      },
+      "aggs": {
+       "x": {
+        "avg": {
+         "field": "x"
+        }
+       },
+       "top": {
+        "top_hits": {
+         "size": 2,
+         "_source": false
+        }
+       }
+      }
+     }
+    }
+   },
+   "responses": [
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 3,
+      "successful": 3,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 20,
+       "relation": "eq"
+      },
+      "max_score": null,
+      "hits": []
+     },
+     "aggregations": {
+      "t": {
+       "doc_count_error_upper_bound": 3,
+       "sum_other_doc_count": 8,
+       "buckets": [
+        {
+         "key": "a",
+         "doc_count": 8,
+         "top": {
+          "hits": {
+           "total": {
+            "value": 8,
+            "relation": "eq"
+           },
+           "max_score": 1.3036711,
+           "hits": [
+            {
+             "_index": "ss",
+             "_id": "3",
+             "_score": 1.3036711
+            },
+            {
+             "_index": "ss",
+             "_id": "31",
+             "_score": 1.1528733
+            }
+           ]
+          }
+         },
+         "x": {
+          "value": 36.633750000000006
+         }
+        },
+        {
+         "key": "c",
+         "doc_count": 3,
+         "top": {
+          "hits": {
+           "total": {
+            "value": 3,
+            "relation": "eq"
+           },
+           "max_score": 1.8427417,
+           "hits": [
+            {
+             "_index": "ss",
+             "_id": "6",
+             "_score": 1.8427417
+            },
+            {
+             "_index": "ss",
+             "_id": "5",
+             "_score": 1.1528733
+            }
+           ]
+          }
+         },
+         "x": {
+          "value": 56.81666666666667
+         }
+        },
+        {
+         "key": "b",
+         "doc_count": 1,
+         "x": {
+          "value": 27.78
+         },
+         "top": {
+          "hits": {
+           "total": {
+            "value": 1,
+            "relation": "eq"
+           },
+           "max_score": 0.60996956,
+           "hits": [
+            {
+             "_index": "ss",
+             "_id": "15",
+             "_score": 0.60996956
+            }
+           ]
+          }
+         }
+        }
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "metrics",
+   "kind": "search",
+   "path": "/ss/_search",
+   "body": {
+    "size": 0,
+    "aggs": {
+     "s": {
+      "stats": {
+       "field": "x"
+      }
+     },
+     "c": {
+      "cardinality": {
+       "field": "tag"
+      }
+     },
+     "p": {
+      "percentiles": {
+       "field": "x",
+       "percents": [
+        10,
+        50,
+        90
+       ]
+      }
+     },
+     "h": {
+      "histogram": {
+       "field": "n",
+       "interval": 2
+      }
+     }
+    }
+   },
+   "responses": [
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 3,
+      "successful": 3,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 60,
+       "relation": "eq"
+      },
+      "max_score": null,
+      "hits": []
+     },
+     "aggregations": {
+      "h": {
+       "buckets": [
+        {
+         "key": 0.0,
+         "doc_count": 24
+        },
+        {
+         "key": 2.0,
+         "doc_count": 24
+        },
+        {
+         "key": 4.0,
+         "doc_count": 12
+        }
+       ]
+      },
+      "p": {
+       "values": {
+        "10.0": 12.478,
+        "50.0": 47.010000000000005,
+        "90.0": 83.711
+       }
+      },
+      "c": {
+       "value": 10
+      },
+      "s": {
+       "count": 60,
+       "min": 7.24,
+       "max": 98.65,
+       "avg": 47.3755,
+       "sum": 2842.53
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "scroll",
+   "kind": "scroll",
+   "path": "/ss/_search?scroll=1m",
+   "body": {
+    "size": 7,
+    "query": {
+     "match": {
+      "title": "dog"
+     }
+    }
+   },
+   "responses": [
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 3,
+      "successful": 3,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 20,
+       "relation": "eq"
+      },
+      "max_score": 1.9354806,
+      "hits": [
+       {
+        "_index": "ss",
+        "_id": "55",
+        "_score": 1.9354806,
+        "_source": {
+         "title": "dog dog brown",
+         "tag": "i",
+         "n": 0,
+         "seq": 55,
+         "x": 10.48
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "6",
+        "_score": 1.8427417,
+        "_source": {
+         "title": "quick dog brown cat dog dog",
+         "tag": "c",
+         "n": 1,
+         "seq": 6,
+         "x": 61.9
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "25",
+        "_score": 1.4159892,
+        "_source": {
+         "title": "lazy dog quick dog",
+         "tag": "e",
+         "n": 0,
+         "seq": 25,
+         "x": 74.04
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "22",
+        "_score": 1.3052164,
+        "_source": {
+         "title": "quick dog cat fox dog",
+         "tag": "f",
+         "n": 2,
+         "seq": 22,
+         "x": 61.41
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "33",
+        "_score": 1.3052164,
+        "_source": {
+         "title": "fox jumps cat dog dog",
+         "tag": "g",
+         "n": 3,
+         "seq": 33,
+         "x": 78.23
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "3",
+        "_score": 1.3036711,
+        "_source": {
+         "title": "dog red",
+         "tag": "a",
+         "n": 3,
+         "seq": 3,
+         "x": 56.55
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "20",
+        "_score": 1.2793438,
+        "_source": {
+         "title": "red fox brown dog",
+         "tag": "j",
+         "n": 0,
+         "seq": 20,
+         "x": 44.06
+        }
+       }
+      ]
+     }
+    },
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 3,
+      "successful": 3,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 20,
+       "relation": "eq"
+      },
+      "max_score": 1.9354806,
+      "hits": [
+       {
+        "_index": "ss",
+        "_id": "5",
+        "_score": 1.1528733,
+        "_source": {
+         "title": "quick lazy red quick dog",
+         "tag": "c",
+         "n": 0,
+         "seq": 5,
+         "x": 56.03
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "31",
+        "_score": 1.1528733,
+        "_source": {
+         "title": "cat jumps cat cat dog",
+         "tag": "a",
+         "n": 1,
+         "seq": 31,
+         "x": 22.68
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "44",
+        "_score": 1.1528733,
+        "_source": {
+         "title": "fox cat jumps dog fox",
+         "tag": "a",
+         "n": 4,
+         "seq": 44,
+         "x": 27.69
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "9",
+        "_score": 1.1274753,
+        "_source": {
+         "title": "jumps lazy dog",
+         "tag": "a",
+         "n": 4,
+         "seq": 9,
+         "x": 41.81
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "49",
+        "_score": 1.1274753,
+        "_source": {
+         "title": "dog brown red",
+         "tag": "a",
+         "n": 4,
+         "seq": 49,
+         "x": 66.95
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "59",
+        "_score": 0.9530773,
+        "_source": {
+         "title": "dog",
+         "tag": "e",
+         "n": 4,
+         "seq": 59,
+         "x": 8.37
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "8",
+        "_score": 0.8025915,
+        "_source": {
+         "title": "brown dog",
+         "tag": "c",
+         "n": 3,
+         "seq": 8,
+         "x": 52.52
+        }
+       }
+      ]
+     }
+    },
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 3,
+      "successful": 3,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 20,
+       "relation": "eq"
+      },
+      "max_score": 1.9354806,
+      "hits": [
+       {
+        "_index": "ss",
+        "_id": "60",
+        "_score": 0.8025915,
+        "_source": {
+         "title": "dog lazy",
+         "tag": "f",
+         "n": 0,
+         "seq": 60,
+         "x": 45.38
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "39",
+        "_score": 0.80221033,
+        "_source": {
+         "title": "dog quick red brown brown fox",
+         "tag": "a",
+         "n": 4,
+         "seq": 39,
+         "x": 29.3
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "12",
+        "_score": 0.6931471,
+        "_source": {
+         "title": "jumps dog fox",
+         "tag": "d",
+         "n": 2,
+         "seq": 12,
+         "x": 30.96
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "15",
+        "_score": 0.60996956,
+        "_source": {
+         "title": "jumps dog quick jumps",
+         "tag": "b",
+         "n": 0,
+         "seq": 15,
+         "x": 27.78
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "14",
+        "_score": 0.5446157,
+        "_source": {
+         "title": "dog jumps fox brown lazy",
+         "tag": "a",
+         "n": 4,
+         "seq": 14,
+         "x": 24.76
+        }
+       },
+       {
+        "_index": "ss",
+        "_id": "17",
+        "_score": 0.49191093,
+        "_source": {
+         "title": "red brown quick dog quick quick",
+         "tag": "a",
+         "n": 2,
+         "seq": 17,
+         "x": 23.33
+        }
+       }
+      ]
+     }
+    },
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 3,
+      "successful": 3,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 20,
+       "relation": "eq"
+      },
+      "max_score": 1.9354806,
+      "hits": []
+     }
+    }
+   ]
+  },
+  {
+   "name": "scroll_sorted",
+   "kind": "scroll",
+   "path": "/ss/_search?scroll=1m",
+   "body": {
+    "size": 11,
+    "sort": [
+     {
+      "n": "asc"
+     }
+    ]
+   },
+   "responses": [
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 3,
+      "successful": 3,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 60,
+       "relation": "eq"
+      },
+      "max_score": null,
+      "hits": [
+       {
+        "_index": "ss",
+        "_id": "5",
+        "_score": null,
+        "_source": {
+         "title": "quick lazy red quick dog",
+         "tag": "c",
+         "n": 0,
+         "seq": 5,
+         "x": 56.03
+        },
+        "sort": [
+         0
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "20",
+        "_score": null,
+        "_source": {
+         "title": "red fox brown dog",
+         "tag": "j",
+         "n": 0,
+         "seq": 20,
+         "x": 44.06
+        },
+        "sort": [
+         0
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "40",
+        "_score": null,
+        "_source": {
+         "title": "cat lazy",
+         "tag": "c",
+         "n": 0,
+         "seq": 40,
+         "x": 83.42
+        },
+        "sort": [
+         0
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "45",
+        "_score": null,
+        "_source": {
+         "title": "jumps",
+         "tag": "c",
+         "n": 0,
+         "seq": 45,
+         "x": 76.0
+        },
+        "sort": [
+         0
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "50",
+        "_score": null,
+        "_source": {
+         "title": "quick",
+         "tag": "h",
+         "n": 0,
+         "seq": 50,
+         "x": 64.35
+        },
+        "sort": [
+         0
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "55",
+        "_score": null,
+        "_source": {
+         "title": "dog dog brown",
+         "tag": "i",
+         "n": 0,
+         "seq": 55,
+         "x": 10.48
+        },
+        "sort": [
+         0
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "15",
+        "_score": null,
+        "_source": {
+         "title": "jumps dog quick jumps",
+         "tag": "b",
+         "n": 0,
+         "seq": 15,
+         "x": 27.78
+        },
+        "sort": [
+         0
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "30",
+        "_score": null,
+        "_source": {
+         "title": "jumps cat fox fox lazy",
+         "tag": "b",
+         "n": 0,
+         "seq": 30,
+         "x": 19.36
+        },
+        "sort": [
+         0
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "35",
+        "_score": null,
+        "_source": {
+         "title": "red",
+         "tag": "b",
+         "n": 0,
+         "seq": 35,
+         "x": 74.34
+        },
+        "sort": [
+         0
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "60",
+        "_score": null,
+        "_source": {
+         "title": "dog lazy",
+         "tag": "f",
+         "n": 0,
+         "seq": 60,
+         "x": 45.38
+        },
+        "sort": [
+         0
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "10",
+        "_score": null,
+        "_source": {
+         "title": "quick jumps red",
+         "tag": "a",
+         "n": 0,
+         "seq": 10,
+         "x": 66.82
+        },
+        "sort": [
+         0
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 3,
+      "successful": 3,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 60,
+       "relation": "eq"
+      },
+      "max_score": null,
+      "hits": [
+       {
+        "_index": "ss",
+        "_id": "25",
+        "_score": null,
+        "_source": {
+         "title": "lazy dog quick dog",
+         "tag": "e",
+         "n": 0,
+         "seq": 25,
+         "x": 74.04
+        },
+        "sort": [
+         0
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "6",
+        "_score": null,
+        "_source": {
+         "title": "quick dog brown cat dog dog",
+         "tag": "c",
+         "n": 1,
+         "seq": 6,
+         "x": 61.9
+        },
+        "sort": [
+         1
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "11",
+        "_score": null,
+        "_source": {
+         "title": "cat cat cat jumps jumps",
+         "tag": "a",
+         "n": 1,
+         "seq": 11,
+         "x": 9.36
+        },
+        "sort": [
+         1
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "21",
+        "_score": null,
+        "_source": {
+         "title": "cat",
+         "tag": "c",
+         "n": 1,
+         "seq": 21,
+         "x": 10.24
+        },
+        "sort": [
+         1
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "31",
+        "_score": null,
+        "_source": {
+         "title": "cat jumps cat cat dog",
+         "tag": "a",
+         "n": 1,
+         "seq": 31,
+         "x": 22.68
+        },
+        "sort": [
+         1
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "36",
+        "_score": null,
+        "_source": {
+         "title": "quick",
+         "tag": "a",
+         "n": 1,
+         "seq": 36,
+         "x": 12.7
+        },
+        "sort": [
+         1
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "51",
+        "_score": null,
+        "_source": {
+         "title": "quick lazy quick",
+         "tag": "i",
+         "n": 1,
+         "seq": 51,
+         "x": 21.96
+        },
+        "sort": [
+         1
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "16",
+        "_score": null,
+        "_source": {
+         "title": "red lazy",
+         "tag": "d",
+         "n": 1,
+         "seq": 16,
+         "x": 98.65
+        },
+        "sort": [
+         1
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "26",
+        "_score": null,
+        "_source": {
+         "title": "quick fox brown cat",
+         "tag": "a",
+         "n": 1,
+         "seq": 26,
+         "x": 54.32
+        },
+        "sort": [
+         1
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "56",
+        "_score": null,
+        "_source": {
+         "title": "lazy fox quick",
+         "tag": "a",
+         "n": 1,
+         "seq": 56,
+         "x": 12.96
+        },
+        "sort": [
+         1
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "1",
+        "_score": null,
+        "_source": {
+         "title": "quick red fox",
+         "tag": "a",
+         "n": 1,
+         "seq": 1,
+         "x": 53.59
+        },
+        "sort": [
+         1
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 3,
+      "successful": 3,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 60,
+       "relation": "eq"
+      },
+      "max_score": null,
+      "hits": [
+       {
+        "_index": "ss",
+        "_id": "41",
+        "_score": null,
+        "_source": {
+         "title": "cat",
+         "tag": "g",
+         "n": 1,
+         "seq": 41,
+         "x": 66.25
+        },
+        "sort": [
+         1
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "46",
+        "_score": null,
+        "_source": {
+         "title": "jumps",
+         "tag": "b",
+         "n": 1,
+         "seq": 46,
+         "x": 97.34
+        },
+        "sort": [
+         1
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "2",
+        "_score": null,
+        "_source": {
+         "title": "fox brown fox",
+         "tag": "a",
+         "n": 2,
+         "seq": 2,
+         "x": 41.82
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "7",
+        "_score": null,
+        "_source": {
+         "title": "red cat jumps jumps",
+         "tag": "b",
+         "n": 2,
+         "seq": 7,
+         "x": 24.84
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "42",
+        "_score": null,
+        "_source": {
+         "title": "red quick quick fox jumps",
+         "tag": "e",
+         "n": 2,
+         "seq": 42,
+         "x": 60.86
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "12",
+        "_score": null,
+        "_source": {
+         "title": "jumps dog fox",
+         "tag": "d",
+         "n": 2,
+         "seq": 12,
+         "x": 30.96
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "17",
+        "_score": null,
+        "_source": {
+         "title": "red brown quick dog quick quick",
+         "tag": "a",
+         "n": 2,
+         "seq": 17,
+         "x": 23.33
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "22",
+        "_score": null,
+        "_source": {
+         "title": "quick dog cat fox dog",
+         "tag": "f",
+         "n": 2,
+         "seq": 22,
+         "x": 61.41
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "27",
+        "_score": null,
+        "_source": {
+         "title": "lazy",
+         "tag": "i",
+         "n": 2,
+         "seq": 27,
+         "x": 86.33
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "32",
+        "_score": null,
+        "_source": {
+         "title": "cat brown",
+         "tag": "b",
+         "n": 2,
+         "seq": 32,
+         "x": 98.52
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "37",
+        "_score": null,
+        "_source": {
+         "title": "jumps quick",
+         "tag": "c",
+         "n": 2,
+         "seq": 37,
+         "x": 59.59
+        },
+        "sort": [
+         2
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 3,
+      "successful": 3,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 60,
+       "relation": "eq"
+      },
+      "max_score": null,
+      "hits": [
+       {
+        "_index": "ss",
+        "_id": "47",
+        "_score": null,
+        "_source": {
+         "title": "brown lazy jumps jumps brown",
+         "tag": "d",
+         "n": 2,
+         "seq": 47,
+         "x": 87.65
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "52",
+        "_score": null,
+        "_source": {
+         "title": "red",
+         "tag": "g",
+         "n": 2,
+         "seq": 52,
+         "x": 16.28
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "57",
+        "_score": null,
+        "_source": {
+         "title": "lazy red quick jumps",
+         "tag": "d",
+         "n": 2,
+         "seq": 57,
+         "x": 8.95
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "13",
+        "_score": null,
+        "_source": {
+         "title": "jumps lazy red cat fox",
+         "tag": "h",
+         "n": 3,
+         "seq": 13,
+         "x": 35.55
+        },
+        "sort": [
+         3
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "18",
+        "_score": null,
+        "_source": {
+         "title": "quick lazy lazy fox",
+         "tag": "a",
+         "n": 3,
+         "seq": 18,
+         "x": 53.46
+        },
+        "sort": [
+         3
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "28",
+        "_score": null,
+        "_source": {
+         "title": "lazy cat quick cat brown cat",
+         "tag": "c",
+         "n": 3,
+         "seq": 28,
+         "x": 61.32
+        },
+        "sort": [
+         3
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "38",
+        "_score": null,
+        "_source": {
+         "title": "cat quick quick fox",
+         "tag": "a",
+         "n": 3,
+         "seq": 38,
+         "x": 97.09
+        },
+        "sort": [
+         3
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "48",
+        "_score": null,
+        "_source": {
+         "title": "brown jumps quick",
+         "tag": "b",
+         "n": 3,
+         "seq": 48,
+         "x": 39.24
+        },
+        "sort": [
+         3
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "53",
+        "_score": null,
+        "_source": {
+         "title": "brown quick red red cat red",
+         "tag": "a",
+         "n": 3,
+         "seq": 53,
+         "x": 31.85
+        },
+        "sort": [
+         3
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "8",
+        "_score": null,
+        "_source": {
+         "title": "brown dog",
+         "tag": "c",
+         "n": 3,
+         "seq": 8,
+         "x": 52.52
+        },
+        "sort": [
+         3
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "43",
+        "_score": null,
+        "_source": {
+         "title": "quick quick",
+         "tag": "b",
+         "n": 3,
+         "seq": 43,
+         "x": 72.52
+        },
+        "sort": [
+         3
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 3,
+      "successful": 3,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 60,
+       "relation": "eq"
+      },
+      "max_score": null,
+      "hits": [
+       {
+        "_index": "ss",
+        "_id": "3",
+        "_score": null,
+        "_source": {
+         "title": "dog red",
+         "tag": "a",
+         "n": 3,
+         "seq": 3,
+         "x": 56.55
+        },
+        "sort": [
+         3
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "23",
+        "_score": null,
+        "_source": {
+         "title": "lazy cat",
+         "tag": "c",
+         "n": 3,
+         "seq": 23,
+         "x": 47.42
+        },
+        "sort": [
+         3
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "33",
+        "_score": null,
+        "_source": {
+         "title": "fox jumps cat dog dog",
+         "tag": "g",
+         "n": 3,
+         "seq": 33,
+         "x": 78.23
+        },
+        "sort": [
+         3
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "58",
+        "_score": null,
+        "_source": {
+         "title": "quick",
+         "tag": "b",
+         "n": 3,
+         "seq": 58,
+         "x": 7.24
+        },
+        "sort": [
+         3
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "4",
+        "_score": null,
+        "_source": {
+         "title": "fox red",
+         "tag": "a",
+         "n": 4,
+         "seq": 4,
+         "x": 22.11
+        },
+        "sort": [
+         4
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "24",
+        "_score": null,
+        "_source": {
+         "title": "jumps",
+         "tag": "j",
+         "n": 4,
+         "seq": 24,
+         "x": 46.6
+        },
+        "sort": [
+         4
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "44",
+        "_score": null,
+        "_source": {
+         "title": "fox cat jumps dog fox",
+         "tag": "a",
+         "n": 4,
+         "seq": 44,
+         "x": 27.69
+        },
+        "sort": [
+         4
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "14",
+        "_score": null,
+        "_source": {
+         "title": "dog jumps fox brown lazy",
+         "tag": "a",
+         "n": 4,
+         "seq": 14,
+         "x": 24.76
+        },
+        "sort": [
+         4
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "29",
+        "_score": null,
+        "_source": {
+         "title": "brown red",
+         "tag": "d",
+         "n": 4,
+         "seq": 29,
+         "x": 22.67
+        },
+        "sort": [
+         4
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "59",
+        "_score": null,
+        "_source": {
+         "title": "dog",
+         "tag": "e",
+         "n": 4,
+         "seq": 59,
+         "x": 8.37
+        },
+        "sort": [
+         4
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "9",
+        "_score": null,
+        "_source": {
+         "title": "jumps lazy dog",
+         "tag": "a",
+         "n": 4,
+         "seq": 9,
+         "x": 41.81
+        },
+        "sort": [
+         4
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 3,
+      "successful": 3,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 60,
+       "relation": "eq"
+      },
+      "max_score": null,
+      "hits": [
+       {
+        "_index": "ss",
+        "_id": "19",
+        "_score": null,
+        "_source": {
+         "title": "cat quick fox jumps red",
+         "tag": "b",
+         "n": 4,
+         "seq": 19,
+         "x": 39.41
+        },
+        "sort": [
+         4
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "34",
+        "_score": null,
+        "_source": {
+         "title": "jumps quick",
+         "tag": "b",
+         "n": 4,
+         "seq": 34,
+         "x": 63.58
+        },
+        "sort": [
+         4
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "39",
+        "_score": null,
+        "_source": {
+         "title": "dog quick red brown brown fox",
+         "tag": "a",
+         "n": 4,
+         "seq": 39,
+         "x": 29.3
+        },
+        "sort": [
+         4
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "49",
+        "_score": null,
+        "_source": {
+         "title": "dog brown red",
+         "tag": "a",
+         "n": 4,
+         "seq": 49,
+         "x": 66.95
+        },
+        "sort": [
+         4
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "54",
+        "_score": null,
+        "_source": {
+         "title": "cat fox cat jumps jumps fox",
+         "tag": "b",
+         "n": 4,
+         "seq": 54,
+         "x": 51.74
+        },
+        "sort": [
+         4
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 3,
+      "successful": 3,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 60,
+       "relation": "eq"
+      },
+      "max_score": null,
+      "hits": []
+     }
+    }
+   ]
+  },
+  {
+   "name": "scroll_doc",
+   "kind": "scroll",
+   "path": "/ss,ss2/_search?scroll=1m",
+   "body": {
+    "size": 13,
+    "sort": [
+     "_doc"
+    ]
+   },
+   "responses": [
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 6,
+      "successful": 6,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 72,
+       "relation": "eq"
+      },
+      "max_score": null,
+      "hits": [
+       {
+        "_index": "ss",
+        "_id": "2",
+        "_score": null,
+        "_source": {
+         "title": "fox brown fox",
+         "tag": "a",
+         "n": 2,
+         "seq": 2,
+         "x": 41.82
+        },
+        "sort": [
+         0
+        ]
+       },
+       {
+        "_index": "ss2",
+        "_id": "2",
+        "_score": null,
+        "_source": {
+         "title": "quick",
+         "tag": "a",
+         "n": 2,
+         "seq": 2,
+         "x": 18.11
+        },
+        "sort": [
+         0
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "8",
+        "_score": null,
+        "_source": {
+         "title": "brown dog",
+         "tag": "c",
+         "n": 3,
+         "seq": 8,
+         "x": 52.52
+        },
+        "sort": [
+         0
+        ]
+       },
+       {
+        "_index": "ss2",
+        "_id": "8",
+        "_score": null,
+        "_source": {
+         "title": "red quick fox",
+         "tag": "a",
+         "n": 3,
+         "seq": 8,
+         "x": 84.13
+        },
+        "sort": [
+         0
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "1",
+        "_score": null,
+        "_source": {
+         "title": "quick red fox",
+         "tag": "a",
+         "n": 1,
+         "seq": 1,
+         "x": 53.59
+        },
+        "sort": [
+         0
+        ]
+       },
+       {
+        "_index": "ss2",
+        "_id": "1",
+        "_score": null,
+        "_source": {
+         "title": "red lazy quick",
+         "tag": "a",
+         "n": 1,
+         "seq": 1,
+         "x": 70.95
+        },
+        "sort": [
+         0
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "4",
+        "_score": null,
+        "_source": {
+         "title": "fox red",
+         "tag": "a",
+         "n": 4,
+         "seq": 4,
+         "x": 22.11
+        },
+        "sort": [
+         1
+        ]
+       },
+       {
+        "_index": "ss2",
+        "_id": "4",
+        "_score": null,
+        "_source": {
+         "title": "cat fox lazy",
+         "tag": "a",
+         "n": 4,
+         "seq": 4,
+         "x": 1.84
+        },
+        "sort": [
+         1
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "12",
+        "_score": null,
+        "_source": {
+         "title": "jumps dog fox",
+         "tag": "d",
+         "n": 2,
+         "seq": 12,
+         "x": 30.96
+        },
+        "sort": [
+         1
+        ]
+       },
+       {
+        "_index": "ss2",
+        "_id": "12",
+        "_score": null,
+        "_source": {
+         "title": "dog jumps lazy brown",
+         "tag": "a",
+         "n": 2,
+         "seq": 12,
+         "x": 77.62
+        },
+        "sort": [
+         1
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "3",
+        "_score": null,
+        "_source": {
+         "title": "dog red",
+         "tag": "a",
+         "n": 3,
+         "seq": 3,
+         "x": 56.55
+        },
+        "sort": [
+         1
+        ]
+       },
+       {
+        "_index": "ss2",
+        "_id": "3",
+        "_score": null,
+        "_source": {
+         "title": "lazy brown lazy",
+         "tag": "b",
+         "n": 3,
+         "seq": 3,
+         "x": 67.22
+        },
+        "sort": [
+         1
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "5",
+        "_score": null,
+        "_source": {
+         "title": "quick lazy red quick dog",
+         "tag": "c",
+         "n": 0,
+         "seq": 5,
+         "x": 56.03
+        },
+        "sort": [
+         2
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 6,
+      "successful": 6,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 72,
+       "relation": "eq"
+      },
+      "max_score": null,
+      "hits": [
+       {
+        "_index": "ss2",
+        "_id": "5",
+        "_score": null,
+        "_source": {
+         "title": "brown jumps brown jumps dog",
+         "tag": "d",
+         "n": 0,
+         "seq": 5,
+         "x": 65.01
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "14",
+        "_score": null,
+        "_source": {
+         "title": "dog jumps fox brown lazy",
+         "tag": "a",
+         "n": 4,
+         "seq": 14,
+         "x": 24.76
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "9",
+        "_score": null,
+        "_source": {
+         "title": "jumps lazy dog",
+         "tag": "a",
+         "n": 4,
+         "seq": 9,
+         "x": 41.81
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss2",
+        "_id": "9",
+        "_score": null,
+        "_source": {
+         "title": "lazy brown lazy fox jumps",
+         "tag": "a",
+         "n": 4,
+         "seq": 9,
+         "x": 26.9
+        },
+        "sort": [
+         2
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "6",
+        "_score": null,
+        "_source": {
+         "title": "quick dog brown cat dog dog",
+         "tag": "c",
+         "n": 1,
+         "seq": 6,
+         "x": 61.9
+        },
+        "sort": [
+         3
+        ]
+       },
+       {
+        "_index": "ss2",
+        "_id": "6",
+        "_score": null,
+        "_source": {
+         "title": "jumps red lazy brown brown cat",
+         "tag": "a",
+         "n": 1,
+         "seq": 6,
+         "x": 88.19
+        },
+        "sort": [
+         3
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "15",
+        "_score": null,
+        "_source": {
+         "title": "jumps dog quick jumps",
+         "tag": "b",
+         "n": 0,
+         "seq": 15,
+         "x": 27.78
+        },
+        "sort": [
+         3
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "10",
+        "_score": null,
+        "_source": {
+         "title": "quick jumps red",
+         "tag": "a",
+         "n": 0,
+         "seq": 10,
+         "x": 66.82
+        },
+        "sort": [
+         3
+        ]
+       },
+       {
+        "_index": "ss2",
+        "_id": "10",
+        "_score": null,
+        "_source": {
+         "title": "lazy",
+         "tag": "b",
+         "n": 0,
+         "seq": 10,
+         "x": 32.89
+        },
+        "sort": [
+         3
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "7",
+        "_score": null,
+        "_source": {
+         "title": "red cat jumps jumps",
+         "tag": "b",
+         "n": 2,
+         "seq": 7,
+         "x": 24.84
+        },
+        "sort": [
+         4
+        ]
+       },
+       {
+        "_index": "ss2",
+        "_id": "7",
+        "_score": null,
+        "_source": {
+         "title": "quick red cat fox quick fox",
+         "tag": "a",
+         "n": 2,
+         "seq": 7,
+         "x": 74.09
+        },
+        "sort": [
+         4
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "16",
+        "_score": null,
+        "_source": {
+         "title": "red lazy",
+         "tag": "d",
+         "n": 1,
+         "seq": 16,
+         "x": 98.65
+        },
+        "sort": [
+         4
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "19",
+        "_score": null,
+        "_source": {
+         "title": "cat quick fox jumps red",
+         "tag": "b",
+         "n": 4,
+         "seq": 19,
+         "x": 39.41
+        },
+        "sort": [
+         4
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 6,
+      "successful": 6,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 72,
+       "relation": "eq"
+      },
+      "max_score": null,
+      "hits": [
+       {
+        "_index": "ss",
+        "_id": "11",
+        "_score": null,
+        "_source": {
+         "title": "cat cat cat jumps jumps",
+         "tag": "a",
+         "n": 1,
+         "seq": 11,
+         "x": 9.36
+        },
+        "sort": [
+         5
+        ]
+       },
+       {
+        "_index": "ss2",
+        "_id": "11",
+        "_score": null,
+        "_source": {
+         "title": "cat brown fox lazy brown",
+         "tag": "b",
+         "n": 1,
+         "seq": 11,
+         "x": 0.11
+        },
+        "sort": [
+         5
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "17",
+        "_score": null,
+        "_source": {
+         "title": "red brown quick dog quick quick",
+         "tag": "a",
+         "n": 2,
+         "seq": 17,
+         "x": 23.33
+        },
+        "sort": [
+         5
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "22",
+        "_score": null,
+        "_source": {
+         "title": "quick dog cat fox dog",
+         "tag": "f",
+         "n": 2,
+         "seq": 22,
+         "x": 61.41
+        },
+        "sort": [
+         5
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "13",
+        "_score": null,
+        "_source": {
+         "title": "jumps lazy red cat fox",
+         "tag": "h",
+         "n": 3,
+         "seq": 13,
+         "x": 35.55
+        },
+        "sort": [
+         6
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "26",
+        "_score": null,
+        "_source": {
+         "title": "quick fox brown cat",
+         "tag": "a",
+         "n": 1,
+         "seq": 26,
+         "x": 54.32
+        },
+        "sort": [
+         6
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "23",
+        "_score": null,
+        "_source": {
+         "title": "lazy cat",
+         "tag": "c",
+         "n": 3,
+         "seq": 23,
+         "x": 47.42
+        },
+        "sort": [
+         6
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "18",
+        "_score": null,
+        "_source": {
+         "title": "quick lazy lazy fox",
+         "tag": "a",
+         "n": 3,
+         "seq": 18,
+         "x": 53.46
+        },
+        "sort": [
+         7
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "29",
+        "_score": null,
+        "_source": {
+         "title": "brown red",
+         "tag": "d",
+         "n": 4,
+         "seq": 29,
+         "x": 22.67
+        },
+        "sort": [
+         7
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "25",
+        "_score": null,
+        "_source": {
+         "title": "lazy dog quick dog",
+         "tag": "e",
+         "n": 0,
+         "seq": 25,
+         "x": 74.04
+        },
+        "sort": [
+         7
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "20",
+        "_score": null,
+        "_source": {
+         "title": "red fox brown dog",
+         "tag": "j",
+         "n": 0,
+         "seq": 20,
+         "x": 44.06
+        },
+        "sort": [
+         8
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "30",
+        "_score": null,
+        "_source": {
+         "title": "jumps cat fox fox lazy",
+         "tag": "b",
+         "n": 0,
+         "seq": 30,
+         "x": 19.36
+        },
+        "sort": [
+         8
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "27",
+        "_score": null,
+        "_source": {
+         "title": "lazy",
+         "tag": "i",
+         "n": 2,
+         "seq": 27,
+         "x": 86.33
+        },
+        "sort": [
+         8
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 6,
+      "successful": 6,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 72,
+       "relation": "eq"
+      },
+      "max_score": null,
+      "hits": [
+       {
+        "_index": "ss",
+        "_id": "21",
+        "_score": null,
+        "_source": {
+         "title": "cat",
+         "tag": "c",
+         "n": 1,
+         "seq": 21,
+         "x": 10.24
+        },
+        "sort": [
+         9
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "35",
+        "_score": null,
+        "_source": {
+         "title": "red",
+         "tag": "b",
+         "n": 0,
+         "seq": 35,
+         "x": 74.34
+        },
+        "sort": [
+         9
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "32",
+        "_score": null,
+        "_source": {
+         "title": "cat brown",
+         "tag": "b",
+         "n": 2,
+         "seq": 32,
+         "x": 98.52
+        },
+        "sort": [
+         9
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "24",
+        "_score": null,
+        "_source": {
+         "title": "jumps",
+         "tag": "j",
+         "n": 4,
+         "seq": 24,
+         "x": 46.6
+        },
+        "sort": [
+         10
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "43",
+        "_score": null,
+        "_source": {
+         "title": "quick quick",
+         "tag": "b",
+         "n": 3,
+         "seq": 43,
+         "x": 72.52
+        },
+        "sort": [
+         10
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "33",
+        "_score": null,
+        "_source": {
+         "title": "fox jumps cat dog dog",
+         "tag": "g",
+         "n": 3,
+         "seq": 33,
+         "x": 78.23
+        },
+        "sort": [
+         10
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "28",
+        "_score": null,
+        "_source": {
+         "title": "lazy cat quick cat brown cat",
+         "tag": "c",
+         "n": 3,
+         "seq": 28,
+         "x": 61.32
+        },
+        "sort": [
+         11
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "56",
+        "_score": null,
+        "_source": {
+         "title": "lazy fox quick",
+         "tag": "a",
+         "n": 1,
+         "seq": 56,
+         "x": 12.96
+        },
+        "sort": [
+         11
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "34",
+        "_score": null,
+        "_source": {
+         "title": "jumps quick",
+         "tag": "b",
+         "n": 4,
+         "seq": 34,
+         "x": 63.58
+        },
+        "sort": [
+         11
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "31",
+        "_score": null,
+        "_source": {
+         "title": "cat jumps cat cat dog",
+         "tag": "a",
+         "n": 1,
+         "seq": 31,
+         "x": 22.68
+        },
+        "sort": [
+         12
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "59",
+        "_score": null,
+        "_source": {
+         "title": "dog",
+         "tag": "e",
+         "n": 4,
+         "seq": 59,
+         "x": 8.37
+        },
+        "sort": [
+         12
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "37",
+        "_score": null,
+        "_source": {
+         "title": "jumps quick",
+         "tag": "c",
+         "n": 2,
+         "seq": 37,
+         "x": 59.59
+        },
+        "sort": [
+         12
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "36",
+        "_score": null,
+        "_source": {
+         "title": "quick",
+         "tag": "a",
+         "n": 1,
+         "seq": 36,
+         "x": 12.7
+        },
+        "sort": [
+         13
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 6,
+      "successful": 6,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 72,
+       "relation": "eq"
+      },
+      "max_score": null,
+      "hits": [
+       {
+        "_index": "ss",
+        "_id": "60",
+        "_score": null,
+        "_source": {
+         "title": "dog lazy",
+         "tag": "f",
+         "n": 0,
+         "seq": 60,
+         "x": 45.38
+        },
+        "sort": [
+         13
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "39",
+        "_score": null,
+        "_source": {
+         "title": "dog quick red brown brown fox",
+         "tag": "a",
+         "n": 4,
+         "seq": 39,
+         "x": 29.3
+        },
+        "sort": [
+         13
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "38",
+        "_score": null,
+        "_source": {
+         "title": "cat quick quick fox",
+         "tag": "a",
+         "n": 3,
+         "seq": 38,
+         "x": 97.09
+        },
+        "sort": [
+         14
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "41",
+        "_score": null,
+        "_source": {
+         "title": "cat",
+         "tag": "g",
+         "n": 1,
+         "seq": 41,
+         "x": 66.25
+        },
+        "sort": [
+         14
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "40",
+        "_score": null,
+        "_source": {
+         "title": "cat lazy",
+         "tag": "c",
+         "n": 0,
+         "seq": 40,
+         "x": 83.42
+        },
+        "sort": [
+         15
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "46",
+        "_score": null,
+        "_source": {
+         "title": "jumps",
+         "tag": "b",
+         "n": 1,
+         "seq": 46,
+         "x": 97.34
+        },
+        "sort": [
+         15
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "42",
+        "_score": null,
+        "_source": {
+         "title": "red quick quick fox jumps",
+         "tag": "e",
+         "n": 2,
+         "seq": 42,
+         "x": 60.86
+        },
+        "sort": [
+         16
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "47",
+        "_score": null,
+        "_source": {
+         "title": "brown lazy jumps jumps brown",
+         "tag": "d",
+         "n": 2,
+         "seq": 47,
+         "x": 87.65
+        },
+        "sort": [
+         16
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "44",
+        "_score": null,
+        "_source": {
+         "title": "fox cat jumps dog fox",
+         "tag": "a",
+         "n": 4,
+         "seq": 44,
+         "x": 27.69
+        },
+        "sort": [
+         17
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "49",
+        "_score": null,
+        "_source": {
+         "title": "dog brown red",
+         "tag": "a",
+         "n": 4,
+         "seq": 49,
+         "x": 66.95
+        },
+        "sort": [
+         17
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "45",
+        "_score": null,
+        "_source": {
+         "title": "jumps",
+         "tag": "c",
+         "n": 0,
+         "seq": 45,
+         "x": 76.0
+        },
+        "sort": [
+         18
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "52",
+        "_score": null,
+        "_source": {
+         "title": "red",
+         "tag": "g",
+         "n": 2,
+         "seq": 52,
+         "x": 16.28
+        },
+        "sort": [
+         18
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "48",
+        "_score": null,
+        "_source": {
+         "title": "brown jumps quick",
+         "tag": "b",
+         "n": 3,
+         "seq": 48,
+         "x": 39.24
+        },
+        "sort": [
+         19
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 6,
+      "successful": 6,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 72,
+       "relation": "eq"
+      },
+      "max_score": null,
+      "hits": [
+       {
+        "_index": "ss",
+        "_id": "54",
+        "_score": null,
+        "_source": {
+         "title": "cat fox cat jumps jumps fox",
+         "tag": "b",
+         "n": 4,
+         "seq": 54,
+         "x": 51.74
+        },
+        "sort": [
+         19
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "50",
+        "_score": null,
+        "_source": {
+         "title": "quick",
+         "tag": "h",
+         "n": 0,
+         "seq": 50,
+         "x": 64.35
+        },
+        "sort": [
+         20
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "57",
+        "_score": null,
+        "_source": {
+         "title": "lazy red quick jumps",
+         "tag": "d",
+         "n": 2,
+         "seq": 57,
+         "x": 8.95
+        },
+        "sort": [
+         20
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "51",
+        "_score": null,
+        "_source": {
+         "title": "quick lazy quick",
+         "tag": "i",
+         "n": 1,
+         "seq": 51,
+         "x": 21.96
+        },
+        "sort": [
+         21
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "58",
+        "_score": null,
+        "_source": {
+         "title": "quick",
+         "tag": "b",
+         "n": 3,
+         "seq": 58,
+         "x": 7.24
+        },
+        "sort": [
+         21
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "53",
+        "_score": null,
+        "_source": {
+         "title": "brown quick red red cat red",
+         "tag": "a",
+         "n": 3,
+         "seq": 53,
+         "x": 31.85
+        },
+        "sort": [
+         22
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "55",
+        "_score": null,
+        "_source": {
+         "title": "dog dog brown",
+         "tag": "i",
+         "n": 0,
+         "seq": 55,
+         "x": 10.48
+        },
+        "sort": [
+         23
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 6,
+      "successful": 6,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 72,
+       "relation": "eq"
+      },
+      "max_score": null,
+      "hits": []
+     }
+    }
+   ]
+  },
+  {
+   "name": "pit_sorted",
+   "kind": "pit",
+   "path": "/ss/_pit?keep_alive=1m",
+   "body": {
+    "size": 12,
+    "sort": [
+     {
+      "n": "asc"
+     }
+    ]
+   },
+   "responses": [
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 3,
+      "successful": 3,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 60,
+       "relation": "eq"
+      },
+      "max_score": null,
+      "hits": [
+       {
+        "_index": "ss",
+        "_id": "5",
+        "_score": null,
+        "_source": {
+         "title": "quick lazy red quick dog",
+         "tag": "c",
+         "n": 0,
+         "seq": 5,
+         "x": 56.03
+        },
+        "sort": [
+         0,
+         2
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "20",
+        "_score": null,
+        "_source": {
+         "title": "red fox brown dog",
+         "tag": "j",
+         "n": 0,
+         "seq": 20,
+         "x": 44.06
+        },
+        "sort": [
+         0,
+         8
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "40",
+        "_score": null,
+        "_source": {
+         "title": "cat lazy",
+         "tag": "c",
+         "n": 0,
+         "seq": 40,
+         "x": 83.42
+        },
+        "sort": [
+         0,
+         15
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "45",
+        "_score": null,
+        "_source": {
+         "title": "jumps",
+         "tag": "c",
+         "n": 0,
+         "seq": 45,
+         "x": 76.0
+        },
+        "sort": [
+         0,
+         18
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "50",
+        "_score": null,
+        "_source": {
+         "title": "quick",
+         "tag": "h",
+         "n": 0,
+         "seq": 50,
+         "x": 64.35
+        },
+        "sort": [
+         0,
+         20
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "55",
+        "_score": null,
+        "_source": {
+         "title": "dog dog brown",
+         "tag": "i",
+         "n": 0,
+         "seq": 55,
+         "x": 10.48
+        },
+        "sort": [
+         0,
+         23
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "15",
+        "_score": null,
+        "_source": {
+         "title": "jumps dog quick jumps",
+         "tag": "b",
+         "n": 0,
+         "seq": 15,
+         "x": 27.78
+        },
+        "sort": [
+         0,
+         4294967299
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "30",
+        "_score": null,
+        "_source": {
+         "title": "jumps cat fox fox lazy",
+         "tag": "b",
+         "n": 0,
+         "seq": 30,
+         "x": 19.36
+        },
+        "sort": [
+         0,
+         4294967304
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "35",
+        "_score": null,
+        "_source": {
+         "title": "red",
+         "tag": "b",
+         "n": 0,
+         "seq": 35,
+         "x": 74.34
+        },
+        "sort": [
+         0,
+         4294967305
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "60",
+        "_score": null,
+        "_source": {
+         "title": "dog lazy",
+         "tag": "f",
+         "n": 0,
+         "seq": 60,
+         "x": 45.38
+        },
+        "sort": [
+         0,
+         4294967309
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "10",
+        "_score": null,
+        "_source": {
+         "title": "quick jumps red",
+         "tag": "a",
+         "n": 0,
+         "seq": 10,
+         "x": 66.82
+        },
+        "sort": [
+         0,
+         8589934595
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "25",
+        "_score": null,
+        "_source": {
+         "title": "lazy dog quick dog",
+         "tag": "e",
+         "n": 0,
+         "seq": 25,
+         "x": 74.04
+        },
+        "sort": [
+         0,
+         8589934599
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 3,
+      "successful": 3,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 60,
+       "relation": "eq"
+      },
+      "max_score": null,
+      "hits": [
+       {
+        "_index": "ss",
+        "_id": "6",
+        "_score": null,
+        "_source": {
+         "title": "quick dog brown cat dog dog",
+         "tag": "c",
+         "n": 1,
+         "seq": 6,
+         "x": 61.9
+        },
+        "sort": [
+         1,
+         3
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "11",
+        "_score": null,
+        "_source": {
+         "title": "cat cat cat jumps jumps",
+         "tag": "a",
+         "n": 1,
+         "seq": 11,
+         "x": 9.36
+        },
+        "sort": [
+         1,
+         5
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "21",
+        "_score": null,
+        "_source": {
+         "title": "cat",
+         "tag": "c",
+         "n": 1,
+         "seq": 21,
+         "x": 10.24
+        },
+        "sort": [
+         1,
+         9
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "31",
+        "_score": null,
+        "_source": {
+         "title": "cat jumps cat cat dog",
+         "tag": "a",
+         "n": 1,
+         "seq": 31,
+         "x": 22.68
+        },
+        "sort": [
+         1,
+         12
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "36",
+        "_score": null,
+        "_source": {
+         "title": "quick",
+         "tag": "a",
+         "n": 1,
+         "seq": 36,
+         "x": 12.7
+        },
+        "sort": [
+         1,
+         13
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "51",
+        "_score": null,
+        "_source": {
+         "title": "quick lazy quick",
+         "tag": "i",
+         "n": 1,
+         "seq": 51,
+         "x": 21.96
+        },
+        "sort": [
+         1,
+         21
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "16",
+        "_score": null,
+        "_source": {
+         "title": "red lazy",
+         "tag": "d",
+         "n": 1,
+         "seq": 16,
+         "x": 98.65
+        },
+        "sort": [
+         1,
+         4294967300
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "26",
+        "_score": null,
+        "_source": {
+         "title": "quick fox brown cat",
+         "tag": "a",
+         "n": 1,
+         "seq": 26,
+         "x": 54.32
+        },
+        "sort": [
+         1,
+         4294967302
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "56",
+        "_score": null,
+        "_source": {
+         "title": "lazy fox quick",
+         "tag": "a",
+         "n": 1,
+         "seq": 56,
+         "x": 12.96
+        },
+        "sort": [
+         1,
+         4294967307
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "1",
+        "_score": null,
+        "_source": {
+         "title": "quick red fox",
+         "tag": "a",
+         "n": 1,
+         "seq": 1,
+         "x": 53.59
+        },
+        "sort": [
+         1,
+         8589934592
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "41",
+        "_score": null,
+        "_source": {
+         "title": "cat",
+         "tag": "g",
+         "n": 1,
+         "seq": 41,
+         "x": 66.25
+        },
+        "sort": [
+         1,
+         8589934606
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "46",
+        "_score": null,
+        "_source": {
+         "title": "jumps",
+         "tag": "b",
+         "n": 1,
+         "seq": 46,
+         "x": 97.34
+        },
+        "sort": [
+         1,
+         8589934607
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 3,
+      "successful": 3,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 60,
+       "relation": "eq"
+      },
+      "max_score": null,
+      "hits": [
+       {
+        "_index": "ss",
+        "_id": "2",
+        "_score": null,
+        "_source": {
+         "title": "fox brown fox",
+         "tag": "a",
+         "n": 2,
+         "seq": 2,
+         "x": 41.82
+        },
+        "sort": [
+         2,
+         0
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "7",
+        "_score": null,
+        "_source": {
+         "title": "red cat jumps jumps",
+         "tag": "b",
+         "n": 2,
+         "seq": 7,
+         "x": 24.84
+        },
+        "sort": [
+         2,
+         4
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "42",
+        "_score": null,
+        "_source": {
+         "title": "red quick quick fox jumps",
+         "tag": "e",
+         "n": 2,
+         "seq": 42,
+         "x": 60.86
+        },
+        "sort": [
+         2,
+         16
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "12",
+        "_score": null,
+        "_source": {
+         "title": "jumps dog fox",
+         "tag": "d",
+         "n": 2,
+         "seq": 12,
+         "x": 30.96
+        },
+        "sort": [
+         2,
+         4294967297
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "17",
+        "_score": null,
+        "_source": {
+         "title": "red brown quick dog quick quick",
+         "tag": "a",
+         "n": 2,
+         "seq": 17,
+         "x": 23.33
+        },
+        "sort": [
+         2,
+         4294967301
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "22",
+        "_score": null,
+        "_source": {
+         "title": "quick dog cat fox dog",
+         "tag": "f",
+         "n": 2,
+         "seq": 22,
+         "x": 61.41
+        },
+        "sort": [
+         2,
+         8589934597
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "27",
+        "_score": null,
+        "_source": {
+         "title": "lazy",
+         "tag": "i",
+         "n": 2,
+         "seq": 27,
+         "x": 86.33
+        },
+        "sort": [
+         2,
+         8589934600
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "32",
+        "_score": null,
+        "_source": {
+         "title": "cat brown",
+         "tag": "b",
+         "n": 2,
+         "seq": 32,
+         "x": 98.52
+        },
+        "sort": [
+         2,
+         8589934601
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "37",
+        "_score": null,
+        "_source": {
+         "title": "jumps quick",
+         "tag": "c",
+         "n": 2,
+         "seq": 37,
+         "x": 59.59
+        },
+        "sort": [
+         2,
+         8589934604
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "47",
+        "_score": null,
+        "_source": {
+         "title": "brown lazy jumps jumps brown",
+         "tag": "d",
+         "n": 2,
+         "seq": 47,
+         "x": 87.65
+        },
+        "sort": [
+         2,
+         8589934608
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "52",
+        "_score": null,
+        "_source": {
+         "title": "red",
+         "tag": "g",
+         "n": 2,
+         "seq": 52,
+         "x": 16.28
+        },
+        "sort": [
+         2,
+         8589934610
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "57",
+        "_score": null,
+        "_source": {
+         "title": "lazy red quick jumps",
+         "tag": "d",
+         "n": 2,
+         "seq": 57,
+         "x": 8.95
+        },
+        "sort": [
+         2,
+         8589934612
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 3,
+      "successful": 3,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 60,
+       "relation": "eq"
+      },
+      "max_score": null,
+      "hits": [
+       {
+        "_index": "ss",
+        "_id": "13",
+        "_score": null,
+        "_source": {
+         "title": "jumps lazy red cat fox",
+         "tag": "h",
+         "n": 3,
+         "seq": 13,
+         "x": 35.55
+        },
+        "sort": [
+         3,
+         6
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "18",
+        "_score": null,
+        "_source": {
+         "title": "quick lazy lazy fox",
+         "tag": "a",
+         "n": 3,
+         "seq": 18,
+         "x": 53.46
+        },
+        "sort": [
+         3,
+         7
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "28",
+        "_score": null,
+        "_source": {
+         "title": "lazy cat quick cat brown cat",
+         "tag": "c",
+         "n": 3,
+         "seq": 28,
+         "x": 61.32
+        },
+        "sort": [
+         3,
+         11
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "38",
+        "_score": null,
+        "_source": {
+         "title": "cat quick quick fox",
+         "tag": "a",
+         "n": 3,
+         "seq": 38,
+         "x": 97.09
+        },
+        "sort": [
+         3,
+         14
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "48",
+        "_score": null,
+        "_source": {
+         "title": "brown jumps quick",
+         "tag": "b",
+         "n": 3,
+         "seq": 48,
+         "x": 39.24
+        },
+        "sort": [
+         3,
+         19
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "53",
+        "_score": null,
+        "_source": {
+         "title": "brown quick red red cat red",
+         "tag": "a",
+         "n": 3,
+         "seq": 53,
+         "x": 31.85
+        },
+        "sort": [
+         3,
+         22
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "8",
+        "_score": null,
+        "_source": {
+         "title": "brown dog",
+         "tag": "c",
+         "n": 3,
+         "seq": 8,
+         "x": 52.52
+        },
+        "sort": [
+         3,
+         4294967296
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "43",
+        "_score": null,
+        "_source": {
+         "title": "quick quick",
+         "tag": "b",
+         "n": 3,
+         "seq": 43,
+         "x": 72.52
+        },
+        "sort": [
+         3,
+         4294967306
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "3",
+        "_score": null,
+        "_source": {
+         "title": "dog red",
+         "tag": "a",
+         "n": 3,
+         "seq": 3,
+         "x": 56.55
+        },
+        "sort": [
+         3,
+         8589934593
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "23",
+        "_score": null,
+        "_source": {
+         "title": "lazy cat",
+         "tag": "c",
+         "n": 3,
+         "seq": 23,
+         "x": 47.42
+        },
+        "sort": [
+         3,
+         8589934598
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "33",
+        "_score": null,
+        "_source": {
+         "title": "fox jumps cat dog dog",
+         "tag": "g",
+         "n": 3,
+         "seq": 33,
+         "x": 78.23
+        },
+        "sort": [
+         3,
+         8589934602
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "58",
+        "_score": null,
+        "_source": {
+         "title": "quick",
+         "tag": "b",
+         "n": 3,
+         "seq": 58,
+         "x": 7.24
+        },
+        "sort": [
+         3,
+         8589934613
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 3,
+      "successful": 3,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 60,
+       "relation": "eq"
+      },
+      "max_score": null,
+      "hits": [
+       {
+        "_index": "ss",
+        "_id": "4",
+        "_score": null,
+        "_source": {
+         "title": "fox red",
+         "tag": "a",
+         "n": 4,
+         "seq": 4,
+         "x": 22.11
+        },
+        "sort": [
+         4,
+         1
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "24",
+        "_score": null,
+        "_source": {
+         "title": "jumps",
+         "tag": "j",
+         "n": 4,
+         "seq": 24,
+         "x": 46.6
+        },
+        "sort": [
+         4,
+         10
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "44",
+        "_score": null,
+        "_source": {
+         "title": "fox cat jumps dog fox",
+         "tag": "a",
+         "n": 4,
+         "seq": 44,
+         "x": 27.69
+        },
+        "sort": [
+         4,
+         17
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "14",
+        "_score": null,
+        "_source": {
+         "title": "dog jumps fox brown lazy",
+         "tag": "a",
+         "n": 4,
+         "seq": 14,
+         "x": 24.76
+        },
+        "sort": [
+         4,
+         4294967298
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "29",
+        "_score": null,
+        "_source": {
+         "title": "brown red",
+         "tag": "d",
+         "n": 4,
+         "seq": 29,
+         "x": 22.67
+        },
+        "sort": [
+         4,
+         4294967303
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "59",
+        "_score": null,
+        "_source": {
+         "title": "dog",
+         "tag": "e",
+         "n": 4,
+         "seq": 59,
+         "x": 8.37
+        },
+        "sort": [
+         4,
+         4294967308
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "9",
+        "_score": null,
+        "_source": {
+         "title": "jumps lazy dog",
+         "tag": "a",
+         "n": 4,
+         "seq": 9,
+         "x": 41.81
+        },
+        "sort": [
+         4,
+         8589934594
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "19",
+        "_score": null,
+        "_source": {
+         "title": "cat quick fox jumps red",
+         "tag": "b",
+         "n": 4,
+         "seq": 19,
+         "x": 39.41
+        },
+        "sort": [
+         4,
+         8589934596
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "34",
+        "_score": null,
+        "_source": {
+         "title": "jumps quick",
+         "tag": "b",
+         "n": 4,
+         "seq": 34,
+         "x": 63.58
+        },
+        "sort": [
+         4,
+         8589934603
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "39",
+        "_score": null,
+        "_source": {
+         "title": "dog quick red brown brown fox",
+         "tag": "a",
+         "n": 4,
+         "seq": 39,
+         "x": 29.3
+        },
+        "sort": [
+         4,
+         8589934605
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "49",
+        "_score": null,
+        "_source": {
+         "title": "dog brown red",
+         "tag": "a",
+         "n": 4,
+         "seq": 49,
+         "x": 66.95
+        },
+        "sort": [
+         4,
+         8589934609
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "54",
+        "_score": null,
+        "_source": {
+         "title": "cat fox cat jumps jumps fox",
+         "tag": "b",
+         "n": 4,
+         "seq": 54,
+         "x": 51.74
+        },
+        "sort": [
+         4,
+         8589934611
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 3,
+      "successful": 3,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 60,
+       "relation": "eq"
+      },
+      "max_score": null,
+      "hits": []
+     }
+    }
+   ]
+  },
+  {
+   "name": "pit_score",
+   "kind": "pit",
+   "path": "/ss/_pit?keep_alive=1m",
+   "body": {
+    "size": 8,
+    "query": {
+     "match": {
+      "title": "fox"
+     }
+    },
+    "sort": [
+     "_score"
+    ]
+   },
+   "responses": [
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 3,
+      "successful": 3,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 19,
+       "relation": "eq"
+      },
+      "max_score": null,
+      "hits": [
+       {
+        "_index": "ss",
+        "_id": "2",
+        "_score": 1.5500376,
+        "_source": {
+         "title": "fox brown fox",
+         "tag": "a",
+         "n": 2,
+         "seq": 2,
+         "x": 41.82
+        },
+        "sort": [
+         1.5500376,
+         0
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "54",
+        "_score": 1.3651023,
+        "_source": {
+         "title": "cat fox cat jumps jumps fox",
+         "tag": "b",
+         "n": 4,
+         "seq": 54,
+         "x": 51.74
+        },
+        "sort": [
+         1.3651023,
+         8589934611
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "44",
+        "_score": 1.3294063,
+        "_source": {
+         "title": "fox cat jumps dog fox",
+         "tag": "a",
+         "n": 4,
+         "seq": 44,
+         "x": 27.69
+        },
+        "sort": [
+         1.3294063,
+         17
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "4",
+        "_score": 1.3125399,
+        "_source": {
+         "title": "fox red",
+         "tag": "a",
+         "n": 4,
+         "seq": 4,
+         "x": 22.11
+        },
+        "sort": [
+         1.3125399,
+         1
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "1",
+        "_score": 1.2714553,
+        "_source": {
+         "title": "quick red fox",
+         "tag": "a",
+         "n": 1,
+         "seq": 1,
+         "x": 53.59
+        },
+        "sort": [
+         1.2714553,
+         8589934592
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "30",
+        "_score": 1.1617182,
+        "_source": {
+         "title": "jumps cat fox fox lazy",
+         "tag": "b",
+         "n": 0,
+         "seq": 30,
+         "x": 19.36
+        },
+        "sort": [
+         1.1617182,
+         4294967304
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "18",
+        "_score": 1.0245678,
+        "_source": {
+         "title": "quick lazy lazy fox",
+         "tag": "a",
+         "n": 3,
+         "seq": 18,
+         "x": 53.46
+        },
+        "sort": [
+         1.0245678,
+         7
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "20",
+        "_score": 1.0245678,
+        "_source": {
+         "title": "red fox brown dog",
+         "tag": "j",
+         "n": 0,
+         "seq": 20,
+         "x": 44.06
+        },
+        "sort": [
+         1.0245678,
+         8
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 3,
+      "successful": 3,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 19,
+       "relation": "eq"
+      },
+      "max_score": null,
+      "hits": [
+       {
+        "_index": "ss",
+        "_id": "38",
+        "_score": 1.0245678,
+        "_source": {
+         "title": "cat quick quick fox",
+         "tag": "a",
+         "n": 3,
+         "seq": 38,
+         "x": 97.09
+        },
+        "sort": [
+         1.0245678,
+         14
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "12",
+        "_score": 1.0033021,
+        "_source": {
+         "title": "jumps dog fox",
+         "tag": "d",
+         "n": 2,
+         "seq": 12,
+         "x": 30.96
+        },
+        "sort": [
+         1.0033021,
+         4294967297
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "56",
+        "_score": 1.0033021,
+        "_source": {
+         "title": "lazy fox quick",
+         "tag": "a",
+         "n": 1,
+         "seq": 56,
+         "x": 12.96
+        },
+        "sort": [
+         1.0033021,
+         4294967307
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "19",
+        "_score": 1.0009038,
+        "_source": {
+         "title": "cat quick fox jumps red",
+         "tag": "b",
+         "n": 4,
+         "seq": 19,
+         "x": 39.41
+        },
+        "sort": [
+         1.0009038,
+         8589934596
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "22",
+        "_score": 1.0009038,
+        "_source": {
+         "title": "quick dog cat fox dog",
+         "tag": "f",
+         "n": 2,
+         "seq": 22,
+         "x": 61.41
+        },
+        "sort": [
+         1.0009038,
+         8589934597
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "33",
+        "_score": 1.0009038,
+        "_source": {
+         "title": "fox jumps cat dog dog",
+         "tag": "g",
+         "n": 3,
+         "seq": 33,
+         "x": 78.23
+        },
+        "sort": [
+         1.0009038,
+         8589934602
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "13",
+        "_score": 0.92328334,
+        "_source": {
+         "title": "jumps lazy red cat fox",
+         "tag": "h",
+         "n": 3,
+         "seq": 13,
+         "x": 35.55
+        },
+        "sort": [
+         0.92328334,
+         6
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "42",
+        "_score": 0.92328334,
+        "_source": {
+         "title": "red quick quick fox jumps",
+         "tag": "e",
+         "n": 2,
+         "seq": 42,
+         "x": 60.86
+        },
+        "sort": [
+         0.92328334,
+         16
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 3,
+      "successful": 3,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 19,
+       "relation": "eq"
+      },
+      "max_score": null,
+      "hits": [
+       {
+        "_index": "ss",
+        "_id": "39",
+        "_score": 0.90465367,
+        "_source": {
+         "title": "dog quick red brown brown fox",
+         "tag": "a",
+         "n": 4,
+         "seq": 39,
+         "x": 29.3
+        },
+        "sort": [
+         0.90465367,
+         8589934605
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "26",
+        "_score": 0.88290596,
+        "_source": {
+         "title": "quick fox brown cat",
+         "tag": "a",
+         "n": 1,
+         "seq": 26,
+         "x": 54.32
+        },
+        "sort": [
+         0.88290596,
+         4294967302
+        ]
+       },
+       {
+        "_index": "ss",
+        "_id": "14",
+        "_score": 0.78830886,
+        "_source": {
+         "title": "dog jumps fox brown lazy",
+         "tag": "a",
+         "n": 4,
+         "seq": 14,
+         "x": 24.76
+        },
+        "sort": [
+         0.78830886,
+         4294967298
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "timed_out": false,
+     "_shards": {
+      "total": 3,
+      "successful": 3,
+      "skipped": 0,
+      "failed": 0
+     },
+     "hits": {
+      "total": {
+       "value": 19,
+       "relation": "eq"
+      },
+      "max_score": null,
+      "hits": []
+     }
+    }
+   ]
+  }
+ ]
+}

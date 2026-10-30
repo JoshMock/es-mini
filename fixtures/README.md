@@ -27,3 +27,8 @@ compares columns and values, or the error type for invalid queries; known differ
 `generate_shard_routing.sh` boots a fresh Elasticsearch, creates indices with several shard
 counts, indexes documents by `_id` and by custom routing, and records the shard each landed on
 in `shard_routing.json`; `es-index/tests/shard_routing.rs` checks `es_index::routing` against it.
+
+`generate_shard_search.sh` boots a fresh Elasticsearch, creates two 3-shard indices, and records
+in `shard_search.json` the setup requests and the responses to searches across shards (hit
+order and tie-breaks, scoring, from/size, search_after, aggregation reduction, and every page of
+a scroll and a point in time); `es-mini/tests/shard_parity.rs` replays and compares them.
