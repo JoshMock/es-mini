@@ -201,8 +201,8 @@ enum Step<'a> {
 
 /// The checks Elasticsearch makes for `method` on the path `segs`, by the actions it names
 /// them.
-// ponytail: msearch, ES|QL and POST _aliases are checked by action only, not per index they
-// name yet (bulk and mget items are, by their handlers)
+// ponytail: ES|QL and POST _aliases are checked by action only, not per index they name yet
+// (bulk, mget and msearch items are, by their handlers)
 fn steps<'a>(method: &Method, segs: &[&'a str], params: &HashMap<String, String>) -> Vec<Step<'a>> {
     use Step::*;
     let at = |action, i| Indices {
@@ -390,18 +390,9 @@ impl Key<'_> {
                         Place::Segment(i) => segs[i],
                         Place::Prefix | Place::Suffix => "_all",
                     };
-                    let names = self.indices(security, action, expr, expand, params)?;
+                    let names = self.indices(&security.store, action, expr, expand, params)?;
                     if expand {
-                        // An empty expansion matches nothing, as Elasticsearch's no-index marker.
-                        let names = if names.is_empty() {
-                            "*,-*".to_owned()
-                        } else {
-                            names
-                                .iter()
-                                .map(|n| encoded(n))
-                                .collect::<Vec<_>>()
-                                .join(",")
-                        };
+                        let names = expression(&names, encoded);
                         let mut segs: Vec<&str> = segs.clone();
                         match at {
                             Place::Segment(i) => segs[i] = &names,
@@ -440,7 +431,7 @@ impl Key<'_> {
     /// `expand`) to those only; a literal name it may not use refuses the request.
     fn indices(
         &self,
-        security: &Security,
+        store: &Store,
         action: &'static str,
         expr: &str,
         expand: bool,
@@ -461,7 +452,7 @@ impl Key<'_> {
             _ => IndicesOptions::READ,
         }
         .with_params(params);
-        let shared = security.store.read();
+        let shared = store.read();
         let (mut out, mut denied) = (Vec::<String>::new(), vec![]);
         for (n, part) in parts.iter().enumerate() {
             if let (true, true, Some(excluded)) = (expand, n > 0, part.strip_prefix('-')) {
@@ -610,6 +601,32 @@ pub(crate) fn mget_shard(authn: Option<&Authn>, names: &[&str]) -> Result<(), Ap
     match denied.is_empty() {
         true => Ok(()),
         false => Err(key.denied(action, &java_order(&denied))),
+    }
+}
+
+/// Authorizes one search of an msearch on the index expression `expr` for whoever `authn` is,
+/// returning `expr` with its wildcards narrowed to the names the key may read; Elasticsearch
+/// checks each search alone.
+pub(crate) fn msearch_item(
+    authn: Option<&Authn>,
+    store: &Store,
+    expr: String,
+    params: &HashMap<String, String>,
+) -> Result<String, AppError> {
+    let Some(Authn::ApiKey { id, roles, .. }) = authn else {
+        return Ok(expr);
+    };
+    let action = "indices:data/read/search";
+    let names = Key { id, roles }.indices(store, action, &expr, true, params)?;
+    Ok(expression(&names, |n| n.to_owned()))
+}
+
+/// `names` as one index expression, each through `name`; none is Elasticsearch's no-index
+/// marker, which matches nothing.
+fn expression(names: &[String], name: impl Fn(&str) -> String) -> String {
+    match names.is_empty() {
+        true => "*,-*".to_owned(),
+        false => names.iter().map(|n| name(n)).collect::<Vec<_>>().join(","),
     }
 }
 

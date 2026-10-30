@@ -1,4 +1,11 @@
-use crate::{AppState, error::AppError, indices::parse_body, params, scroll::Contexts};
+use crate::{
+    AppState,
+    error::AppError,
+    indices::parse_body,
+    params,
+    scroll::Contexts,
+    security::{Authn, msearch_item},
+};
 use axum::{
     Extension, Json,
     body::Bytes,
@@ -428,20 +435,22 @@ pub async fn msearch(
     state: State<AppState>,
     contexts: Extension<Contexts>,
     path: Option<Path<String>>,
+    authn: Option<Extension<Authn>>,
     uri: Uri,
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
-    msearch_impl(state, contexts, path, uri, body, false).await
+    msearch_impl(state, contexts, path, authn, uri, body, false).await
 }
 
 pub async fn msearch_template(
     state: State<AppState>,
     contexts: Extension<Contexts>,
     path: Option<Path<String>>,
+    authn: Option<Extension<Authn>>,
     uri: Uri,
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
-    msearch_impl(state, contexts, path, uri, body, true).await
+    msearch_impl(state, contexts, path, authn, uri, body, true).await
 }
 
 /// `_msearch`: NDJSON header/body pairs, each run as a `_search`; a failing search fails only its own entry.
@@ -450,6 +459,7 @@ async fn msearch_impl(
     State(state): State<AppState>,
     Extension(contexts): Extension<Contexts>,
     path: Option<Path<String>>,
+    authn: Option<Extension<Authn>>,
     uri: Uri,
     body: Bytes,
     template: bool,
@@ -483,6 +493,7 @@ async fn msearch_impl(
                     _ => drop(params.insert(k.clone(), v)),
                 }
             }
+            let name = msearch_item(authn.as_deref(), &state, name, &params)?;
             let mut search_body = Bytes::copy_from_slice(search_body.as_bytes());
             if template {
                 search_body = crate::template::search_body(&search_body)?;

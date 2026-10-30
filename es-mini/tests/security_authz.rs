@@ -607,3 +607,36 @@ async fn mget_items_are_authorized_by_index() {
     let out = ok(&app, &kal, "POST", "/b1/_mget", Some(json!({"ids": ["1"]}))).await;
     assert_eq!(out["docs"][0]["error"], on("b1", "b1")["error"]);
 }
+
+/// Each msearch search is authorized alone as `indices:data/read/search`: a name the key may
+/// not read fails its search with the 403, unmatched wildcards find nothing (recorded from
+/// Elasticsearch 9.5.5).
+#[tokio::test]
+async fn msearch_searches_are_authorized_one_by_one() {
+    let app = app().await;
+    let roles = json!({"r": {"indices": [
+        {"names": ["al"], "privileges": ["read"]},
+        {"names": ["c1"], "privileges": ["read"]},
+    ]}});
+    let (kal, id) = key(&app, ELASTIC, roles).await;
+    let body: String = ["al", "ca", "c1,b1", "nope", "x*", "*"]
+        .iter()
+        .map(|i| format!("{{\"index\":\"{i}\"}}\n{{}}\n"))
+        .collect();
+    let (status, out) = ndjson(&app, &kal, "/_msearch", &body).await;
+    assert_eq!(status, 200, "{out}");
+    let r = &out["responses"];
+    assert_eq!(r[0]["status"], 200, "{out}");
+    assert_eq!(r[0]["hits"]["hits"][0]["_index"], "b1", "{out}");
+    let search = |names| denied(&id, "indices:data/read/search", names, "read,all");
+    assert_eq!(r[1], search("ca"));
+    assert_eq!(r[2], search("b1"));
+    assert_eq!(r[3], search("nope"));
+    assert_eq!(r[4]["status"], 200, "{out}");
+    assert_eq!(r[4]["hits"]["total"]["value"], 0, "{out}");
+    // A wildcard expands to what the key may read: al (b1) and c1.
+    assert_eq!(r[5]["hits"]["total"]["value"], 2, "{out}");
+    let (status, out) = ndjson(&app, &kal, "/al/_msearch", "{}\n{}\n").await;
+    assert_eq!(status, 200, "{out}");
+    assert_eq!(out["responses"][0]["hits"]["total"]["value"], 1, "{out}");
+}
