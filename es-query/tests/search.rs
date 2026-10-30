@@ -1633,3 +1633,13 @@ fn search_after_keeps_hits_sorted_after_its_values() {
     let ids: Vec<_> = r.hits.iter().map(|h| h.id).collect();
     assert_eq!((ids, r.total), (vec!["4", "2"], 4));
 }
+
+#[test]
+fn doc_sort_values_are_doc_ids() {
+    let idx = index();
+    let req = SearchRequest::parse(&json!({"sort": [{"_doc": "desc"}, "_shard_doc"]})).unwrap();
+    let r = search(&idx, &req);
+    let hits: Vec<_> = r.hits.iter().map(|h| (h.id, h.sort.clone())).collect();
+    let want = [("4", 3), ("3", 2), ("2", 1), ("1", 0)];
+    assert_eq!(hits, want.map(|(id, d)| (id, vec![json!(d), json!(d)])));
+}

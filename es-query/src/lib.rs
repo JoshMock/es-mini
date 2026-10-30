@@ -34,7 +34,7 @@ use es_index::{Document, FieldMapping, Index, analysis::Analyzer, disk::DiskPos}
 use serde_json::{Map, Value};
 use std::{
     borrow::Cow,
-    cell::RefCell,
+    cell::{OnceCell, RefCell},
     cmp::Ordering,
     collections::{BTreeSet, HashMap, HashSet},
 };
@@ -220,6 +220,10 @@ struct Searcher<'a> {
     query: Query,
     /// Runtime fields that emit the document's `_source` as a string.
     runtime_source: Vec<String>,
+    /// The shard's position among the searched targets, as `_shard_doc` encodes it.
+    shard_index: usize,
+    /// The shard's [`Index::seq_nos`], read for the first `_doc` or `_shard_doc` sort value.
+    seq_nos: OnceCell<Vec<u64>>,
 }
 
 const K1: f64 = 1.2;
@@ -247,6 +251,8 @@ impl<'a> Searcher<'a> {
             named: named_queries(q),
             query: q.clone(),
             runtime_source: Vec::new(),
+            shard_index: 0,
+            seq_nos: OnceCell::new(),
         }
     }
 
@@ -1255,6 +1261,15 @@ impl<'a> Searcher<'a> {
         sort.iter()
             .map(|f| match f.field.as_str() {
                 "_score" => Value::from(score as f32),
+                "_doc" | "_shard_doc" => {
+                    let ids = self.seq_nos.get_or_init(|| self.index.seq_nos());
+                    let doc_id = ids.partition_point(|&s| s < doc.seq_no) as u64;
+                    match f.field.as_str() {
+                        "_doc" => doc_id.into(),
+                        // ShardDocSortField.encodeShardAndDoc
+                        _ => ((self.shard_index as u64) << 32 | doc_id).into(),
+                    }
+                }
                 field => {
                     let vals = values(&doc.source, self.kind(field).1);
                     // dates sort by epoch millis, date_nanos by epoch nanos
@@ -1494,6 +1509,7 @@ pub fn search_many<'a>(
         };
         let mut s = Searcher::unscored(index, &query);
         s.runtime_source = req.runtime_source.clone();
+        s.shard_index = pos;
         if by_score || !req.aggs.is_empty() {
             s.gather(&query);
         }
