@@ -11,6 +11,7 @@ mod nodes;
 mod params;
 mod scroll;
 mod search;
+mod security;
 mod store;
 mod template;
 
@@ -157,25 +158,47 @@ pub fn app() -> Router {
 
 /// The full HTTP API over `indices`, e.g. ones opened with [`es_index::disk::open`].
 pub fn app_with(indices: Indices) -> Router {
-    with_es_405(router(Arc::new(Store::new(indices))))
+    with_es_405(router(Arc::new(Store::new(indices)), None))
+}
+
+/// The full HTTP API over a fresh, empty in-memory store, configured by node `settings` (by
+/// name, as in `elasticsearch.yml` and its keystore): `xpack.security.enabled` and
+/// `bootstrap.password`.
+pub fn app_with_settings(settings: &HashMap<String, String>) -> Result<Router, String> {
+    let security = security::from_settings(settings)?;
+    let state = Arc::new(Store::new(Indices::new()));
+    let app = with_es_405(router(state, security.clone()));
+    Ok(secured(app, security))
+}
+
+/// `app` authenticating every request when `security` is on.
+fn secured(app: Router, security: Option<Arc<security::Security>>) -> Router {
+    match security {
+        Some(s) => app.layer(axum::middleware::from_fn_with_state(
+            s,
+            security::authenticate,
+        )),
+        None => app,
+    }
 }
 
 /// The full HTTP API over the data directory `dir` (created if missing): its indices are loaded
 /// now (replaying their translogs), and every successful write request is made durable before
 /// it is answered (see [`es_index::disk::persist`]).
 pub fn app_persisted(dir: &std::path::Path) -> Result<Router, String> {
-    persisted(dir).map(|(app, _)| app)
+    persisted(dir, &HashMap::new()).map(|(app, _)| app)
 }
 
-/// Serves [`app_persisted`] over `dir` on `listener` until `shutdown` completes, lets in-flight
-/// requests finish, then flushes: commits every index's segments and empties its translog, so
+/// Serves [`app_persisted`] over `dir`, configured by `settings` as [`app_with_settings`] is, on
+/// `listener` until `shutdown` completes, lets in-flight requests finish, then flushes: commits every index's segments and empties its translog, so
 /// Elasticsearch opens the directory without replaying anything.
 pub async fn serve_persisted(
     listener: tokio::net::TcpListener,
     dir: &std::path::Path,
+    settings: &HashMap<String, String>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), String> {
-    let (app, state) = persisted(dir)?;
+    let (app, state) = persisted(dir, settings)?;
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
         .await
@@ -183,7 +206,11 @@ pub async fn serve_persisted(
     es_index::disk::save(dir, &state.write()).map_err(|e| e.0)
 }
 
-fn persisted(dir: &std::path::Path) -> Result<(Router, AppState), String> {
+fn persisted(
+    dir: &std::path::Path,
+    settings: &HashMap<String, String>,
+) -> Result<(Router, AppState), String> {
+    let security = security::from_settings(settings)?;
     es_index::disk::recover(dir).map_err(|e| e.0)?;
     let indices = if dir.join("_state").is_dir() {
         es_index::disk::open(dir).map_err(|e| e.0)?
@@ -193,7 +220,8 @@ fn persisted(dir: &std::path::Path) -> Result<(Router, AppState), String> {
     let state = Arc::new(Store::new(indices));
     spawn_syncer(dir.to_owned(), Arc::downgrade(&state));
     let (dir, saved, group) = (dir.to_owned(), state.clone(), Arc::new(Group::default()));
-    let app = with_es_405(router(state.clone()).layer(axum::middleware::from_fn(
+    let routes = router(state.clone(), security.clone());
+    let app = with_es_405(routes.layer(axum::middleware::from_fn(
         move |req: axum::extract::Request, next: axum::middleware::Next| {
             let (dir, state, group) = (dir.clone(), saved.clone(), group.clone());
             async move {
@@ -240,7 +268,7 @@ fn persisted(dir: &std::path::Path) -> Result<(Router, AppState), String> {
             }
         },
     )));
-    Ok((app, state))
+    Ok((secured(app, security), state))
 }
 
 /// Group commit: one write request at a time persists (a round), covering every write applied
@@ -334,8 +362,12 @@ async fn filter_response(
     (parts, out).into_response()
 }
 
-fn router(state: AppState) -> Router {
-    Router::new()
+fn router(state: AppState, security: Option<Arc<security::Security>>) -> Router {
+    let routes = match security {
+        Some(s) => security::routes(s),
+        None => Router::new(),
+    };
+    routes
         .route("/", get(info))
         .route("/_cluster/health", get(health))
         .route("/_cluster/health/{index}", get(health))

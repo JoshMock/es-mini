@@ -522,7 +522,7 @@ fn searches_do_not_wait_for_writes_to_other_indices() {
     let state = std::sync::Arc::new(crate::store::Store::new(es_index::Indices::from(
         ["a", "b"].map(|n| (n.to_owned(), es_index::Index::default())),
     )));
-    let app = crate::router(state.clone());
+    let app = crate::router(state.clone(), None);
     let shared = state.read();
     let writing_a = shared.write("a").unwrap();
     let (tx, rx) = std::sync::mpsc::channel();

@@ -5,7 +5,8 @@ Elasticsearch 9.5.5 (see [COMPATIBILITY.md](COMPATIBILITY.md)). It speaks the sa
 can read and write the same on-disk format (Lucene 10), so the two can take turns on one data
 directory.
 
-Single node, no security; binds `127.0.0.1` unless `ES_MINI_HOST` says otherwise.
+Single node; binds `127.0.0.1` unless `ES_MINI_HOST` says otherwise. Security is off unless
+`xpack.security.enabled=true`, which requires an API key or the `elastic` user on every request.
 
 ## Features
 
@@ -48,6 +49,7 @@ cargo run -p es-mini                                # in memory, on 127.0.0.1:92
 ES_MINI_DATA=/path/to/data cargo run -p es-mini     # persist to a data directory
 ES_MINI_PORT=9201 cargo run -p es-mini              # another port
 ES_MINI_HOST=0.0.0.0 cargo run -p es-mini           # another bind address (default 127.0.0.1)
+env xpack.security.enabled=true ELASTIC_PASSWORD=changeme cargo run -p es-mini  # require auth
 ```
 
 ```sh

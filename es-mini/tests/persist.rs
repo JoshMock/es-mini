@@ -202,7 +202,7 @@ async fn graceful_shutdown_flushes() {
     drop(app);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    es_mini::serve_persisted(listener, &dir, async {})
+    es_mini::serve_persisted(listener, &dir, &Default::default(), async {})
         .await
         .unwrap();
 
