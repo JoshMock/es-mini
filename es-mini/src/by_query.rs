@@ -146,17 +146,21 @@ fn by_query(
             json!({"index": index, "shard": 0, "node": node, "status": code, "reason": reason}),
         );
     }
-    let hits: Vec<(String, String, Value)> = match failures.is_empty() {
+    let hits: Vec<(String, String, Option<String>, Value)> = match failures.is_empty() {
         true => (r.hits.into_iter())
-            .map(|h| (h.index.to_owned(), h.id.to_owned(), h.doc.source.clone()))
+            .map(|h| {
+                let (index, id) = (h.index.to_owned(), h.id.to_owned());
+                (index, id, h.doc.routing.clone(), h.doc.source.clone())
+            })
             .collect(),
         false => vec![],
     };
-    for (index, id, source) in &hits {
+    for (index, id, routing, source) in &hits {
         let index = indices.get_mut(index).expect("searched index exists");
+        let routing = routing.as_deref();
         match delete {
-            true => index.delete(id),
-            false => index.put(id, source.clone()),
+            true => index.delete_routed(id, routing),
+            false => index.put_auto(id, routing, source.clone(), -1),
         };
     }
     if params

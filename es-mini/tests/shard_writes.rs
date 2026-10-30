@@ -281,3 +281,35 @@ async fn flush_commits_every_shard() {
     let shard = shard_id("9", Some("x"), SHARDS).to_string();
     assert_eq!(committed_shards(&dir, "_1"), [shard]);
 }
+
+#[tokio::test]
+async fn by_query_writes_keep_documents_on_their_shard() {
+    let app = es_mini::app();
+    call(
+        &app,
+        "PUT",
+        "/i",
+        r#"{"settings": {"number_of_shards": 3}}"#,
+    )
+    .await;
+    // routed to a shard other than its id's
+    call(
+        &app,
+        "PUT",
+        "/i/_doc/a?routing=r2&refresh=true",
+        r#"{"v": 1}"#,
+    )
+    .await;
+    let r = call(&app, "POST", "/i/_update_by_query?refresh=true", "{}").await;
+    assert_eq!(r["updated"], 1, "{r}");
+    assert_eq!(hits(&app).await, 1);
+    let r = call(&app, "GET", "/i/_doc/a?routing=r2", "").await;
+    assert_eq!(
+        (&r["_version"], &r["_routing"]),
+        (&2.into(), &"r2".into()),
+        "{r}"
+    );
+    let r = call(&app, "POST", "/i/_delete_by_query?refresh=true", "{}").await;
+    assert_eq!(r["deleted"], 1, "{r}");
+    assert_eq!(hits(&app).await, 0);
+}
