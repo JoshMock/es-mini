@@ -38,6 +38,9 @@ pub struct SearchRequest {
     pub runtime_source: Vec<String>,
     /// Body `search_after`: only hits that sort after these values, one per `sort` field.
     pub search_after: Option<Vec<Value>>,
+    /// URL `search_type=dfs_query_then_fetch`: score with the statistics of every target
+    /// summed, instead of each target's own.
+    pub dfs: bool,
 }
 
 /// Which Elasticsearch error type a query failure maps to.
@@ -180,6 +183,7 @@ impl SearchRequest {
             aggs,
             pipelines,
             typed_keys: false,
+            dfs: false,
             profile: body.get("profile").and_then(Value::as_bool) == Some(true),
             query,
             track_total_hits,

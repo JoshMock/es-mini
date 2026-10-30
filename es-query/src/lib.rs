@@ -196,12 +196,15 @@ pub fn java_hash_order<K: AsRef<str>, T>(entries: &mut [(K, T)]) {
     });
 }
 
+type FieldStats = HashMap<String, (f64, f64)>;
+type DocFreqs = HashMap<String, HashMap<String, f64>>;
+
 struct Searcher<'a> {
     index: &'a Index,
-    /// Per field: (docs with the field, average length).
-    field_stats: HashMap<String, (f64, f64)>,
+    /// Per field: (docs with the field, their summed length).
+    field_stats: FieldStats,
     /// Per field, per term: its document frequency.
-    doc_freq: HashMap<String, HashMap<String, f64>>,
+    doc_freq: DocFreqs,
     /// Per scored field, per term: its frequencies and field lengths (see [`Index::term_freqs`]).
     freqs: HashMap<String, HashMap<String, TermFreqs>>,
     /// Resolved field types, so unmapped fields are sampled once per search.
@@ -318,12 +321,8 @@ impl<'a> Searcher<'a> {
             }
         }
         if let Some(m) = (self.index).field_stats(field, path, kind == Kind::Text, &wanted) {
-            let avg = if m.docs > 0.0 {
-                m.total_terms / m.docs
-            } else {
-                1.0
-            };
-            self.field_stats.insert(field.clone(), (m.docs, avg));
+            self.field_stats
+                .insert(field.clone(), (m.docs, m.total_terms));
             self.doc_freq
                 .entry(field.clone())
                 .or_default()
@@ -354,10 +353,7 @@ impl<'a> Searcher<'a> {
                 }
             }
         }
-        self.field_stats.insert(
-            field.clone(),
-            (docs, if docs > 0.0 { len / docs } else { 1.0 }),
-        );
+        self.field_stats.insert(field.clone(), (docs, len));
         let freqs = self.doc_freq.entry(field.clone()).or_default();
         for w in &wanted {
             freqs.insert(w.clone(), df.get(w.as_str()).copied().unwrap_or(0.0));
@@ -648,7 +644,11 @@ impl<'a> Searcher<'a> {
     /// BM25's inputs and parts for a term of a field `len` terms long:
     /// `[df, docs with the field, norm length, average length, idf, tf]`.
     fn bm25_parts(&self, field: &str, term: &str, freq: f64, len: f64) -> [f64; 6] {
-        let (n, avg) = self.field_stats.get(field).copied().unwrap_or((1.0, 1.0));
+        let (n, avg) = match self.field_stats.get(field) {
+            Some(&(n, len)) if n > 0.0 => (n, len / n),
+            Some(&(n, _)) => (n, 1.0),
+            None => (1.0, 1.0),
+        };
         let df = (self.doc_freq.get(field).and_then(|f| f.get(term)))
             .copied()
             .unwrap_or(0.0);
@@ -1483,6 +1483,7 @@ pub fn search_many<'a>(
     let mut failures = Vec::new();
     // hits counted but not kept, past the page
     let mut total = 0;
+    let global = req.dfs.then(|| global_stats(targets, &req.query));
     for (pos, (name, index, filter)) in targets.iter().enumerate() {
         let query = match with_filter(index, &req.query, *filter, now) {
             Ok(q) => q,
@@ -1495,6 +1496,9 @@ pub fn search_many<'a>(
         s.runtime_source = req.runtime_source.clone();
         if by_score || !req.aggs.is_empty() {
             s.gather(&query);
+        }
+        if let Some((stats, df)) = &global {
+            (s.field_stats, s.doc_freq) = (stats.clone(), df.clone());
         }
         // Without aggregations to feed, the documents on disk are selected and ordered from
         // postings and doc values where they can be; only the hits returned are read.
@@ -1643,6 +1647,27 @@ pub fn search_many<'a>(
             })
             .collect(),
     })
+}
+
+/// Per field, the BM25 statistics of every target summed, as dfs_query_then_fetch's
+/// AggregatedDfs gives each shard.
+fn global_stats(targets: &[Target], q: &Query) -> (FieldStats, DocFreqs) {
+    let (mut stats, mut df) = (FieldStats::new(), DocFreqs::new());
+    for (_, index, _) in targets {
+        let mut s = Searcher::unscored(index, q);
+        s.gather(q);
+        for (field, (n, len)) in s.field_stats {
+            let e = stats.entry(field).or_default();
+            (e.0, e.1) = (e.0 + n, e.1 + len);
+        }
+        for (field, terms) in s.doc_freq {
+            let e = df.entry(field).or_default();
+            terms
+                .into_iter()
+                .for_each(|(t, n)| *e.entry(t).or_default() += n);
+        }
+    }
+    (stats, df)
 }
 
 /// [`count_many`] of one index; panics where it fails (e.g. on a date that does not parse).

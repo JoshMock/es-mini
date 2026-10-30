@@ -230,6 +230,7 @@ pub async fn search(
     req.typed_keys = params
         .get("typed_keys")
         .is_some_and(|v| v.is_empty() || v == "true");
+    req.dfs = params.get("search_type").map(String::as_str) == Some("dfs_query_then_fetch");
     let scroll = params
         .get("scroll")
         .map(|v| crate::scroll::keep_alive(v))
