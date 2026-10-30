@@ -1,5 +1,6 @@
 //! Responses report each index's real shards: `_shards` headers, per-shard failures (grouped
-//! by index and reason, as Elasticsearch's ExceptionsHelper.groupBy does), profile shard ids.
+//! by index and reason, as Elasticsearch's ExceptionsHelper.groupBy does), profile shard ids,
+//! and cluster health.
 
 use axum::{body::Body, http::Request};
 use http_body_util::BodyExt;
@@ -87,4 +88,22 @@ async fn profile_names_each_shard() {
         .collect();
     let id = |i: &str, n: u32| (json!(format!("[{node}][{i}][{n}]")), json!(i), json!(n));
     assert_eq!(ids, [id("a", 0), id("a", 1), id("a", 2), id("b", 0)]);
+}
+
+#[tokio::test]
+async fn health_counts_every_shard() {
+    let app = setup("keyword", "keyword").await;
+    let (_, r) = call(&app, "GET", "/_cluster/health?level=shards", Value::Null).await;
+    assert_eq!(r["active_primary_shards"], 4);
+    assert_eq!(r["active_shards"], 4);
+    let a = &r["indices"]["a"];
+    assert_eq!(a["number_of_shards"], 3);
+    assert_eq!(a["active_primary_shards"], 3);
+    assert_eq!(a["active_shards"], 3);
+    let shards: Vec<_> = a["shards"].as_object().unwrap().keys().cloned().collect();
+    assert_eq!(shards, ["0", "1", "2"]);
+    assert_eq!(a["shards"]["2"]["primary_active"], true);
+    assert_eq!(r["indices"]["b"]["number_of_shards"], 1);
+    let (_, r) = call(&app, "GET", "/_cluster/health/a", Value::Null).await;
+    assert_eq!(r["active_primary_shards"], 3);
 }

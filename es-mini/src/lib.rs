@@ -86,13 +86,14 @@ async fn health(
             }
         },
     };
+    let shards: Vec<usize> = (names.iter())
+        .map(|n| store.read(n).map_or(1, |i| i.number_of_shards()))
+        .collect();
     let level = params.get("level").map(String::as_str);
-    let mut body = health_body(names.len());
+    let mut body = health_body(shards.iter().sum());
     if matches!(level, Some("indices" | "shards")) {
-        let shards = level == Some("shards");
-        let indices: serde_json::Map<String, Value> = names
-            .iter()
-            .map(|name| (name.clone(), index_health(shards)))
+        let indices: serde_json::Map<String, Value> = (names.iter().zip(shards))
+            .map(|(name, n)| (name.clone(), index_health(n, level == Some("shards"))))
             .collect();
         body["indices"] = Value::Object(indices);
     }
@@ -120,21 +121,22 @@ fn health_body(shards: usize) -> Value {
     })
 }
 
-// ponytail: every index is one green primary shard, no replicas
-fn index_health(shards: bool) -> Value {
+/// The health of an index of `n` shards, listing each shard's with `shards`.
+// ponytail: every shard is a green primary, no replicas
+fn index_health(n: usize, shards: bool) -> Value {
     let mut h = json!({
         "status": "green",
-        "number_of_shards": 1,
+        "number_of_shards": n,
         "number_of_replicas": 0,
-        "active_primary_shards": 1,
-        "active_shards": 1,
+        "active_primary_shards": n,
+        "active_shards": n,
         "relocating_shards": 0,
         "initializing_shards": 0,
         "unassigned_shards": 0,
         "unassigned_primary_shards": 0
     });
     if shards {
-        h["shards"] = json!({"0": {
+        let shard = json!({
             "status": "green",
             "primary_active": true,
             "active_shards": 1,
@@ -142,7 +144,8 @@ fn index_health(shards: bool) -> Value {
             "initializing_shards": 0,
             "unassigned_shards": 0,
             "unassigned_primary_shards": 0
-        }});
+        });
+        h["shards"] = (0..n).map(|i| (i.to_string(), shard.clone())).collect();
     }
     h
 }
