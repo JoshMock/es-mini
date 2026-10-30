@@ -254,17 +254,53 @@ pub struct TermStats {
     pub doc_freq: HashMap<(String, String), f64>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Index {
-    /// Statistics of the segments of an index opened from disk or last committed, deleted
-    /// documents included; scoring adds those of the documents in memory not yet committed.
-    pub stats: Option<TermStats>,
     pub settings: Settings,
     pub mappings: Mappings,
     pub aliases: BTreeMap<String, aliases::Alias>,
     /// Closed indices keep their metadata but reject document reads, writes, and searches.
     pub closed: bool,
-    /// User data of the shard commit the index was opened from; saves keep its history markers.
+    /// Its shards, at least shard 0. Those up to `index.number_of_shards` not written yet may
+    /// be missing; saves write them empty.
+    shards: Vec<Shard>,
+}
+
+impl Default for Index {
+    fn default() -> Self {
+        Index {
+            settings: Settings::default(),
+            mappings: Mappings::default(),
+            aliases: BTreeMap::new(),
+            closed: false,
+            shards: vec![Shard::default()],
+        }
+    }
+}
+
+// ponytail: an index reads and writes its shard 0 until writes are routed to their shard
+// (goal shard-writes) and searches merge every shard's (goal shard-search-merge)
+impl std::ops::Deref for Index {
+    type Target = Shard;
+    fn deref(&self) -> &Shard {
+        &self.shards[0]
+    }
+}
+
+impl std::ops::DerefMut for Index {
+    fn deref_mut(&mut self) -> &mut Shard {
+        &mut self.shards[0]
+    }
+}
+
+/// One shard of an index: its documents, segments and translog state, with its own versions
+/// and sequence numbers.
+#[derive(Debug, Default)]
+pub struct Shard {
+    /// Statistics of the segments of a shard opened from disk or last committed, deleted
+    /// documents included; scoring adds those of the documents in memory not yet committed.
+    pub stats: Option<TermStats>,
+    /// User data of the shard commit the shard was opened from; saves keep its history markers.
     pub commit: BTreeMap<String, String>,
     /// Documents written since the index was opened; they replace any on disk. Shared with
     /// snapshots.
@@ -277,7 +313,7 @@ pub struct Index {
     /// already counts: a snapshot's copies of those on disk, or those of the last commit.
     persisted: u64,
     /// The segments of an index opened from disk, serving the documents not written since.
-    disk: Option<disk::Shard>,
+    disk: Option<disk::Segments>,
     /// Sources of updated/deleted docs that were in memory, kept for BM25 statistics like
     /// Elasticsearch's soft deletes, which merges keep above the last commit's checkpoint
     /// (`stats` counts those on disk). A commit hands them to its segments' statistics, from
@@ -346,7 +382,7 @@ struct RequestCache {
     tick: u64,
 }
 
-impl Index {
+impl Shard {
     fn last_version(&self, id: &str) -> u64 {
         self.meta(id)
             .map(|m| m.0)
@@ -394,9 +430,9 @@ impl Index {
         }
     }
 
-    fn next_seq_no(&mut self) -> u64 {
+    fn next_seq_no(&mut self, settings: &Settings) -> u64 {
         // The scheduled refresh that came due since the last one, run late but before this write.
-        if self.refresh_due() {
+        if self.refresh_due(settings) {
             self.refresh();
         }
         self.next_seq_no += 1;
@@ -404,9 +440,8 @@ impl Index {
     }
 
     /// Drops tombstones older than `index.gc_deletes`.
-    fn prune_tombstones(&mut self) {
-        let ttl = self
-            .settings
+    fn prune_tombstones(&mut self, settings: &Settings) {
+        let ttl = settings
             .get(index_settings::GC_DELETES)
             .and_then(parse_time)
             .unwrap_or(Duration::from_secs(60));
@@ -428,16 +463,17 @@ impl Index {
         self.deleted_versions.len()
     }
 
-    /// Creates or overwrites a document.
-    pub fn put(&mut self, id: &str, source: Value) -> WriteResult {
-        self.put_auto(id, source, -1)
-    }
-
-    /// Like [`Index::put`] for an id Elasticsearch generated at `auto_id_timestamp` (-1: none).
-    pub fn put_auto(&mut self, id: &str, source: Value, auto_id_timestamp: i64) -> WriteResult {
-        self.prune_tombstones();
+    /// Like [`Index::put_auto`] in this shard.
+    pub fn put_auto(
+        &mut self,
+        settings: &Settings,
+        id: &str,
+        source: Value,
+        auto_id_timestamp: i64,
+    ) -> WriteResult {
+        self.prune_tombstones(settings);
         let version = self.last_version(id) + 1;
-        let seq_no = self.next_seq_no();
+        let seq_no = self.next_seq_no(settings);
         self.unlogged.push(es_codec::translog::Op::Index {
             id: id.to_owned(),
             source: serde_json::to_vec(&source).unwrap_or_default(),
@@ -507,49 +543,35 @@ impl Index {
         }
     }
 
-    /// Creates a document; `Err(current_version)` if it already exists.
-    pub fn create(&mut self, id: &str, source: Value) -> Result<WriteResult, u64> {
-        self.create_auto(id, source, -1)
-    }
-
-    /// Like [`Index::create`] for a generated id; see [`Index::put_auto`].
+    /// Like [`Index::create_auto`] in this shard.
     pub fn create_auto(
         &mut self,
+        settings: &Settings,
         id: &str,
         source: Value,
         auto_id_timestamp: i64,
     ) -> Result<WriteResult, u64> {
         match self.meta(id) {
             Some((version, _)) => Err(version),
-            None => Ok(self.put_auto(id, source, auto_id_timestamp)),
+            None => Ok(self.put_auto(settings, id, source, auto_id_timestamp)),
         }
     }
 
-    /// A copy for point-in-time searches: later writes to `self` do not change it. It shares
-    /// the documents and segments, which stay readable after a save deletes their files.
+    /// This shard's part of [`Index::snapshot`].
     // ponytail: copies the ids and versions of the documents (not their sources); memory grows
     // with the document count times open snapshots, where Lucene shares per-segment live docs
-    pub fn snapshot(&self) -> Index {
-        let mut settings = self.settings.clone();
-        // it sees the writes visible now, and is never refreshed
-        settings.merge(&serde_json::json!({ index_settings::REFRESH_INTERVAL: "-1" }));
-        Index {
+    fn snapshot(&self, settings: &Settings) -> Shard {
+        Shard {
             stats: self.stats.clone(),
-            settings,
-            mappings: self.mappings.clone(),
             docs: self.docs.clone(),
             by_seq_no: self.by_seq_no.clone(),
             disk: self.disk.clone(),
             superseded: self.superseded.clone(),
             persisted: self.persisted,
             next_seq_no: self.next_seq_no,
-            refreshed_seq_no: if self.refresh_due() {
-                self.next_seq_no
-            } else {
-                self.refreshed_seq_no
-            },
+            refreshed_seq_no: self.visible_seq_no(settings),
             refreshed_at: self.refreshed_at,
-            ..Index::default()
+            ..Shard::default()
         }
     }
 
@@ -560,19 +582,20 @@ impl Index {
     /// replaces it.
     pub fn memo<T: std::any::Any + Send + Sync>(
         &self,
+        mappings: &Mappings,
         build: impl FnOnce() -> T,
         follow: impl FnOnce(&mut T, &[u64], &[(&str, &Document)]) -> bool,
     ) -> Arc<T> {
         // Held while building, so concurrent callers wait for one build.
         let mut memo = self.memo.0.lock().unwrap_or_else(PoisonError::into_inner);
         let keep = |v: &Arc<T>| Memoized {
-            mappings: self.mappings.clone(),
+            mappings: mappings.clone(),
             value: v.clone(),
             removed: Vec::new(),
             written: Vec::new(),
         };
         if let Some(m) = memo.take()
-            && m.mappings == self.mappings
+            && m.mappings == *mappings
             && let Ok(mut v) = m.value.downcast::<T>()
         {
             if m.removed.is_empty() && m.written.is_empty() {
@@ -603,10 +626,12 @@ impl Index {
     /// the least recently used entries.
     pub fn cached<E>(
         &self,
+        settings: &Settings,
+        mappings: &Mappings,
         key: String,
         compute: impl FnOnce() -> Result<Value, E>,
     ) -> Result<Value, E> {
-        let visible = self.visible_seq_no();
+        let visible = self.visible_seq_no(settings);
         let lock = || {
             self.request_cache
                 .lock()
@@ -617,9 +642,9 @@ impl Index {
             if !c
                 .reader
                 .as_ref()
-                .is_some_and(|r| r.0 == visible && r.1 == self.mappings)
+                .is_some_and(|r| r.0 == visible && r.1 == *mappings)
             {
-                c.reader = Some((visible, self.mappings.clone()));
+                c.reader = Some((visible, mappings.clone()));
                 c.entries.clear();
                 c.recency.clear();
                 c.bytes = 0;
@@ -640,7 +665,7 @@ impl Index {
         let mut c = lock();
         if c.reader
             .as_ref()
-            .is_some_and(|r| r.0 == visible && r.1 == self.mappings)
+            .is_some_and(|r| r.0 == visible && r.1 == *mappings)
         {
             c.tick += 1;
             let tick = c.tick;
@@ -683,8 +708,8 @@ impl Index {
     /// visible. Writes run one that came due first, so the writes since all precede it.
     // ponytail: no refresh_interval set means searchable at once, as a search of an idle
     // Elasticsearch shard waits for its refresh; `-1` never refreshes on its own
-    fn refresh_due(&self) -> bool {
-        let Some(interval) = self.settings.get(index_settings::REFRESH_INTERVAL) else {
+    fn refresh_due(&self, settings: &Settings) -> bool {
+        let Some(interval) = settings.get(index_settings::REFRESH_INTERVAL) else {
             return true;
         };
         match index_settings::time_millis(interval, index_settings::REFRESH_INTERVAL) {
@@ -696,14 +721,14 @@ impl Index {
     }
 
     /// Whether the write with `seq_no` is visible to search.
-    pub fn searchable(&self, seq_no: u64) -> bool {
-        seq_no < self.visible_seq_no()
+    pub fn searchable(&self, settings: &Settings, seq_no: u64) -> bool {
+        seq_no < self.visible_seq_no(settings)
     }
 
     /// The sequence number below which writes are visible to search: every write if a
     /// scheduled refresh has come due, else those before the last refresh.
-    pub fn visible_seq_no(&self) -> u64 {
-        if self.refresh_due() {
+    pub fn visible_seq_no(&self, settings: &Settings) -> u64 {
+        if self.refresh_due(settings) {
             self.next_seq_no
         } else {
             self.refreshed_seq_no
@@ -771,7 +796,7 @@ impl Index {
 
     /// Every live document on disk, without reading it: its position, id and sequence number.
     pub fn disk_live(&self) -> impl Iterator<Item = (disk::DiskPos, (&str, u64))> {
-        self.disk.iter().flat_map(disk::Shard::positions)
+        self.disk.iter().flat_map(disk::Segments::positions)
     }
 
     /// The on-disk documents that may index `term` in `field`, from its postings (see
@@ -796,12 +821,13 @@ impl Index {
     /// read. Floats are their f32 values, so `place` compares them with float semantics.
     pub fn disk_numbers(
         &self,
+        mappings: &Mappings,
         field: &str,
         place: impl Fn(&Value) -> Ordering,
         exact: bool,
     ) -> Option<BTreeSet<disk::DiskPos>> {
         use FieldMapping as M;
-        let decode = match self.mappings.properties.get(field)? {
+        let decode = match mappings.properties.get(field)? {
             M::Long | M::Integer | M::Short | M::Byte | M::Date { .. } => Value::from,
             M::Double => |v| Value::from(sortable_double(v)),
             M::Float => |v| Value::from(sortable_float(v)),
@@ -818,6 +844,7 @@ impl Index {
     /// in a segment without doc values for the field. Each segment's column is decoded once.
     pub fn disk_values<'a>(
         &'a self,
+        mappings: &'a Mappings,
         field: &'a str,
     ) -> impl FnMut(&str) -> Option<Vec<Value>> + 'a {
         use FieldMapping as M;
@@ -833,7 +860,7 @@ impl Index {
                 Some(D::Numbers(n)) => Some(n[doc].iter().map(|v| f(*v)).collect()),
                 _ => None,
             };
-            match self.mappings.properties.get(field)? {
+            match mappings.properties.get(field)? {
                 M::Long | M::Integer | M::Short | M::Byte | M::Date { .. } => numbers(Value::from),
                 M::Double => numbers(|v| Value::from(sortable_double(v))),
                 M::Float => numbers(|v| Value::from(sortable_float(v))),
@@ -880,10 +907,10 @@ impl Index {
     }
 
     /// Deletes a document. Like ES, a missing document still consumes a version and seq_no.
-    pub fn delete(&mut self, id: &str) -> WriteResult {
-        self.prune_tombstones();
+    pub fn delete(&mut self, settings: &Settings, id: &str) -> WriteResult {
+        self.prune_tombstones(settings);
         let version = self.last_version(id) + 1;
-        let seq_no = self.next_seq_no();
+        let seq_no = self.next_seq_no(settings);
         self.unlogged.push(es_codec::translog::Op::Delete {
             id: id.to_owned(),
             seq_no: seq_no as i64,
@@ -909,6 +936,139 @@ impl Index {
                 DocResult::Deleted
             }
             None => DocResult::NotFound,
+        }
+    }
+}
+
+impl Index {
+    /// Its shards, `index.number_of_shards` of them once opened from disk.
+    pub fn shards(&self) -> &[Shard] {
+        &self.shards
+    }
+
+    /// `index.number_of_shards`.
+    pub fn number_of_shards(&self) -> usize {
+        (self.settings.get(index_settings::NUMBER_OF_SHARDS))
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(1)
+    }
+
+    /// Shard `n`, created empty if it was not written yet.
+    pub(crate) fn shard_mut(&mut self, n: usize) -> &mut Shard {
+        if self.shards.len() <= n {
+            self.shards.resize_with(n + 1, Shard::default);
+        }
+        &mut self.shards[n]
+    }
+
+    /// Creates or overwrites a document.
+    pub fn put(&mut self, id: &str, source: Value) -> WriteResult {
+        self.put_auto(id, source, -1)
+    }
+
+    /// Like [`Index::put`] for an id Elasticsearch generated at `auto_id_timestamp` (-1: none).
+    pub fn put_auto(&mut self, id: &str, source: Value, auto_id_timestamp: i64) -> WriteResult {
+        (self.shards[0]).put_auto(&self.settings, id, source, auto_id_timestamp)
+    }
+
+    /// Like [`Index::put`] in shard `n`.
+    pub fn put_in(&mut self, n: usize, id: &str, source: Value) -> WriteResult {
+        self.shard_mut(n);
+        self.shards[n].put_auto(&self.settings, id, source, -1)
+    }
+
+    /// Creates a document; `Err(current_version)` if it already exists.
+    pub fn create(&mut self, id: &str, source: Value) -> Result<WriteResult, u64> {
+        self.create_auto(id, source, -1)
+    }
+
+    /// Like [`Index::create`] for a generated id; see [`Index::put_auto`].
+    pub fn create_auto(
+        &mut self,
+        id: &str,
+        source: Value,
+        auto_id_timestamp: i64,
+    ) -> Result<WriteResult, u64> {
+        (self.shards[0]).create_auto(&self.settings, id, source, auto_id_timestamp)
+    }
+
+    /// Deletes a document. Like ES, a missing document still consumes a version and seq_no.
+    pub fn delete(&mut self, id: &str) -> WriteResult {
+        self.shards[0].delete(&self.settings, id)
+    }
+
+    /// Like [`Index::delete`] in shard `n`.
+    pub fn delete_in(&mut self, n: usize, id: &str) -> WriteResult {
+        self.shard_mut(n);
+        self.shards[n].delete(&self.settings, id)
+    }
+
+    /// Makes all writes so far visible to search.
+    pub fn refresh(&mut self) {
+        self.shards.iter_mut().for_each(Shard::refresh);
+    }
+
+    /// See [`Shard::searchable`].
+    pub fn searchable(&self, seq_no: u64) -> bool {
+        self.shards[0].searchable(&self.settings, seq_no)
+    }
+
+    /// See [`Shard::visible_seq_no`].
+    pub fn visible_seq_no(&self) -> u64 {
+        self.shards[0].visible_seq_no(&self.settings)
+    }
+
+    /// See [`Shard::memo`].
+    pub fn memo<T: std::any::Any + Send + Sync>(
+        &self,
+        build: impl FnOnce() -> T,
+        follow: impl FnOnce(&mut T, &[u64], &[(&str, &Document)]) -> bool,
+    ) -> Arc<T> {
+        self.shards[0].memo(&self.mappings, build, follow)
+    }
+
+    /// See [`Shard::cached`].
+    pub fn cached<E>(
+        &self,
+        key: String,
+        compute: impl FnOnce() -> Result<Value, E>,
+    ) -> Result<Value, E> {
+        self.shards[0].cached(&self.settings, &self.mappings, key, compute)
+    }
+
+    /// See [`Shard::disk_numbers`].
+    pub fn disk_numbers(
+        &self,
+        field: &str,
+        place: impl Fn(&Value) -> Ordering,
+        exact: bool,
+    ) -> Option<BTreeSet<disk::DiskPos>> {
+        self.shards[0].disk_numbers(&self.mappings, field, place, exact)
+    }
+
+    /// See [`Shard::disk_values`].
+    pub fn disk_values<'a>(
+        &'a self,
+        field: &'a str,
+    ) -> impl FnMut(&str) -> Option<Vec<Value>> + 'a {
+        self.shards[0].disk_values(&self.mappings, field)
+    }
+
+    /// A copy for point-in-time searches: later writes to `self` do not change it. It shares
+    /// the documents and segments, which stay readable after a save deletes their files.
+    pub fn snapshot(&self) -> Index {
+        let mut settings = self.settings.clone();
+        // it sees the writes visible now, and is never refreshed
+        settings.merge(&serde_json::json!({ index_settings::REFRESH_INTERVAL: "-1" }));
+        Index {
+            shards: self
+                .shards
+                .iter()
+                .map(|s| s.snapshot(&self.settings))
+                .collect(),
+            settings,
+            mappings: self.mappings.clone(),
+            ..Index::default()
         }
     }
 

@@ -17,7 +17,8 @@ fn io(path: &Path) -> impl Fn(std::io::Error) -> Error + '_ {
     move |e| Error(format!("{}: {e}", path.display()))
 }
 
-/// Writes `data_dir` holding `indices`, each with one empty shard (no documents yet).
+/// Writes `data_dir` holding `indices`, each with `index.number_of_shards` empty shards (no
+/// documents yet).
 pub fn write_empty_data_dir(
     data_dir: &Path,
     global: &GlobalMetadata,
@@ -37,8 +38,9 @@ pub fn write_empty_data_dir(
         0,
         &manifest_doc(global.term as i64, 0, -1, &[]),
     )?;
-    for ix in indices {
-        let shard = data_dir.join("indices").join(&ix.uuid).join("0");
+    for (ix, n) in (indices.iter()).flat_map(|ix| (0..ix.number_of_shards()).map(move |n| (ix, n)))
+    {
+        let shard = data_dir.join("indices").join(&ix.uuid).join(n.to_string());
         let (index, translog) = (shard.join("index"), shard.join("translog"));
         for d in [&index, &translog] {
             std::fs::create_dir_all(d).map_err(io(d))?;

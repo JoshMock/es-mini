@@ -94,7 +94,7 @@ pub struct FieldStats {
 }
 
 /// A term's frequency in each live document holding it, with the document's field length as
-/// its norm stands for it (see [`Index::term_freqs`](crate::Index::term_freqs)).
+/// its norm stands for it (see [`Shard::term_freqs`](crate::Shard::term_freqs)).
 #[derive(Debug, Default)]
 pub struct TermFreqs {
     /// On-disk documents by position.
@@ -110,7 +110,7 @@ pub type TermDocs = HashMap<String, Posting>;
 #[derive(Debug, Clone, Copy)]
 pub struct Posting {
     /// The term's frequency and the field length as its norm stands for it; (1, 1) for a term
-    /// that is not analyzed (see [`Index::term_freqs`](crate::Index::term_freqs)).
+    /// that is not analyzed (see [`Shard::term_freqs`](crate::Shard::term_freqs)).
     pub at: (u32, u32),
     pub seq_no: u64,
 }
@@ -307,7 +307,7 @@ impl Postings {
     }
 }
 
-impl crate::Index {
+impl crate::Shard {
     fn postings_for<R>(&self, path: &str, analyzed: bool, read: impl FnOnce(&Field) -> R) -> R {
         let mut postings = self
             .postings
@@ -318,7 +318,7 @@ impl crate::Index {
     }
 
     /// The in-memory documents indexing all (or any) of `terms` at `path`. Documents on disk
-    /// are narrowed separately ([`Index::disk_term`](crate::Index::disk_term)).
+    /// are narrowed separately ([`Shard::disk_term`](crate::Shard::disk_term)).
     pub fn memory_docs(
         &self,
         path: &str,
@@ -410,17 +410,17 @@ impl crate::Index {
         Some(TermFreqs { disk, memory })
     }
 
-    /// The in-memory documents with a value of numeric or date `field` (at source `path`)
+    /// The in-memory documents with a value of the numeric or date field `mapping` maps (at source `path`)
     /// within `[gt, gte, lt, lte]` (or at them: the bounds are inclusive), compared as numbers
     /// (dates as instants); `None` for other fields, or for a bound that is not a number or
     /// date of the field.
     pub fn memory_numbers(
         &self,
-        field: &str,
+        mapping: &FieldMapping,
         path: &str,
         bounds: [Option<&Value>; 4],
     ) -> Option<HashSet<String>> {
-        let key = Key::of(self.mappings.field(field)?)?;
+        let key = Key::of(mapping)?;
         // a date range's bounds are epoch millis once resolved (es-query's `resolve_dates`)
         let read_bound = |b: &Value| match (&key, b.as_i64()) {
             (Key::Date(..), Some(t)) => Key::Number.read(&t.into()),
@@ -440,13 +440,13 @@ impl crate::Index {
         })
     }
 
-    /// How many in-memory documents a range of numeric `field` (at source `path`) matches,
+    /// How many in-memory documents a range of the numeric field `mapping` maps (at source `path`) matches,
     /// and the first `n` of them by value (highest first if `desc`), equal ones in write order.
     /// `None` unless every in-memory document is visible below `visible` and every value of the
     /// field and bound is a lone JSON number an f64 holds exactly, so keys order them as sources.
     pub fn memory_numbers_first(
         &self,
-        field: &str,
+        mapping: &FieldMapping,
         path: &str,
         [gt, gte, lt, lte]: [Option<&Value>; 4],
         desc: bool,
@@ -454,7 +454,7 @@ impl crate::Index {
         visible: u64,
     ) -> Option<(usize, Vec<(&str, &crate::Document)>)> {
         use std::ops::Bound::{Excluded, Included, Unbounded};
-        let key = Key::of(self.mappings.field(field)?)?;
+        let key = Key::of(mapping)?;
         let all_visible = self
             .by_seq_no
             .keys()
@@ -576,6 +576,32 @@ impl crate::Index {
                     .collect(),
             })
         })
+    }
+}
+
+impl crate::Index {
+    /// See [`Shard::memory_numbers`](crate::Shard::memory_numbers).
+    pub fn memory_numbers(
+        &self,
+        field: &str,
+        path: &str,
+        bounds: [Option<&Value>; 4],
+    ) -> Option<HashSet<String>> {
+        (**self).memory_numbers(self.mappings.field(field)?, path, bounds)
+    }
+
+    /// See [`Shard::memory_numbers_first`](crate::Shard::memory_numbers_first).
+    pub fn memory_numbers_first(
+        &self,
+        field: &str,
+        path: &str,
+        bounds: [Option<&Value>; 4],
+        desc: bool,
+        n: usize,
+        visible: u64,
+    ) -> Option<(usize, Vec<(&str, &crate::Document)>)> {
+        let mapping = self.mappings.field(field)?;
+        (**self).memory_numbers_first(mapping, path, bounds, desc, n, visible)
     }
 }
 

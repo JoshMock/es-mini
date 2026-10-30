@@ -28,6 +28,15 @@ pub struct IndexMetadata {
     pub mappings: Option<String>,
 }
 
+impl IndexMetadata {
+    /// `index.number_of_shards` (default 1).
+    pub fn number_of_shards(&self) -> usize {
+        (self.settings.get("index.number_of_shards"))
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(1)
+    }
+}
+
 fn unframe(blob: &[u8]) -> Result<Vec<u8>> {
     match blob.strip_prefix(b"DFL\0") {
         Some(body) => inflate::inflate(body),
@@ -149,7 +158,7 @@ pub struct GlobalMetadata {
     pub term: i32,
 }
 
-/// Allocation id of every index's shard 0 in written data directories.
+/// Allocation id of every index's shards in written data directories.
 pub const ALLOCATION_ID: &str = "esminiAllocationId00A";
 
 /// Writes a fresh `<data>/_state` Lucene index (inverse of [`read_indices`]): one single-page
@@ -249,12 +258,13 @@ pub fn write_state(
             meta.push(("mappings_hash".into(), Value::String(hash)));
         }
         // Without an in-sync id, Elasticsearch recovers the primary from an empty store.
+        let in_sync = (0..ix.number_of_shards()).map(|n| {
+            let ids = Value::Array(vec![Value::String(ALLOCATION_ID.into())]);
+            (n.to_string(), ids)
+        });
         meta.push((
             "in_sync_allocations".into(),
-            Value::Object(vec![(
-                "0".into(),
-                Value::Array(vec![Value::String(ALLOCATION_ID.into())]),
-            )]),
+            Value::Object(in_sync.collect()),
         ));
         let top = Value::Object(vec![(ix.name.clone(), Value::Object(meta))]);
         stored.push(doc(6, ix.uuid.clone(), smile::encode(&top)));

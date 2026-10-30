@@ -3,7 +3,7 @@
 //! An opened index serves its documents from the segments: only ids, versions and term
 //! statistics are read into memory, and a `_source` is read from disk when a document is.
 
-use crate::{Document, Index, Indices, Mappings, TermStats};
+use crate::{Document, Index, Indices, Mappings, Shard, TermStats};
 use es_codec::{
     SegmentInfos, SegmentReader,
     cluster_state::read_indices,
@@ -23,7 +23,7 @@ use std::{
     time::Duration,
 };
 
-/// Opens every index of `data_dir` (single shard 0).
+/// Opens every index of `data_dir`, each shard from `indices/<uuid>/<shard>/`.
 pub fn open(data_dir: &Path) -> es_codec::Result<Indices> {
     let mut out = Indices::new();
     for meta in read_indices(data_dir)? {
@@ -40,15 +40,22 @@ pub fn open(data_dir: &Path) -> es_codec::Result<Indices> {
             let m: Value = serde_json::from_str(&m).map_err(|e| es_codec::Error(e.to_string()))?;
             index.mappings = Mappings::deserialize(&m["_doc"]).unwrap_or_default();
         }
-        let dir = data_dir.join("indices").join(&meta.uuid).join("0/index");
-        // An index whose shard never started (e.g. a system index made just before shutdown)
+        // An index whose shards never started (e.g. a system index made just before shutdown)
         // has no shard directory.
-        if !dir.exists() {
+        if !shard_dir(data_dir, &meta.uuid, 0).exists() {
             continue;
         }
-        load_shard(&mut index, &dir)
-            .map_err(|e| es_codec::Error(format!("index [{}]: {}", meta.name, e.0)))?;
-        replay_translog(&mut index, &dir.join("../translog"))?;
+        for n in 0..index.number_of_shards() {
+            let dir = shard_dir(data_dir, &meta.uuid, n);
+            let shard = index.shard_mut(n);
+            if !dir.exists() {
+                continue;
+            }
+            load_shard(shard, &dir).map_err(|e| {
+                es_codec::Error(format!("index [{}]: shard [{n}]: {}", meta.name, e.0))
+            })?;
+            replay_translog(shard, &dir.join("../translog"))?;
+        }
         out.insert(meta.name, index);
     }
     Ok(out)
@@ -56,7 +63,7 @@ pub fn open(data_dir: &Path) -> es_codec::Result<Indices> {
 
 /// Re-applies the operations in a shard's translog that its commit does not hold: those above
 /// the commit's `local_checkpoint`, up to the checkpoint's offset in the current generation.
-fn replay_translog(index: &mut Index, dir: &Path) -> es_codec::Result<()> {
+fn replay_translog(index: &mut Shard, dir: &Path) -> es_codec::Result<()> {
     use es_codec::translog::{read, read_checkpoint};
     let Ok(bytes) = std::fs::read(dir.join("translog.ckp")) else {
         return Ok(());
@@ -88,7 +95,7 @@ fn replay_translog(index: &mut Index, dir: &Path) -> es_codec::Result<()> {
 /// A document's place in an opened index's segments: `(segment, doc id)`.
 pub type DiskPos = (usize, usize);
 
-/// Where a live document of a [`Shard`] is, with its version and sequence number.
+/// Where a live document of [`Segments`] is, with its version and sequence number.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct DiskDoc {
     segment: usize,
@@ -100,7 +107,7 @@ pub(crate) struct DiskDoc {
 /// The segments of a shard opened from disk. Documents stay in them until read. A clone shares
 /// the segments, which keep their files open, so it can read them after a save deletes them.
 #[derive(Clone)]
-pub(crate) struct Shard {
+pub(crate) struct Segments {
     segments: Arc<Vec<SegmentReader>>,
     /// Live documents by id. Writes to the index remove the ones they replace or delete.
     ids: HashMap<String, DiskDoc>,
@@ -108,9 +115,9 @@ pub(crate) struct Shard {
     nested: Vec<Vec<String>>,
 }
 
-impl std::fmt::Debug for Shard {
+impl std::fmt::Debug for Segments {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Shard")
+        f.debug_struct("Segments")
             .field("segments", &self.segments.len())
             .field("docs", &self.ids.len())
             .finish()
@@ -142,7 +149,7 @@ fn document(d: &DiskDoc, source: Option<Vec<u8>>) -> es_codec::Result<Document> 
     })
 }
 
-impl Shard {
+impl Segments {
     pub(crate) fn meta(&self, id: &str) -> Option<DiskDoc> {
         self.ids.get(id).copied()
     }
@@ -350,7 +357,7 @@ fn commit_stats(dir: &Path) -> es_codec::Result<Option<TermStats>> {
     Ok(Some(stats))
 }
 
-fn load_shard(index: &mut Index, dir: &Path) -> es_codec::Result<()> {
+fn load_shard(index: &mut Shard, dir: &Path) -> es_codec::Result<()> {
     let mut stats = TermStats::default();
     let infos = SegmentInfos::read_latest(dir)?;
     // Operations after the last live doc (deletes) still consumed sequence numbers.
@@ -364,7 +371,7 @@ fn load_shard(index: &mut Index, dir: &Path) -> es_codec::Result<()> {
     index.commit = infos.user_data;
     let (mut segments, mut shard) = (
         vec![],
-        Shard {
+        Segments {
             segments: Arc::default(),
             ids: HashMap::new(),
             nested: vec![],
@@ -429,7 +436,7 @@ fn load_shard(index: &mut Index, dir: &Path) -> es_codec::Result<()> {
 
 /// The documents of `ix` that the saved segments do not hold: all but the `current` ids.
 fn unsaved<'a>(
-    ix: &'a Index,
+    ix: &'a Shard,
     current: &'a HashSet<String>,
 ) -> es_codec::Result<Vec<(&'a str, Cow<'a, Document>)>> {
     let mut out: Vec<_> = ix
@@ -1217,46 +1224,55 @@ fn log(data_dir: &Path, indices: &mut Indices, all: bool) -> es_codec::Result<Pe
     let unchanged = read_indices(data_dir).is_ok_and(|saved| saved == metas);
     let mut logs = vec![];
     if unchanged {
-        for meta in &metas {
-            let dir = shard_dir(data_dir, &meta.uuid).join("../translog");
-            let Ok(cp) = std::fs::read(dir.join("translog.ckp"))
-                .map_err(io)
-                .and_then(|b| es_codec::translog::read_checkpoint(&b))
-            else {
-                logs.clear();
-                break;
-            };
-            logs.push((dir, cp));
+        'read: for (meta, ix) in metas.iter().zip(indices.values()) {
+            for n in 0..ix.number_of_shards() {
+                let dir = shard_dir(data_dir, &meta.uuid, n).join("../translog");
+                let Ok(cp) = std::fs::read(dir.join("translog.ckp"))
+                    .map_err(io)
+                    .and_then(|b| es_codec::translog::read_checkpoint(&b))
+                else {
+                    logs.clear();
+                    break 'read;
+                };
+                logs.push((dir, cp));
+            }
         }
     }
-    let mut flush = !unchanged || logs.len() != indices.len();
+    let shard_count: usize = indices.values().map(Index::number_of_shards).sum();
+    let mut flush = !unchanged || logs.len() != shard_count;
     if flush && all {
         return Ok(pending);
     }
     if !flush {
-        for ((dir, cp), ix) in logs.into_iter().zip(indices.values_mut()) {
+        let mut logs = logs.into_iter();
+        for ix in indices.values_mut() {
             let deferred =
                 ix.settings.get(crate::index_settings::TRANSLOG_DURABILITY) == Some("async");
-            let mut ops = pending.saving.remove(&dir).unwrap_or_default();
-            if all || !deferred {
-                ops.extend(ix.take_unlogged());
+            let threshold = flush_threshold(ix);
+            for n in 0..ix.number_of_shards() {
+                let (dir, cp) = logs.next().expect("a checkpoint per shard");
+                let mut ops = pending.saving.remove(&dir).unwrap_or_default();
+                if all || !deferred {
+                    ops.extend(ix.shard_mut(n).take_unlogged());
+                }
+                // The checkpoint is rewritten on every append, so its age is the shard's idle
+                // time.
+                let idle = || {
+                    std::fs::metadata(dir.join("translog.ckp"))
+                        .and_then(|m| m.modified())
+                        .is_ok_and(|t| t.elapsed().is_ok_and(|e| e >= INACTIVE))
+                };
+                flush |= all && ops.is_empty() && cp.num_ops > 0 && idle();
+                if ops.is_empty() {
+                    continue;
+                }
+                let bytes: Vec<u8> = ops.iter().flat_map(es_codec::translog::encode).collect();
+                // A flush commits these ops too, so they need no append first.
+                flush |= (cp.offset as u64 + bytes.len() as u64) > threshold;
+                pending
+                    .appends
+                    .push((dir, advance(cp, &ops, bytes.len()), bytes, ops));
             }
-            // The checkpoint is rewritten on every append, so its age is the shard's idle time.
-            let idle = || {
-                std::fs::metadata(dir.join("translog.ckp"))
-                    .and_then(|m| m.modified())
-                    .is_ok_and(|t| t.elapsed().is_ok_and(|e| e >= INACTIVE))
-            };
-            flush |= all && ops.is_empty() && cp.num_ops > 0 && idle();
-            if ops.is_empty() {
-                continue;
-            }
-            let bytes: Vec<u8> = ops.iter().flat_map(es_codec::translog::encode).collect();
-            // A flush commits these ops too, so they need no append first.
-            flush |= (cp.offset as u64 + bytes.len() as u64) > flush_threshold(ix);
-            pending
-                .appends
-                .push((dir, advance(cp, &ops, bytes.len()), bytes, ops));
         }
     }
     if flush {
@@ -1265,8 +1281,11 @@ fn log(data_dir: &Path, indices: &mut Indices, all: bool) -> es_codec::Result<Pe
         forget_retries(&mut pending.saving, data_dir);
         // ponytail: rereads every term of every index; cache per segment if commits get slow
         for (meta, ix) in metas.iter().zip(indices.values_mut()) {
-            drop(ix.take_unlogged());
-            ix.committed(commit_stats(&shard_dir(data_dir, &meta.uuid))?);
+            for n in 0..ix.number_of_shards() {
+                let shard = ix.shard_mut(n);
+                drop(shard.take_unlogged());
+                shard.committed(commit_stats(&shard_dir(data_dir, &meta.uuid, n))?);
+            }
         }
     }
     Ok(pending)
@@ -1497,7 +1516,7 @@ fn link(from: &Path, to: &Path) -> es_codec::Result<()> {
 fn reuse_segments(
     prev: &Path,
     dir: &Path,
-    ix: &Index,
+    ix: &Shard,
 ) -> es_codec::Result<Option<(SegmentInfos, HashSet<String>, bool)>> {
     use es_codec::{live_docs::write_liv, segment_infos::radix36};
     let Ok(mut infos) = SegmentInfos::read_latest(prev) else {
@@ -1941,8 +1960,19 @@ fn metas(indices: &Indices) -> Vec<es_codec::cluster_state::IndexMetadata> {
         .collect()
 }
 
-fn shard_dir(root: &Path, uuid: &str) -> std::path::PathBuf {
-    root.join("indices").join(uuid).join("0/index")
+/// The Lucene directory of shard `n` of the index `uuid`.
+fn shard_dir(root: &Path, uuid: &str, n: usize) -> std::path::PathBuf {
+    root.join("indices")
+        .join(uuid)
+        .join(n.to_string())
+        .join("index")
+}
+
+/// Every shard of `ix` up to `index.number_of_shards`, with its number: those not written yet
+/// are empty.
+fn shards(ix: &Index) -> impl Iterator<Item = (usize, &Shard)> {
+    static EMPTY: std::sync::LazyLock<Shard> = std::sync::LazyLock::new(Shard::default);
+    (0..ix.number_of_shards()).map(|n| (n, ix.shards().get(n).unwrap_or(&EMPTY)))
 }
 
 /// Field infos of the metadata fields es-mini writes.
@@ -1954,14 +1984,14 @@ fn meta_fields() -> Vec<es_codec::field_infos::FieldInfo> {
     fields
 }
 
-/// Commits `ix` into the shard directory `dir`, reusing the commit in `prev` (the same
+/// Commits `shard` of `ix` into the shard directory `dir`, reusing the commit in `prev` (the same
 /// directory for an in-place commit). An in-place commit of an unchanged index writes nothing.
 /// A commit afterwards deletes the files in `dir` no longer referenced. Returns whether it
 /// committed.
-fn write_shard(prev: &Path, dir: &Path, ix: &Index) -> es_codec::Result<bool> {
+fn write_shard(prev: &Path, dir: &Path, ix: &Index, shard: &Shard) -> es_codec::Result<bool> {
     use es_codec::segment_infos::{radix36, shard_user_data};
     let in_place = prev == dir;
-    let (mut infos, current, changed) = match reuse_segments(prev, dir, ix)? {
+    let (mut infos, current, changed) = match reuse_segments(prev, dir, shard)? {
         Some(reused) => reused,
         None => (
             SegmentInfos {
@@ -1978,8 +2008,8 @@ fn write_shard(prev: &Path, dir: &Path, ix: &Index) -> es_codec::Result<bool> {
             true,
         ),
     };
-    let max_seq = ix.next_seq_no as i64 - 1;
-    let mut owned = unsaved(ix, &current)?;
+    let max_seq = shard.next_seq_no as i64 - 1;
+    let mut owned = unsaved(shard, &current)?;
     let saved_max = infos
         .user_data
         .get("max_seq_no")
@@ -2025,7 +2055,7 @@ fn write_shard(prev: &Path, dir: &Path, ix: &Index) -> es_codec::Result<bool> {
         "translog_uuid",
         "max_unsafe_auto_id_timestamp",
     ] {
-        if let Some(v) = ix.commit.get(key) {
+        if let Some(v) = shard.commit.get(key) {
             infos.user_data.insert(key.into(), v.clone());
         }
     }
@@ -2089,27 +2119,29 @@ fn save_in_place(data_dir: &Path, indices: &Indices) -> es_codec::Result<bool> {
         Ok(saved) if saved == metas => {}
         _ => return Ok(false),
     }
-    let mut shards = vec![];
+    let mut writes = vec![];
     for (meta, ix) in metas.iter().zip(indices.values()) {
-        let dir = shard_dir(data_dir, &meta.uuid);
-        let ours = SegmentInfos::read_latest(&dir).is_ok_and(|infos| {
-            infos
-                .segments
-                .iter()
-                .all(|s| s.info.diagnostics.get(WRITER.0).map(String::as_str) == Some(WRITER.1))
-        });
-        if !ours {
-            return Ok(false);
+        for (n, shard) in shards(ix) {
+            let dir = shard_dir(data_dir, &meta.uuid, n);
+            let ours = SegmentInfos::read_latest(&dir).is_ok_and(|infos| {
+                infos
+                    .segments
+                    .iter()
+                    .all(|s| s.info.diagnostics.get(WRITER.0).map(String::as_str) == Some(WRITER.1))
+            });
+            if !ours {
+                return Ok(false);
+            }
+            writes.push((dir, ix, shard));
         }
-        shards.push((dir, ix));
     }
-    for (dir, ix) in shards {
-        write_shard(&dir, &dir, ix)?;
+    for (dir, ix, shard) in writes {
+        write_shard(&dir, &dir, ix, shard)?;
     }
     Ok(true)
 }
 
-/// Writes cluster metadata plus every index's shard into the empty directory `data_dir`,
+/// Writes cluster metadata plus every index's shards into the empty directory `data_dir`,
 /// reusing the segments of the snapshot at `prev` (see [`reuse_segments`]).
 fn write_snapshot(data_dir: &Path, indices: &Indices, prev: &Path) -> es_codec::Result<()> {
     use es_codec::{cluster_state::GlobalMetadata, data_dir::write_empty_data_dir};
@@ -2121,11 +2153,14 @@ fn write_snapshot(data_dir: &Path, indices: &Indices, prev: &Path) -> es_codec::
     };
     write_empty_data_dir(data_dir, &global, &metas)?;
     for (meta, ix) in metas.iter().zip(indices.values()) {
-        write_shard(
-            &shard_dir(prev, &meta.uuid),
-            &shard_dir(data_dir, &meta.uuid),
-            ix,
-        )?;
+        for (n, shard) in shards(ix) {
+            write_shard(
+                &shard_dir(prev, &meta.uuid, n),
+                &shard_dir(data_dir, &meta.uuid, n),
+                ix,
+                shard,
+            )?;
+        }
     }
     Ok(())
 }
@@ -2229,7 +2264,7 @@ mod tests {
     }
 
     fn shard(dir: &Path) -> std::path::PathBuf {
-        shard_dir(dir, &read_indices(dir).unwrap()[0].uuid)
+        shard_dir(dir, &read_indices(dir).unwrap()[0].uuid, 0)
     }
 
     /// Like Lucene's SegmentMerger, a merge copies each format from the segments it merges (so
