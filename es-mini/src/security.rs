@@ -2,6 +2,7 @@
 //! as the built-in `elastic` superuser, as Elasticsearch's `AuthenticationService` does.
 
 use crate::error::AppError;
+use crate::store::Store;
 use axum::{
     Extension, Json, Router,
     body::Bytes,
@@ -12,9 +13,14 @@ use axum::{
     routing::{get, post, put},
 };
 use es_index::es_codec::{base64, sha256::sha256_base64};
+use es_index::{Index, Indices};
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::Arc;
+
+/// The system index keys are stored in, as Elasticsearch names it, behind the [`ALIAS`] alias.
+pub(crate) const INDEX: &str = ".security-7";
+const ALIAS: &str = ".security";
 
 /// The challenges a 401 sends, in Elasticsearch's order.
 const CHALLENGES: [&str; 2] = ["Basic realm=\"security\", charset=\"UTF-8\"", "ApiKey"];
@@ -22,10 +28,8 @@ const CHALLENGES: [&str; 2] = ["Basic realm=\"security\", charset=\"UTF-8\"", "A
 pub struct Security {
     /// The hash of `bootstrap.password`, `elastic`'s password (ES's `ELASTIC_PASSWORD`).
     elastic: Option<String>,
-    /// API keys as (id, the document Elasticsearch stores in `.security-7`), in index order: a
-    /// write moves a key last, as an update moves a Lucene document.
-    // ponytail: in memory until keys are stored in .security-7
-    keys: Mutex<Vec<(String, Value)>>,
+    /// Holds API keys in the system index [`INDEX`], as the documents Elasticsearch stores.
+    store: Arc<Store>,
 }
 
 /// Who a request authenticated as.
@@ -37,7 +41,10 @@ enum Authn {
 
 /// Security as the node settings `xpack.security.enabled` (default false) and
 /// `bootstrap.password` configure it; `None` when disabled.
-pub fn from_settings(settings: &HashMap<String, String>) -> Result<Option<Arc<Security>>, String> {
+pub fn from_settings(
+    settings: &HashMap<String, String>,
+    store: &Arc<Store>,
+) -> Result<Option<Arc<Security>>, String> {
     match settings.get("xpack.security.enabled").map(String::as_str) {
         None | Some("false") => return Ok(None),
         Some("true") => {}
@@ -51,8 +58,8 @@ pub fn from_settings(settings: &HashMap<String, String>) -> Result<Option<Arc<Se
         .map(|p| hash(p.as_bytes()))
         .transpose()
         .map_err(|e| format!("hashing bootstrap.password: {e}"))?;
-    let keys = Mutex::default();
-    Ok(Some(Arc::new(Security { elastic, keys })))
+    let store = store.clone();
+    Ok(Some(Arc::new(Security { elastic, store })))
 }
 
 /// The security REST API.
@@ -96,11 +103,65 @@ pub async fn authenticate(
     }
 }
 
-impl Security {
-    fn keys(&self) -> MutexGuard<'_, Vec<(String, Value)>> {
-        self.keys.lock().unwrap_or_else(PoisonError::into_inner)
-    }
+/// The keys in [`INDEX`] among the system indices `system`, as (id, document), in index order: a
+/// write moves a key last, as an update moves a Lucene document.
+fn keys(system: &Indices) -> Vec<(String, Value)> {
+    let Some(index) = system.get(INDEX) else {
+        return vec![];
+    };
+    let mut keys: Vec<_> = (index.docs())
+        .filter(|(_, d)| d.source["doc_type"] == "api_key")
+        .map(|(id, d)| (d.seq_no, id.to_owned(), d.source.clone()))
+        .collect();
+    keys.sort_by_key(|k| k.0);
+    keys.into_iter().map(|(_, id, doc)| (id, doc)).collect()
+}
 
+/// Key `id`'s document, if [`INDEX`] holds that key.
+fn key(system: &Indices, id: &str) -> Option<Value> {
+    let doc = system.get(INDEX)?.get(id)?;
+    (doc.source["doc_type"] == "api_key").then(|| doc.into_owned().source)
+}
+
+/// Writes key `id`'s document `doc` to [`INDEX`], creating the index as Elasticsearch does on
+/// first use: hidden, one shard, behind the hidden alias [`ALIAS`].
+fn put_key(system: &mut Indices, id: &str, doc: Value) {
+    let index = system.entry(INDEX.to_owned()).or_insert_with(|| {
+        let mut index = Index::default();
+        let settings =
+            json!({"hidden": "true", "number_of_shards": "1", "auto_expand_replicas": "0-1"});
+        index.settings.merge(&settings);
+        index.settings.record_creation(INDEX);
+        let alias = es_index::aliases::Alias::parse(&json!({"is_hidden": true}));
+        index
+            .aliases
+            .insert(ALIAS.to_owned(), alias.expect("a valid alias"));
+        index
+    });
+    index.put(id, doc);
+}
+
+/// Refuses `action` on [`INDEX`] or [`ALIAS`] (`name`) to any request but the security APIs,
+/// with the error Elasticsearch gives `elastic`; `privileges` are those it says grant `action`.
+// ponytail: refused with security off too, where ES has no .security-7 to protect
+pub(crate) fn refuse_restricted(
+    name: &str,
+    action: &str,
+    privileges: &str,
+) -> Result<(), AppError> {
+    if name != INDEX && name != ALIAS {
+        return Ok(());
+    }
+    Err(AppError::Other(
+        StatusCode::FORBIDDEN,
+        "security_exception",
+        format!(
+            "action [{action}] is unauthorized for user [elastic] with effective roles [superuser] on restricted indices [{name}], this action is granted by the index privileges [{privileges}]"
+        ),
+    ))
+}
+
+impl Security {
     fn authn(&self, auth: &[u8], uri: &str) -> Result<Authn, Value> {
         let scheme = |s: &str| {
             (auth.len() > s.len() && auth[..s.len()].eq_ignore_ascii_case(s.as_bytes()))
@@ -147,8 +208,7 @@ impl Security {
             Some((id, secret)) if !id.is_empty() => (id, secret),
             _ => return Err("invalid ApiKey value".into()),
         };
-        let keys = self.keys();
-        let Some((_, doc)) = keys.iter().find(|(k, _)| k == id) else {
+        let Some(doc) = key(&self.store.system(), id) else {
             return Err(format!("unable to find apikey with id {id}"));
         };
         if doc["api_key_invalidated"] == true {
@@ -157,7 +217,7 @@ impl Security {
         if !verify(secret, doc["api_key_hash"].as_str().unwrap_or("")) {
             return Err(format!("invalid credentials for API key [{id}]"));
         }
-        if !active(doc, now()) {
+        if !active(&doc, now()) {
             return Err("api key is expired".into());
         }
         let name = doc["name"].as_str().unwrap_or("");
@@ -276,7 +336,7 @@ async fn create_key(
             "email": null,
         },
     });
-    security.keys().push((id.clone(), doc));
+    put_key(&mut security.store.system(), &id, doc);
     let encoded = base64::encode(format!("{id}:{secret}").as_bytes(), base64::STANDARD, true);
     let mut out = json!({"id": id, "name": name});
     if let Some(e) = expiration {
@@ -399,7 +459,7 @@ async fn update_key(
     let expiration = expiration(&req, request, now())?;
     validate(request_errors(&req))?;
     owner_only(&authn)?;
-    let updated = update(&mut security.keys(), &id, &req, expiration)?;
+    let updated = update(&mut security.store.system(), &id, &req, expiration)?;
     Ok(Json(json!({"updated": updated})))
 }
 
@@ -427,12 +487,12 @@ async fn bulk_update_keys(
     validate(errors)?;
     owner_only(&authn)?;
     let (mut updated, mut noops, mut details) = (vec![], vec![], Map::new());
-    let mut keys = security.keys();
+    let mut system = security.store.system();
     for (i, id) in ids.iter().enumerate() {
         if ids[..i].contains(id) {
             continue;
         }
-        match update(&mut keys, id, &req, expiration) {
+        match update(&mut system, id, &req, expiration) {
             Ok(true) => updated.push(*id),
             Ok(false) => noops.push(*id),
             Err(e) => {
@@ -462,19 +522,19 @@ fn owner_only(authn: &Authn) -> Result<(), AppError> {
 
 /// Applies `req` to `elastic`'s key `id`, moving it last if it changes; whether it changed.
 fn update(
-    keys: &mut Vec<(String, Value)>,
+    system: &mut Indices,
     id: &str,
     req: &KeyRequest,
     expiration: Option<i64>,
 ) -> Result<bool, AppError> {
-    let Some(at) = keys.iter().position(|(k, d)| {
-        k == id && d["creator"]["principal"] == "elastic" && d["creator"]["realm"] == "reserved"
-    }) else {
+    let owned =
+        |d: &Value| d["creator"]["principal"] == "elastic" && d["creator"]["realm"] == "reserved";
+    let Some(stored) = key(system, id).filter(owned) else {
         return Err(AppError::ResourceNotFound(format!(
             "no API key owned by requesting user found for ID [{id}]"
         )));
     };
-    let doc = &keys[at].1;
+    let doc = &stored;
     if doc["api_key_invalidated"] == true {
         return Err(AppError::IllegalArgument(format!(
             "cannot update invalidated API key [{id}]"
@@ -492,14 +552,13 @@ fn update(
     if let Some(metadata) = req.metadata {
         doc["metadata_flattened"] = Value::Object(metadata.clone());
     }
-    if expiration.is_none() && doc == keys[at].1 {
+    if expiration.is_none() && doc == stored {
         return Ok(false);
     }
     if let Some(e) = expiration {
         doc["expiration_time"] = e.into();
     }
-    keys.remove(at);
-    keys.push((id.to_owned(), doc));
+    put_key(system, id, doc);
     Ok(true)
 }
 
@@ -820,11 +879,9 @@ fn active(doc: &Value, now: i64) -> bool {
 fn owner_realm(security: &Security, authn: &Authn) -> String {
     match authn {
         Authn::Elastic => "reserved".into(),
-        Authn::ApiKey { id, .. } => (security.keys().iter())
-            .find(|(k, _)| k == id)
-            .and_then(|(_, d)| d["creator"]["realm"].as_str())
-            .unwrap_or("")
-            .to_owned(),
+        Authn::ApiKey { id, .. } => key(&security.store.system(), id)
+            .and_then(|d| d["creator"]["realm"].as_str().map(str::to_owned))
+            .unwrap_or_default(),
     }
 }
 
@@ -886,7 +943,7 @@ async fn get_keys(
         active_only: flag("active_only"),
     };
     let now = now();
-    let keys = security.keys();
+    let keys = keys(&security.store.system());
     let infos: Vec<Value> = (keys.iter())
         .filter(|(k, d)| filter.matches(k, d, now))
         .map(|(k, d)| info(k, d, flag("with_limited_by")))
@@ -1040,19 +1097,18 @@ async fn invalidate_keys(
         filter.realm = realm.as_deref();
     }
     let now = now();
-    let mut keys = security.keys();
+    let mut system = security.store.system();
     // Elasticsearch searches for valid keys only, so none is ever reported as previously
     // invalidated.
-    let (mut hit, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut *keys)
-        .into_iter()
-        .partition(|(k, d)| d["api_key_invalidated"] != true && filter.matches(k, d, now));
-    for (_, doc) in &mut hit {
-        doc["api_key_invalidated"] = true.into();
-        doc["invalidation_time"] = now.into();
+    let mut ids = vec![];
+    for (id, mut doc) in keys(&system) {
+        if doc["api_key_invalidated"] != true && filter.matches(&id, &doc, now) {
+            doc["api_key_invalidated"] = true.into();
+            doc["invalidation_time"] = now.into();
+            put_key(&mut system, &id, doc);
+            ids.push(id);
+        }
     }
-    let ids: Vec<String> = hit.iter().map(|(k, _)| k.clone()).collect();
-    // Updated documents come last, as in a Lucene index.
-    *keys = kept.into_iter().chain(hit).collect();
     Ok(Json(json!({
         "invalidated_api_keys": ids,
         "previously_invalidated_api_keys": [],

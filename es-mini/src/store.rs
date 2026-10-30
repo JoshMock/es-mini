@@ -1,10 +1,15 @@
 //! The indices behind the API, each behind its own lock, so writes to different indices and
-//! reads proceed concurrently. Locks are taken in one order: the map, then indices by name.
+//! reads proceed concurrently. Locks are taken in one order: the map, then indices by name,
+//! then the system indices.
 
 use es_index::aliases::{Alias, IndexMeta};
 use es_index::{Index, Indices};
 use std::collections::BTreeMap;
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
+
+/// System indices: only the API that owns one reads or writes it, through [`Store::system`];
+/// index expressions, listings and document requests never see them.
+pub(crate) const SYSTEM: [&str; 1] = [crate::security::INDEX];
 
 type Map = BTreeMap<String, Slot>;
 
@@ -25,11 +30,17 @@ impl IndexMeta for Slot {
     }
 }
 
-pub(crate) struct Store(RwLock<Map>);
+pub(crate) struct Store(RwLock<Map>, Mutex<Indices>);
 
 impl Store {
-    pub fn new(indices: Indices) -> Self {
-        Self(RwLock::new(wrap(indices)))
+    pub fn new(mut indices: Indices) -> Self {
+        let system = take_system(&mut indices);
+        Self(RwLock::new(wrap(indices)), Mutex::new(system))
+    }
+
+    /// The system indices, by name.
+    pub fn system(&self) -> MutexGuard<'_, Indices> {
+        self.1.lock().expect("lock poisoned")
     }
 
     /// Shared access: no index is created or deleted, and no alias or setting changes, until
@@ -45,8 +56,27 @@ impl Store {
             .into_iter()
             .map(|(name, slot)| (name, slot.index.into_inner().expect("lock poisoned")))
             .collect();
-        Exclusive { map, indices }
+        Exclusive {
+            map,
+            indices,
+            system: None,
+        }
     }
+
+    /// [`Store::write`] with the system indices too, for saving everything to disk.
+    pub fn write_all(&self) -> Exclusive<'_> {
+        let mut all = self.write();
+        let mut system = self.system();
+        all.indices.append(&mut system);
+        all.system = Some(system);
+        all
+    }
+}
+
+fn take_system(indices: &mut Indices) -> Indices {
+    (SYSTEM.iter())
+        .filter_map(|name| indices.remove_entry(*name))
+        .collect()
 }
 
 fn wrap(indices: Indices) -> Map {
@@ -136,6 +166,8 @@ impl IndexMeta for Locked<'_> {
 pub(crate) struct Exclusive<'a> {
     map: RwLockWriteGuard<'a, Map>,
     indices: Indices,
+    /// Set by [`Store::write_all`], whose system indices are in `indices` until dropped.
+    system: Option<MutexGuard<'a, Indices>>,
 }
 
 impl std::ops::Deref for Exclusive<'_> {
@@ -153,6 +185,9 @@ impl std::ops::DerefMut for Exclusive<'_> {
 
 impl Drop for Exclusive<'_> {
     fn drop(&mut self) {
+        if let Some(system) = &mut self.system {
+            **system = take_system(&mut self.indices);
+        }
         *self.map = wrap(std::mem::take(&mut self.indices));
     }
 }

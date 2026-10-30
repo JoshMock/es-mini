@@ -165,8 +165,8 @@ pub fn app_with(indices: Indices) -> Router {
 /// name, as in `elasticsearch.yml` and its keystore): `xpack.security.enabled` and
 /// `bootstrap.password`.
 pub fn app_with_settings(settings: &HashMap<String, String>) -> Result<Router, String> {
-    let security = security::from_settings(settings)?;
     let state = Arc::new(Store::new(Indices::new()));
+    let security = security::from_settings(settings, &state)?;
     let app = with_es_405(router(state, security.clone()));
     Ok(secured(app, security))
 }
@@ -186,7 +186,15 @@ fn secured(app: Router, security: Option<Arc<security::Security>>) -> Router {
 /// now (replaying their translogs), and every successful write request is made durable before
 /// it is answered (see [`es_index::disk::persist`]).
 pub fn app_persisted(dir: &std::path::Path) -> Result<Router, String> {
-    persisted(dir, &HashMap::new()).map(|(app, _)| app)
+    app_persisted_with_settings(dir, &HashMap::new())
+}
+
+/// [`app_persisted`] configured by `settings` as [`app_with_settings`] is.
+pub fn app_persisted_with_settings(
+    dir: &std::path::Path,
+    settings: &HashMap<String, String>,
+) -> Result<Router, String> {
+    persisted(dir, settings).map(|(app, _)| app)
 }
 
 /// Serves [`app_persisted`] over `dir`, configured by `settings` as [`app_with_settings`] is, on
@@ -203,14 +211,13 @@ pub async fn serve_persisted(
         .with_graceful_shutdown(shutdown)
         .await
         .map_err(|e| e.to_string())?;
-    es_index::disk::save(dir, &state.write()).map_err(|e| e.0)
+    es_index::disk::save(dir, &state.write_all()).map_err(|e| e.0)
 }
 
 fn persisted(
     dir: &std::path::Path,
     settings: &HashMap<String, String>,
 ) -> Result<(Router, AppState), String> {
-    let security = security::from_settings(settings)?;
     es_index::disk::recover(dir).map_err(|e| e.0)?;
     let indices = if dir.join("_state").is_dir() {
         es_index::disk::open(dir).map_err(|e| e.0)?
@@ -218,6 +225,7 @@ fn persisted(
         Indices::new()
     };
     let state = Arc::new(Store::new(indices));
+    let security = security::from_settings(settings, &state)?;
     spawn_syncer(dir.to_owned(), Arc::downgrade(&state));
     let (dir, saved, group) = (dir.to_owned(), state.clone(), Arc::new(Group::default()));
     let routes = router(state.clone(), security.clone());
@@ -245,7 +253,7 @@ fn persisted(
                     tokio::task::spawn_blocking(move || {
                         // The fsync runs without the indices lock, so other writes apply meanwhile.
                         group.persist(|| {
-                            let begun = es_index::disk::begin_persist(&dir, &mut state.write());
+                            let begun = es_index::disk::begin_persist(&dir, &mut state.write_all());
                             begun
                                 .and_then(es_index::disk::Pending::finish)
                                 .map_err(|e| e.0)
@@ -326,7 +334,7 @@ fn spawn_syncer(dir: std::path::PathBuf, state: std::sync::Weak<Store>) {
             }
             last = Instant::now();
             // The fsync runs without the indices lock, as for write requests.
-            let begun = es_index::disk::begin_sync(&dir, &mut state.write());
+            let begun = es_index::disk::begin_sync(&dir, &mut state.write_all());
             if let Err(e) = begun.and_then(es_index::disk::Pending::finish) {
                 tracing::error!("syncing {}: {e}", dir.display());
             }

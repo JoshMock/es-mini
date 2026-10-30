@@ -843,3 +843,85 @@ async fn keys_are_bulk_updated() {
         (400, error(400, &[("x_content_parse_exception", reason)], 0))
     );
 }
+
+/// Deletes a data directory when dropped.
+struct Cleanup(std::path::PathBuf);
+
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn persisted(dir: &std::path::Path) -> axum::Router {
+    let settings = HashMap::from([
+        ("xpack.security.enabled".to_owned(), "true".to_owned()),
+        ("bootstrap.password".to_owned(), "changeme".to_owned()),
+    ]);
+    es_mini::app_persisted_with_settings(dir, &settings).unwrap()
+}
+
+#[tokio::test]
+async fn keys_survive_restart_in_a_hidden_index() {
+    let dir = std::env::temp_dir().join(format!("esm-api-keys-{}", std::process::id()));
+    let _cleanup = Cleanup(dir.clone());
+    let _ = std::fs::remove_dir_all(&dir);
+    let app = persisted(&dir);
+    let (k1, a1) = create(&app, ELASTIC, json!({"name": "k1", "metadata": {"m": 1}})).await;
+    let (k2, a2) = create(&app, ELASTIC, json!({"name": "k2"})).await;
+    let ids = json!({"ids": [k2["id"]]});
+    let got = call(&app, ELASTIC, "DELETE", "/_security/api_key", Some(ids)).await;
+    assert_eq!(got.0, 200, "{}", got.1);
+    let (_, before) = call(&app, ELASTIC, "GET", "/_security/api_key", None).await;
+    assert_eq!(before["api_keys"].as_array().unwrap().len(), 2, "{before}");
+    drop(app);
+
+    let app = persisted(&dir);
+    let (status, after) = call(&app, ELASTIC, "GET", "/_security/api_key", None).await;
+    assert_eq!(status, 200, "{after}");
+    assert_eq!(after, before);
+    assert_eq!(
+        call(&app, &a1, "GET", "/_security/_authenticate", None)
+            .await
+            .0,
+        200
+    );
+    let why = format!(
+        "api key [{}] has been invalidated",
+        k2["id"].as_str().unwrap()
+    );
+    let got = call(&app, &a2, "GET", "/_security/_authenticate", None).await;
+    assert_eq!(got, (401, unauthorized(&why)));
+
+    // Ordinary requests see no .security-7 and cannot write it.
+    let id = k1["id"].as_str().unwrap();
+    let got = call(&app, ELASTIC, "GET", "/_search", None).await;
+    assert_eq!(got.1["hits"]["total"]["value"], 0, "{}", got.1);
+    let got = call(&app, ELASTIC, "GET", "/_cat/shards?format=json", None).await;
+    assert_eq!(got, (200, json!([])));
+    let got = call(
+        &app,
+        ELASTIC,
+        "GET",
+        &format!("/.security-7/_doc/{id}"),
+        None,
+    )
+    .await;
+    assert_eq!(got.0, 404, "{}", got.1);
+    let got = call(&app, ELASTIC, "GET", "/.security/_search", None).await;
+    assert_eq!(got.0, 404, "{}", got.1);
+    for index in [".security-7", ".security"] {
+        let uri = format!("/{index}/_doc/x");
+        let got = call(&app, ELASTIC, "PUT", &uri, Some(json!({"a": 1}))).await;
+        let reason = format!(
+            "action [indices:data/write/bulk[s]] is unauthorized for user [elastic] with effective roles [superuser] on restricted indices [{index}], this action is granted by the index privileges [create_doc,create,delete,index,write,all]"
+        );
+        assert_eq!(
+            got,
+            (403, error(403, &[("security_exception", &reason)], 0))
+        );
+    }
+    let got = call(&app, ELASTIC, "PUT", "/.security-7", None).await;
+    let reason = "action [indices:admin/create] is unauthorized for user [elastic] with effective roles [superuser] on restricted indices [.security-7], this action is granted by the index privileges [create_index,manage,all]";
+    assert_eq!(got, (403, error(403, &[("security_exception", reason)], 0)));
+}

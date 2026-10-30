@@ -97,6 +97,8 @@ pub async fn create(
         &["timeout", "master_timeout", "wait_for_active_shards"],
     )?;
     let name = resolve_date_math(&name)?;
+    let privileges = "create_index,manage,all";
+    crate::security::refuse_restricted(&name, "indices:admin/create", privileges)?;
     validate_index_name(&name)?;
     let body = parse_body(&body)?;
     let mut index = Index::default();
