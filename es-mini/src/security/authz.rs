@@ -70,6 +70,7 @@ const GRANTED_BY: &[(&str, &str)] = &[
     ("indices:data/read/msearch", "read,all"),
     ("indices:data/read/msearch/template", "read,all"),
     ("indices:data/read/mget", "read,all"),
+    ("indices:data/read/mget[shard]", "read,all"),
     ("indices:data/read/esql", "read_cross_cluster,read,all"),
     (
         "indices:data/write/bulk",
@@ -200,8 +201,8 @@ enum Step<'a> {
 
 /// The checks Elasticsearch makes for `method` on the path `segs`, by the actions it names
 /// them.
-// ponytail: mget, msearch, ES|QL and POST _aliases are checked by action only, not per index
-// they name yet (bulk items are, by the bulk handler)
+// ponytail: msearch, ES|QL and POST _aliases are checked by action only, not per index they
+// name yet (bulk and mget items are, by their handlers)
 fn steps<'a>(method: &Method, segs: &[&'a str], params: &HashMap<String, String>) -> Vec<Step<'a>> {
     use Step::*;
     let at = |action, i| Indices {
@@ -593,6 +594,23 @@ pub(crate) fn bulk_item(
         _ => "indices:data/write/delete",
     };
     Key { id, roles }.write(store, item, index)
+}
+
+/// Authorizes an mget shard request, which reads its items through `names`, for whoever
+/// `authn` is; Elasticsearch fails all the shard's items when its key may not read one name.
+pub(crate) fn mget_shard(authn: Option<&Authn>, names: &[&str]) -> Result<(), AppError> {
+    let Some(Authn::ApiKey { id, roles, .. }) = authn else {
+        return Ok(());
+    };
+    let key = Key { id, roles };
+    let action = "indices:data/read/mget[shard]";
+    let denied: Vec<&str> = (names.iter().copied())
+        .filter(|n| !key.index(action, n))
+        .collect();
+    match denied.is_empty() {
+        true => Ok(()),
+        false => Err(key.denied(action, &java_order(&denied))),
+    }
 }
 
 /// The privileges of one kind (cluster or index) that `_has_privileges` compares.

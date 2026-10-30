@@ -1,6 +1,11 @@
-use crate::{AppState, error::AppError, params};
+use crate::{
+    AppState,
+    error::AppError,
+    params,
+    security::{Authn, mget_shard},
+};
 use axum::{
-    Json,
+    Extension, Json,
     body::Bytes,
     extract::{Path, Query, State},
     http::{StatusCode, Uri},
@@ -535,6 +540,7 @@ pub async fn get(
 pub async fn mget(
     State(state): State<AppState>,
     path: Option<Path<String>>,
+    authn: Option<Extension<Authn>>,
     uri: Uri,
     Query(params): Query<HashMap<String, String>>,
     body: Bytes,
@@ -560,20 +566,42 @@ pub async fn mget(
                 "no documents to get".into(),
             ));
         };
+    let items = (items.into_iter())
+        .map(|(index, id, routing)| Some((index.or_else(|| default_index.clone())?, id, routing)))
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| missing("index"))?;
+    // ponytail: items are grouped by index, where Elasticsearch groups them by shard
+    let concrete: Vec<Option<String>> = {
+        let shared = state.read();
+        (items.iter())
+            .map(|(index, ..)| match index.contains('*') {
+                true => None,
+                false => single_index(&*shared, index).ok(),
+            })
+            .collect()
+    };
     let mut docs = Vec::new();
-    for (index, id, routing) in items {
-        let Some(index) = index.or_else(|| default_index.clone()) else {
-            return Err(missing("index"));
-        };
+    for (n, (index, id, routing)) in items.iter().cloned().enumerate() {
+        if let Some(c) = &concrete[n] {
+            let names: Vec<&str> = (items.iter().zip(&concrete))
+                .filter(|(_, other)| other.as_ref() == Some(c))
+                .map(|((name, ..), _)| name.as_str())
+                .collect();
+            if let Err(e) = mget_shard(authn.as_deref(), &names) {
+                docs.push(json!({"_index": c, "_id": id, "error": e.parts().1}));
+                continue;
+            }
+        }
         let mut params = params.clone();
         params.extend(routing.map(|r| ("routing".to_owned(), r)));
-        let r = get(
-            State(state.clone()),
-            Path((index.clone(), id.clone())),
-            uri.clone(),
-            Query(params),
-        )
-        .await;
+        // Elasticsearch resolves an item's index without expanding wildcards.
+        let r = match index.contains('*') {
+            true => Err(AppError::IndexNotFound(index.clone())),
+            false => {
+                let path = Path((index.clone(), id.clone()));
+                get(State(state.clone()), path, uri.clone(), Query(params)).await
+            }
+        };
         docs.push(match r {
             Ok((_, Json(d))) => d,
             Err(e) => {

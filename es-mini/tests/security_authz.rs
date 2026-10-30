@@ -570,3 +570,40 @@ async fn bulk_items_are_authorized_by_index() {
     let (_, b1) = call(&app, ELASTIC, "GET", "/b1/_doc/5", None).await;
     assert_eq!(b1["found"], false, "{b1}");
 }
+
+/// Each mget item is authorized by the names that reach its index: an index any of whose names
+/// the key may not read fails all its items, named by the concrete index (recorded from
+/// Elasticsearch 9.5.5: an alias grants its items only, `ca` fails `c1`'s too).
+#[tokio::test]
+async fn mget_items_are_authorized_by_index() {
+    let app = app().await;
+    let roles = json!({"r": {"indices": [
+        {"names": ["al"], "privileges": ["read"]},
+        {"names": ["c1"], "privileges": ["read"]},
+    ]}});
+    let (kal, id) = key(&app, ELASTIC, roles).await;
+    let docs: Vec<Value> = ["al", "b1", "ca", "c1", "c*"]
+        .iter()
+        .map(|i| json!({"_index": i, "_id": "1"}))
+        .collect();
+    let out = ok(&app, &kal, "POST", "/_mget", Some(json!({"docs": docs}))).await;
+    let mget = "indices:data/read/mget[shard]";
+    let on = |index: &str, names: &str| json!({"_index": index, "error": denied(&id, mget, names, "read,all")["error"]});
+    let got: Vec<Value> = (out["docs"].as_array().unwrap().iter())
+        .map(|d| json!({"_index": d["_index"], "error": d["error"]}))
+        .collect();
+    assert_eq!(
+        got[..4],
+        [
+            on("b1", "b1"),
+            on("b1", "b1"),
+            on("c1", "ca"),
+            on("c1", "ca")
+        ]
+    );
+    assert_eq!(got[4]["error"]["type"], "index_not_found_exception");
+    let out = ok(&app, &kal, "POST", "/al/_mget", Some(json!({"ids": ["1"]}))).await;
+    assert_eq!(out["docs"][0]["found"], true, "{out}");
+    let out = ok(&app, &kal, "POST", "/b1/_mget", Some(json!({"ids": ["1"]}))).await;
+    assert_eq!(out["docs"][0]["error"], on("b1", "b1")["error"]);
+}
