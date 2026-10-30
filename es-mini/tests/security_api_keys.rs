@@ -1,4 +1,4 @@
-//! The API key lifecycle (create, get, invalidate) with security on. Expected bodies were
+//! The API key lifecycle (create, get, update, invalidate) with security on. Expected bodies were
 //! recorded from a live Elasticsearch 9.5.5 (`xpack.security.enabled=true`).
 
 use axum::{body::Body, http::Request};
@@ -590,4 +590,256 @@ async fn keys_create_only_empty_derived_keys() {
     // The creating key owns it: owner=true lists keys of the key's realm.
     let (_, got) = call(&app, &auth, "GET", "/_security/api_key?owner=true", None).await;
     assert_eq!(got["api_keys"].as_array().unwrap().len(), 1);
+}
+
+/// The key `id` as the get API shows it.
+async fn get_key(app: &axum::Router, id: &str) -> Value {
+    let uri = format!("/_security/api_key?id={id}");
+    let (_, got) = call(app, ELASTIC, "GET", &uri, None).await;
+    got["api_keys"][0].clone()
+}
+
+#[tokio::test]
+async fn keys_are_updated() {
+    let app = secured();
+    let body = json!({"name": "k1", "metadata": {"a": 1}, "role_descriptors": {"r1": {"cluster": ["monitor"]}}});
+    let (k1, _) = create(&app, ELASTIC, body).await;
+    let id = k1["id"].as_str().unwrap();
+    let uri = format!("/_security/api_key/{id}");
+    let update = |body: Option<Value>| call(&app, ELASTIC, "PUT", &uri, body);
+    let (updated, unchanged) = (
+        (200, json!({"updated": true})),
+        (200, json!({"updated": false})),
+    );
+    for body in [None, Some(json!({})), Some(json!({"metadata": {"a": 1}}))] {
+        assert_eq!(update(body).await, unchanged);
+    }
+    assert_eq!(update(Some(json!({"metadata": {"b": 2}}))).await, updated);
+    assert_eq!(get_key(&app, id).await["metadata"], json!({"b": 2}));
+    assert_eq!(update(Some(json!({"role_descriptors": {}}))).await, updated);
+    assert_eq!(get_key(&app, id).await["role_descriptors"], json!({}));
+
+    let roles = json!({"r2": {"indices": [{"names": ["x"], "privileges": ["read"]}]}});
+    let body = json!({"role_descriptors": roles, "expiration": "2d"});
+    assert_eq!(update(Some(body)).await, updated);
+    let info = get_key(&app, id).await;
+    let r2 = json!({"cluster": [], "indices": [{"names": ["x"], "privileges": ["read"], "allow_restricted_indices": false}], "applications": [], "run_as": [], "metadata": {}, "transient_metadata": {"enabled": true}});
+    assert_eq!(info["role_descriptors"], json!({"r2": r2}));
+    let left = info["expiration"].as_i64().unwrap() - info["creation"].as_i64().unwrap();
+    assert!(
+        (2 * 86_400_000..2 * 86_400_000 + 60_000).contains(&left),
+        "{left}"
+    );
+    // The same roles in another form change nothing; any expiration does.
+    let same = json!({"r2": {"indices": [{"names": "x", "privileges": ["read"]}], "run_as": []}});
+    assert_eq!(
+        update(Some(json!({"role_descriptors": same}))).await,
+        unchanged
+    );
+    assert_eq!(update(Some(json!({"expiration": "2d"}))).await, updated);
+}
+
+#[tokio::test]
+async fn update_requests_are_validated() {
+    let app = secured();
+    let (k1, auth) = create(&app, ELASTIC, json!({"name": "k1"})).await;
+    let (k2, _) = create(&app, ELASTIC, json!({"name": "k2", "expiration": "-1d"})).await;
+    let (k3, _) = create(&app, ELASTIC, json!({"name": "k3"})).await;
+    let id = k1["id"].as_str().unwrap();
+    let uri = format!("/_security/api_key/{id}");
+    let update = |body: Value| call(&app, ELASTIC, "PUT", &uri, Some(body));
+    let x_content = |reason: &str| error(400, &[("x_content_parse_exception", reason)], 0);
+    let illegal = |reason: &str| error(400, &[("illegal_argument_exception", reason)], 0);
+    let cases = [
+        (
+            json!({"metadata": {"_x": 1}}),
+            validation("Validation Failed: 1: API key metadata keys may not start with [_];"),
+        ),
+        (
+            json!({"metadata": "s"}),
+            x_content(
+                "[update_api_key_request_payload] metadata doesn't support values of type: VALUE_STRING",
+            ),
+        ),
+        (
+            json!({"metadata": null}),
+            x_content(
+                "[update_api_key_request_payload] metadata doesn't support values of type: VALUE_NULL",
+            ),
+        ),
+        (
+            json!({"role_descriptors": null}),
+            x_content(
+                "[update_api_key_request_payload] role_descriptors doesn't support values of type: VALUE_NULL",
+            ),
+        ),
+        (
+            json!({"name": "n"}),
+            x_content("[update_api_key_request_payload] unknown field [name]"),
+        ),
+        (
+            json!({"expiration": "zz"}),
+            error(
+                400,
+                &[
+                    (
+                        "x_content_parse_exception",
+                        "Failed to build [update_api_key_request_payload] after last required field arrived",
+                    ),
+                    (
+                        "illegal_argument_exception",
+                        "failed to parse setting [expiration] with value [zz] as a time value: unit is missing or unrecognized",
+                    ),
+                ],
+                0,
+            ),
+        ),
+    ];
+    for (body, expected) in cases {
+        assert_eq!(update(body.clone()).await, (400, expected), "{body}");
+    }
+    let got = call(&app, ELASTIC, "PUT", &format!("{uri}?refresh=true"), None).await;
+    let reason = format!("request [{uri}] contains unrecognized parameter: [refresh]");
+    assert_eq!(got, (400, illegal(&reason)));
+
+    let got = call(&app, ELASTIC, "PUT", "/_security/api_key/nope", None).await;
+    let reason = "no API key owned by requesting user found for ID [nope]";
+    assert_eq!(
+        got,
+        (
+            404,
+            error(404, &[("resource_not_found_exception", reason)], 0)
+        )
+    );
+    let k2 = k2["id"].as_str().unwrap();
+    let got = call(
+        &app,
+        ELASTIC,
+        "PUT",
+        &format!("/_security/api_key/{k2}"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        got,
+        (
+            400,
+            illegal(&format!("cannot update expired API key [{k2}]"))
+        )
+    );
+    let k3 = k3["id"].as_str().unwrap();
+    call(
+        &app,
+        ELASTIC,
+        "DELETE",
+        "/_security/api_key",
+        Some(json!({"ids": [k3]})),
+    )
+    .await;
+    let got = call(
+        &app,
+        ELASTIC,
+        "PUT",
+        &format!("/_security/api_key/{k3}"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        got,
+        (
+            400,
+            illegal(&format!("cannot update invalidated API key [{k3}]"))
+        )
+    );
+
+    let reason =
+        "authentication via API key not supported: only the owner user can update an API key";
+    let got = call(&app, &auth, "PUT", &uri, None).await;
+    assert_eq!(got, (400, illegal(reason)));
+    let body = json!({"ids": [id]});
+    let got = call(
+        &app,
+        &auth,
+        "POST",
+        "/_security/api_key/_bulk_update",
+        Some(body),
+    )
+    .await;
+    assert_eq!(got, (400, illegal(reason)));
+}
+
+#[tokio::test]
+async fn keys_are_bulk_updated() {
+    let app = secured();
+    let mut ids = vec![];
+    for body in [
+        json!({"name": "k1"}),
+        json!({"name": "k2", "expiration": "1d"}),
+        json!({"name": "k3", "expiration": "-1d"}),
+        json!({"name": "k4"}),
+    ] {
+        ids.push(create(&app, ELASTIC, body).await.0["id"].clone());
+    }
+    let (a, b, c, d) = (&ids[0], &ids[1], &ids[2], &ids[3]);
+    call(
+        &app,
+        ELASTIC,
+        "DELETE",
+        "/_security/api_key",
+        Some(json!({"ids": [d]})),
+    )
+    .await;
+    let bulk = |body: Value| {
+        call(
+            &app,
+            ELASTIC,
+            "POST",
+            "/_security/api_key/_bulk_update",
+            Some(body),
+        )
+    };
+
+    let got = bulk(json!({"ids": [a, b, c, d, "nope"], "metadata": {"z": 1}})).await;
+    let illegal = |reason: String| json!({"type": "illegal_argument_exception", "reason": reason});
+    let details = json!({
+        c.as_str().unwrap(): illegal(format!("cannot update expired API key [{}]", c.as_str().unwrap())),
+        "nope": {"type": "resource_not_found_exception", "reason": "no API key owned by requesting user found for ID [nope]"},
+        d.as_str().unwrap(): illegal(format!("cannot update invalidated API key [{}]", d.as_str().unwrap())),
+    });
+    let expected =
+        json!({"updated": [a, b], "noops": [], "errors": {"count": 3, "details": details}});
+    assert_eq!(got, (200, expected));
+    assert_eq!(
+        get_key(&app, b.as_str().unwrap()).await["metadata"],
+        json!({"z": 1})
+    );
+
+    let got = bulk(json!({"ids": [a, b], "metadata": {"z": 1}})).await;
+    assert_eq!(got, (200, json!({"updated": [], "noops": [a, b]})));
+    // Duplicates count once, and a single id may be a string.
+    let got = bulk(json!({"ids": [a, a]})).await;
+    assert_eq!(got, (200, json!({"updated": [], "noops": [a]})));
+    let got = bulk(json!({"ids": a})).await;
+    assert_eq!(got, (200, json!({"updated": [], "noops": [a]})));
+    let got = bulk(json!({"ids": [b], "role_descriptors": {"q": {}}, "expiration": "3d"})).await;
+    assert_eq!(got, (200, json!({"updated": [b], "noops": []})));
+
+    let got = bulk(json!({"ids": []})).await;
+    let expected = validation("Validation Failed: 1: Field [ids] cannot be empty;");
+    assert_eq!(got, (400, expected));
+    let got = bulk(json!({})).await;
+    let expected = error(400, &[("illegal_argument_exception", "Required [ids]")], 0);
+    assert_eq!(got, (400, expected));
+    let got = bulk(json!({"ids": [b], "bogus": 1})).await;
+    let reason = "[bulk_update_api_key_request] unknown field [bogus]";
+    assert_eq!(
+        got,
+        (400, error(400, &[("x_content_parse_exception", reason)], 0))
+    );
+    let got = bulk(json!({"ids": 5})).await;
+    let reason = "[bulk_update_api_key_request] ids doesn't support values of type: VALUE_NUMBER";
+    assert_eq!(
+        got,
+        (400, error(400, &[("x_content_parse_exception", reason)], 0))
+    );
 }

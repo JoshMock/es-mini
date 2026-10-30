@@ -5,11 +5,11 @@ use crate::error::AppError;
 use axum::{
     Extension, Json, Router,
     body::Bytes,
-    extract::{Query, Request, State},
+    extract::{Path, Query, Request, State},
     http::{HeaderValue, StatusCode, Uri, header},
     middleware::Next,
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use es_index::es_codec::{base64, sha256::sha256_base64};
 use serde_json::{Map, Value, json};
@@ -66,6 +66,8 @@ pub fn routes<S>(security: Arc<Security>) -> Router<S> {
                 .get(get_keys)
                 .delete(invalidate_keys),
         )
+        .route("/_security/api_key/{id}", put(update_key))
+        .route("/_security/api_key/_bulk_update", post(bulk_update_keys))
         .with_state(security)
 }
 
@@ -215,47 +217,22 @@ async fn create_key(
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
     let body = crate::docs::parse_json(&body)?;
-    let (mut name, mut expiration, mut metadata, mut roles) = (None, None, None, None);
-    for (k, v) in body.as_object().into_iter().flatten() {
-        let wrong = || {
-            let token = es_index::json_token(v);
-            AppError::XContentParse(format!(
-                "[api_key_request] {k} doesn't support values of type: {token}"
-            ))
-        };
-        match k.as_str() {
-            "name" => name = Some(v.as_str().ok_or_else(wrong)?),
-            "expiration" => expiration = Some(v.as_str().ok_or_else(wrong)?),
-            "metadata" => metadata = Some(v.as_object().ok_or_else(wrong)?),
-            "role_descriptors" => roles = Some(role_descriptors(v)?),
-            _ => {
-                return Err(AppError::XContentParse(format!(
-                    "[api_key_request] unknown field [{k}]"
-                )));
-            }
-        }
-    }
-    let Some(name) = name else {
+    let request = "api_key_request";
+    let req = key_request(
+        &body,
+        request,
+        &["name", "expiration", "metadata", "role_descriptors"],
+    )?;
+    let Some(name) = req.name else {
         return Err(AppError::IllegalArgument("Required [name]".into()));
     };
     let (id, creation) = es_index::auto_id();
-    let expiration = expiration
-        .map(|e| {
-            // Elasticsearch adds whole seconds only.
-            let ms = es_index::index_settings::time_millis(e, "expiration")
-                .map_err(failed_expiration)?;
-            Ok::<_, AppError>(creation + ms / 1000 * 1000)
-        })
-        .transpose()?;
+    let expiration = expiration(&req, request, creation)?;
     let mut errors = vec![];
     errors.extend(name_error(name));
-    if metadata.is_some_and(|m| m.keys().any(|k| k.starts_with('_'))) {
-        errors.push("API key metadata keys may not start with [_]".into());
-    }
-    for role in roles.iter().flat_map(Map::values) {
-        errors.extend(privilege_errors(role));
-    }
+    errors.extend(request_errors(&req));
     validate(errors)?;
+    let (metadata, roles) = (req.metadata, req.roles);
     let (realm, limited_by) = match authn {
         Authn::Elastic => ("reserved", superuser()),
         Authn::ApiKey { .. } => {
@@ -311,7 +288,7 @@ async fn create_key(
 }
 
 /// The error for an `expiration` that is not a time value, as Elasticsearch's parser wraps it.
-fn failed_expiration(reason: String) -> AppError {
+fn failed_expiration(reason: String, request: &str) -> AppError {
     let mut cause = json!({"type": "illegal_argument_exception", "reason": reason});
     // Java's Long.parseLong failed on the value without its unit.
     if let Some(rest) = reason.strip_prefix("failed to parse [") {
@@ -321,8 +298,209 @@ fn failed_expiration(reason: String) -> AppError {
         let reason = format!("For input string: \"{}\"", n.trim());
         cause["caused_by"] = json!({"type": "number_format_exception", "reason": reason});
     }
-    let reason = "Failed to build [api_key_request] after last required field arrived";
-    AppError::Caused(Box::new(AppError::XContentParse(reason.into())), cause)
+    let reason = format!("Failed to build [{request}] after last required field arrived");
+    AppError::Caused(Box::new(AppError::XContentParse(reason)), cause)
+}
+
+/// The fields of a create or update request.
+#[derive(Default)]
+struct KeyRequest<'a> {
+    name: Option<&'a str>,
+    ids: Option<Vec<&'a str>>,
+    expiration: Option<&'a str>,
+    metadata: Option<&'a Map<String, Value>>,
+    roles: Option<Map<String, Value>>,
+}
+
+/// `body` as Elasticsearch's parser named `request` reads it, refusing fields not in `fields`.
+fn key_request<'a>(
+    body: &'a Value,
+    request: &str,
+    fields: &[&str],
+) -> Result<KeyRequest<'a>, AppError> {
+    let mut out = KeyRequest::default();
+    for (k, v) in body.as_object().into_iter().flatten() {
+        let wrong = || {
+            let token = es_index::json_token(v);
+            AppError::XContentParse(format!(
+                "[{request}] {k} doesn't support values of type: {token}"
+            ))
+        };
+        match k.as_str() {
+            _ if !fields.contains(&k.as_str()) => {
+                return Err(AppError::XContentParse(format!(
+                    "[{request}] unknown field [{k}]"
+                )));
+            }
+            "name" => out.name = Some(v.as_str().ok_or_else(wrong)?),
+            "expiration" => out.expiration = Some(v.as_str().ok_or_else(wrong)?),
+            "metadata" => out.metadata = Some(v.as_object().ok_or_else(wrong)?),
+            "ids" => {
+                let ids = match v {
+                    Value::String(id) => Some(vec![id.as_str()]),
+                    _ => v
+                        .as_array()
+                        .ok_or_else(wrong)?
+                        .iter()
+                        .map(Value::as_str)
+                        .collect(),
+                };
+                out.ids = Some(ids.ok_or_else(wrong)?);
+            }
+            _ if v.is_null() => return Err(wrong()),
+            _ => out.roles = Some(role_descriptors(request, v)?),
+        }
+    }
+    Ok(out)
+}
+
+/// When a key `req` sets the expiration of at `from` expires.
+fn expiration(req: &KeyRequest, request: &str, from: i64) -> Result<Option<i64>, AppError> {
+    let ms = |e| es_index::index_settings::time_millis(e, "expiration");
+    // Elasticsearch adds whole seconds only.
+    (req.expiration.map(ms).transpose())
+        .map(|ms| ms.map(|ms| from + ms / 1000 * 1000))
+        .map_err(|e| failed_expiration(e, request))
+}
+
+/// What request validation finds wrong with the metadata and role descriptors of `req`.
+fn request_errors(req: &KeyRequest) -> Vec<String> {
+    let mut errors = vec![];
+    if (req.metadata).is_some_and(|m| m.keys().any(|k| k.starts_with('_'))) {
+        errors.push("API key metadata keys may not start with [_]".into());
+    }
+    for role in req.roles.iter().flat_map(Map::values) {
+        errors.extend(privilege_errors(role));
+    }
+    errors
+}
+
+/// `PUT /_security/api_key/{id}`: changes a key's role descriptors, metadata or expiration.
+async fn update_key(
+    State(security): State<Arc<Security>>,
+    Extension(authn): Extension<Authn>,
+    Path(id): Path<String>,
+    uri: Uri,
+    Query(params): Query<HashMap<String, String>>,
+    body: Bytes,
+) -> Result<Json<Value>, AppError> {
+    crate::params::check(&uri, &params, &[])?;
+    // The body is optional.
+    let body = match body.is_empty() {
+        true => json!({}),
+        false => crate::docs::parse_json(&body)?,
+    };
+    let request = "update_api_key_request_payload";
+    let req = key_request(
+        &body,
+        request,
+        &["expiration", "metadata", "role_descriptors"],
+    )?;
+    let expiration = expiration(&req, request, now())?;
+    validate(request_errors(&req))?;
+    owner_only(&authn)?;
+    let updated = update(&mut security.keys(), &id, &req, expiration)?;
+    Ok(Json(json!({"updated": updated})))
+}
+
+/// `POST /_security/api_key/_bulk_update`: updates each of `ids` alike.
+async fn bulk_update_keys(
+    State(security): State<Arc<Security>>,
+    Extension(authn): Extension<Authn>,
+    uri: Uri,
+    Query(params): Query<HashMap<String, String>>,
+    body: Bytes,
+) -> Result<Json<Value>, AppError> {
+    crate::params::check(&uri, &params, &[])?;
+    let body = crate::docs::parse_json(&body)?;
+    let request = "bulk_update_api_key_request";
+    let fields = ["ids", "expiration", "metadata", "role_descriptors"];
+    let req = key_request(&body, request, &fields)?;
+    let Some(ids) = &req.ids else {
+        return Err(AppError::IllegalArgument("Required [ids]".into()));
+    };
+    let expiration = expiration(&req, request, now())?;
+    let mut errors = request_errors(&req);
+    if ids.is_empty() {
+        errors.insert(0, "Field [ids] cannot be empty".into());
+    }
+    validate(errors)?;
+    owner_only(&authn)?;
+    let (mut updated, mut noops, mut details) = (vec![], vec![], Map::new());
+    let mut keys = security.keys();
+    for (i, id) in ids.iter().enumerate() {
+        if ids[..i].contains(id) {
+            continue;
+        }
+        match update(&mut keys, id, &req, expiration) {
+            Ok(true) => updated.push(*id),
+            Ok(false) => noops.push(*id),
+            Err(e) => {
+                let (_, mut error) = e.parts();
+                error.as_object_mut().map(|e| e.shift_remove("root_cause"));
+                details.insert((*id).to_owned(), error);
+            }
+        }
+    }
+    let mut out = json!({"updated": updated, "noops": noops});
+    if !details.is_empty() {
+        out["errors"] = json!({"count": details.len(), "details": details});
+    }
+    Ok(Json(out))
+}
+
+/// Elasticsearch lets only users, not API keys, update keys.
+fn owner_only(authn: &Authn) -> Result<(), AppError> {
+    match authn {
+        Authn::Elastic => Ok(()),
+        Authn::ApiKey { .. } => Err(AppError::IllegalArgument(
+            "authentication via API key not supported: only the owner user can update an API key"
+                .into(),
+        )),
+    }
+}
+
+/// Applies `req` to `elastic`'s key `id`, moving it last if it changes; whether it changed.
+fn update(
+    keys: &mut Vec<(String, Value)>,
+    id: &str,
+    req: &KeyRequest,
+    expiration: Option<i64>,
+) -> Result<bool, AppError> {
+    let Some(at) = keys.iter().position(|(k, d)| {
+        k == id && d["creator"]["principal"] == "elastic" && d["creator"]["realm"] == "reserved"
+    }) else {
+        return Err(AppError::ResourceNotFound(format!(
+            "no API key owned by requesting user found for ID [{id}]"
+        )));
+    };
+    let doc = &keys[at].1;
+    if doc["api_key_invalidated"] == true {
+        return Err(AppError::IllegalArgument(format!(
+            "cannot update invalidated API key [{id}]"
+        )));
+    }
+    if !active(doc, now()) {
+        return Err(AppError::IllegalArgument(format!(
+            "cannot update expired API key [{id}]"
+        )));
+    }
+    let mut doc = doc.clone();
+    if let Some(roles) = &req.roles {
+        doc["role_descriptors"] = Value::Object(roles.clone());
+    }
+    if let Some(metadata) = req.metadata {
+        doc["metadata_flattened"] = Value::Object(metadata.clone());
+    }
+    if expiration.is_none() && doc == keys[at].1 {
+        return Ok(false);
+    }
+    if let Some(e) = expiration {
+        doc["expiration_time"] = e.into();
+    }
+    keys.remove(at);
+    keys.push((id.to_owned(), doc));
+    Ok(true)
 }
 
 /// What is wrong with an API key name, as Elasticsearch's `Validation.ApiKey.validateName`.
@@ -342,13 +520,13 @@ fn name_error(name: &str) -> Option<String> {
 }
 
 /// `role_descriptors` parsed into the form Elasticsearch stores in `.security-7`.
-fn role_descriptors(v: &Value) -> Result<Map<String, Value>, AppError> {
-    let outer = "[api_key_request] failed to parse field [role_descriptors]";
+fn role_descriptors(request: &str, v: &Value) -> Result<Map<String, Value>, AppError> {
+    let outer = format!("[{request}] failed to parse field [role_descriptors]");
     let roles = v.as_object().ok_or_else(|| {
         let reason =
             "[role_descriptors] doesn't support arrays. Use a single object with multiple fields.";
         let cause = json!({"type": "illegal_argument_exception", "reason": reason});
-        AppError::Caused(Box::new(AppError::XContentParse(outer.into())), cause)
+        AppError::Caused(Box::new(AppError::XContentParse(outer.clone())), cause)
     })?;
     roles
         .iter()
@@ -356,7 +534,7 @@ fn role_descriptors(v: &Value) -> Result<Map<String, Value>, AppError> {
             let parsed = role_descriptor(name, role).map_err(|chain| {
                 let mid = format!("[role_descriptors] failed to parse field [{name}]");
                 let wrap = [
-                    ("x_content_parse_exception", outer.into()),
+                    ("x_content_parse_exception", outer.clone()),
                     ("x_content_parse_exception", mid),
                 ];
                 AppError::Chain(wrap.into_iter().chain(chain).collect())
