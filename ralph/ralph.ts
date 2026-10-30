@@ -47,7 +47,8 @@ const SUITES: Record<string, Suite> = {
     list: "ralph/goals.txt",
     frozen: ["ralph/ponytail-ledger.md", "ralph/ledger-check.sh", "bench", "ralph/esql-cold.sh"],
     howTo: () =>
-      "Read z_old/EXECUTION.md for the task's full definition of done. Make one coherent, verified step " +
+      "If z_old/EXECUTION.md defines this goal, read it for the full definition of done; otherwise the goal " +
+      "line is the full definition and overrides that plan's scope assumptions. Make one coherent, verified step " +
       "of progress per iteration (it is fine if the goal needs several iterations). Delete the goal's line " +
       "from ralph/goals.txt only when its done-criteria hold. The loop then runs the goal's Done-check " +
       "command itself and rejects the iteration if it fails, so run that command yourself first.",
