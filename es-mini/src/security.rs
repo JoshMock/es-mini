@@ -19,7 +19,10 @@ use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+mod authz;
 mod query;
+
+pub use authz::authorize;
 
 /// The system index keys are stored in, as Elasticsearch names it, behind the [`ALIAS`] alias.
 pub(crate) const INDEX: &str = ".security-7";
@@ -39,7 +42,12 @@ pub struct Security {
 #[derive(Clone)]
 enum Authn {
     Elastic,
-    ApiKey { id: String, name: String },
+    ApiKey {
+        id: String,
+        name: String,
+        /// The role descriptor sets that authorize it (see [`authz::role_sets`]).
+        roles: Vec<Value>,
+    },
 }
 
 /// Security as the node settings `xpack.security.enabled` (default false) and
@@ -245,8 +253,8 @@ impl Security {
             return Err("api key is expired".into());
         }
         let name = doc["name"].as_str().unwrap_or("");
-        let (id, name) = (id.to_owned(), name.to_owned());
-        Ok(Authn::ApiKey { id, name })
+        let (id, name, roles) = (id.to_owned(), name.to_owned(), authz::role_sets(&doc));
+        Ok(Authn::ApiKey { id, name, roles })
     }
 }
 
@@ -288,7 +296,7 @@ async fn authenticate_response(Extension(authn): Extension<Authn>) -> Json<Value
         "lookup_realm": realm,
         "authentication_type": kind,
     });
-    if let Authn::ApiKey { id, name } = authn {
+    if let Authn::ApiKey { id, name, .. } = authn {
         body["api_key"] = json!({"managed_by": "elasticsearch", "name": name, "id": id});
     }
     Json(body)

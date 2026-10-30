@@ -171,13 +171,18 @@ pub fn app_with_settings(settings: &HashMap<String, String>) -> Result<Router, S
     Ok(secured(app, security))
 }
 
-/// `app` authenticating every request when `security` is on.
+/// `app` authenticating and authorizing every request when `security` is on.
 fn secured(app: Router, security: Option<Arc<security::Security>>) -> Router {
     match security {
-        Some(s) => app.layer(axum::middleware::from_fn_with_state(
-            s,
-            security::authenticate,
-        )),
+        Some(s) => app
+            .layer(axum::middleware::from_fn_with_state(
+                s.clone(),
+                security::authorize,
+            ))
+            .layer(axum::middleware::from_fn_with_state(
+                s,
+                security::authenticate,
+            )),
         None => app,
     }
 }

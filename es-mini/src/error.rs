@@ -62,6 +62,9 @@ pub enum AppError {
     /// A 400 with its `caused_by` chain, outermost first, as (type, reason): the innermost is the
     /// root cause, as with Elasticsearch's nested x_content parse failures.
     Chain(Vec<(&'static str, String)>),
+    /// Field- or document-level security on these indices (comma-separated), which needs a
+    /// license es-mini lacks: Elasticsearch's 403 on its basic license.
+    DlsFlsUnlicensed(String),
     /// Any other error: its status, type and reason.
     Other(StatusCode, &'static str, String),
 }
@@ -152,6 +155,18 @@ impl AppError {
                         "failed_shards": [{"shard": -1, "index": null, "reason": cause}],
                     }),
                 );
+            }
+            Self::DlsFlsUnlicensed(indices) => {
+                let feature = "field and document level security";
+                let cause = json!({
+                    "type": "security_exception",
+                    "reason": format!("current license is non-compliant for [{feature}]"),
+                    "license.expired.feature": feature,
+                    "indices_with_dls_or_fls": indices,
+                });
+                let mut error = cause.clone();
+                error["root_cause"] = json!([cause]);
+                return (StatusCode::FORBIDDEN, error);
             }
             Self::IndexClosed(i) => (
                 StatusCode::BAD_REQUEST,
