@@ -1600,14 +1600,14 @@ fn error_shapes_a_query_failing_on_some_indices_fails_only_their_shards() {
     let req = SearchRequest::parse(&json!({"query": {"range": {"date": {"gte": "bogus"}}}}));
     let req = req.unwrap();
     let r = es_query::search_many(&[("d", &d, None), ("p", &plain, None)], &req).unwrap();
-    let failed: Vec<_> = r.failures.iter().map(|(n, e)| (*n, e.kind)).collect();
+    let failed: Vec<_> = r.failures.iter().map(|(n, _, e)| (*n, e.kind)).collect();
     assert_eq!(failed, [("d", es_query::ErrorKind::Parse)]);
     // failing everywhere, the error lists each index's failure
     let e = es_query::search_many(&[("d", &d, None), ("e", &d, None)], &req).unwrap_err();
     let shards: Vec<_> = e
         .shards
         .iter()
-        .map(|(n, s)| (n.as_str(), s.msg == e.msg))
+        .map(|(n, _, s)| (n.as_str(), s.msg == e.msg))
         .collect();
     assert_eq!(shards, [("d", true), ("e", true)]);
 }

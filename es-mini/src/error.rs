@@ -55,8 +55,8 @@ pub enum AppError {
     SearchContextMissing(u64),
     /// An error with the `caused_by` it reports.
     Caused(Box<AppError>, Value),
-    /// A search that failed on every index: each index's failure.
-    AllShardsFailed(Vec<(String, es_query::QueryError)>),
+    /// A search that failed on every shard: each shard's index, number and failure.
+    AllShardsFailed(Vec<(String, usize, es_query::QueryError)>),
     /// Settings (given as JSON) with a list holding more than strings, numbers and booleans.
     SettingsLists(String),
     /// Any other error: its status, type and reason.
@@ -106,13 +106,8 @@ impl AppError {
                 return (status, error);
             }
             Self::AllShardsFailed(shards) => {
-                let (mut status, mut root_cause, mut failed_shards) = (None, vec![], vec![]);
-                for (index, e) in shards {
-                    let (s, causes, failure) = shard_failure(&index, e);
-                    status.get_or_insert(s);
-                    root_cause.extend(causes);
-                    failed_shards.push(failure);
-                }
+                let shards = shards.iter().map(|(i, n, e)| (i.as_str(), *n, e.clone()));
+                let (status, root_cause, failed_shards) = shard_failures(shards);
                 return (
                     status.unwrap_or(StatusCode::BAD_REQUEST),
                     json!({
@@ -268,8 +263,28 @@ impl AppError {
 
 /// A failed shard of `index` as a search response lists it: the status, root causes, and the
 /// failure entry.
+/// The failures of `shards` as [`shard_failure`] renders them, keeping the first of each index
+/// and reason only (Elasticsearch's ExceptionsHelper.groupBy), with the root causes of those
+/// kept and the first one's status.
+pub(crate) fn shard_failures<'a>(
+    shards: impl IntoIterator<Item = (&'a str, usize, es_query::QueryError)>,
+) -> (Option<StatusCode>, Vec<Value>, Vec<Value>) {
+    let (mut status, mut root_cause, mut failures) = (None, vec![], Vec::<Value>::new());
+    for (index, shard, e) in shards {
+        let (s, causes, f) = shard_failure(index, shard, e);
+        if (failures.iter()).any(|g| g["index"] == f["index"] && g["reason"] == f["reason"]) {
+            continue;
+        }
+        status.get_or_insert(s);
+        root_cause.extend(causes);
+        failures.push(f);
+    }
+    (status, root_cause, failures)
+}
+
 pub(crate) fn shard_failure(
     index: &str,
+    shard: usize,
     e: es_query::QueryError,
 ) -> (StatusCode, Vec<Value>, Value) {
     let (status, mut reason) = AppError::from(e).parts();
@@ -278,7 +293,7 @@ pub(crate) fn shard_failure(
         _ => vec![],
     };
     let failure =
-        json!({"shard": 0, "index": index, "node": crate::nodes::NODE_ID, "reason": reason});
+        json!({"shard": shard, "index": index, "node": crate::nodes::NODE_ID, "reason": reason});
     (status, causes, failure)
 }
 

@@ -137,13 +137,13 @@ fn by_query(
     let r = es_query::search_many(&targets, &req)?;
     // Like ES, a failed shard aborts before any write; the response has the highest status.
     let (mut status, mut failures) = (StatusCode::OK, vec![]);
-    for (index, e) in &r.failures {
-        let (s, _, f) = crate::error::shard_failure(index, e.clone());
+    for (index, shard, e) in &r.failures {
+        let (s, _, f) = crate::error::shard_failure(index, *shard, e.clone());
         status = status.max(s);
         let (node, code) = (crate::nodes::NODE_ID, s.as_u16());
         let reason = &f["reason"];
         failures.push(
-            json!({"index": index, "shard": 0, "node": node, "status": code, "reason": reason}),
+            json!({"index": index, "shard": shard, "node": node, "status": code, "reason": reason}),
         );
     }
     let hits: Vec<(String, String, Option<String>, Value)> = match failures.is_empty() {

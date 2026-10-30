@@ -1188,14 +1188,16 @@ pub struct SearchResult<'a> {
     pub hits: Vec<Hit<'a>>,
     /// The rendered `aggregations`, if the request had any.
     pub aggregations: Option<Value>,
-    /// With `profile: true`, each searched target's `aggregations` profile (an array), in
-    /// target order.
-    pub profile: Option<Vec<Value>>,
-    /// The targets whose shard failed, with why; their documents are left out.
-    pub failures: Vec<(&'a str, QueryError)>,
+    /// With `profile: true`, each searched target's index, shard number and `aggregations`
+    /// profile (an array), in target order.
+    pub profile: Option<Vec<(&'a str, usize, Value)>>,
+    /// The index and shard number of each target that failed, with why; their documents are
+    /// left out.
+    pub failures: Vec<(&'a str, usize, QueryError)>,
 }
 
-/// One index to search, with the filter of the alias it was reached through.
+/// One index (or shard of one) to search, with the filter of the alias it was reached
+/// through. An index's shards are its targets in shard-number order.
 pub type Target<'a> = (&'a str, &'a Index, Option<&'a Value>);
 
 /// The request query, narrowed by an alias filter.
@@ -1500,10 +1502,11 @@ pub fn search_many<'a>(
     let mut total = 0;
     let global = req.dfs.then(|| global_stats(targets, &req.query));
     for (pos, (name, index, filter)) in targets.iter().enumerate() {
+        let shard = targets[..pos].iter().filter(|t| t.0 == *name).count();
         let query = match with_filter(index, &req.query, *filter, now) {
             Ok(q) => q,
             Err(e) => {
-                failures.push((*name, e));
+                failures.push((*name, shard, e));
                 continue;
             }
         };
@@ -1538,14 +1541,14 @@ pub fn search_many<'a>(
         let index_aggs = match aggs::resolve_dates(&req.aggs, index, now) {
             Ok(a) => a,
             Err(e) => {
-                failures.push((*name, e));
+                failures.push((*name, shard, e));
                 continue;
             }
         };
         let mut collector = match aggs::Collector::new(&index_aggs, &s, name, req.profile) {
             Ok(c) => c,
             Err(e) => {
-                failures.push((*name, e));
+                failures.push((*name, shard, e));
                 continue;
             }
         };
@@ -1599,14 +1602,14 @@ pub fn search_many<'a>(
         }
         if let Some(e) = collector.failed() {
             hits.retain(|h| h.target != pos);
-            failures.push((*name, e));
+            failures.push((*name, shard, e));
             continue;
         }
         total += counted;
         let (stats, p) = collector.finish(matches!(query, Query::MatchAll));
         aggs::reduce(&mut aggs, stats);
         if let (Some(all), Some(p)) = (&mut profile, p) {
-            all.push(p);
+            all.push((*name, shard, p));
         }
         searchers.insert(pos, s);
     }
@@ -1624,11 +1627,11 @@ pub fn search_many<'a>(
         skipped = n - hits.len();
     }
     if !failures.is_empty() && failures.len() == targets.len() {
-        let shards = (failures.iter()).map(|(n, e)| (n.to_string(), e.clone()));
+        let shards = (failures.iter()).map(|(n, s, e)| (n.to_string(), *s, e.clone()));
         let shards = shards.collect();
         return Err(QueryError {
             shards,
-            ..failures.swap_remove(0).1
+            ..failures.swap_remove(0).2
         });
     }
     // Elasticsearch collects no top docs for size 0, so it reports no max_score; nor does it

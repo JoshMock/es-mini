@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 fn ids(idx: &Index, query: Value) -> Result<Vec<String>, String> {
     let req = SearchRequest::parse(&json!({ "query": query })).map_err(|e| e.msg)?;
     let r = search_many(&[("i", idx, None)], &req).map_err(|e| e.msg)?;
-    if let Some((_, e)) = r.failures.first() {
+    if let Some((_, _, e)) = r.failures.first() {
         return Err(e.msg.clone());
     }
     let mut ids: Vec<String> = r.hits.iter().map(|h| h.id.to_owned()).collect();

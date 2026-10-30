@@ -68,9 +68,9 @@ pub const MAX_BUCKETS: usize = 65_536;
 pub struct QueryError {
     pub kind: ErrorKind,
     pub msg: String,
-    /// When the search failed on every index: each index's failure; the first gives `kind`
-    /// and `msg`.
-    pub shards: Vec<(String, QueryError)>,
+    /// When the search failed on every shard: each shard's index, number and failure; the
+    /// first gives `kind` and `msg`.
+    pub shards: Vec<(String, usize, QueryError)>,
 }
 
 impl QueryError {

@@ -121,20 +121,20 @@ const COUNT_PARAMS: [&str; 15] = [
     "terminate_after",
 ];
 
-// ponytail: every index has exactly one shard, so total is the number of targets
+/// The `_shards` header of a search over `n` shards that all succeeded.
 pub(crate) fn shards(n: usize) -> Value {
     json!({"total": n, "successful": n, "skipped": 0, "failed": 0})
 }
 
-/// The `profile` section: one shard per target, ordered by id like ES. ponytail: only
+/// The `profile` section: one entry per searched shard, ordered by id like ES. ponytail: only
 /// aggregations are profiled; there is no `searches` (query) or `fetch` profile.
-fn profile(targets: &[es_query::Target], aggs: Vec<Value>) -> Value {
-    let mut shards: Vec<Value> = (targets.iter().zip(aggs))
-        .map(|((index, ..), aggs)| {
+fn profile(searched: Vec<(&str, usize, Value)>) -> Value {
+    let mut shards: Vec<Value> = (searched.into_iter())
+        .map(|(index, shard, aggs)| {
             json!({
-                "id": format!("[{}][{index}][0]", crate::nodes::NODE_ID),
+                "id": format!("[{}][{index}][{shard}]", crate::nodes::NODE_ID),
                 "node_id": crate::nodes::NODE_ID,
-                "shard_id": 0,
+                "shard_id": shard,
                 "index": index,
                 "cluster": "(local)",
                 "aggregations": aggs,
@@ -347,19 +347,14 @@ pub async fn search(
             let s = &mut resp["_shards"];
             s["successful"] = (targets.len() - r.failures.len()).into();
             s["failed"] = r.failures.len().into();
-            let failures = (r.failures.iter())
-                .map(|(index, e)| crate::error::shard_failure(index, e.clone()).2);
-            s["failures"] = failures.collect();
+            let failures = (r.failures.iter()).map(|(i, n, e)| (*i, *n, e.clone()));
+            s["failures"] = crate::error::shard_failures(failures).2.into();
         }
         if let Some(a) = r.aggregations {
             resp["aggregations"] = a;
         }
         if let Some(p) = r.profile {
-            let searched: Vec<_> = (targets.iter())
-                .filter(|(n, ..)| !r.failures.iter().any(|(f, _)| f == n))
-                .cloned()
-                .collect();
-            resp["profile"] = profile(&searched, p);
+            resp["profile"] = profile(p);
         }
         Ok(resp)
     };
@@ -570,8 +565,9 @@ pub async fn count(
     let resolved = crate::indices::data_targets(&*shared, &name, &params)?;
     let indices = shared.lock(resolved.iter().map(|t| &t.index));
     let split = split(&indices, &resolved);
-    let n = es_query::count_many(&targets(&indices, &resolved, &split), &query)?;
-    let resp = json!({"count": n, "_shards": shards(resolved.len())});
+    let targets = targets(&indices, &resolved, &split);
+    let n = es_query::count_many(&targets, &query)?;
+    let resp = json!({"count": n, "_shards": shards(targets.len())});
     Ok(Json(resp))
 }
 
