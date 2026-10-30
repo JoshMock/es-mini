@@ -554,6 +554,53 @@ fn sort_missing_controls_where_absent_values_go() {
 }
 
 #[test]
+fn date_and_boolean_sort_values_are_longs() {
+    let mut i = Index::default();
+    let date = json!({"type": "date", "format": "epoch_millis"});
+    i.mappings
+        .properties
+        .insert("d".into(), serde_json::from_value(date).unwrap());
+    i.mappings
+        .properties
+        .insert("b".into(), FieldMapping::Boolean);
+    i.put("a", json!({"d": 5, "b": true}));
+    i.put("b", json!({"b": false}));
+    i.put("c", json!({"d": 1}));
+    let sorts = |sort: Value| {
+        let req = SearchRequest::parse(&json!({"sort": sort})).unwrap();
+        let r = es_query::search(&i, &req);
+        r.hits
+            .iter()
+            .map(|h| (h.id.to_string(), h.sort.clone()))
+            .collect::<Vec<_>>()
+    };
+    // As Elasticsearch: booleans sort as 0 and 1, and a missing long as Long.MAX_VALUE, or
+    // MIN_VALUE where missing values come first in the order.
+    let (max, min) = (json!(i64::MAX), json!(i64::MIN));
+    assert_eq!(
+        sorts(json!(["d", "b"])),
+        [
+            ("c".into(), vec![json!(1), max.clone()]),
+            ("a".into(), vec![json!(5), json!(1)]),
+            ("b".into(), vec![max.clone(), json!(0)]),
+        ]
+    );
+    assert_eq!(
+        sorts(json!([{"d": {"order": "desc"}}])),
+        [
+            ("a".into(), vec![json!(5)]),
+            ("c".into(), vec![json!(1)]),
+            ("b".into(), vec![min.clone()]),
+        ]
+    );
+    assert_eq!(sorts(json!([{"d": {"missing": "_first"}}]))[0].1, [min]);
+    assert_eq!(
+        sorts(json!([{"d": {"order": "desc", "missing": "_first"}}]))[0].1,
+        [max]
+    );
+}
+
+#[test]
 fn date_range_compares_instants_not_strings() {
     let mut idx = Index::default();
     idx.mappings.properties.insert(

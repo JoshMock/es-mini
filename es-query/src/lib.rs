@@ -1285,13 +1285,23 @@ impl<'a> Searcher<'a> {
                             instant = |f, l, v| es_index::disk::date_nanos(f, l, v).flatten();
                             (format, locale)
                         }
+                        Some(FieldMapping::Boolean) => {
+                            let longs: Vec<Value> = (vals.into_iter())
+                                .filter_map(|v| match v.as_str() {
+                                    Some(s) => s.parse::<bool>().ok(),
+                                    None => v.as_bool(),
+                                })
+                                .map(|b| Value::from(i64::from(b)))
+                                .collect();
+                            return long_sort_value(f, longs.iter().collect());
+                        }
                         _ => return sort_value(f, vals),
                     };
                     let instants: Vec<Value> = (vals.into_iter())
                         .filter_map(|v| instant(format.as_deref(), locale.as_deref(), v))
                         .map(Value::from)
                         .collect();
-                    sort_value(f, instants.iter().collect())
+                    long_sort_value(f, instants.iter().collect())
                 }
             })
             .collect()
@@ -1426,6 +1436,18 @@ fn sort_value(f: &SortField, mut values: Vec<&Value>) -> Value {
         },
         |v| (*v).clone(),
     )
+}
+
+/// [`sort_value`] of a field Elasticsearch sorts as longs (dates, booleans): a missing value
+/// is `Long.MAX_VALUE`, or `MIN_VALUE` where missing values sort first.
+fn long_sort_value(f: &SortField, values: Vec<&Value>) -> Value {
+    match sort_value(f, values) {
+        Value::Null => {
+            let first = f.missing.as_ref().and_then(Value::as_str) == Some("_first");
+            if first == f.desc { i64::MAX } else { i64::MIN }.into()
+        }
+        v => v,
+    }
 }
 
 /// The score of every document `q` matches, if it does not vary (see [`Searcher::score`]).
