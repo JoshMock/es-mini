@@ -1264,3 +1264,184 @@ async fn query_requests_are_validated() {
     let reason = "request [/_security/_query/api_key] contains unrecognized parameter: [foo]";
     assert_eq!(got, (400, illegal(reason)));
 }
+
+#[tokio::test]
+async fn keys_are_aggregated() {
+    let app = secured();
+    query_fixture(&app).await;
+    let terms = |buckets: Value| json!({"doc_count_error_upper_bound": 0, "sum_other_doc_count": 0, "buckets": buckets});
+    let one = |k: &str| json!({"key": k, "doc_count": 1});
+    // (params, body, aggregations), recorded from Elasticsearch 9.5.5
+    // ponytail: aggregations on metadata are left out: es-mini has no flattened type, so they
+    // see an unmapped field (ES gives buckets dev and prod for terms on metadata.env)
+    let cases = [
+        (
+            "",
+            json!({"size": 0, "aggs": {"n": {"terms": {"field": "name"}}}}),
+            json!({"n": terms(json!([one("Gone"), one("k1"), one("k2"), one("other-3")]))}),
+        ),
+        (
+            "?typed_keys=true",
+            json!({"size": 0, "aggs": {"n": {"terms": {"field": "username"}, "aggs": {"c": {"cardinality": {"field": "name"}}, "v": {"value_count": {"field": "name"}}}}}}),
+            json!({"sterms#n": terms(json!([{"key": "elastic", "doc_count": 4, "cardinality#c": {"value": 4}, "value_count#v": {"value": 4}}]))}),
+        ),
+        (
+            "",
+            json!({"size": 0, "aggregations": {"inv": {"terms": {"field": "invalidated"}}, "m": {"missing": {"field": "expiration"}}, "t": {"terms": {"field": "type"}}, "r": {"terms": {"field": "realm_name"}}}}),
+            json!({
+                "inv": terms(json!([{"key": 0, "key_as_string": "false", "doc_count": 3}, {"key": 1, "key_as_string": "true", "doc_count": 1}])),
+                "m": {"doc_count": 3},
+                "t": terms(json!([{"key": "rest", "doc_count": 4}])),
+                "r": terms(json!([{"key": "reserved", "doc_count": 4}])),
+            }),
+        ),
+        (
+            "",
+            json!({"size": 0, "aggs": {"rr": {"range": {"field": "creation", "ranges": [{"to": 1}, {"from": 1}]}}}}),
+            json!({"rr": {"buckets": [{"key": "*-1", "to": 1.0, "to_as_string": "1", "doc_count": 0}, {"key": "1-*", "from": 1.0, "from_as_string": "1", "doc_count": 4}]}}),
+        ),
+        (
+            "",
+            json!({"size": 0, "aggs": {"f": {"filter": {"term": {"name": "k1"}}, "aggs": {"n": {"terms": {"field": "name"}}}}}}),
+            json!({"f": {"doc_count": 1, "n": terms(json!([one("k1")]))}}),
+        ),
+        (
+            "",
+            json!({"size": 0, "aggs": {"fs": {"filters": {"filters": {"a": {"prefix": {"name": "k"}}, "b": {"term": {"invalidated": true}}}, "other_bucket_key": "rest"}}, "fa": {"filters": {"filters": [{"match": {"name": "k1"}}, {"exists": {"field": "expiration"}}]}}}}),
+            json!({
+                "fs": {"buckets": {"a": {"doc_count": 2}, "b": {"doc_count": 1}, "rest": {"doc_count": 1}}},
+                "fa": {"buckets": [{"doc_count": 1}, {"doc_count": 1}]},
+            }),
+        ),
+        (
+            "",
+            json!({"size": 0, "aggs": {"x": {"terms": {"field": "name", "missing": "none", "size": 2, "order": {"_key": "asc"}}, "meta": {"a": 1}}}}),
+            json!({"x": {"meta": {"a": 1}, "doc_count_error_upper_bound": 0, "sum_other_doc_count": 2, "buckets": [one("Gone"), one("k1")]}}),
+        ),
+    ];
+    for (params, body, aggs) in cases {
+        let got = query(&app, ELASTIC, params, Some(body.clone())).await;
+        let expected = json!({"total": 4, "count": 0, "api_keys": [], "aggregations": aggs});
+        assert_eq!(got, (200, expected), "{body}");
+    }
+    // Aggregations count the keys the query matches.
+    let body =
+        json!({"query": {"term": {"name": "k1"}}, "aggs": {"n": {"terms": {"field": "name"}}}});
+    let got = query(&app, ELASTIC, "", Some(body)).await;
+    assert_eq!(
+        (got.1["count"].clone(), got.1["aggregations"].clone()),
+        (json!(1), json!({"n": terms(json!([one("k1")]))}))
+    );
+}
+
+#[tokio::test]
+async fn aggregation_requests_are_validated() {
+    let app = secured();
+    query_fixture(&app).await;
+    let illegal = |reason: &str| error(400, &[("illegal_argument_exception", reason)], 0);
+    let field = |f: &str| {
+        illegal(&format!(
+            "Field [{f}] is not allowed for querying or aggregation"
+        ))
+    };
+    let unsupported =
+        |name: &str, t: &str| illegal(&format!("Unsupported API Keys agg [{name}] of type [{t}]"));
+    let pipeline = |t: &str| illegal(&format!("Unsupported aggregation of type [{t}]"));
+    let terms = json!({"terms": {"field": "name"}});
+    let cases = [
+        (
+            json!({"x": {"avg": {"field": "creation"}}}),
+            unsupported("x", "avg"),
+        ),
+        (json!({"x": {"global": {}}}), unsupported("x", "global")),
+        (json!({"x": {"terms": {"field": "foo"}}}), field("foo")),
+        (
+            json!({"x": {"terms": {"field": "api_key_hash"}}}),
+            field("api_key_hash"),
+        ),
+        (
+            json!({"x": {"terms": {"field": "na*"}}}),
+            illegal("Field name pattern [na*] is not allowed for querying or aggregation"),
+        ),
+        (
+            json!({"x": {"terms": {"script": "doc['name'].value"}}}),
+            illegal("Unsupported script value source for [x] agg"),
+        ),
+        (
+            json!({"x": terms, "mb": {"max_bucket": {"buckets_path": "x._count"}}}),
+            pipeline("max_bucket"),
+        ),
+        (
+            json!({"x": {"terms": {"field": "name"}, "aggs": {"bs": {"bucket_sort": {"size": 1}}}}}),
+            pipeline("bucket_sort"),
+        ),
+        (
+            json!({"x": {"terms": {"field": "name"}, "aggs": {"d": {"derivative": {"buckets_path": "_count"}}}}}),
+            pipeline("derivative"),
+        ),
+        (
+            json!({"x": {"terms": {"field": "name"}, "aggs": {"y": {"avg": {"field": "creation"}}}}}),
+            unsupported("y", "avg"),
+        ),
+        // Sub-aggregations are checked first.
+        (
+            json!({"x": {"global": {}, "aggs": {"y": {"terms": {"field": "foo"}}}}}),
+            field("foo"),
+        ),
+        (
+            json!({"x": {"filter": {"term": {"foo": "bar"}}}}),
+            field("foo"),
+        ),
+        (
+            // ponytail: recorded with a script query, which es-query cannot parse
+            json!({"x": {"filter": {"constant_score": {"filter": {"term": {"name": "k1"}}}}}}),
+            illegal("Query type [constant_score] is not currently supported in this context"),
+        ),
+        (
+            json!({"x": terms, "y": {"terms": {"field": "foo"}}}),
+            field("foo"),
+        ),
+    ];
+    for (aggs, expected) in cases {
+        let body = json!({"aggs": aggs});
+        let got = query(&app, ELASTIC, "", Some(body.clone())).await;
+        assert_eq!(got, (400, expected), "{body}");
+    }
+
+    let body = json!({"aggs": {"x": terms}, "aggregations": {"y": terms}});
+    let reason =
+        "Failed to build [query_api_key_request_payload] after last required field arrived";
+    let chain = [
+        ("x_content_parse_exception", reason),
+        (
+            "illegal_argument_exception",
+            "Duplicate 'aggs' or 'aggregations' field",
+        ),
+    ];
+    assert_eq!(
+        query(&app, ELASTIC, "", Some(body)).await,
+        (400, error(400, &chain, 0))
+    );
+    // ponytail: ES also gives the line and col
+    let body = json!({"aggs": 5});
+    let reason =
+        "[query_api_key_request_payload] aggs doesn't support values of type: VALUE_NUMBER";
+    let got = query(&app, ELASTIC, "", Some(body)).await;
+    assert_eq!(
+        got,
+        (400, error(400, &[("x_content_parse_exception", reason)], 0))
+    );
+    let body = json!({"aggs": {"x": {"terms": {}}}});
+    let chain = [
+        (
+            "x_content_parse_exception",
+            "[query_api_key_request_payload] failed to parse field [aggs]",
+        ),
+        (
+            "illegal_argument_exception",
+            "Required one of fields [field, script], but none were specified.",
+        ),
+    ];
+    let got = query(&app, ELASTIC, "", Some(body)).await;
+    assert_eq!(got, (400, error(400, &chain, 1)));
+}

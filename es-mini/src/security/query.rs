@@ -44,8 +44,6 @@ pub(super) async fn query_keys(
         false => crate::docs::parse_json(&body)?,
     };
     let mut search = json!({"track_total_hits": true});
-    // ponytail: aggs/aggregations are refused as unknown fields until ApiKeyAggregationsBuilder
-    // is ported
     for (k, v) in body.as_object().into_iter().flatten() {
         let wrong = || {
             let token = es_index::json_token(v);
@@ -58,14 +56,7 @@ pub(super) async fn query_keys(
             // error of an unsupported one where ES gives a parsing_exception
             "query" => {
                 let q = translate_query(v)?;
-                es_query::parse_query(&q).map_err(|e| {
-                    let kind = match e.kind {
-                        es_query::ErrorKind::Parsing => "parsing_exception",
-                        es_query::ErrorKind::IllegalArgument => "illegal_argument_exception",
-                        _ => "x_content_parse_exception",
-                    };
-                    failed_field(k, (kind, e.msg))
-                })?;
+                es_query::parse_query(&q).map_err(|e| failed_parse(k, e))?;
                 search[k] = q;
                 continue;
             }
@@ -78,6 +69,19 @@ pub(super) async fn query_keys(
             }
             "search_after" if !v.is_array() => return Err(wrong()),
             "search_after" => {}
+            "aggs" | "aggregations" if !v.is_object() => return Err(wrong()),
+            "aggs" | "aggregations" => {
+                // ponytail: es-query has no scripts in aggregations; ES parses them and
+                // translate_agg refuses them below
+                match es_query::SearchRequest::parse(&json!({"aggs": v})) {
+                    Err(e) if !e.msg.ends_with("unknown field [script]") => {
+                        return Err(failed_parse(k, e));
+                    }
+                    _ => {}
+                }
+                search["aggs"] = v.clone();
+                continue;
+            }
             _ => {
                 return Err(AppError::XContentParse(format!(
                     "[{REQUEST}] unknown field [{k}]"
@@ -91,6 +95,17 @@ pub(super) async fn query_keys(
         Some(format!("[{k}] parameter cannot be negative but was [{n}]"))
     });
     validate(negative.collect())?;
+    if body.get("aggs").is_some() && body.get("aggregations").is_some() {
+        let outer = format!("Failed to build [{REQUEST}] after last required field arrived");
+        let cause = json!({"type": "illegal_argument_exception", "reason": "Duplicate 'aggs' or 'aggregations' field"});
+        return Err(AppError::Caused(
+            Box::new(AppError::XContentParse(outer)),
+            cause,
+        ));
+    }
+    if let Some(aggs) = search.get("aggs").and_then(Value::as_object) {
+        search["aggs"] = translate_aggs(aggs)?.into();
+    }
 
     let mut query = json!({"bool": {"filter": [{"term": {"doc_type": "api_key"}}]}});
     if let Some(q) = search.get("query") {
@@ -108,7 +123,8 @@ pub(super) async fn query_keys(
     let Some(index) = system.get(INDEX) else {
         return Ok(Json(json!({"total": 0, "count": 0, "api_keys": []})));
     };
-    let req = es_query::SearchRequest::parse(&search)?;
+    let mut req = es_query::SearchRequest::parse(&search)?;
+    req.typed_keys = flag("typed_keys");
     let r = es_query::search_many(&[(INDEX, index, None)], &req)?;
     let keys: Vec<Value> = (r.hits.iter())
         .map(|h| {
@@ -119,15 +135,27 @@ pub(super) async fn query_keys(
             key
         })
         .collect();
-    Ok(Json(
-        json!({"total": r.total, "count": keys.len(), "api_keys": keys}),
-    ))
+    let mut out = json!({"total": r.total, "count": keys.len(), "api_keys": keys});
+    if let Some(aggs) = r.aggregations {
+        out["aggregations"] = aggs;
+    }
+    Ok(Json(out))
 }
 
 /// Elasticsearch's error for body field `k` that failed with `cause` (type, reason).
 fn failed_field(k: &str, cause: (&'static str, String)) -> AppError {
     let outer = format!("[{REQUEST}] failed to parse field [{k}]");
     AppError::Chain(vec![("x_content_parse_exception", outer), cause])
+}
+
+/// Elasticsearch's error for body field `k` that es-query failed to parse with `e`.
+fn failed_parse(k: &str, e: es_query::QueryError) -> AppError {
+    let kind = match e.kind {
+        es_query::ErrorKind::Parsing => "parsing_exception",
+        es_query::ErrorKind::IllegalArgument => "illegal_argument_exception",
+        _ => "x_content_parse_exception",
+    };
+    failed_field(k, (kind, e.msg))
 }
 
 /// Checks that `s` is a sort the request parser reads: a field name, or `{field: {options}}`.
@@ -165,7 +193,8 @@ fn translate(field: &str) -> Result<String, AppError> {
     }
     if let Some(sub) = field.strip_prefix("metadata.") {
         // ponytail: es-mini has no flattened type; a metadata subfield reads as an unmapped
-        // keyword (`.keyword`), and the whole of `metadata` matches nothing
+        // keyword (`.keyword`), and the whole of `metadata` matches nothing; aggregations,
+        // which need a mapping, see it as unmapped
         return Ok(format!("metadata_flattened.{sub}.keyword"));
     }
     match FIELDS.iter().find(|(q, _)| *q == field) {
@@ -309,4 +338,100 @@ fn translate_sort(s: &Value) -> Result<Value, AppError> {
     let mut out = Map::new();
     out.insert(translate(field)?, options);
     Ok(out.into())
+}
+
+/// The aggregation's type: its key other than sub-aggregations and `meta`.
+fn agg_type(agg: &Value) -> &str {
+    let keys = agg.as_object().into_iter().flat_map(|o| o.keys());
+    let mut types = keys.filter(|k| !["aggs", "aggregations", "meta"].contains(&k.as_str()));
+    types.next().map_or("", String::as_str)
+}
+
+/// Pipeline aggregation types, which Elasticsearch refuses here.
+fn is_pipeline(t: &str) -> bool {
+    t.ends_with("_bucket")
+        || [
+            "bucket_sort",
+            "bucket_script",
+            "bucket_selector",
+            "bucket_count_ks_test",
+            "bucket_correlation",
+            "change_point",
+            "cumulative_cardinality",
+            "cumulative_sum",
+            "derivative",
+            "inference",
+            "moving_fn",
+            "moving_percentiles",
+            "normalize",
+            "serial_diff",
+        ]
+        .contains(&t)
+}
+
+fn unsupported_pipeline(aggs: &Map<String, Value>) -> Result<(), AppError> {
+    match aggs.values().map(agg_type).find(|t| is_pipeline(t)) {
+        Some(t) => Err(illegal(format!("Unsupported aggregation of type [{t}]"))),
+        None => Ok(()),
+    }
+}
+
+/// `aggs` with their field names translated, refusing what Elasticsearch does not allow here,
+/// as `ApiKeyAggregationsBuilder.process`.
+fn translate_aggs(aggs: &Map<String, Value>) -> Result<Map<String, Value>, AppError> {
+    unsupported_pipeline(aggs)?;
+    (aggs.iter())
+        .map(|(name, agg)| Ok((name.clone(), translate_agg(name, agg)?)))
+        .collect()
+}
+
+/// One aggregation translated, its sub-aggregations first (`AggregationBuilder.deepCopy`).
+fn translate_agg(name: &str, agg: &Value) -> Result<Value, AppError> {
+    let mut agg = agg.clone();
+    for k in ["aggs", "aggregations"] {
+        let Some(subs) = agg.get(k).and_then(Value::as_object) else {
+            continue;
+        };
+        let mut out = Map::new();
+        for (n, sub) in subs.iter().filter(|(_, s)| !is_pipeline(agg_type(s))) {
+            out.insert(n.clone(), translate_agg(n, sub)?);
+        }
+        unsupported_pipeline(subs)?;
+        agg[k] = out.into();
+    }
+    let t = agg_type(&agg).to_owned();
+    let body = &mut agg[&t];
+    match t.as_str() {
+        // ponytail: composite is allowed by ES, but es-query has no composite aggregation
+        "terms" | "range" | "date_range" | "missing" | "cardinality" | "value_count" => {
+            if body.get("script").is_some() {
+                return Err(illegal(format!(
+                    "Unsupported script value source for [{name}] agg"
+                )));
+            }
+            if let Some(f) = body.get("field").and_then(Value::as_str) {
+                body["field"] = translate(f)?.into();
+            }
+        }
+        "filter" => *body = translate_query(body)?,
+        "filters" => match body.get_mut("filters") {
+            Some(Value::Array(qs)) => {
+                for q in qs {
+                    *q = translate_query(q)?;
+                }
+            }
+            Some(Value::Object(qs)) => {
+                for q in qs.values_mut() {
+                    *q = translate_query(q)?;
+                }
+            }
+            _ => {}
+        },
+        _ => {
+            return Err(illegal(format!(
+                "Unsupported API Keys agg [{name}] of type [{t}]"
+            )));
+        }
+    }
+    Ok(agg)
 }
