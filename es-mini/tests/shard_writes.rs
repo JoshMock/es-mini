@@ -335,3 +335,45 @@ async fn mget_reads_each_documents_routing() {
     let r = call(&app, "POST", "/i/_mget?routing=r2", r#"{"ids": ["a"]}"#).await;
     assert_eq!(r["docs"][0]["_routing"], "r2", "{r}");
 }
+
+#[tokio::test]
+async fn required_routing_rejects_requests_without_it() {
+    let app = es_mini::app();
+    let mappings = r#"{"mappings": {"_routing": {"required": true}}}"#;
+    let r = call(&app, "PUT", "/i", mappings).await;
+    assert_eq!(r["acknowledged"], true, "{r}");
+    let r = call(&app, "GET", "/i/_mapping", "").await;
+    assert_eq!(
+        r["i"]["mappings"]["_routing"],
+        json!({"required": true}),
+        "{r}"
+    );
+    let missing = json!({
+        "type": "routing_missing_exception",
+        "reason": "routing is required for [i]/[1]",
+        "index_uuid": "_na_",
+        "index": "i"
+    });
+    for (method, uri, body) in [
+        ("PUT", "/i/_doc/1", "{}"),
+        ("PUT", "/i/_create/1", "{}"),
+        ("POST", "/i/_update/1", r#"{"doc": {}}"#),
+        ("DELETE", "/i/_doc/1", ""),
+        ("GET", "/i/_doc/1", ""),
+    ] {
+        let r = call(&app, method, uri, body).await;
+        assert_eq!(r["error"]["root_cause"][0], missing, "{method} {uri}: {r}");
+        assert_eq!(r["status"], 400, "{r}");
+    }
+    let bulk = "{\"index\": {\"_id\": \"1\"}}\n{}\n{\"index\": {\"_id\": \"2\", \"routing\": \"x\"}}\n{}\n";
+    let r = call(&app, "POST", "/i/_bulk", bulk).await;
+    assert_eq!(r["errors"], true, "{r}");
+    assert_eq!(r["items"][0]["index"]["status"], 400, "{r}");
+    assert_eq!(
+        r["items"][0]["index"]["error"]["type"], "routing_missing_exception",
+        "{r}"
+    );
+    assert_eq!(r["items"][1]["index"]["status"], 201, "{r}");
+    let r = call(&app, "PUT", "/i/_doc/1?routing=x", "{}").await;
+    assert_eq!(r["result"], "created", "{r}");
+}

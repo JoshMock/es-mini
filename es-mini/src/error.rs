@@ -37,6 +37,11 @@ pub enum AppError {
         index: String,
         id: String,
     },
+    /// A request without routing for a document of an index whose mapping requires it.
+    RoutingMissing {
+        index: String,
+        id: String,
+    },
     ActionRequestValidation(String),
     ResourceNotFound(String),
     IllegalArgument(String),
@@ -213,6 +218,12 @@ impl AppError {
                 StatusCode::NOT_FOUND,
                 "document_missing_exception",
                 format!("[{id}]: document missing"),
+                Some(index),
+            ),
+            Self::RoutingMissing { index, id } => (
+                StatusCode::BAD_REQUEST,
+                "routing_missing_exception",
+                format!("routing is required for [{index}]/[{id}]"),
                 Some(index),
             ),
             Self::ActionRequestValidation(r) => (

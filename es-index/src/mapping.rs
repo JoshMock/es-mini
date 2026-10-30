@@ -287,6 +287,9 @@ pub fn cidr(t: &str) -> Result<(u128, u128), String> {
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Mappings {
+    /// The `_routing` mapping section, e.g. `{"required": true}`.
+    #[serde(default, rename = "_routing", skip_serializing_if = "Option::is_none")]
+    pub routing: Option<Value>,
     /// The `_source` mapping section, e.g. `{"enabled": false}`.
     #[serde(default, rename = "_source", skip_serializing_if = "Option::is_none")]
     pub source: Option<Value>,
@@ -395,9 +398,17 @@ impl Mappings {
         if new.source.is_some() {
             out.source.clone_from(&new.source);
         }
+        if new.routing.is_some() {
+            out.routing.clone_from(&new.routing);
+        }
         out.date_detection = new.date_detection.or(self.date_detection);
         out.numeric_detection = new.numeric_detection.or(self.numeric_detection);
         Ok(out)
+    }
+
+    /// True when the mapping sets `_routing.required`: writes and gets need a routing.
+    pub fn routing_required(&self) -> bool {
+        self.routing.as_ref().is_some_and(|r| r["required"] == true)
     }
 
     /// False when the mapping sets `_source.enabled` to `false`.

@@ -147,6 +147,30 @@ fn write<T>(
     Ok(apply(index, target, f))
 }
 
+/// [`write`] of document `id` with `routing`, refused without one if the index's mapping
+/// requires it.
+fn write_doc<T>(
+    state: &AppState,
+    name: &str,
+    (id, routing): (&str, Option<&str>),
+    f: impl FnOnce(&mut Index) -> T,
+) -> Result<(T, u64, String), AppError> {
+    let (r, total, index) = write(state, name, |i| {
+        (routing.is_some() || !i.mappings.routing_required()).then(|| f(i))
+    })?;
+    match r {
+        Some(r) => Ok((r, total, index)),
+        None => Err(routing_missing(index, id)),
+    }
+}
+
+fn routing_missing(index: String, id: &str) -> AppError {
+    AppError::RoutingMissing {
+        index,
+        id: id.to_owned(),
+    }
+}
+
 /// `f`'s result on `index`, with its shard total and name.
 fn apply<T>(index: &mut Index, name: String, f: impl FnOnce(&mut Index) -> T) -> (T, u64, String) {
     let replicas = index
@@ -207,7 +231,7 @@ pub fn put_or_create(
         )));
     }
     let source = check_source(source)?;
-    let (w, total, index) = write(state, index, |i| {
+    let (w, total, index) = write_doc(state, index, (id, routing), |i| {
         let limit = i
             .settings
             .get("index.mapping.array_objects.limit")
@@ -453,7 +477,11 @@ pub async fn get(
     // A non-realtime get sees what search sees, unless it asks for a refresh first.
     let realtime = params.get("realtime").is_none_or(|v| v != "false")
         || params.get("refresh").is_some_and(|v| v != "false");
-    let shard = i.shard_of(&id, params.get("routing").map(String::as_str));
+    let routing = params.get("routing").map(String::as_str);
+    if routing.is_none() && i.mappings.routing_required() {
+        return Err(routing_missing(index, &id));
+    }
+    let shard = i.shard_of(&id, routing);
     let found = shard
         .and_then(|s| (s.get(&id)).filter(|d| realtime || s.searchable(&i.settings, d.seq_no)));
     Ok(match found {
@@ -565,7 +593,9 @@ pub async fn delete(
 }
 
 pub fn delete_doc(state: &AppState, index: &str, id: &str, routing: Option<&str>) -> Reply {
-    let (w, total, index) = write(state, index, |i| i.delete_routed(id, routing))?;
+    let (w, total, index) = write_doc(state, index, (id, routing), |i| {
+        i.delete_routed(id, routing)
+    })?;
     Ok(reply(&index, id, w, total))
 }
 
@@ -632,7 +662,7 @@ pub fn update_doc(
         false => body.get("upsert").cloned(),
     };
     let detect_noop = body["detect_noop"].as_bool() != Some(false);
-    let (w, total, index) = write(state, index, |i| {
+    let (w, total, index) = write_doc(state, index, (id, routing), |i| {
         i.update(id, routing, &partial, upsert, detect_noop)
             .map_err(AppError::DocumentParsing)
     })?;
