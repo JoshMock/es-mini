@@ -1730,3 +1730,14 @@ fn point_in_time_sorts_break_ties_by_shard_doc() {
     );
     assert!(sorts(json!({"pit": pit})).is_empty());
 }
+
+#[test]
+fn an_aggregation_without_a_field_is_an_illegal_argument() {
+    // As ES 9.5.5's AggregatorFactories parser reports it (recorded via _security/_query/api_key).
+    let e = SearchRequest::parse(&json!({"aggs": {"x": {"terms": {}}}})).unwrap_err();
+    let reason = "Required one of fields [field, script], but none were specified.";
+    assert_eq!(
+        (e.kind, e.msg.as_str()),
+        (es_query::ErrorKind::IllegalArgument, reason)
+    );
+}

@@ -1114,10 +1114,9 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
             "[values] must not be null: [{name}]"
         )));
     }
-    let field = params
-        .get("field")
-        .and_then(Value::as_str)
-        .ok_or("Required one of fields [field, script], but none were specified.")?;
+    let field = params.get("field").and_then(Value::as_str).ok_or_else(|| {
+        QueryError::illegal("Required one of fields [field, script], but none were specified.")
+    })?;
     Ok(Agg {
         name: name.to_owned(),
         meta,
