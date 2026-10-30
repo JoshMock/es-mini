@@ -4,6 +4,7 @@
 
 use super::{Authn, Security};
 use crate::error::AppError;
+use crate::store::Store;
 use axum::{
     Extension, Json,
     body::Bytes,
@@ -199,8 +200,8 @@ enum Step<'a> {
 
 /// The checks Elasticsearch makes for `method` on the path `segs`, by the actions it names
 /// them.
-// ponytail: bulk, mget, msearch, ES|QL and POST _aliases are checked by action only, not per
-// index they name yet
+// ponytail: mget, msearch, ES|QL and POST _aliases are checked by action only, not per index
+// they name yet (bulk items are, by the bulk handler)
 fn steps<'a>(method: &Method, segs: &[&'a str], params: &HashMap<String, String>) -> Vec<Step<'a>> {
     use Step::*;
     let at = |action, i| Indices {
@@ -415,16 +416,7 @@ impl Key<'_> {
                     index,
                 } => {
                     self.any_index(action, &[index])?;
-                    let auto = "indices:admin/auto_create";
-                    let shared = security.store.read();
-                    let exists =
-                        shared.contains_key(index) || es_index::aliases::is_alias(&*shared, index);
-                    if !exists && !self.index(auto, index) {
-                        return Err(self.denied(auto, &[index]));
-                    }
-                    if !self.index(item, index) {
-                        return Err(self.denied("indices:data/write/bulk[s]", &[index]));
-                    }
+                    self.write(&security.store, item, index)?;
                 }
                 Step::AliasNames(aliases) => {
                     let action = "indices:admin/aliases";
@@ -518,6 +510,23 @@ impl Key<'_> {
         Ok(out)
     }
 
+    /// Authorizes the bulk item action `item` on `index`: auto-creation first if `index` is
+    /// missing (deletes create nothing), then `item` itself.
+    fn write(&self, store: &Store, item: &str, index: &str) -> Result<(), AppError> {
+        let auto = "indices:admin/auto_create";
+        let creates = item != "indices:data/write/delete" && {
+            let shared = store.read();
+            !(shared.contains_key(index) || es_index::aliases::is_alias(&*shared, index))
+        };
+        if creates && !self.index(auto, index) {
+            return Err(self.denied(auto, &[index]));
+        }
+        match self.index(item, index) {
+            true => Ok(()),
+            false => Err(self.denied("indices:data/write/bulk[s]", &[index])),
+        }
+    }
+
     fn cluster(&self, action: &str) -> bool {
         (self.roles.iter()).all(|set| roles(set).any(|r| grants(&r["cluster"], action)))
     }
@@ -564,6 +573,26 @@ impl Key<'_> {
         );
         AppError::Other(StatusCode::FORBIDDEN, "security_exception", reason)
     }
+}
+
+/// Authorizes a bulk item, `op` (`index`, `create`, `update` or `delete`) on `index`, for
+/// whoever `authn` is; Elasticsearch fails the item alone when its key may not.
+pub(crate) fn bulk_item(
+    authn: Option<&Authn>,
+    store: &Store,
+    op: &str,
+    index: &str,
+) -> Result<(), AppError> {
+    let Some(Authn::ApiKey { id, roles, .. }) = authn else {
+        return Ok(());
+    };
+    let item = match op {
+        "index" => "indices:data/write/index:op_type/index",
+        "create" => "indices:data/write/index:op_type/create",
+        "update" => "indices:data/write/update",
+        _ => "indices:data/write/delete",
+    };
+    Key { id, roles }.write(store, item, index)
 }
 
 /// The privileges of one kind (cluster or index) that `_has_privileges` compares.

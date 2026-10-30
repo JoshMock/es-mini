@@ -513,3 +513,60 @@ async fn has_privileges_errors_as_recorded() {
         assert_eq!(out, case["response"], "{request}");
     }
 }
+
+/// Status and body of `POST uri` with the NDJSON `body`, authenticated by `auth`.
+async fn ndjson(app: &axum::Router, auth: &str, uri: &str, body: &str) -> (u16, Value) {
+    let req = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("authorization", auth)
+        .header("content-type", "application/x-ndjson")
+        .body(Body::from(body.to_owned()))
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    let status = res.status().as_u16();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&bytes).unwrap())
+}
+
+/// Each bulk item is authorized on its own index, failing alone (recorded from Elasticsearch
+/// 9.5.5).
+#[tokio::test]
+async fn bulk_items_are_authorized_by_index() {
+    let app = app().await;
+    let roles = json!({"r": {"indices": [
+        {"names": ["a*"], "privileges": ["write"]},
+        {"names": ["n*"], "privileges": ["create_index"]},
+    ]}});
+    let (kw, id) = key(&app, ELASTIC, roles).await;
+    let body = concat!(
+        "{\"index\":{\"_index\":\"a1\",\"_id\":\"5\"}}\n{\"x\":1}\n",
+        "{\"index\":{\"_index\":\"b1\",\"_id\":\"5\"}}\n{\"x\":1}\n",
+        "{\"create\":{\"_index\":\"a7\",\"_id\":\"5\"}}\n{\"x\":1}\n",
+    );
+    let (status, out) = ndjson(&app, &kw, "/_bulk", body).await;
+    assert_eq!(status, 200, "{out}");
+    assert_eq!(out["errors"], true);
+    assert_eq!(out["items"][0]["index"]["status"], 201, "{out}");
+    let reason = |action: &str, index: &str, privileges: &str| {
+        format!(
+            "action [{action}] is unauthorized for API key id [{id}] of user [elastic] on indices [{index}], this action is granted by the index privileges [{privileges}]"
+        )
+    };
+    let bulk = "create_doc,create,delete,index,write,all";
+    let expected = json!([
+        {"index": {"_index": "b1", "_id": "5", "status": 403, "error": {
+            "type": "security_exception",
+            "reason": reason("indices:data/write/bulk[s]", "b1", bulk),
+        }}},
+        {"create": {"_index": "a7", "_id": "5", "status": 403, "error": {
+            "type": "security_exception",
+            "reason": reason("indices:admin/auto_create", "a7", "auto_configure,create_index,manage,all"),
+        }}},
+    ]);
+    // Compared as text, for the order of the keys.
+    let denied = json!(out["items"].as_array().unwrap()[1..]);
+    assert_eq!(denied.to_string(), expected.to_string());
+    let (_, b1) = call(&app, ELASTIC, "GET", "/b1/_doc/5", None).await;
+    assert_eq!(b1["found"], false, "{b1}");
+}

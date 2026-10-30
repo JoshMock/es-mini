@@ -3,9 +3,10 @@ use crate::{
     docs::{delete_doc, force_refresh, parse_json, put_or_create, update_doc},
     error::AppError,
     params,
+    security::{Authn, bulk_item},
 };
 use axum::{
-    Json,
+    Extension, Json,
     body::Bytes,
     extract::{Path, Query, State},
     http::Uri,
@@ -110,8 +111,15 @@ fn is_alias(state: &AppState, name: &str) -> bool {
     aliases::is_alias(&*state.read(), name)
 }
 
-fn execute(state: &AppState, params: &HashMap<String, String>, a: Action) -> Value {
-    let resolved = if a.require_alias && !is_alias(state, &a.index) {
+fn execute(
+    state: &AppState,
+    authn: Option<&Authn>,
+    params: &HashMap<String, String>,
+    a: Action,
+) -> Value {
+    let resolved = if let Err(e) = bulk_item(authn, state, &a.op, &a.index) {
+        Err(e)
+    } else if a.require_alias && !is_alias(state, &a.index) {
         Err(AppError::RequireAlias(a.index.clone()))
     } else {
         resolve_alias(state, &a.index)
@@ -159,6 +167,7 @@ fn execute(state: &AppState, params: &HashMap<String, String>, a: Action) -> Val
 
 async fn run(
     state: AppState,
+    authn: Option<Extension<Authn>>,
     default_index: Option<&str>,
     params: &HashMap<String, String>,
     body: Bytes,
@@ -166,7 +175,7 @@ async fn run(
     let start = Instant::now();
     let items: Vec<Value> = parse(&body, default_index, flag(params))?
         .into_iter()
-        .map(|a| execute(&state, params, a))
+        .map(|a| execute(&state, authn.as_deref(), params, a))
         .collect();
     let errors = items.iter().any(|i| {
         i.as_object()
@@ -199,23 +208,25 @@ const BULK_PARAMS: [&str; 12] = [
 
 pub async fn bulk(
     State(state): State<AppState>,
+    authn: Option<Extension<Authn>>,
     uri: Uri,
     Query(params): Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
     params::check(&uri, &params, &BULK_PARAMS)?;
-    run(state, None, &params, body).await
+    run(state, authn, None, &params, body).await
 }
 
 pub async fn bulk_index(
     State(state): State<AppState>,
     Path(index): Path<String>,
+    authn: Option<Extension<Authn>>,
     uri: Uri,
     Query(params): Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
     params::check(&uri, &params, &BULK_PARAMS)?;
-    run(state, Some(&index), &params, body).await
+    run(state, authn, Some(&index), &params, body).await
 }
 
 #[cfg(test)]
