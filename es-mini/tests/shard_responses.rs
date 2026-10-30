@@ -154,3 +154,48 @@ async fn level_must_be_known() {
         "level parameter must be one of [cluster] or [indices] or [shards] but was [bogus]";
     assert_eq!(r["error"]["reason"], reason);
 }
+
+#[tokio::test]
+async fn cat_shards_lists_every_shard() {
+    let app = setup("keyword", "keyword").await;
+    let (s, r) = call(&app, "GET", "/_cat/shards/a,b?format=json", Value::Null).await;
+    assert_eq!(s, 200, "{r}");
+    let rows = r.as_array().unwrap();
+    let ids: Vec<_> = rows
+        .iter()
+        .map(|r| (r["index"].clone(), r["shard"].clone()))
+        .collect();
+    let id = |i: &str, n: &str| (json!(i), json!(n));
+    assert_eq!(
+        ids,
+        [id("a", "0"), id("a", "1"), id("a", "2"), id("b", "0")]
+    );
+    let docs: u64 = (rows.iter())
+        .map(|r| r["docs"].as_str().unwrap().parse::<u64>().unwrap())
+        .sum();
+    assert_eq!(docs, 12);
+    let keys: Vec<_> = rows[0].as_object().unwrap().keys().cloned().collect();
+    let columns = [
+        "index", "shard", "prirep", "state", "docs", "store", "dataset", "ip", "node",
+    ];
+    assert_eq!(keys, columns);
+    assert_eq!(
+        (&rows[0]["prirep"], &rows[0]["state"]),
+        (&json!("p"), &json!("STARTED"))
+    );
+
+    let req = Request::get("/_cat/shards/b?v")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    let text = res.into_body().collect().await.unwrap().to_bytes();
+    let expected = "index shard prirep state   docs store dataset ip        node\n\
+                    b     0     p      STARTED    6    0b      0b 127.0.0.1 es-mini\n";
+    assert_eq!(std::str::from_utf8(&text).unwrap(), expected);
+
+    let (s, r) = call(&app, "GET", "/_cat/shards/nope", Value::Null).await;
+    assert_eq!(
+        (s, &r["error"]["type"]),
+        (404, &json!("index_not_found_exception"))
+    );
+}

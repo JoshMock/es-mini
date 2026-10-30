@@ -917,3 +917,76 @@ pub async fn stats(
     }
     Ok(Json(out))
 }
+
+/// `GET /_cat/shards[/{index}]`: one row per shard, as JSON with `format=json`, else as an
+/// aligned text table (with a header row if `v`).
+// ponytail: only the default columns; no h, s, bytes or help. Store sizes are 0b like _stats.
+pub async fn cat_shards(
+    State(state): State<AppState>,
+    path: Option<Path<String>>,
+    uri: Uri,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<axum::response::Response, AppError> {
+    use axum::response::IntoResponse;
+    check(&uri, &params, &["format", "v"])?;
+    const COLUMNS: [&str; 9] = [
+        "index", "shard", "prirep", "state", "docs", "store", "dataset", "ip", "node",
+    ];
+    let shared = state.read();
+    let expr = path.map_or("_all".to_string(), |Path(p)| p);
+    let names = read_indices(&*shared, &expr, &params)?;
+    let indices = shared.lock(&names);
+    let rows: Vec<Vec<String>> = (names.iter())
+        .flat_map(|n| (0..indices[n].number_of_shards()).map(move |i| (n, i)))
+        .map(|(n, i)| {
+            let docs = indices[n].shards().get(i).map_or(0, |s| s.docs().count());
+            let (i, docs) = (i.to_string(), docs.to_string());
+            [
+                n,
+                &i,
+                "p",
+                "STARTED",
+                &docs,
+                "0b",
+                "0b",
+                "127.0.0.1",
+                crate::CLUSTER_NAME,
+            ]
+            .map(str::to_string)
+            .to_vec()
+        })
+        .collect();
+    if params.get("format").map(String::as_str) == Some("json") {
+        let rows: Vec<Map<String, Value>> = (rows.into_iter())
+            .map(|r| {
+                COLUMNS
+                    .iter()
+                    .map(|c| c.to_string())
+                    .zip(r.into_iter().map(Value::from))
+                    .collect()
+            })
+            .collect();
+        return Ok(Json(rows).into_response());
+    }
+    let header = params.get("v").is_some_and(|v| v != "false");
+    let table: Vec<Vec<String>> = (header
+        .then(|| COLUMNS.map(str::to_string).to_vec())
+        .into_iter())
+    .chain(rows)
+    .collect();
+    let width = |c: usize| table.iter().map(|r| r[c].len()).max().unwrap_or(0);
+    let mut out = String::new();
+    for row in &table {
+        for (c, cell) in row.iter().enumerate() {
+            let w = width(c);
+            // docs, store and dataset align right, as RestShardsAction declares
+            match c {
+                4..=6 => out += &format!("{cell:>w$} "),
+                8 => out += cell,
+                _ => out += &format!("{cell:<w$} "),
+            }
+        }
+        out.push('\n');
+    }
+    Ok(([("content-type", "text/plain; charset=UTF-8")], out).into_response())
+}

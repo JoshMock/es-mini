@@ -407,6 +407,8 @@ fn router(state: AppState) -> Router {
         .route("/_stats/{metric}", get(indices::stats))
         .route("/{index}/_stats", get(indices::stats))
         .route("/{index}/_stats/{metric}", get(indices::stats))
+        .route("/_cat/shards", get(indices::cat_shards))
+        .route("/_cat/shards/{index}", get(indices::cat_shards))
         .route("/_query", post(search::esql))
         .route("/_bulk", post(bulk::bulk).put(bulk::bulk))
         .route(
