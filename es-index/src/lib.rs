@@ -225,6 +225,8 @@ pub struct Document {
     pub source: Value,
     pub version: u64,
     pub seq_no: u64,
+    /// The `_routing` it was written with.
+    pub routing: Option<String>,
 }
 
 /// The `result` field of ES write responses.
@@ -469,6 +471,7 @@ impl Shard {
         &mut self,
         settings: &Settings,
         id: &str,
+        routing: Option<&str>,
         source: Value,
         auto_id_timestamp: i64,
     ) -> WriteResult {
@@ -481,10 +484,10 @@ impl Shard {
             seq_no: seq_no as i64,
             version: version as i64,
             primary_term: 1,
-            routing: None,
+            routing: routing.map(str::to_owned),
             auto_id_timestamp,
         });
-        let result = self.store(id, source, version, seq_no);
+        let result = self.store(id, routing.map(str::to_owned), source, version, seq_no);
         WriteResult {
             result,
             version,
@@ -493,7 +496,14 @@ impl Shard {
     }
 
     /// Stores a document at a given version and sequence number.
-    fn store(&mut self, id: &str, source: Value, version: u64, seq_no: u64) -> DocResult {
+    fn store(
+        &mut self,
+        id: &str,
+        routing: Option<String>,
+        source: Value,
+        version: u64,
+        seq_no: u64,
+    ) -> DocResult {
         self.deleted_versions.remove(id);
         let old = self.take(id);
         self.postings
@@ -504,6 +514,7 @@ impl Shard {
             source,
             version,
             seq_no,
+            routing,
         });
         self.by_seq_no.insert(seq_no, (id.to_owned(), doc.clone()));
         self.docs.insert(id.to_owned(), doc);
@@ -532,10 +543,11 @@ impl Shard {
                 source,
                 seq_no,
                 version,
+                routing,
                 ..
             } => {
                 let source = serde_json::from_slice(&source).unwrap_or(Value::Null);
-                self.store(&id, source, version as u64, seq_no as u64);
+                self.store(&id, routing, source, version as u64, seq_no as u64);
             }
             Op::Delete { id, version, .. } => {
                 self.remove(&id, version as u64);
@@ -549,12 +561,13 @@ impl Shard {
         &mut self,
         settings: &Settings,
         id: &str,
+        routing: Option<&str>,
         source: Value,
         auto_id_timestamp: i64,
     ) -> Result<WriteResult, u64> {
         match self.meta(id) {
             Some((version, _)) => Err(version),
-            None => Ok(self.put_auto(settings, id, source, auto_id_timestamp)),
+            None => Ok(self.put_auto(settings, id, routing, source, auto_id_timestamp)),
         }
     }
 
@@ -992,13 +1005,13 @@ impl Index {
         auto_id_timestamp: i64,
     ) -> WriteResult {
         let (settings, shard) = self.shard_mut(self.shard_for(id, routing));
-        shard.put_auto(settings, id, source, auto_id_timestamp)
+        shard.put_auto(settings, id, routing, source, auto_id_timestamp)
     }
 
     /// Like [`Index::put`] in shard `n`.
     pub fn put_in(&mut self, n: usize, id: &str, source: Value) -> WriteResult {
         let (settings, shard) = self.shard_mut(n);
-        shard.put_auto(settings, id, source, -1)
+        shard.put_auto(settings, id, None, source, -1)
     }
 
     /// Creates a document; `Err(current_version)` if it already exists.
@@ -1015,7 +1028,7 @@ impl Index {
         auto_id_timestamp: i64,
     ) -> Result<WriteResult, u64> {
         let (settings, shard) = self.shard_mut(self.shard_for(id, routing));
-        shard.create_auto(settings, id, source, auto_id_timestamp)
+        shard.create_auto(settings, id, routing, source, auto_id_timestamp)
     }
 
     /// Deletes a document. Like ES, a missing document still consumes a version and seq_no.

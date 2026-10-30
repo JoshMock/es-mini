@@ -152,3 +152,90 @@ async fn the_routing_parameter_picks_the_shard() {
     let r = call(&app, "GET", &format!("/i/_doc/{id}"), "").await;
     assert_eq!(r["_source"], json!({"v": 9}), "{r}");
 }
+
+#[tokio::test]
+async fn documents_keep_their_routing() {
+    let (dir, _cleanup) = scratch("shard-writes-keep-routing");
+    let app = es_mini::app_persisted(&dir).unwrap();
+    call(
+        &app,
+        "PUT",
+        "/i",
+        r#"{"settings": {"number_of_shards": 3}}"#,
+    )
+    .await;
+    call(&app, "PUT", "/i/_doc/a?routing=r1", r#"{"v": 1}"#).await;
+    call(&app, "PUT", "/i/_doc/b", r#"{"v": 2}"#).await;
+    let bulk = "{\"index\": {\"_id\": \"c\", \"routing\": \"r2\"}}\n{\"v\": 3}\n";
+    call(&app, "POST", "/i/_bulk?refresh=true", bulk).await;
+
+    // _routing follows _primary_term in a get and _score in a hit, as Elasticsearch orders them
+    let check = |app: axum::Router| async move {
+        let r = call(&app, "GET", "/i/_doc/a?routing=r1", "").await;
+        let keys: Vec<_> = r.as_object().unwrap().keys().cloned().collect();
+        let order = [
+            "_index",
+            "_id",
+            "_version",
+            "_seq_no",
+            "_primary_term",
+            "_routing",
+            "found",
+            "_source",
+        ];
+        assert_eq!(keys, order, "{r}");
+        assert_eq!(r["_routing"], "r1", "{r}");
+        let r = call(&app, "GET", "/i/_doc/b", "").await;
+        assert!(r.get("_routing").is_none(), "{r}");
+        let r = call(&app, "POST", "/i/_search", r#"{"sort": ["_doc"]}"#).await;
+        let mut routings: Vec<_> = (r["hits"]["hits"].as_array().unwrap().iter())
+            .map(|h| {
+                (
+                    h["_id"].as_str().unwrap().to_owned(),
+                    h.get("_routing").cloned(),
+                )
+            })
+            .collect();
+        routings.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            routings,
+            [
+                ("a".into(), Some("r1".into())),
+                ("b".into(), None),
+                ("c".into(), Some("r2".into()))
+            ],
+            "{r}"
+        );
+        let hit = r["hits"]["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|h| h["_id"] == "a");
+        let keys: Vec<_> = hit.unwrap().as_object().unwrap().keys().cloned().collect();
+        assert_eq!(
+            keys[..5],
+            ["_index", "_id", "_score", "_routing", "_source"],
+            "{r}"
+        );
+    };
+    check(app.clone()).await;
+    drop(app);
+    // replayed from the translog
+    let app = es_mini::app_persisted(&dir).unwrap();
+    check(app.clone()).await;
+    call(&app, "POST", "/i/_flush", "").await;
+    drop(app);
+    // read from the segments
+    let app = es_mini::app_persisted(&dir).unwrap();
+    check(app.clone()).await;
+    let r = call(
+        &app,
+        "POST",
+        "/i/_update/a?routing=r1",
+        r#"{"doc": {"v": 5}}"#,
+    )
+    .await;
+    assert_eq!(r["result"], "updated", "{r}");
+    let r = call(&app, "GET", "/i/_doc/a?routing=r1", "").await;
+    assert_eq!(r["_routing"], "r1", "{r}");
+}

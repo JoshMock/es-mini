@@ -460,8 +460,12 @@ pub async fn get(
         Some(d) => {
             let mut r = json!({
                 "_index": index, "_id": id, "_version": d.version, "_seq_no": d.seq_no,
-                "_primary_term": 1, "found": true
+                "_primary_term": 1
             });
+            if let Some(routing) = &d.routing {
+                r["_routing"] = routing.as_str().into();
+            }
+            r["found"] = true.into();
             if let Some(src) =
                 filter_source(&d.source, &params).filter(|_| i.mappings.source_enabled())
             {

@@ -124,28 +124,29 @@ impl std::fmt::Debug for Segments {
     }
 }
 
-/// The `_id` and `_source` bytes of a document's stored fields.
-fn id_and_source(
-    seg: &SegmentReader,
-    fields: Doc,
-) -> es_codec::Result<(Option<String>, Option<Vec<u8>>)> {
-    let (mut id, mut source) = (None, None);
+/// The `_id`, `_source` bytes and `_routing` of a document's stored fields.
+type Stored = (Option<String>, Option<Vec<u8>>, Option<String>);
+
+fn id_and_source(seg: &SegmentReader, fields: Doc) -> es_codec::Result<Stored> {
+    let (mut id, mut source, mut routing) = (None, None, None);
     for (n, v) in fields {
         match (seg.field_by_number(n)?.name.as_str(), v) {
             ("_id", StoredValue::Bytes(b)) => id = Some(decode_id(&b)),
             ("_source", StoredValue::Bytes(b)) => source = Some(b),
+            ("_routing", StoredValue::String(r)) => routing = Some(r),
             _ => {}
         }
     }
-    Ok((id, source))
+    Ok((id, source, routing))
 }
 
-fn document(d: &DiskDoc, source: Option<Vec<u8>>) -> es_codec::Result<Document> {
+fn document(d: &DiskDoc, (_, source, routing): Stored) -> es_codec::Result<Document> {
     let source = source.ok_or_else(|| es_codec::Error("document has no _source".into()))?;
     Ok(Document {
         source: serde_json::from_slice(&source).map_err(|e| es_codec::Error(e.to_string()))?,
         version: d.version,
         seq_no: d.seq_no,
+        routing,
     })
 }
 
@@ -182,7 +183,7 @@ impl Segments {
     /// Reads a live document from its segment.
     pub(crate) fn load(&self, d: &DiskDoc) -> es_codec::Result<Document> {
         let seg = &self.segments[d.segment];
-        document(d, id_and_source(seg, seg.document(d.doc)?)?.1)
+        document(d, id_and_source(seg, seg.document(d.doc)?)?)
     }
 
     /// The docs that may hold `term` in `field`: those whose postings do, and every doc of a
@@ -289,16 +290,16 @@ impl Segments {
             docs.filter_map(move |fields| {
                 let read = || {
                     let (doc, fields) = fields?;
-                    let (Some(id), source) = id_and_source(seg, fields)? else {
-                        return Ok(None);
-                    };
-                    let Some((id, d)) = self.ids.get_key_value(&id) else {
+                    let stored = id_and_source(seg, fields)?;
+                    let Some((id, d)) =
+                        (stored.0.as_ref()).and_then(|id| self.ids.get_key_value(id))
+                    else {
                         return Ok(None);
                     };
                     if (d.segment, d.doc) != (s, doc) {
                         return Ok(None);
                     }
-                    Ok(Some((id.as_str(), document(d, source)?)))
+                    Ok(Some((id.as_str(), document(d, stored)?)))
                 };
                 read().transpose()
             })
@@ -413,7 +414,7 @@ fn load_shard(index: &mut Shard, dir: &Path) -> es_codec::Result<()> {
             }
             Err(_) => {
                 for (doc, fields) in seg.documents(0..seg.max_doc())?.enumerate() {
-                    if let (Some(id), Some(_)) = id_and_source(&seg, fields?)? {
+                    if let (Some(id), Some(_), _) = id_and_source(&seg, fields?)? {
                         add(id, doc);
                     }
                 }
@@ -1599,6 +1600,8 @@ fn write_docs(
     };
     let lucene = lucene_docs(mappings, docs);
     let user = user_fields(mappings, &lucene, fields);
+    let nested_path = (fields.len() + user.fields.len()) as i32;
+    let routing_number = nested_path + i32::from(lucene.iter().any(|l| !l.path.is_empty()));
     // Built a doc at a time as the stored fields writer asks for them.
     let stored = (lucene.iter().enumerate()).map(|(doc, l)| {
         let (id, d) = docs[l.doc];
@@ -1606,6 +1609,9 @@ fn write_docs(
         if l.path.is_empty() {
             stored.push((0, StoredValue::Bytes(encode_id(id))));
             stored.push((1, StoredValue::Bytes(d.source.to_string().into_bytes())));
+            if let Some(r) = &d.routing {
+                stored.push((routing_number, StoredValue::String(r.clone())));
+            }
         }
         for (n, values) in &user.stored {
             let text = |v: &String| (*n, StoredValue::String(v.clone()));
@@ -1637,7 +1643,6 @@ fn write_docs(
         TermPostings::from_sorted(entries)
     };
     let mut all_fields = fields.to_vec();
-    let nested_path = (fields.len() + user.fields.len()) as i32;
     all_fields.extend(user.fields);
     let mut terms = vec![(0, postings(&|l| Some(encode_id(docs[l.doc].0))))];
     terms.extend(user.terms);
@@ -1650,6 +1655,21 @@ fn write_docs(
             ..fields[0].clone()
         });
         terms.push((nested_path, paths));
+    }
+    // Like RoutingFieldMapper: a stored StringField, on roots only
+    let routings = postings(&|l| {
+        let routing = docs[l.doc].1.routing.as_ref();
+        routing
+            .filter(|_| l.path.is_empty())
+            .map(|r| r.clone().into_bytes())
+    });
+    if !routings.is_empty() {
+        all_fields.push(es_codec::field_infos::FieldInfo {
+            name: "_routing".into(),
+            number: routing_number,
+            ..fields[0].clone()
+        });
+        terms.push((routing_number, routings));
     }
     let (name, id) = segment_name(counter);
     let seg = write_segment(
@@ -1739,8 +1759,9 @@ fn merge(dir: &Path, infos: &mut SegmentInfos) -> es_codec::Result<()> {
         })
         .collect();
     let covered = |name: &str| {
-        // A segment without nested documents has no `_nested_path`.
+        // A segment without nested or routed documents has no `_nested_path` or `_routing`.
         name == "_nested_path"
+            || name == "_routing"
             || (readers.iter().zip(&empties))
                 .all(|(r, e)| r.field(name).is_ok() || e.contains(name))
     };

@@ -381,8 +381,11 @@ pub async fn search(
 pub(crate) fn render_hits(hits: &[es_query::Hit]) -> Vec<Value> {
     hits.iter()
         .map(|h| {
-            let mut hit =
-                json!({"_index": h.index, "_id": h.id, "_score": h.score, "_source": h.doc.source});
+            let mut hit = json!({"_index": h.index, "_id": h.id, "_score": h.score});
+            if let Some(r) = &h.doc.routing {
+                hit["_routing"] = r.as_str().into();
+            }
+            hit["_source"] = h.doc.source.clone();
             if !h.sort.is_empty() {
                 hit["sort"] = h.sort.clone().into();
             }
