@@ -21,6 +21,7 @@ Suites: `yaml` (tests/yaml-xfail.txt), `parity` (fixtures/parity-xfail.txt), and
 node ralph.ts --suites yaml,goals,parity --until 07:00 --review-every 10
 ```
 
-Each suite ends after 3 rejections in a row; a review iteration runs after every 10 accepted
+`--until` also takes a weekday (`--until 'mon 07:00'`) for runs longer than a day; `ralph/start.sh`
+runs this detached under systemd. Each suite ends after 3 rejections in a row; a review iteration runs after every 10 accepted
 ones. Progress goes to `ralph/REPORT.md`, escalations to `ralph/NEEDS_HUMAN.md` (both
 git-ignored), and a notification is sent at the end. Standing orders are in AGENTS.md.

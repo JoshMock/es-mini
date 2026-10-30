@@ -1,7 +1,7 @@
 // Ralph loop: each iteration gives one fresh pi agent session one target (a known-failing test
 // or a goal), then verifies the result independently and rolls back anything that does not hold.
 //
-//   node ralph.ts [--suites yaml,parity,goals] [--max N] [--until HH:MM] [--target ID]
+//   node ralph.ts [--suites yaml,parity,goals] [--max N] [--until '[DAY] HH:MM'] [--target ID]
 //                 [--review-every N] [--timeout-min N] [--dry-run]
 //
 // Suites run in the given order; a suite ends when it runs out of targets or rejects 3
@@ -145,12 +145,10 @@ const timeoutMs = Number(flag("timeout-min") ?? 90) * 60_000;
 const dryRun = args.includes("--dry-run");
 const unattended = until !== undefined || max > 1;
 
-/** The next occurrence of HH:MM local time. */
-function deadline(hhmm: string): Date {
-  const [h, m] = hhmm.split(":").map(Number);
-  const d = new Date();
-  d.setHours(h, m, 0, 0);
-  if (d <= new Date()) d.setDate(d.getDate() + 1);
+/** The next occurrence of `HH:MM` or `DAY HH:MM` local time, parsed by GNU date like overnight.sh. */
+function deadline(when: string): Date {
+  const d = new Date(Number(execFileSync("date", ["-d", when, "+%s"], { encoding: "utf8" })) * 1000);
+  if (d <= new Date()) d.setDate(d.getDate() + (/^\d/.test(when) ? 1 : 7));
   return d;
 }
 
