@@ -32,6 +32,8 @@ pub(super) struct Terms {
     pub(super) map: bool,
     /// `collect_mode`: `Some(true)` for `breadth_first`, `Some(false)` for `depth_first`.
     breadth_first: Option<bool>,
+    /// `show_term_doc_count_error`: each bucket reports its own error bound.
+    show_error: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -74,6 +76,7 @@ impl Terms {
             value_type: None,
             map: false,
             breadth_first: None,
+            show_error: false,
         };
         for (k, v) in params {
             let bad = || QueryError::x_content(format!("[terms] failed to parse field [{k}]"));
@@ -104,6 +107,7 @@ impl Terms {
                         _ => None,
                     };
                 }
+                "show_term_doc_count_error" => t.show_error = v.as_bool() == Some(true),
                 "size" => t.size = positive("size")?,
                 "shard_size" => t.shard_size = Some(positive("shardSize")?),
                 "min_doc_count" => t.min_doc_count = at_least_0("minDocCount")?,
@@ -281,6 +285,8 @@ impl Terms {
             -1
         };
         b.shards = 1;
+        v.iter_mut()
+            .for_each(|(_, bucket)| bucket.seen_error = b.error);
         b.counts = v.into_iter().collect();
     }
 
@@ -323,6 +329,15 @@ impl Terms {
                 _ => {}
             }
             out.insert("doc_count".into(), bucket.count.into());
+            if self.show_error {
+                // AbstractInternalTerms: the errors of the shards that did not return the term
+                let e = match (b.shards, error) {
+                    (..=1, _) => 0,
+                    (_, -1) => -1,
+                    _ => error - bucket.seen_error,
+                };
+                out.insert("doc_count_error_upper_bound".into(), e.into());
+            }
             sub(&mut bucket.subs, &mut out)?;
             Ok(Value::Object(out))
         });
@@ -592,6 +607,8 @@ impl Filter {
 pub(super) struct Bucket {
     pub(super) count: u64,
     pub(super) subs: Vec<Stats>,
+    /// The summed errors of the shards that returned this bucket.
+    seen_error: i64,
 }
 
 /// One shard's buckets, or several shards' merged.
@@ -623,6 +640,7 @@ impl Buckets {
         (self.counts.entry(k)).or_insert_with(|| Bucket {
             count: 0,
             subs: empty.clone(),
+            seen_error: 0,
         })
     }
 
@@ -648,6 +666,7 @@ impl Buckets {
             match self.counts.get_mut(&k) {
                 Some(mine) => {
                     mine.count += b.count;
+                    mine.seen_error += b.seen_error;
                     super::reduce(&mut mine.subs, b.subs);
                 }
                 None => drop(self.counts.insert(k, b)),
