@@ -518,15 +518,23 @@ impl<'a> Searcher<'a> {
         }
     }
 
-    /// How many in-memory documents a range query sorted by its own field alone matches, and
-    /// the first `n` of them in order (see [`Index::memory_numbers_first`]).
+    /// How many in-memory documents `q` matches, and the first `n` of them in order, with
+    /// their score: for a range query sorted by its own field alone (see
+    /// [`Index::memory_numbers_first`]), and for a query with a
+    /// [`memory_score`](Self::memory_score) sorted by score, whose hits rank in write order.
     fn memory_sorted(
         &self,
         q: &Query,
         sort: &[SortField],
         n: usize,
         visible: u64,
-    ) -> Option<(usize, Vec<(&'a str, &'a Document)>)> {
+    ) -> Option<MemoryPage<'a>> {
+        if let (Query::Term { field, value }, []) = (q, sort) {
+            let score = self.memory_score(q)?;
+            let (count, page) =
+                (self.index).memory_term_first(self.kind(field).1, &text(value), n, visible);
+            return Some((score, count, page));
+        }
         let (
             Query::Range {
                 field,
@@ -546,6 +554,7 @@ impl<'a> Searcher<'a> {
         (f.field == *field)
             .then(|| (self.index).memory_numbers_first(field, path, bounds, f.desc, n, visible))
             .flatten()
+            .map(|(count, page)| (1.0, count, page))
     }
 
     /// The on-disk documents indexing all (or any) of `terms` in `field` (see
@@ -1282,15 +1291,15 @@ impl<'a> Searcher<'a> {
         }
     }
 
-    /// The score of every in-memory candidate of `q` (see `memory_candidates`), if each one
-    /// matches and they all score alike: a term on a keyword, which postings list exactly and
-    /// which counts once per document without norms (see `score_terms`).
+    /// The score of every in-memory document `q` matches, if they all score alike: a term on a
+    /// keyword, which postings (and so `memory_candidates`) list exactly and which counts once
+    /// per document without norms (see `score_terms`).
     fn memory_score(&self, q: &Query) -> Option<f64> {
         let Query::Term { field, value } = q else {
             return None;
         };
         let term = text(value);
-        if field == "_id" || self.kind(field).0 != Kind::Keyword || self.in_memory.is_none() {
+        if field == "_id" || self.kind(field).0 != Kind::Keyword {
             return None;
         }
         // the postings `score_terms` reads (see `gather`)
@@ -1417,6 +1426,9 @@ fn constant_score(q: &Query) -> Option<f64> {
     }
 }
 
+/// The score of some in-memory hits, how many there are, and the first of them in order.
+type MemoryPage<'a> = (f64, usize, Vec<(&'a str, &'a Document)>);
+
 /// A matching document, before hits are paged and read.
 struct Found<'a> {
     /// The position of its index among the searched targets.
@@ -1494,7 +1506,7 @@ pub fn search_many<'a>(
             None => s.candidates(&query, false),
         };
         let visible = index.visible_seq_no();
-        // a range sorted by its own field pages its in-memory hits from the numeric index
+        // a range sorted by its own field, or a keyword term by score, pages its in-memory hits
         let n = req.from.saturating_add(req.size);
         let memory_page = (req.aggs.is_empty() && !req.profile)
             .then(|| s.memory_sorted(&query, &req.sort, n, visible))
@@ -1520,15 +1532,15 @@ pub fn search_many<'a>(
         let before = hits.len();
         hits.extend(selected.into_iter().flatten());
         let mut counted = 0;
-        if let Some((count, page)) = memory_page {
+        if let Some((score, count, page)) = memory_page {
             counted = count - page.len();
             hits.extend(page.into_iter().map(|(id, doc)| Found {
                 target: pos,
                 id,
                 seq_no: doc.seq_no,
-                sort: s.sort_values(&req.sort, 1.0, doc),
+                sort: s.sort_values(&req.sort, score, doc),
                 doc: Some(Cow::Borrowed(doc)),
-                score: 1.0,
+                score,
             }));
         }
         // With one score for all, hits rank in write order, so once enough are counted the
@@ -2326,6 +2338,37 @@ mod tests {
         ix.delete("b");
         ix.put("c", json!({"tag": "x"}));
         assert_eq!((n(&ix, "x"), n(&ix, "y")), (1, 2));
+    }
+
+    /// A keyword term's in-memory hits all score alike, so its page is the first written of
+    /// them and its total all of them, also after updates, deletes and unrefreshed writes.
+    #[test]
+    fn keyword_term_hits_page_in_write_order() {
+        let mut ix = Index::default();
+        let keyword = FieldMapping::Keyword {
+            ignore_above: None,
+            split_queries_on_whitespace: false,
+        };
+        ix.mappings.properties.insert("tag".into(), keyword);
+        ix.settings
+            .merge(&json!({ es_index::index_settings::REFRESH_INTERVAL: "-1" }));
+        for i in 0..6 {
+            ix.put(&i.to_string(), json!({"tag": "x"}));
+        }
+        ix.put("0", json!({"tag": "x"}));
+        ix.put("1", json!({"tag": "y"}));
+        ix.delete("2");
+        ix.refresh();
+        ix.put("9", json!({"tag": "x"}));
+        let run = |from: usize| {
+            let body = json!({"query": {"term": {"tag": "x"}}, "from": from, "size": 2});
+            let r = search(&ix, &SearchRequest::parse(&body).unwrap());
+            let ids: Vec<_> = r.hits.iter().map(|h| h.id).collect();
+            (r.total, ids.join(","), r.max_score.is_some())
+        };
+        assert_eq!(run(0), (4, "3,4".into(), true));
+        assert_eq!(run(3), (4, "0".into(), true));
+        assert_eq!(run(4), (4, "".into(), true));
     }
 
     /// A range sorted by its own field pages its in-memory hits from the numeric index while

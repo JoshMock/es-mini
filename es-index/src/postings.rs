@@ -349,6 +349,30 @@ impl crate::Index {
         self.postings_for(path, analyzed, |f| f.docs.get(term).map_or(0, HashMap::len))
     }
 
+    /// How many in-memory documents below `visible` index the not-analyzed `term` at `path`,
+    /// and the first `n` of them in write order (in no order).
+    pub fn memory_term_first(
+        &self,
+        path: &str,
+        term: &str,
+        n: usize,
+        visible: u64,
+    ) -> (usize, Vec<(&str, &crate::Document)>) {
+        self.postings_for(path, false, |f| {
+            let ids = f.docs.get(term).into_iter().flat_map(HashMap::keys);
+            let mut docs: Vec<_> = (ids.filter_map(|id| self.docs.get_key_value(id)))
+                .map(|(id, d)| (id.as_str(), &**d))
+                .filter(|(_, d)| d.seq_no < visible)
+                .collect();
+            let count = docs.len();
+            if n < count {
+                docs.select_nth_unstable_by_key(n, |(_, d)| d.seq_no);
+                docs.truncate(n);
+            }
+            (count, docs)
+        })
+    }
+
     /// The frequency of `term` in each live document holding it in `field` (at source `path`),
     /// with the document's field length as its norm stands for it: from postings and norms on
     /// disk, and from the in-memory postings. As in Elasticsearch, a term that is not analyzed
