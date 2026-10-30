@@ -23,3 +23,7 @@ those too, in memory and from disk.
 as `expected-esql/NNN.json`. `es-mini/tests/esql_parity.rs` replays the ingest in memory and
 compares columns and values, or the error type for invalid queries; known differences are in
 `esql-parity-xfail.txt`, which may only shrink.
+
+`generate_shard_routing.sh` boots a fresh Elasticsearch, creates indices with several shard
+counts, indexes documents by `_id` and by custom routing, and records the shard each landed on
+in `shard_routing.json`; `es-index/tests/shard_routing.rs` checks `es_index::routing` against it.

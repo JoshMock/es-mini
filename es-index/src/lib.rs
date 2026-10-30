@@ -9,6 +9,7 @@ pub mod filter_path;
 pub mod index_settings;
 pub mod mapping;
 pub mod postings;
+pub mod routing;
 pub mod tz;
 
 pub use mapping::{FieldMapping, Mappings};

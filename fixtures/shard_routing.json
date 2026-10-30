@@ -1,0 +1,988 @@
+[
+ {
+  "index": "r1",
+  "settings": {
+   "number_of_shards": 1
+  },
+  "routing_num_shards": 1024,
+  "cases": [
+   {
+    "id": "1",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "10",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "11",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "12",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "13",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "14",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "15",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "16",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "17",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "18",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "19",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "2",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "20",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "3",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "4",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "5",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "6",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "7",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "8",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "9",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "abc",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "hello world",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "rt-42",
+    "routing": "42",
+    "shard": 0
+   },
+   {
+    "id": "rt-user1",
+    "routing": "user1",
+    "shard": 0
+   },
+   {
+    "id": "rt-x",
+    "routing": "x",
+    "shard": 0
+   },
+   {
+    "id": "rt-日本",
+    "routing": "日本",
+    "shard": 0
+   },
+   {
+    "id": "rt-😀",
+    "routing": "😀",
+    "shard": 0
+   },
+   {
+    "id": "ünïcödé",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "日本語",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "😀emoji",
+    "routing": null,
+    "shard": 0
+   }
+  ]
+ },
+ {
+  "index": "r2",
+  "settings": {
+   "number_of_shards": 2
+  },
+  "routing_num_shards": 1024,
+  "cases": [
+   {
+    "id": "1",
+    "routing": null,
+    "shard": 1
+   },
+   {
+    "id": "10",
+    "routing": null,
+    "shard": 1
+   },
+   {
+    "id": "11",
+    "routing": null,
+    "shard": 1
+   },
+   {
+    "id": "12",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "13",
+    "routing": null,
+    "shard": 1
+   },
+   {
+    "id": "14",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "15",
+    "routing": null,
+    "shard": 1
+   },
+   {
+    "id": "16",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "17",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "18",
+    "routing": null,
+    "shard": 1
+   },
+   {
+    "id": "19",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "2",
+    "routing": null,
+    "shard": 1
+   },
+   {
+    "id": "20",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "3",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "4",
+    "routing": null,
+    "shard": 1
+   },
+   {
+    "id": "5",
+    "routing": null,
+    "shard": 1
+   },
+   {
+    "id": "6",
+    "routing": null,
+    "shard": 1
+   },
+   {
+    "id": "7",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "8",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "9",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "routing": null,
+    "shard": 1
+   },
+   {
+    "id": "abc",
+    "routing": null,
+    "shard": 1
+   },
+   {
+    "id": "hello world",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "rt-42",
+    "routing": "42",
+    "shard": 0
+   },
+   {
+    "id": "rt-user1",
+    "routing": "user1",
+    "shard": 0
+   },
+   {
+    "id": "rt-x",
+    "routing": "x",
+    "shard": 0
+   },
+   {
+    "id": "rt-日本",
+    "routing": "日本",
+    "shard": 1
+   },
+   {
+    "id": "rt-😀",
+    "routing": "😀",
+    "shard": 1
+   },
+   {
+    "id": "ünïcödé",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "日本語",
+    "routing": null,
+    "shard": 1
+   },
+   {
+    "id": "😀emoji",
+    "routing": null,
+    "shard": 1
+   }
+  ]
+ },
+ {
+  "index": "r3",
+  "settings": {
+   "number_of_shards": 3
+  },
+  "routing_num_shards": 768,
+  "cases": [
+   {
+    "id": "1",
+    "routing": null,
+    "shard": 2
+   },
+   {
+    "id": "10",
+    "routing": null,
+    "shard": 2
+   },
+   {
+    "id": "11",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "12",
+    "routing": null,
+    "shard": 1
+   },
+   {
+    "id": "13",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "14",
+    "routing": null,
+    "shard": 1
+   },
+   {
+    "id": "15",
+    "routing": null,
+    "shard": 1
+   },
+   {
+    "id": "16",
+    "routing": null,
+    "shard": 1
+   },
+   {
+    "id": "17",
+    "routing": null,
+    "shard": 1
+   },
+   {
+    "id": "18",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "19",
+    "routing": null,
+    "shard": 2
+   },
+   {
+    "id": "2",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "20",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "3",
+    "routing": null,
+    "shard": 2
+   },
+   {
+    "id": "4",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "5",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "6",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "7",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "8",
+    "routing": null,
+    "shard": 1
+   },
+   {
+    "id": "9",
+    "routing": null,
+    "shard": 2
+   },
+   {
+    "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "routing": null,
+    "shard": 2
+   },
+   {
+    "id": "abc",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "hello world",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "rt-42",
+    "routing": "42",
+    "shard": 0
+   },
+   {
+    "id": "rt-user1",
+    "routing": "user1",
+    "shard": 1
+   },
+   {
+    "id": "rt-x",
+    "routing": "x",
+    "shard": 2
+   },
+   {
+    "id": "rt-日本",
+    "routing": "日本",
+    "shard": 0
+   },
+   {
+    "id": "rt-😀",
+    "routing": "😀",
+    "shard": 0
+   },
+   {
+    "id": "ünïcödé",
+    "routing": null,
+    "shard": 1
+   },
+   {
+    "id": "日本語",
+    "routing": null,
+    "shard": 1
+   },
+   {
+    "id": "😀emoji",
+    "routing": null,
+    "shard": 2
+   }
+  ]
+ },
+ {
+  "index": "r5",
+  "settings": {
+   "number_of_shards": 5
+  },
+  "routing_num_shards": 640,
+  "cases": [
+   {
+    "id": "1",
+    "routing": null,
+    "shard": 3
+   },
+   {
+    "id": "10",
+    "routing": null,
+    "shard": 1
+   },
+   {
+    "id": "11",
+    "routing": null,
+    "shard": 4
+   },
+   {
+    "id": "12",
+    "routing": null,
+    "shard": 1
+   },
+   {
+    "id": "13",
+    "routing": null,
+    "shard": 3
+   },
+   {
+    "id": "14",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "15",
+    "routing": null,
+    "shard": 2
+   },
+   {
+    "id": "16",
+    "routing": null,
+    "shard": 3
+   },
+   {
+    "id": "17",
+    "routing": null,
+    "shard": 4
+   },
+   {
+    "id": "18",
+    "routing": null,
+    "shard": 3
+   },
+   {
+    "id": "19",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "2",
+    "routing": null,
+    "shard": 2
+   },
+   {
+    "id": "20",
+    "routing": null,
+    "shard": 2
+   },
+   {
+    "id": "3",
+    "routing": null,
+    "shard": 4
+   },
+   {
+    "id": "4",
+    "routing": null,
+    "shard": 2
+   },
+   {
+    "id": "5",
+    "routing": null,
+    "shard": 1
+   },
+   {
+    "id": "6",
+    "routing": null,
+    "shard": 2
+   },
+   {
+    "id": "7",
+    "routing": null,
+    "shard": 3
+   },
+   {
+    "id": "8",
+    "routing": null,
+    "shard": 1
+   },
+   {
+    "id": "9",
+    "routing": null,
+    "shard": 1
+   },
+   {
+    "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "routing": null,
+    "shard": 1
+   },
+   {
+    "id": "abc",
+    "routing": null,
+    "shard": 4
+   },
+   {
+    "id": "hello world",
+    "routing": null,
+    "shard": 3
+   },
+   {
+    "id": "rt-42",
+    "routing": "42",
+    "shard": 1
+   },
+   {
+    "id": "rt-user1",
+    "routing": "user1",
+    "shard": 2
+   },
+   {
+    "id": "rt-x",
+    "routing": "x",
+    "shard": 1
+   },
+   {
+    "id": "rt-日本",
+    "routing": "日本",
+    "shard": 2
+   },
+   {
+    "id": "rt-😀",
+    "routing": "😀",
+    "shard": 3
+   },
+   {
+    "id": "ünïcödé",
+    "routing": null,
+    "shard": 3
+   },
+   {
+    "id": "日本語",
+    "routing": null,
+    "shard": 1
+   },
+   {
+    "id": "😀emoji",
+    "routing": null,
+    "shard": 4
+   }
+  ]
+ },
+ {
+  "index": "r7",
+  "settings": {
+   "number_of_shards": 7,
+   "number_of_routing_shards": 14
+  },
+  "routing_num_shards": 14,
+  "cases": [
+   {
+    "id": "1",
+    "routing": null,
+    "shard": 2
+   },
+   {
+    "id": "10",
+    "routing": null,
+    "shard": 5
+   },
+   {
+    "id": "11",
+    "routing": null,
+    "shard": 4
+   },
+   {
+    "id": "12",
+    "routing": null,
+    "shard": 4
+   },
+   {
+    "id": "13",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "14",
+    "routing": null,
+    "shard": 3
+   },
+   {
+    "id": "15",
+    "routing": null,
+    "shard": 2
+   },
+   {
+    "id": "16",
+    "routing": null,
+    "shard": 2
+   },
+   {
+    "id": "17",
+    "routing": null,
+    "shard": 2
+   },
+   {
+    "id": "18",
+    "routing": null,
+    "shard": 5
+   },
+   {
+    "id": "19",
+    "routing": null,
+    "shard": 6
+   },
+   {
+    "id": "2",
+    "routing": null,
+    "shard": 5
+   },
+   {
+    "id": "20",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "3",
+    "routing": null,
+    "shard": 1
+   },
+   {
+    "id": "4",
+    "routing": null,
+    "shard": 2
+   },
+   {
+    "id": "5",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "6",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "7",
+    "routing": null,
+    "shard": 6
+   },
+   {
+    "id": "8",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "9",
+    "routing": null,
+    "shard": 2
+   },
+   {
+    "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "routing": null,
+    "shard": 5
+   },
+   {
+    "id": "abc",
+    "routing": null,
+    "shard": 1
+   },
+   {
+    "id": "hello world",
+    "routing": null,
+    "shard": 5
+   },
+   {
+    "id": "rt-42",
+    "routing": "42",
+    "shard": 4
+   },
+   {
+    "id": "rt-user1",
+    "routing": "user1",
+    "shard": 4
+   },
+   {
+    "id": "rt-x",
+    "routing": "x",
+    "shard": 4
+   },
+   {
+    "id": "rt-日本",
+    "routing": "日本",
+    "shard": 5
+   },
+   {
+    "id": "rt-😀",
+    "routing": "😀",
+    "shard": 6
+   },
+   {
+    "id": "ünïcödé",
+    "routing": null,
+    "shard": 6
+   },
+   {
+    "id": "日本語",
+    "routing": null,
+    "shard": 2
+   },
+   {
+    "id": "😀emoji",
+    "routing": null,
+    "shard": 5
+   }
+  ]
+ },
+ {
+  "index": "r8",
+  "settings": {
+   "number_of_shards": 8,
+   "number_of_routing_shards": 8
+  },
+  "routing_num_shards": 8,
+  "cases": [
+   {
+    "id": "1",
+    "routing": null,
+    "shard": 3
+   },
+   {
+    "id": "10",
+    "routing": null,
+    "shard": 7
+   },
+   {
+    "id": "11",
+    "routing": null,
+    "shard": 3
+   },
+   {
+    "id": "12",
+    "routing": null,
+    "shard": 6
+   },
+   {
+    "id": "13",
+    "routing": null,
+    "shard": 5
+   },
+   {
+    "id": "14",
+    "routing": null,
+    "shard": 2
+   },
+   {
+    "id": "15",
+    "routing": null,
+    "shard": 3
+   },
+   {
+    "id": "16",
+    "routing": null,
+    "shard": 2
+   },
+   {
+    "id": "17",
+    "routing": null,
+    "shard": 4
+   },
+   {
+    "id": "18",
+    "routing": null,
+    "shard": 7
+   },
+   {
+    "id": "19",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "2",
+    "routing": null,
+    "shard": 3
+   },
+   {
+    "id": "20",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "3",
+    "routing": null,
+    "shard": 2
+   },
+   {
+    "id": "4",
+    "routing": null,
+    "shard": 3
+   },
+   {
+    "id": "5",
+    "routing": null,
+    "shard": 7
+   },
+   {
+    "id": "6",
+    "routing": null,
+    "shard": 1
+   },
+   {
+    "id": "7",
+    "routing": null,
+    "shard": 6
+   },
+   {
+    "id": "8",
+    "routing": null,
+    "shard": 2
+   },
+   {
+    "id": "9",
+    "routing": null,
+    "shard": 2
+   },
+   {
+    "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "routing": null,
+    "shard": 3
+   },
+   {
+    "id": "abc",
+    "routing": null,
+    "shard": 3
+   },
+   {
+    "id": "hello world",
+    "routing": null,
+    "shard": 4
+   },
+   {
+    "id": "rt-42",
+    "routing": "42",
+    "shard": 2
+   },
+   {
+    "id": "rt-user1",
+    "routing": "user1",
+    "shard": 4
+   },
+   {
+    "id": "rt-x",
+    "routing": "x",
+    "shard": 4
+   },
+   {
+    "id": "rt-日本",
+    "routing": "日本",
+    "shard": 3
+   },
+   {
+    "id": "rt-😀",
+    "routing": "😀",
+    "shard": 1
+   },
+   {
+    "id": "ünïcödé",
+    "routing": null,
+    "shard": 0
+   },
+   {
+    "id": "日本語",
+    "routing": null,
+    "shard": 5
+   },
+   {
+    "id": "😀emoji",
+    "routing": null,
+    "shard": 1
+   }
+  ]
+ }
+]
