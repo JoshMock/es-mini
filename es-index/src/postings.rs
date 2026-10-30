@@ -12,6 +12,7 @@
 use crate::{FieldMapping, analysis::Analyzer};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
 /// A JSON scalar as the string ES would index (`5` → "5", `true` → "true").
 pub fn text(v: &Value) -> String {
@@ -98,16 +99,21 @@ pub struct FieldStats {
 pub struct TermFreqs {
     /// On-disk documents by position.
     pub disk: HashMap<crate::disk::DiskPos, (u32, u32)>,
-    /// In-memory documents by id.
-    pub memory: HashMap<String, (u32, u32)>,
+    /// In-memory documents by id: the term's in-memory postings, shared, not copied.
+    pub memory: Arc<TermDocs>,
 }
+
+/// The live in-memory documents holding a term, by id, with its frequency there and the
+/// field length as its norm stands for it; (1, 1) for a term that is not analyzed (see
+/// [`Index::term_freqs`](crate::Index::term_freqs)).
+pub type TermDocs = HashMap<String, (u32, u32)>;
 
 #[derive(Debug, Default)]
 struct Field {
-    /// Term → live documents containing it, with its frequency there.
-    docs: HashMap<String, HashMap<String, u32>>,
-    /// Live document id → its distinct terms and its number of terms.
-    live: HashMap<String, (HashSet<String>, u32)>,
+    /// Term → live documents containing it, shared with searches.
+    docs: HashMap<String, Arc<TermDocs>>,
+    /// Live document id → its distinct terms.
+    live: HashMap<String, HashSet<String>>,
     /// Statistics over live and superseded documents.
     doc_count: f64,
     total_terms: f64,
@@ -116,7 +122,7 @@ struct Field {
 
 impl Field {
     /// Links a document, and adds it to the statistics if `counted`.
-    fn add(&mut self, id: &str, terms: Vec<String>, counted: bool) {
+    fn add(&mut self, id: &str, analyzed: bool, terms: Vec<String>, counted: bool) {
         if terms.is_empty() {
             return;
         }
@@ -126,22 +132,24 @@ impl Field {
             .into_iter()
             .for_each(|t| *freqs.entry(t).or_default() += 1);
         let counted = if counted { 1.0 } else { 0.0 };
+        let len = crate::disk::norm_len(crate::disk::norm_byte(count as u32));
         for (t, freq) in &freqs {
-            let docs = self.docs.entry(t.clone()).or_default();
-            docs.insert(id.to_owned(), *freq);
+            let at = if analyzed { (*freq, len) } else { (1, 1) };
+            let docs = Arc::make_mut(self.docs.entry(t.clone()).or_default());
+            docs.insert(id.to_owned(), at);
             *self.doc_freq.entry(t.clone()).or_default() += counted;
         }
         self.doc_count += counted;
         self.total_terms += counted * count as f64;
         let distinct = freqs.into_keys().collect();
-        self.live.insert(id.to_owned(), (distinct, count as u32));
+        self.live.insert(id.to_owned(), distinct);
     }
 
     /// Unlinks a replaced or deleted document; its statistics stay.
     fn remove(&mut self, id: &str) {
-        for t in self.live.remove(id).into_iter().flat_map(|l| l.0) {
+        for t in self.live.remove(id).into_iter().flatten() {
             if let Some(ids) = self.docs.get_mut(&t) {
-                ids.remove(id);
+                Arc::make_mut(ids).remove(id);
                 if ids.is_empty() {
                     self.docs.remove(&t);
                 }
@@ -262,12 +270,14 @@ impl Postings {
                 let mut f = Field::default();
                 for (id, d) in live {
                     let counted = d.seq_no >= persisted;
-                    f.add(id, field_terms(&d.source, path, analyzed), counted);
+                    let terms = field_terms(&d.source, path, analyzed);
+                    f.add(id, analyzed, terms, counted);
                 }
                 for (n, d) in superseded.iter().enumerate() {
                     // Counted in the statistics, then unlinked like any superseded document.
                     let id = format!("\0superseded{n}");
-                    f.add(&id, field_terms(&d.source, path, analyzed), true);
+                    let terms = field_terms(&d.source, path, analyzed);
+                    f.add(&id, analyzed, terms, true);
                     f.remove(&id);
                 }
                 f
@@ -276,7 +286,8 @@ impl Postings {
 
     pub(crate) fn add(&mut self, id: &str, source: &Value) {
         for ((path, analyzed), f) in &mut self.0 {
-            f.add(id, field_terms(source, path, *analyzed), true);
+            let terms = field_terms(source, path, *analyzed);
+            f.add(id, *analyzed, terms, true);
         }
         for ((path, key), n) in &mut self.1 {
             n.add(id, keys(key, source, path));
@@ -346,7 +357,7 @@ impl crate::Index {
     /// [`memory_docs`](Self::memory_docs) for one term, without collecting them.
     pub fn memory_term_count(&self, path: &str, analyzed: bool, term: &str) -> usize {
         // writes unlink replaced and deleted documents, so postings list live ones only
-        self.postings_for(path, analyzed, |f| f.docs.get(term).map_or(0, HashMap::len))
+        self.postings_for(path, analyzed, |f| f.docs.get(term).map_or(0, |d| d.len()))
     }
 
     /// How many in-memory documents below `visible` index the not-analyzed `term` at `path`,
@@ -359,7 +370,7 @@ impl crate::Index {
         visible: u64,
     ) -> (usize, Vec<(&str, &crate::Document)>) {
         self.postings_for(path, false, |f| {
-            let ids = f.docs.get(term).into_iter().flat_map(HashMap::keys);
+            let ids = f.docs.get(term).into_iter().flat_map(|d| d.keys());
             let mut docs: Vec<_> = (ids.filter_map(|id| self.docs.get_key_value(id)))
                 .map(|(id, d)| (id.as_str(), &**d))
                 .filter(|(_, d)| d.seq_no < visible)
@@ -389,20 +400,8 @@ impl crate::Index {
             Some(d) => d.term_freqs(field, term)?,
             None => HashMap::new(),
         };
-        let memory = self.postings_for(path, analyzed, |f| {
-            let docs = f.docs.get(term).into_iter().flatten();
-            (docs.map(|(id, freq)| {
-                let at = match analyzed {
-                    true => {
-                        let len = f.live.get(id).map_or(0, |l| l.1);
-                        (*freq, crate::disk::norm_len(crate::disk::norm_byte(len)))
-                    }
-                    false => (1, 1),
-                };
-                (id.clone(), at)
-            }))
-            .collect()
-        });
+        let memory = self.postings_for(path, analyzed, |f| f.docs.get(term).cloned());
+        let memory = memory.unwrap_or_default();
         Some(TermFreqs { disk, memory })
     }
 
