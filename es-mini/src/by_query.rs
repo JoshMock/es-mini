@@ -132,7 +132,8 @@ fn by_query(
 
     let mut indices = state.write();
     let resolved = crate::indices::data_targets(&indices, &name, &params)?;
-    let targets = crate::search::targets(&indices, &resolved);
+    let split = crate::search::split(&indices, &resolved);
+    let targets = crate::search::targets(&indices, &resolved, &split);
     let r = es_query::search_many(&targets, &req)?;
     // Like ES, a failed shard aborts before any write; the response has the highest status.
     let (mut status, mut failures) = (StatusCode::OK, vec![]);

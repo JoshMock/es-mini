@@ -18,6 +18,7 @@ struct Action {
     op: String,
     index: String,
     id: Option<String>,
+    routing: Option<String>,
     body: Option<Value>,
     /// The source line `body` was parsed from.
     raw: Vec<u8>,
@@ -87,6 +88,7 @@ fn parse(
             op: op.to_owned(),
             index: index.to_owned(),
             id,
+            routing: meta["routing"].as_str().map(str::to_owned),
             body,
             raw,
             require_alias: meta["require_alias"].as_bool().unwrap_or(require_alias),
@@ -124,11 +126,15 @@ fn execute(state: &AppState, params: &HashMap<String, String>, a: Action) -> Val
                 "if _id is specified it must not be empty".into(),
             ));
         }
+        let routing = a
+            .routing
+            .as_deref()
+            .or(params.get("routing").map(String::as_str));
         let mut reply = match a.op.as_str() {
-            "index" => put_or_create(state, &target, &id, body, &a.raw, false, ts),
-            "create" => put_or_create(state, &target, &id, body, &a.raw, true, ts),
-            "update" => update_doc(state, &target, &id, &body),
-            _ => delete_doc(state, &target, &id),
+            "index" => put_or_create(state, &target, (&id, routing), body, &a.raw, false, ts),
+            "create" => put_or_create(state, &target, (&id, routing), body, &a.raw, true, ts),
+            "update" => update_doc(state, &target, &id, routing, &body),
+            _ => delete_doc(state, &target, &id, routing),
         }?;
         force_refresh(state, params, &target, &mut reply)?;
         Ok(reply)

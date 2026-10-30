@@ -278,8 +278,9 @@ impl Default for Index {
     }
 }
 
-// ponytail: an index reads and writes its shard 0 until writes are routed to their shard
-// (goal shard-writes) and searches merge every shard's (goal shard-search-merge)
+// ponytail: reads not routed to a shard read shard 0, which searches of a multi-shard index
+// avoid by searching each shard's snapshot until they search every shard in place
+// (goal shard-search-merge)
 impl std::ops::Deref for Index {
     type Target = Shard;
     fn deref(&self) -> &Shard {
@@ -953,54 +954,85 @@ impl Index {
             .unwrap_or(1)
     }
 
-    /// Shard `n`, created empty if it was not written yet.
-    pub(crate) fn shard_mut(&mut self, n: usize) -> &mut Shard {
+    /// Shard `n` with the settings to write to it, created empty if it was not written yet.
+    pub(crate) fn shard_mut(&mut self, n: usize) -> (&Settings, &mut Shard) {
         if self.shards.len() <= n {
             self.shards.resize_with(n + 1, Shard::default);
         }
-        &mut self.shards[n]
+        (&self.settings, &mut self.shards[n])
+    }
+
+    /// The shard [`routing::shard_id`] picks for `id` and `routing`.
+    fn shard_for(&self, id: &str, routing: Option<&str>) -> usize {
+        routing::shard_id(id, routing, self.number_of_shards() as u32) as usize
+    }
+
+    /// The shard that holds `id` (routed by `routing`), if it was written.
+    pub fn shard_of(&self, id: &str, routing: Option<&str>) -> Option<&Shard> {
+        self.shards.get(self.shard_for(id, routing))
+    }
+
+    /// Every shard's documents, in no particular order.
+    pub fn docs(&self) -> impl Iterator<Item = (&str, Cow<'_, Document>)> {
+        self.shards.iter().flat_map(Shard::docs)
     }
 
     /// Creates or overwrites a document.
     pub fn put(&mut self, id: &str, source: Value) -> WriteResult {
-        self.put_auto(id, source, -1)
+        self.put_auto(id, None, source, -1)
     }
 
-    /// Like [`Index::put`] for an id Elasticsearch generated at `auto_id_timestamp` (-1: none).
-    pub fn put_auto(&mut self, id: &str, source: Value, auto_id_timestamp: i64) -> WriteResult {
-        (self.shards[0]).put_auto(&self.settings, id, source, auto_id_timestamp)
+    /// Like [`Index::put`] in the shard `routing` (or `id`) routes to, for an id Elasticsearch
+    /// generated at `auto_id_timestamp` (-1: none).
+    pub fn put_auto(
+        &mut self,
+        id: &str,
+        routing: Option<&str>,
+        source: Value,
+        auto_id_timestamp: i64,
+    ) -> WriteResult {
+        let (settings, shard) = self.shard_mut(self.shard_for(id, routing));
+        shard.put_auto(settings, id, source, auto_id_timestamp)
     }
 
     /// Like [`Index::put`] in shard `n`.
     pub fn put_in(&mut self, n: usize, id: &str, source: Value) -> WriteResult {
-        self.shard_mut(n);
-        self.shards[n].put_auto(&self.settings, id, source, -1)
+        let (settings, shard) = self.shard_mut(n);
+        shard.put_auto(settings, id, source, -1)
     }
 
     /// Creates a document; `Err(current_version)` if it already exists.
     pub fn create(&mut self, id: &str, source: Value) -> Result<WriteResult, u64> {
-        self.create_auto(id, source, -1)
+        self.create_auto(id, None, source, -1)
     }
 
-    /// Like [`Index::create`] for a generated id; see [`Index::put_auto`].
+    /// Like [`Index::create`], routed and for a generated id as [`Index::put_auto`] is.
     pub fn create_auto(
         &mut self,
         id: &str,
+        routing: Option<&str>,
         source: Value,
         auto_id_timestamp: i64,
     ) -> Result<WriteResult, u64> {
-        (self.shards[0]).create_auto(&self.settings, id, source, auto_id_timestamp)
+        let (settings, shard) = self.shard_mut(self.shard_for(id, routing));
+        shard.create_auto(settings, id, source, auto_id_timestamp)
     }
 
     /// Deletes a document. Like ES, a missing document still consumes a version and seq_no.
     pub fn delete(&mut self, id: &str) -> WriteResult {
-        self.shards[0].delete(&self.settings, id)
+        self.delete_routed(id, None)
+    }
+
+    /// Like [`Index::delete`] in the shard `routing` (or `id`) routes to.
+    pub fn delete_routed(&mut self, id: &str, routing: Option<&str>) -> WriteResult {
+        let (settings, shard) = self.shard_mut(self.shard_for(id, routing));
+        shard.delete(settings, id)
     }
 
     /// Like [`Index::delete`] in shard `n`.
     pub fn delete_in(&mut self, n: usize, id: &str) -> WriteResult {
-        self.shard_mut(n);
-        self.shards[n].delete(&self.settings, id)
+        let (settings, shard) = self.shard_mut(n);
+        shard.delete(settings, id)
     }
 
     /// Makes all writes so far visible to search.
@@ -1024,6 +1056,11 @@ impl Index {
         build: impl FnOnce() -> T,
         follow: impl FnOnce(&mut T, &[u64], &[(&str, &Document)]) -> bool,
     ) -> Arc<T> {
+        // ponytail: an index of several shards builds anew each time; one memo per shard if
+        // multi-shard ES|QL gets slow
+        if self.shards.len() > 1 {
+            return Arc::new(build());
+        }
         self.shards[0].memo(&self.mappings, build, follow)
     }
 
@@ -1057,19 +1094,44 @@ impl Index {
     /// A copy for point-in-time searches: later writes to `self` do not change it. It shares
     /// the documents and segments, which stay readable after a save deletes their files.
     pub fn snapshot(&self) -> Index {
-        let mut settings = self.settings.clone();
-        // it sees the writes visible now, and is never refreshed
-        settings.merge(&serde_json::json!({ index_settings::REFRESH_INTERVAL: "-1" }));
         Index {
             shards: self
                 .shards
                 .iter()
                 .map(|s| s.snapshot(&self.settings))
                 .collect(),
+            ..self.snapshot_meta()
+        }
+    }
+
+    /// A snapshot's settings and mappings, without shards.
+    fn snapshot_meta(&self) -> Index {
+        let mut settings = self.settings.clone();
+        // it sees the writes visible now, and is never refreshed
+        settings.merge(&serde_json::json!({ index_settings::REFRESH_INTERVAL: "-1" }));
+        Index {
             settings,
             mappings: self.mappings.clone(),
             ..Index::default()
         }
+    }
+
+    /// Each of its `index.number_of_shards` shards as a one-shard [`Index::snapshot`], so that a
+    /// search reads each one.
+    // ponytail: copies each shard's document ids on every search of a multi-shard index, and
+    // their postings are rebuilt; searching the shards in place is goal shard-search-merge
+    pub fn shard_snapshots(&self) -> Vec<Index> {
+        let empty = Shard::default();
+        let shards = self.number_of_shards().max(self.shards.len());
+        (0..shards)
+            .map(|n| {
+                let shard = self.shards.get(n).unwrap_or(&empty);
+                Index {
+                    shards: vec![shard.snapshot(&self.settings)],
+                    ..self.snapshot_meta()
+                }
+            })
+            .collect()
     }
 
     /// Merges `partial` into an existing document, or indexes `upsert` if it is missing,
@@ -1078,16 +1140,17 @@ impl Index {
     pub fn update(
         &mut self,
         id: &str,
+        routing: Option<&str>,
         partial: &Value,
         upsert: Option<Value>,
         detect_noop: bool,
     ) -> Result<Option<WriteResult>, String> {
-        let Some(doc) = self.get(id) else {
+        let Some(doc) = self.shard_of(id, routing).and_then(|s| s.get(id)) else {
             let Some(source) = upsert else {
                 return Ok(None);
             };
             self.map_dynamic(id, &source)?;
-            return Ok(Some(self.put(id, source)));
+            return Ok(Some(self.put_auto(id, routing, source, -1)));
         };
         let mut source = doc.source.clone();
         merge(&mut source, partial);
@@ -1101,7 +1164,7 @@ impl Index {
         }
         drop(doc);
         self.map_dynamic(id, &source)?;
-        Ok(Some(self.put(id, source)))
+        Ok(Some(self.put_auto(id, routing, source, -1)))
     }
 }
 
@@ -2057,7 +2120,7 @@ mod tests {
         ix.put("a", json!({}));
         let (id, ts) = auto_id();
         assert_eq!(id.len(), 20);
-        ix.put_auto(&id, json!({}), ts);
+        ix.put_auto(&id, None, json!({}), ts);
         let stamps: Vec<i64> = ix
             .take_unlogged()
             .into_iter()
@@ -2215,7 +2278,7 @@ mod tests {
     fn update_merges_recursively() {
         let mut idx = Index::default();
         idx.put("1", json!({"a": 1, "o": {"x": 1, "y": 1}}));
-        let r = idx.update("1", &json!({"b": 2, "o": {"y": 2}}), None, true);
+        let r = idx.update("1", None, &json!({"b": 2, "o": {"y": 2}}), None, true);
         assert_eq!(r, Ok(Some(w(DocResult::Updated, 2, 1))));
         assert_eq!(
             idx.get("1").unwrap().source,
@@ -2228,7 +2291,7 @@ mod tests {
         let mut idx = Index::default();
         idx.put("1", json!({"a": 1}));
         assert_eq!(
-            idx.update("1", &json!({"a": 1}), None, true),
+            idx.update("1", None, &json!({"a": 1}), None, true),
             Ok(Some(w(DocResult::Noop, 1, 0)))
         );
     }
@@ -2238,7 +2301,7 @@ mod tests {
         let mut idx = Index::default();
         idx.put("1", json!({"a": 1}));
         let r = idx
-            .update("1", &json!({"a": 1}), None, false)
+            .update("1", None, &json!({"a": 1}), None, false)
             .unwrap()
             .unwrap();
         assert_eq!((r.result, r.version), (DocResult::Updated, 2));
@@ -2247,8 +2310,11 @@ mod tests {
     #[test]
     fn update_missing_doc() {
         let mut idx = Index::default();
-        assert_eq!(idx.update("1", &json!({"a": 1}), None, true), Ok(None));
-        let r = idx.update("1", &json!({"a": 1}), Some(json!({"u": 1})), true);
+        assert_eq!(
+            idx.update("1", None, &json!({"a": 1}), None, true),
+            Ok(None)
+        );
+        let r = idx.update("1", None, &json!({"a": 1}), Some(json!({"u": 1})), true);
         assert_eq!(r, Ok(Some(w(DocResult::Created, 1, 0))));
         assert_eq!(idx.get("1").unwrap().source, json!({"u": 1}));
     }

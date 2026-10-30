@@ -95,8 +95,14 @@ pub async fn field_caps(
         let q = es_query::parse_query(&body["index_filter"])
             .map_err(|e| AppError::ParsingException(e.to_string()))?;
         names.retain(|n| {
-            let one = [("", &*indices[n], None)];
-            es_query::count_many(&one, &q).map_or(true, |c| c > 0 || indices[n].docs().count() == 0)
+            let one = [es_index::aliases::Target {
+                index: n.clone(),
+                filter: None,
+            }];
+            let split = crate::search::split(&indices, &one);
+            let shards = crate::search::targets(&indices, &one, &split);
+            es_query::count_many(&shards, &q)
+                .map_or(true, |c| c > 0 || indices[n].docs().count() == 0)
         });
     }
     let runtime: Vec<(String, String)> =

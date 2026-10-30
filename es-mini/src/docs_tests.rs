@@ -497,7 +497,8 @@ fn writes_to_different_indices_run_concurrently() {
     let to_b = std::thread::spawn({
         let state = state.clone();
         move || {
-            let wrote = crate::docs::put_or_create(&state, "b", "1", json!({}), b"{}", false, 0);
+            let wrote =
+                crate::docs::put_or_create(&state, "b", ("1", None), json!({}), b"{}", false, 0);
             tx.send(wrote.is_ok()).unwrap();
         }
     });

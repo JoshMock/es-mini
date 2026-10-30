@@ -47,7 +47,7 @@ pub fn open(data_dir: &Path) -> es_codec::Result<Indices> {
         }
         for n in 0..index.number_of_shards() {
             let dir = shard_dir(data_dir, &meta.uuid, n);
-            let shard = index.shard_mut(n);
+            let shard = index.shard_mut(n).1;
             if !dir.exists() {
                 continue;
             }
@@ -1253,7 +1253,7 @@ fn log(data_dir: &Path, indices: &mut Indices, all: bool) -> es_codec::Result<Pe
                 let (dir, cp) = logs.next().expect("a checkpoint per shard");
                 let mut ops = pending.saving.remove(&dir).unwrap_or_default();
                 if all || !deferred {
-                    ops.extend(ix.shard_mut(n).take_unlogged());
+                    ops.extend(ix.shard_mut(n).1.take_unlogged());
                 }
                 // The checkpoint is rewritten on every append, so its age is the shard's idle
                 // time.
@@ -1282,7 +1282,7 @@ fn log(data_dir: &Path, indices: &mut Indices, all: bool) -> es_codec::Result<Pe
         // ponytail: rereads every term of every index; cache per segment if commits get slow
         for (meta, ix) in metas.iter().zip(indices.values_mut()) {
             for n in 0..ix.number_of_shards() {
-                let shard = ix.shard_mut(n);
+                let shard = ix.shard_mut(n).1;
                 drop(shard.take_unlogged());
                 shard.committed(commit_stats(&shard_dir(data_dir, &meta.uuid, n))?);
             }

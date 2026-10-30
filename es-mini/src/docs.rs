@@ -194,7 +194,7 @@ fn reply(index: &str, id: &str, w: WriteResult, shards_total: u64) -> (StatusCod
 pub fn put_or_create(
     state: &AppState,
     index: &str,
-    id: &str,
+    (id, routing): (&str, Option<&str>),
     source: Value,
     raw: &[u8],
     create: bool,
@@ -262,8 +262,8 @@ pub fn put_or_create(
         i.map_dynamic(id, &source)
             .map_err(AppError::DocumentParsing)?;
         Ok(match create {
-            true => i.create_auto(id, source, auto_id_timestamp),
-            false => Ok(i.put_auto(id, source, auto_id_timestamp)),
+            true => i.create_auto(id, routing, source, auto_id_timestamp),
+            false => Ok(i.put_auto(id, routing, source, auto_id_timestamp)),
         })
     })?;
     let w = w?.map_err(|current_version| AppError::VersionConflict {
@@ -347,7 +347,8 @@ pub async fn index_with_id(
     params::check(&uri, &params, &WRITE_PARAMS)?;
     let create = params.get("op_type").is_some_and(|o| o == "create");
     with_write_params(&state, &params, &index, || {
-        put_or_create(&state, &index, &id, parse_source(&body)?, &body, create, -1)
+        let doc = (id.as_str(), params.get("routing").map(String::as_str));
+        put_or_create(&state, &index, doc, parse_source(&body)?, &body, create, -1)
     })
 }
 
@@ -361,7 +362,8 @@ pub async fn index_auto_id(
     params::check(&uri, &params, &WRITE_PARAMS)?;
     with_write_params(&state, &params, &index, || {
         let (id, ts) = auto_id();
-        put_or_create(&state, &index, &id, parse_source(&body)?, &body, true, ts)
+        let doc = (id.as_str(), params.get("routing").map(String::as_str));
+        put_or_create(&state, &index, doc, parse_source(&body)?, &body, true, ts)
     })
 }
 
@@ -374,7 +376,8 @@ pub async fn create(
 ) -> Reply {
     params::check(&uri, &params, &WRITE_PARAMS)?;
     with_write_params(&state, &params, &index, || {
-        put_or_create(&state, &index, &id, parse_source(&body)?, &body, true, -1)
+        let doc = (id.as_str(), params.get("routing").map(String::as_str));
+        put_or_create(&state, &index, doc, parse_source(&body)?, &body, true, -1)
     })
 }
 
@@ -450,7 +453,9 @@ pub async fn get(
     // A non-realtime get sees what search sees, unless it asks for a refresh first.
     let realtime = params.get("realtime").is_none_or(|v| v != "false")
         || params.get("refresh").is_some_and(|v| v != "false");
-    let found = i.get(&id).filter(|d| realtime || i.searchable(d.seq_no));
+    let shard = i.shard_of(&id, params.get("routing").map(String::as_str));
+    let found = shard
+        .and_then(|s| (s.get(&id)).filter(|d| realtime || s.searchable(&i.settings, d.seq_no)));
     Ok(match found {
         Some(d) => {
             let mut r = json!({
@@ -541,11 +546,18 @@ pub async fn delete(
     Query(params): Query<HashMap<String, String>>,
 ) -> Reply {
     params::check(&uri, &params, &DELETE_PARAMS)?;
-    with_write_params(&state, &params, &index, || delete_doc(&state, &index, &id))
+    with_write_params(&state, &params, &index, || {
+        delete_doc(
+            &state,
+            &index,
+            &id,
+            params.get("routing").map(String::as_str),
+        )
+    })
 }
 
-pub fn delete_doc(state: &AppState, index: &str, id: &str) -> Reply {
-    let (w, total, index) = write(state, index, |i| i.delete(id))?;
+pub fn delete_doc(state: &AppState, index: &str, id: &str, routing: Option<&str>) -> Reply {
+    let (w, total, index) = write(state, index, |i| i.delete_routed(id, routing))?;
     Ok(reply(&index, id, w, total))
 }
 
@@ -574,11 +586,18 @@ pub async fn update(
 ) -> Reply {
     params::check(&uri, &params, &UPDATE_PARAMS)?;
     with_write_params(&state, &params, &index, || {
-        update_doc(&state, &index, &id, &parse_json(&body)?)
+        let routing = params.get("routing").map(String::as_str);
+        update_doc(&state, &index, &id, routing, &parse_json(&body)?)
     })
 }
 
-pub fn update_doc(state: &AppState, index: &str, id: &str, body: &Value) -> Reply {
+pub fn update_doc(
+    state: &AppState,
+    index: &str,
+    id: &str,
+    routing: Option<&str>,
+    body: &Value,
+) -> Reply {
     const FIELDS: [&str; 8] = [
         "doc",
         "upsert",
@@ -606,7 +625,7 @@ pub fn update_doc(state: &AppState, index: &str, id: &str, body: &Value) -> Repl
     };
     let detect_noop = body["detect_noop"].as_bool() != Some(false);
     let (w, total, index) = write(state, index, |i| {
-        i.update(id, &partial, upsert, detect_noop)
+        i.update(id, routing, &partial, upsert, detect_noop)
             .map_err(AppError::DocumentParsing)
     })?;
     let w = w?.ok_or_else(|| AppError::DocumentMissing {

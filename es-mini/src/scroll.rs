@@ -116,7 +116,10 @@ pub(crate) fn snapshot(
     Ok(Arc::new(
         resolved
             .into_iter()
-            .map(|t| (t.index.clone(), indices[&t.index].snapshot(), t.filter))
+            .flat_map(|t| {
+                let shards = indices[&t.index].shard_snapshots().into_iter();
+                shards.map(move |s| (t.index.clone(), s, t.filter.clone()))
+            })
             .collect(),
     ))
 }

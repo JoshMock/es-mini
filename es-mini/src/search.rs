@@ -15,18 +15,36 @@ use serde_json::{Value, json};
 use std::borrow::Borrow;
 use std::{collections::HashMap, time::Instant};
 
+/// The shards of each multi-shard index of `resolved`, copied to be searched one by one (see
+/// [`es_index::Index::shard_snapshots`]); none for an index of one shard, searched in place.
+pub(crate) fn split(
+    indices: &aliases::Map<impl Borrow<es_index::Index>>,
+    resolved: &[aliases::Target],
+) -> Vec<Vec<es_index::Index>> {
+    (resolved.iter())
+        .map(|t| {
+            let index = indices[&t.index].borrow();
+            match index.number_of_shards() {
+                1 => vec![],
+                _ => index.shard_snapshots(),
+            }
+        })
+        .collect()
+}
+
+/// A search target per shard of `resolved`, from `split` where it has them.
 pub(crate) fn targets<'a>(
     indices: &'a aliases::Map<impl Borrow<es_index::Index>>,
     resolved: &'a [aliases::Target],
+    split: &'a [Vec<es_index::Index>],
 ) -> Vec<es_query::Target<'a>> {
-    resolved
-        .iter()
-        .map(|t| {
-            (
-                t.index.as_str(),
-                indices[&t.index].borrow(),
-                t.filter.as_ref(),
-            )
+    (resolved.iter().zip(split))
+        .flat_map(|(t, shards)| {
+            let (name, filter) = (t.index.as_str(), t.filter.as_ref());
+            match &shards[..] {
+                [] => vec![(name, indices[&t.index].borrow(), filter)],
+                _ => shards.iter().map(|s| (name, s, filter)).collect(),
+            }
         })
         .collect()
 }
@@ -131,15 +149,17 @@ fn terms_lookups(shared: &crate::store::Shared, v: &mut Value) -> Result<(), App
         Value::Object(o) => {
             if let Some(Value::Object(terms)) = o.get_mut("terms") {
                 for spec in terms.values_mut() {
-                    let Some((Some(index), Some(id), Some(path))) = spec.as_object().map(|l| {
-                        let s = |k| l.get(k).and_then(Value::as_str);
-                        (s("index"), s("id"), s("path"))
-                    }) else {
+                    let Some((Some(index), Some(id), Some(path), routing)) =
+                        spec.as_object().map(|l| {
+                            let s = |k| l.get(k).and_then(Value::as_str);
+                            (s("index"), s("id"), s("path"), s("routing"))
+                        })
+                    else {
                         continue;
                     };
                     let index = crate::docs::single_index(&**shared, index)?;
                     let index = shared.read(&index).expect("resolved");
-                    *spec = match index.get(id) {
+                    *spec = match index.shard_of(id, routing).and_then(|s| s.get(id)) {
                         Some(d) => es_index::postings::values(&d.source, path)
                             .into_iter()
                             .cloned()
@@ -219,7 +239,7 @@ pub async fn search(
         None if scroll.is_some() => Some(crate::scroll::snapshot(&state, &name, &params)?),
         None => None,
     };
-    let (shared, indices, resolved);
+    let (shared, indices, resolved, split);
     let targets = match &snapshot {
         Some(s) => s
             .iter()
@@ -229,7 +249,8 @@ pub async fn search(
             shared = state.read();
             resolved = crate::indices::data_targets(&*shared, &name, &params)?;
             indices = shared.lock(resolved.iter().map(|t| &t.index));
-            targets(&indices, &resolved)
+            split = self::split(&indices, &resolved);
+            targets(&indices, &resolved, &split)
         }
     };
     for (_, index, _) in &targets {
@@ -539,7 +560,8 @@ pub async fn count(
     };
     let resolved = crate::indices::data_targets(&*shared, &name, &params)?;
     let indices = shared.lock(resolved.iter().map(|t| &t.index));
-    let n = es_query::count_many(&targets(&indices, &resolved), &query)?;
+    let split = split(&indices, &resolved);
+    let n = es_query::count_many(&targets(&indices, &resolved, &split), &query)?;
     let resp = json!({"count": n, "_shards": shards(resolved.len())});
     Ok(Json(resp))
 }

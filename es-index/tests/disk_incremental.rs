@@ -196,7 +196,7 @@ fn writes_replace_and_delete_documents_served_from_disk() {
     let ix = indices.get_mut("idx").unwrap();
     assert_eq!(ix.create("0", json!({})), Err(1));
     let r = ix
-        .update("1", &json!({"w": 1}), None, true)
+        .update("1", None, &json!({"w": 1}), None, true)
         .unwrap()
         .unwrap();
     assert_eq!((r.version, r.seq_no), (2, 5));
