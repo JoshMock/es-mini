@@ -5,14 +5,16 @@
 use super::{Authn, Security};
 use crate::error::AppError;
 use axum::{
+    Extension, Json,
+    body::Bytes,
     extract::{Query, Request, State},
     http::{Method, StatusCode, Uri},
     middleware::Next,
     response::{IntoResponse, Response},
 };
 use es_index::aliases::{IndexMeta, IndicesOptions, glob};
-use serde_json::Value;
-use std::collections::HashMap;
+use serde_json::{Value, json};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 /// The privileges that grant each action es-mini authorizes, in the order Elasticsearch's
@@ -562,6 +564,376 @@ impl Key<'_> {
         );
         AppError::Other(StatusCode::FORBIDDEN, "security_exception", reason)
     }
+}
+
+/// The privileges of one kind (cluster or index) that `_has_privileges` compares.
+struct Kind {
+    /// The named privileges that a named privilege implies, where they are not just itself and
+    /// `none`, as Elasticsearch 9.5.5's `_has_privileges` reports them (recorded).
+    implies: &'static [(&'static str, &'static str)],
+    /// The action patterns of named privileges as (name, included, excluded), from
+    /// Elasticsearch's `ClusterPrivilegeResolver` and `IndexPrivilege`, to compare named
+    /// privileges with privileges that are action patterns.
+    // ponytail: only these privileges; any other named one is never implied by action patterns
+    actions: &'static [(
+        &'static str,
+        &'static [&'static str],
+        &'static [&'static str],
+    )],
+}
+
+const ALL_CLUSTER: &[&str] = &[
+    "cluster:*",
+    "indices:admin/template/*",
+    "indices:admin/index_template/*",
+];
+const API_KEYS: &[&str] = &["cluster:admin/xpack/security/api_key/*"];
+
+const CLUSTER: Kind = Kind {
+    implies: &[
+        (
+            "all",
+            "all,cancel_task,cross_cluster_search,manage,manage_api_key,manage_ccr,manage_ilm,manage_index_templates,manage_ml,manage_own_api_key,manage_security,manage_token,monitor,monitor_ml,monitor_stats,none,read_ccr,read_ilm,read_security,transport_client",
+        ),
+        (
+            "monitor",
+            "monitor,monitor_ml,monitor_stats,none,transport_client",
+        ),
+        (
+            "manage",
+            "cancel_task,cross_cluster_search,manage,manage_ilm,manage_index_templates,manage_ml,monitor,monitor_ml,monitor_stats,none,read_ilm,transport_client",
+        ),
+        (
+            "manage_security",
+            "manage_api_key,manage_own_api_key,manage_security,manage_token,none,read_security",
+        ),
+        ("manage_api_key", "manage_api_key,manage_own_api_key,none"),
+        ("manage_own_api_key", "manage_own_api_key"),
+        ("manage_ml", "manage_ml,monitor_ml,none"),
+        ("manage_ilm", "manage_ilm,none,read_ilm"),
+        ("manage_ccr", "manage_ccr,none,read_ccr"),
+    ],
+    actions: &[
+        ("all", ALL_CLUSTER, &[]),
+        ("manage", ALL_CLUSTER, &["cluster:admin/xpack/security/*"]),
+        (
+            "monitor",
+            &[
+                "cluster:monitor/*",
+                "indices:admin/template/get",
+                "indices:admin/index_template/get",
+                "cluster:admin/component_template/get",
+            ],
+            &[],
+        ),
+        ("monitor_stats", &["cluster:monitor/stats*"], &[]),
+        (
+            "manage_security",
+            &["cluster:admin/xpack/security/*"],
+            &["cluster:admin/xpack/security/delegate_pki"],
+        ),
+        ("manage_api_key", API_KEYS, &[]),
+        ("manage_own_api_key", API_KEYS, &[]),
+    ],
+};
+
+const INDEX: Kind = Kind {
+    implies: &[
+        (
+            "all",
+            "all,auto_configure,create,create_doc,create_index,cross_cluster_replication,cross_cluster_replication_internal,delete,delete_index,index,maintenance,manage,manage_data_stream_lifecycle,manage_failure_store,manage_follow_index,manage_ilm,manage_leader_index,monitor,none,read,read_cross_cluster,read_failure_store,view_index_metadata,write",
+        ),
+        ("create", "create,create_doc,none"),
+        ("index", "create,create_doc,index,none"),
+        (
+            "manage",
+            "auto_configure,create_index,delete_index,maintenance,manage,manage_data_stream_lifecycle,manage_failure_store,manage_follow_index,manage_ilm,manage_leader_index,monitor,none,view_index_metadata",
+        ),
+        ("none", ""),
+        ("read", "none,read,read_cross_cluster"),
+        ("write", "create,create_doc,delete,index,none,write"),
+        ("read_failure_store", "read_failure_store"),
+        (
+            "manage_failure_store",
+            "manage,manage_data_stream_lifecycle,manage_failure_store",
+        ),
+    ],
+    actions: &[
+        (
+            "all",
+            &["indices:*", "internal:transport/proxy/indices:*"],
+            &[],
+        ),
+        (
+            "read",
+            &[
+                "indices:data/read/*",
+                "internal:transport/proxy/indices:data/read/*",
+                "indices:admin/resolve/index",
+            ],
+            &[],
+        ),
+        (
+            "write",
+            &["indices:data/write/*", "indices:admin/mapping/auto_put"],
+            &[],
+        ),
+        (
+            "index",
+            &[
+                "indices:data/write/index*",
+                "indices:data/write/bulk*",
+                "indices:data/write/update*",
+            ],
+            &[],
+        ),
+        ("monitor", &["indices:monitor/*"], &[]),
+        (
+            "manage",
+            &[
+                "indices:monitor/*",
+                "indices:admin/*",
+                "indices:data/read/field_caps*",
+            ],
+            &[],
+        ),
+    ],
+};
+
+impl Kind {
+    /// Whether the privileges `granted` (names, or patterns over action names) imply the
+    /// privilege `requested`.
+    fn implies(&self, granted: &[&str], requested: &str) -> bool {
+        let named = |p: &str| !p.contains(':');
+        let by_name = |g: &&str| match self.implies.iter().find(|(n, _)| n == g) {
+            Some((_, implied)) => implied.split(',').any(|i| i == requested),
+            None => *g == requested || requested == "none",
+        };
+        if granted.iter().filter(|g| named(g)).any(by_name) {
+            return true;
+        }
+        // manage_own_api_key grants actions on the user's own keys only, so no action outright.
+        let acting = || granted.iter().filter(|g| **g != "manage_own_api_key");
+        if requested == "none" {
+            return granted.iter().any(|g| !named(g));
+        }
+        if !named(requested) && !requested.contains('*') {
+            let named_by = granted_by(requested).split(',');
+            if acting().any(|g| named_by.clone().any(|n| n == *g)) {
+                return true;
+            }
+        }
+        let Some((wanted, _)) = self.actions(requested) else {
+            return false;
+        };
+        let covered = |w: &&str| {
+            acting().filter_map(|g| self.actions(g)).any(|(inc, exc)| {
+                inc.iter().any(|i| glob(i, w)) && !exc.iter().any(|e| glob(e, w) || glob(w, e))
+            })
+        };
+        wanted.iter().all(covered)
+    }
+
+    /// The action patterns of `privilege` as (included, excluded), if known.
+    fn actions<'a>(&self, privilege: &'a str) -> Option<(Vec<&'a str>, &'static [&'static str])> {
+        if privilege.contains(':') {
+            return Some((vec![privilege], &[]));
+        }
+        (self.actions.iter())
+            .find(|(n, ..)| *n == privilege)
+            .map(|(_, inc, exc)| (inc.to_vec(), *exc))
+    }
+}
+
+/// The strings of a JSON string array.
+fn strs(v: &Value) -> impl Iterator<Item = &str> + Clone {
+    v.as_array().into_iter().flatten().filter_map(Value::as_str)
+}
+
+/// Whether the index privilege entry `e` covers the index name or pattern `name`; restricted
+/// indices (es-mini's `.security-7` and `.security`) only if the entry allows them, and a
+/// pattern checked with `allow_restricted` only if it cannot match them or the entry allows them.
+// ponytail: Elasticsearch restricts every system index; es-mini has only these
+fn names_cover(e: &Value, name: &str, allow_restricted: bool) -> bool {
+    let restricted = [super::INDEX, super::ALIAS];
+    let reaches_restricted = restricted.contains(&name)
+        || (allow_restricted && name.contains('*') && restricted.iter().any(|r| glob(name, r)));
+    strs(&e["names"]).any(|n| glob(n, name))
+        && (e["allow_restricted_indices"] == true || !reaches_restricted)
+}
+
+impl Key<'_> {
+    fn has_cluster(&self, privilege: &str) -> bool {
+        (self.roles.iter()).all(|set| {
+            let granted: Vec<&str> = roles(set).flat_map(|r| strs(&r["cluster"])).collect();
+            CLUSTER.implies(&granted, privilege)
+        })
+    }
+
+    fn has_index(&self, name: &str, allow_restricted: bool, privilege: &str) -> bool {
+        (self.roles.iter()).all(|set| {
+            let covering = entries(set).filter(|e| names_cover(e, name, allow_restricted));
+            let granted: Vec<&str> = covering.flat_map(|e| strs(&e["privileges"])).collect();
+            // A role whose index privileges are all `none` has no index privileges at all.
+            let some = || {
+                entries(set)
+                    .flat_map(|e| strs(&e["privileges"]))
+                    .any(|p| p != "none")
+            };
+            match privilege {
+                "none" if granted.contains(&"none") => some(),
+                _ => !granted.is_empty() && INDEX.implies(&granted, privilege),
+            }
+        })
+    }
+
+    fn has_application(&self, app: &str, resource: &str, privilege: &str) -> bool {
+        (self.roles.iter()).all(|set| {
+            roles(set)
+                .flat_map(|r| r["applications"].as_array().into_iter().flatten())
+                .any(|a| {
+                    a["application"].as_str().is_some_and(|n| glob(n, app))
+                        && strs(&a["privileges"]).any(|p| p == "*" || p == privilege)
+                        && strs(&a["resources"]).any(|r| glob(r, resource))
+                })
+        })
+    }
+}
+
+/// `GET|POST /_security/user/_has_privileges`: which of the privileges the request names the
+/// user (`elastic`, or an API key, limited by its creator) has.
+pub(super) async fn has_privileges(
+    Extension(authn): Extension<Authn>,
+    body: Bytes,
+) -> Result<Json<Value>, AppError> {
+    if body.is_empty() {
+        let reason = "request body or source parameter is required";
+        return Err(AppError::Parse(reason.into()));
+    }
+    let body = crate::docs::parse_json(&body)?;
+    let who = "elastic/has_privileges";
+    let fields = ["cluster", "index", "application"];
+    let check = format!("failed to parse privileges check [{who}].");
+    let given = body.as_object().into_iter().flatten();
+    if let Some((k, _)) = given.clone().find(|(k, _)| !fields.contains(&k.as_str())) {
+        return Err(AppError::Parse(format!("{check} unexpected field [{k}]")));
+    }
+    if given.count() == 0 {
+        let reason =
+            format!("{check} All privilege fields [cluster,index,applications] are missing");
+        return Err(AppError::Parse(reason));
+    }
+    let entries_of = format!("failed to parse indices privileges for role [{who}].");
+    let index = match body.get("index") {
+        None => &vec![],
+        Some(Value::Array(index)) => index,
+        Some(v) => {
+            let token = es_index::json_token(v);
+            return Err(AppError::Parse(format!(
+                "{entries_of} expected field [index] value to be an array, but found [{token}] instead"
+            )));
+        }
+    };
+    for entry in index {
+        for f in ["field_security", "query"] {
+            if entry.get(f).is_some() {
+                let reason = format!("Field [{f}] is not supported in a has_privileges request");
+                return Err(AppError::Parse(reason));
+            }
+        }
+        if let Some(v) = entry
+            .get("allow_restricted_indices")
+            .filter(|v| !v.is_boolean())
+        {
+            let token = es_index::json_token(v);
+            return Err(AppError::Parse(format!(
+                "{entries_of} expected field [allow_restricted_indices] value to be a boolean, but found [{token}] instead"
+            )));
+        }
+    }
+    let cluster = body.get("cluster").cloned().unwrap_or(json!([]));
+    let role = json!({"cluster": cluster, "indices": index});
+    let role = super::role_descriptor(who, &role).map_err(AppError::Chain)?;
+    let index = role["indices"].as_array().map_or(&[][..], Vec::as_slice);
+    for entry in index {
+        if strs(&entry["names"]).next().is_none() {
+            let reason = format!("{entries_of} [names] cannot be an empty array");
+            return Err(AppError::Parse(reason));
+        }
+        if strs(&entry["privileges"]).next().is_none() {
+            let reason = "indices privileges must define at least one privilege";
+            return Err(AppError::IllegalArgument(reason.into()));
+        }
+    }
+    let application = body["application"]
+        .as_array()
+        .map_or(&[][..], Vec::as_slice);
+    let cluster: Vec<&str> = strs(&role["cluster"]).collect();
+    if cluster.is_empty() && index.is_empty() && application.is_empty() {
+        let reason = "must specify at least one privilege";
+        return Err(AppError::ActionRequestValidation(reason.into()));
+    }
+    if let Some(e) = super::privilege_errors(&role).into_iter().next() {
+        return Err(AppError::IllegalArgument(e));
+    }
+    // ponytail: of the validations of application privileges, only the name's length
+    for a in application {
+        let name = a["application"].as_str().unwrap_or("");
+        if name.chars().count() < 3 {
+            return Err(AppError::ActionRequestValidation(format!(
+                "An application name prefix must be at least 3 characters long (found '{name}')"
+            )));
+        }
+    }
+    let elastic;
+    let (id, roles) = match &authn {
+        Authn::Elastic => {
+            elastic = [super::superuser()];
+            ("", &elastic[..])
+        }
+        Authn::ApiKey { id, roles, .. } => (id.as_str(), &roles[..]),
+    };
+    let key = Key { id, roles };
+    let mut all = true;
+    let mut has = |granted: bool| {
+        all &= granted;
+        granted
+    };
+    let cluster: serde_json::Map<String, Value> = (java_order(&cluster).into_iter())
+        .map(|p| (p.to_owned(), has(key.has_cluster(p)).into()))
+        .collect();
+    let mut indices = BTreeMap::<&str, BTreeMap<&str, bool>>::new();
+    for entry in index {
+        let allow = entry["allow_restricted_indices"] == true;
+        for name in strs(&entry["names"]) {
+            for p in strs(&entry["privileges"]) {
+                let granted = has(key.has_index(name, allow, p));
+                *indices.entry(name).or_default().entry(p).or_insert(true) &= granted;
+            }
+        }
+    }
+    let mut applications = BTreeMap::<&str, BTreeMap<&str, BTreeMap<&str, bool>>>::new();
+    for a in application {
+        let name = a["application"].as_str().unwrap_or("");
+        for resource in strs(&a["resources"]) {
+            for p in strs(&a["privileges"]) {
+                let granted = has(key.has_application(name, resource, p));
+                let resources = applications.entry(name).or_default();
+                *resources
+                    .entry(resource)
+                    .or_default()
+                    .entry(p)
+                    .or_insert(true) &= granted;
+            }
+        }
+    }
+    Ok(Json(json!({
+        "username": "elastic",
+        "has_all_requested": all,
+        "cluster": cluster,
+        "index": indices,
+        "application": applications,
+    })))
 }
 
 /// The roles of one set of role descriptors.

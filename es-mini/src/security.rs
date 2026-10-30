@@ -84,6 +84,10 @@ pub fn routes<S>(security: Arc<Security>) -> Router<S> {
                 .get(get_keys)
                 .delete(invalidate_keys),
         )
+        .route(
+            "/_security/user/_has_privileges",
+            get(authz::has_privileges).post(authz::has_privileges),
+        )
         .route("/_security/api_key/{id}", put(update_key))
         .route("/_security/api_key/_bulk_update", post(bulk_update_keys))
         .route(

@@ -457,3 +457,59 @@ async fn field_and_document_level_security_are_refused() {
         }
     }
 }
+
+/// `_has_privileges` answers as Elasticsearch 9.5.5 did for the keys and requests recorded in
+/// `data/has_privileges.json` (a `null` role is a key without role descriptors, which has
+/// `elastic`'s privileges, and `elastic` itself).
+#[tokio::test]
+async fn has_privileges_as_recorded() {
+    let app = app().await;
+    let data: Value =
+        serde_json::from_str(include_str!("data/has_privileges.json")).expect("valid JSON");
+    for case in data["cases"].as_array().unwrap() {
+        let auths = match &case["roles"] {
+            Value::Null => {
+                let body = json!({"name": "plain"});
+                let plain = ok(&app, ELASTIC, "POST", "/_security/api_key", Some(body)).await;
+                vec![
+                    ELASTIC.to_owned(),
+                    format!("ApiKey {}", plain["encoded"].as_str().unwrap()),
+                ]
+            }
+            roles => vec![key(&app, ELASTIC, roles.clone()).await.0],
+        };
+        for auth in auths {
+            for method in ["GET", "POST"] {
+                let uri = "/_security/user/_has_privileges";
+                let request = Some(case["request"].clone());
+                let (status, out) = call(&app, &auth, method, uri, request).await;
+                assert_eq!(status, 200, "{case}: {out}");
+                // Compared as text, for the order of the keys.
+                assert_eq!(out.to_string(), case["response"].to_string(), "{case}");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn has_privileges_errors_as_recorded() {
+    let app = app().await;
+    let (k, _) = key(&app, ELASTIC, read_a()).await;
+    let data: Value =
+        serde_json::from_str(include_str!("data/has_privileges.json")).expect("valid JSON");
+    for case in data["errors"].as_array().unwrap() {
+        let request = case["request"].as_str().unwrap();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/_security/user/_has_privileges")
+            .header("authorization", &k)
+            .header("content-type", "application/json")
+            .body(Body::from(request.to_owned()))
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status().as_u16(), 400, "{request}");
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let out: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(out, case["response"], "{request}");
+    }
+}
