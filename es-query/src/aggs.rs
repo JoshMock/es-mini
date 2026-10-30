@@ -869,13 +869,7 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
     for (k, v) in body {
         match k.as_str() {
             "meta" if !v.is_object() => {
-                let token = match v {
-                    Value::Null => "VALUE_NULL",
-                    Value::Bool(_) => "VALUE_BOOLEAN",
-                    Value::Number(_) => "VALUE_NUMBER",
-                    Value::String(_) => "VALUE_STRING",
-                    _ => "START_ARRAY",
-                };
+                let token = es_index::json_token(v);
                 return Err(format!(
                     "Expected [START_OBJECT] under [meta], but got a [{token}] in [{name}]"
                 )

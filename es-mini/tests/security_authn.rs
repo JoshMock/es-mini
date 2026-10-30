@@ -240,13 +240,13 @@ async fn api_keys_authenticate() {
     });
     assert_eq!(body.to_string(), expected.to_string());
 
-    // PUT creates too, and a key can create keys.
+    // PUT creates too, and a key can create keys (with no privileges).
     let (status, _, other) = call(
         &app,
         "PUT",
         "/_security/api_key",
         Some(&auth),
-        Some(json!({"name": "k2"})),
+        Some(json!({"name": "k2", "role_descriptors": {"none": {}}})),
     )
     .await;
     assert_eq!(status, 200, "{other}");
@@ -283,12 +283,6 @@ async fn api_key_requests_are_validated() {
             .extend(error.as_object().unwrap().clone());
         assert_eq!(got, expected);
     }
-    // ponytail: the other create fields (expiration, metadata, role_descriptors) arrive with the
-    // security-api-keys goal; until then they are refused, not ignored.
-    let body = Some(json!({"name": "k", "role_descriptors": {}}));
-    let (status, _, got) = call(&app, "POST", "/_security/api_key", Some(&elastic), body).await;
-    assert_eq!(status, 400, "{got}");
-    assert_eq!(got["error"]["type"], "x_content_parse_exception");
 }
 
 #[tokio::test]

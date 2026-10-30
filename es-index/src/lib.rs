@@ -1446,6 +1446,18 @@ pub(crate) fn date_instant_in(
     })
 }
 
+/// The Jackson token Elasticsearch's parse errors name for a JSON value.
+pub fn json_token(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "VALUE_NULL",
+        Value::Bool(_) => "VALUE_BOOLEAN",
+        Value::Number(_) => "VALUE_NUMBER",
+        Value::String(_) => "VALUE_STRING",
+        Value::Array(_) => "START_ARRAY",
+        Value::Object(_) => "START_OBJECT",
+    }
+}
+
 /// A JSON number, or a string holding one, as `f64`.
 pub fn json_num(v: &Value) -> Option<f64> {
     v.as_f64().or_else(|| v.as_str()?.parse().ok())

@@ -59,6 +59,9 @@ pub enum AppError {
     AllShardsFailed(Vec<(String, usize, es_query::QueryError)>),
     /// Settings (given as JSON) with a list holding more than strings, numbers and booleans.
     SettingsLists(String),
+    /// A 400 with its `caused_by` chain, outermost first, as (type, reason): the innermost is the
+    /// root cause, as with Elasticsearch's nested x_content parse failures.
+    Chain(Vec<(&'static str, String)>),
     /// Any other error: its status, type and reason.
     Other(StatusCode, &'static str, String),
 }
@@ -99,6 +102,19 @@ impl AppError {
                         },
                     }),
                 );
+            }
+            Self::Chain(chain) => {
+                let mut error = Value::Null;
+                for (kind, reason) in chain.iter().rev() {
+                    let mut e = json!({"type": kind, "reason": reason});
+                    if !error.is_null() {
+                        e["caused_by"] = error;
+                    }
+                    error = e;
+                }
+                let root = chain.last().map(|(t, r)| json!({"type": t, "reason": r}));
+                error["root_cause"] = json!([root]);
+                return (StatusCode::BAD_REQUEST, error);
             }
             Self::Caused(error, cause) => {
                 let (status, mut error) = error.parts();
