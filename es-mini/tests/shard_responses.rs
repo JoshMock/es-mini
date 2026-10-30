@@ -144,3 +144,13 @@ async fn stats_list_every_shard_at_level_shards() {
     let (_, r) = call(&app, "GET", "/a/_stats?level=cluster", Value::Null).await;
     assert!(r.get("indices").is_none(), "{r}");
 }
+
+#[tokio::test]
+async fn level_must_be_known() {
+    let app = setup("keyword", "keyword").await;
+    let (s, r) = call(&app, "GET", "/a/_stats?level=bogus", Value::Null).await;
+    assert_eq!(s, 400);
+    let reason =
+        "level parameter must be one of [cluster] or [indices] or [shards] but was [bogus]";
+    assert_eq!(r["error"]["reason"], reason);
+}

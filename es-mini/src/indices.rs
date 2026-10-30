@@ -701,6 +701,12 @@ pub async fn stats(
             "groups",
         ],
     )?;
+    let level = params.get("level").map_or("indices", String::as_str);
+    if !["cluster", "indices", "shards"].contains(&level) {
+        return Err(AppError::IllegalArgument(format!(
+            "level parameter must be one of [cluster] or [indices] or [shards] but was [{level}]"
+        )));
+    }
     let path = path.map(|Path(p)| p).unwrap_or_default();
     let metric = path.get("metric").map_or("_all", String::as_str);
     let wanted = |m: &str| metric == "_all" || metric.split(',').any(|x| x == m);
@@ -879,7 +885,7 @@ pub async fn stats(
         );
         let s = section(docs, cache);
         let mut stats = json!({"primaries": s, "total": s});
-        if params.get("level").map(String::as_str) == Some("shards") {
+        if level == "shards" {
             let routing = json!({"state": "STARTED", "primary": true, "node": crate::nodes::NODE_ID, "relocating_node": null});
             // ponytail: the request cache is counted per index, so shards report it empty; no
             // commit, seq_no, retention_leases or shard_path sections
@@ -906,7 +912,7 @@ pub async fn stats(
         "_shards": {"total": shards, "successful": shards, "failed": 0},
         "_all": {"primaries": all, "total": all},
     });
-    if params.get("level").map(String::as_str) != Some("cluster") {
+    if level != "cluster" {
         out["indices"] = Value::Object(per_index);
     }
     Ok(Json(out))
