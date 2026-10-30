@@ -107,3 +107,17 @@ async fn health_counts_every_shard() {
     let (_, r) = call(&app, "GET", "/_cluster/health/a", Value::Null).await;
     assert_eq!(r["active_primary_shards"], 3);
 }
+
+#[tokio::test]
+async fn broadcasts_count_every_shard() {
+    let app = setup("keyword", "keyword").await;
+    let all = json!({"total": 4, "successful": 4, "failed": 0});
+    for (method, uri) in [
+        ("POST", "/a,b/_refresh"),
+        ("POST", "/a,b/_flush"),
+        ("GET", "/a,b/_stats"),
+    ] {
+        let (_, r) = call(&app, method, uri, Value::Null).await;
+        assert_eq!(r["_shards"], all, "{uri}");
+    }
+}
