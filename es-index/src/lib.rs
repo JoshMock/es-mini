@@ -285,8 +285,8 @@ impl Default for Index {
 }
 
 // ponytail: reads not routed to a shard read shard 0, which searches of a multi-shard index
-// avoid by searching each shard's snapshot until they search every shard in place
-// (goal shard-search-merge)
+// (and ES|QL alias filters) avoid by searching each shard's snapshot; search shards in place
+// if those copies cost too much
 impl std::ops::Deref for Index {
     type Target = Shard;
     fn deref(&self) -> &Shard {
@@ -1148,7 +1148,7 @@ impl Index {
     /// Each of its `index.number_of_shards` shards as a one-shard [`Index::snapshot`], so that a
     /// search reads each one.
     // ponytail: copies each shard's document ids on every search of a multi-shard index, and
-    // their postings are rebuilt; searching the shards in place is goal shard-search-merge
+    // their postings are rebuilt; search the shards in place if that gets slow
     pub fn shard_snapshots(&self) -> Vec<Index> {
         let empty = Shard::default();
         let shards = self.number_of_shards().max(self.shards.len());

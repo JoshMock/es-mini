@@ -261,8 +261,6 @@ impl AppError {
     }
 }
 
-/// A failed shard of `index` as a search response lists it: the status, root causes, and the
-/// failure entry.
 /// The failures of `shards` as [`shard_failure`] renders them, keeping the first of each index
 /// and reason only (Elasticsearch's ExceptionsHelper.groupBy), with the root causes of those
 /// kept and the first one's status.
@@ -282,6 +280,8 @@ pub(crate) fn shard_failures<'a>(
     (status, root_cause, failures)
 }
 
+/// A failed shard of `index` as a search response lists it: the status, root causes, and the
+/// failure entry.
 pub(crate) fn shard_failure(
     index: &str,
     shard: usize,
