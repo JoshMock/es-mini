@@ -461,7 +461,7 @@ impl Index {
         self.postings
             .get_mut()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .add(id, &source);
+            .add(id, seq_no, &source);
         let doc = Arc::new(Document {
             source,
             version,
@@ -2227,15 +2227,15 @@ mod tests {
             let f = ix.term_freqs("t", "t", true, "fox").unwrap();
             f.memory
                 .get(id)
-                .or_else(|| f.disk.get(&ix.disk_pos(id)?))
-                .copied()
+                .map(|p| p.at)
+                .or_else(|| f.disk.get(&ix.disk_pos(id)?).copied())
         };
         let a = |ix: &Index, id: &str| {
             let f = ix.term_freqs("k", "k", false, "a").unwrap();
             f.memory
                 .get(id)
-                .or_else(|| f.disk.get(&ix.disk_pos(id)?))
-                .copied()
+                .map(|p| p.at)
+                .or_else(|| f.disk.get(&ix.disk_pos(id)?).copied())
         };
         let all = |ix: &Index| {
             let ids = ["1", "2", "3", "4"];

@@ -103,10 +103,17 @@ pub struct TermFreqs {
     pub memory: Arc<TermDocs>,
 }
 
-/// The live in-memory documents holding a term, by id, with its frequency there and the
-/// field length as its norm stands for it; (1, 1) for a term that is not analyzed (see
-/// [`Index::term_freqs`](crate::Index::term_freqs)).
-pub type TermDocs = HashMap<String, (u32, u32)>;
+/// The live in-memory documents holding a term, by id.
+pub type TermDocs = HashMap<String, Posting>;
+
+/// A live in-memory document in a term's postings.
+#[derive(Debug, Clone, Copy)]
+pub struct Posting {
+    /// The term's frequency and the field length as its norm stands for it; (1, 1) for a term
+    /// that is not analyzed (see [`Index::term_freqs`](crate::Index::term_freqs)).
+    pub at: (u32, u32),
+    pub seq_no: u64,
+}
 
 #[derive(Debug, Default)]
 struct Field {
@@ -122,7 +129,7 @@ struct Field {
 
 impl Field {
     /// Links a document, and adds it to the statistics if `counted`.
-    fn add(&mut self, id: &str, analyzed: bool, terms: Vec<String>, counted: bool) {
+    fn add(&mut self, id: &str, seq_no: u64, analyzed: bool, terms: Vec<String>, counted: bool) {
         if terms.is_empty() {
             return;
         }
@@ -136,7 +143,7 @@ impl Field {
         for (t, freq) in &freqs {
             let at = if analyzed { (*freq, len) } else { (1, 1) };
             let docs = Arc::make_mut(self.docs.entry(t.clone()).or_default());
-            docs.insert(id.to_owned(), at);
+            docs.insert(id.to_owned(), Posting { at, seq_no });
             *self.doc_freq.entry(t.clone()).or_default() += counted;
         }
         self.doc_count += counted;
@@ -271,23 +278,23 @@ impl Postings {
                 for (id, d) in live {
                     let counted = d.seq_no >= persisted;
                     let terms = field_terms(&d.source, path, analyzed);
-                    f.add(id, analyzed, terms, counted);
+                    f.add(id, d.seq_no, analyzed, terms, counted);
                 }
                 for (n, d) in superseded.iter().enumerate() {
                     // Counted in the statistics, then unlinked like any superseded document.
                     let id = format!("\0superseded{n}");
                     let terms = field_terms(&d.source, path, analyzed);
-                    f.add(&id, analyzed, terms, true);
+                    f.add(&id, d.seq_no, analyzed, terms, true);
                     f.remove(&id);
                 }
                 f
             })
     }
 
-    pub(crate) fn add(&mut self, id: &str, source: &Value) {
+    pub(crate) fn add(&mut self, id: &str, seq_no: u64, source: &Value) {
         for ((path, analyzed), f) in &mut self.0 {
             let terms = field_terms(source, path, *analyzed);
-            f.add(id, *analyzed, terms, true);
+            f.add(id, seq_no, *analyzed, terms, true);
         }
         for ((path, key), n) in &mut self.1 {
             n.add(id, keys(key, source, path));
@@ -369,19 +376,17 @@ impl crate::Index {
         n: usize,
         visible: u64,
     ) -> (usize, Vec<(&str, &crate::Document)>) {
-        self.postings_for(path, false, |f| {
-            let ids = f.docs.get(term).into_iter().flat_map(|d| d.keys());
-            let mut docs: Vec<_> = (ids.filter_map(|id| self.docs.get_key_value(id)))
-                .map(|(id, d)| (id.as_str(), &**d))
-                .filter(|(_, d)| d.seq_no < visible)
-                .collect();
-            let count = docs.len();
-            if n < count {
-                docs.select_nth_unstable_by_key(n, |(_, d)| d.seq_no);
-                docs.truncate(n);
-            }
-            (count, docs)
-        })
+        let mut seq_nos: Vec<u64> = self.postings_for(path, false, |f| {
+            let docs = f.docs.get(term).into_iter().flat_map(|d| d.values());
+            docs.map(|p| p.seq_no).filter(|s| *s < visible).collect()
+        });
+        let count = seq_nos.len();
+        if n < count {
+            seq_nos.select_nth_unstable(n);
+            seq_nos.truncate(n);
+        }
+        let docs = seq_nos.iter().filter_map(|s| self.by_seq_no.get(s));
+        (count, docs.map(|(id, d)| (id.as_str(), &**d)).collect())
     }
 
     /// The frequency of `term` in each live document holding it in `field` (at source `path`),

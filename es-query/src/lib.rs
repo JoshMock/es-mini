@@ -1006,8 +1006,8 @@ impl<'a> Searcher<'a> {
     /// (`Some(None)` if it does not hold the term); `None` without postings (see `gather`).
     fn posting(&self, field: &str, term: &str, id: &str) -> Option<Option<(u32, u32)>> {
         let f = self.freqs.get(field)?.get(term)?;
-        let on_disk = || f.disk.get(&self.index.disk_pos(id)?);
-        Some(f.memory.get(id).or_else(on_disk).copied())
+        let on_disk = || f.disk.get(&self.index.disk_pos(id)?).copied();
+        Some(f.memory.get(id).map(|p| p.at).or_else(on_disk))
     }
 
     /// A document's score for `wanted` terms of `field` from their postings (`Some(None)` if
