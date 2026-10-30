@@ -12,6 +12,7 @@ pub mod postings;
 pub mod routing;
 pub mod tz;
 
+pub use es_codec;
 pub use mapping::{FieldMapping, Mappings};
 
 use serde::Serialize;

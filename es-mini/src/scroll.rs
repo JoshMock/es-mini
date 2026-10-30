@@ -166,34 +166,8 @@ fn base64_error(id: &str) -> Option<String> {
         .chars()
         .map(|c| u8::try_from(c).unwrap_or(b'?'))
         .collect();
-    if src.len() == 1 {
-        return Some("Input byte[] should at least have 2 bytes for base64 bytes".into());
-    }
-    let (mut shift, mut at) = (18, 0);
-    while at < src.len() {
-        let b = src[at];
-        at += 1;
-        if b == b'=' {
-            if shift == 18 || shift == 6 && src.get(at).is_none_or(|b| *b != b'=') {
-                return Some("Input byte array has wrong 4-byte ending unit".into());
-            }
-            at += usize::from(shift == 6);
-            break;
-        }
-        if !(b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
-            // Java's Integer.toString(byte, 16): signed
-            let (sign, b) = (
-                if b < 0x80 { "" } else { "-" },
-                i32::from(b as i8).unsigned_abs(),
-            );
-            return Some(format!("Illegal base64 character {sign}{b:x}"));
-        }
-        shift = if shift == 0 { 18 } else { shift - 6 };
-    }
-    if shift == 12 {
-        return Some("Last unit does not have enough valid bits".into());
-    }
-    (at < src.len()).then(|| format!("Input byte array has incorrect ending byte at {at}"))
+    use es_index::es_codec::base64;
+    base64::decode(&src, base64::URL).err()
 }
 
 /// `POST /{index}/_pit`: snapshots the indices `index` resolves to.
