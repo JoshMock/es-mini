@@ -147,21 +147,42 @@ fn write<T>(
     Ok(apply(index, target, f))
 }
 
-/// [`write`] of document `id` with `routing`, refused without one if the index's mapping
-/// requires it.
+/// [`write`] of document `id` sent to `name` with `routing`, which `f` gets as [`routing`]
+/// resolves it.
 fn write_doc<T>(
     state: &AppState,
     name: &str,
     (id, routing): (&str, Option<&str>),
-    f: impl FnOnce(&mut Index) -> T,
+    f: impl FnOnce(&mut Index, Option<&str>) -> T,
 ) -> Result<(T, u64, String), AppError> {
     let (r, total, index) = write(state, name, |i| {
-        (routing.is_some() || !i.mappings.routing_required()).then(|| f(i))
+        let Some(routing) = self::routing(i, name, routing)? else {
+            return Ok::<_, AppError>(None);
+        };
+        let routing = routing.map(str::to_owned);
+        Ok(Some(f(i, routing.as_deref())))
     })?;
-    match r {
+    match r? {
         Some(r) => Ok((r, total, index)),
         None => Err(routing_missing(index, id)),
     }
+}
+
+/// The routing of a document request with `routing` sent to `name` that reached index `i`:
+/// that of the alias `name` if it has one. `Ok(None)` if the request lacks the routing `i`'s
+/// mapping requires.
+fn routing<'a>(
+    i: &'a Index,
+    name: &str,
+    routing: Option<&'a str>,
+) -> Result<Option<Option<&'a str>>, AppError> {
+    let routing = match i.aliases.get(name) {
+        Some(alias) => alias
+            .index_routing(name, routing)
+            .map_err(AppError::IllegalArgument)?,
+        None => routing,
+    };
+    Ok((routing.is_some() || !i.mappings.routing_required()).then_some(routing))
 }
 
 fn routing_missing(index: String, id: &str) -> AppError {
@@ -231,7 +252,7 @@ pub fn put_or_create(
         )));
     }
     let source = check_source(source)?;
-    let (w, total, index) = write_doc(state, index, (id, routing), |i| {
+    let (w, total, index) = write_doc(state, index, (id, routing), |i, routing| {
         let limit = i
             .settings
             .get("index.mapping.array_objects.limit")
@@ -472,15 +493,15 @@ pub async fn get(
 ) -> Reply {
     params::check(&uri, &params, &GET_PARAMS)?;
     let shared = state.read();
-    let index = single_index(&*shared, &index)?;
+    let name = index;
+    let index = single_index(&*shared, &name)?;
     let i = shared.read(&index).expect("resolved");
     // A non-realtime get sees what search sees, unless it asks for a refresh first.
     let realtime = params.get("realtime").is_none_or(|v| v != "false")
         || params.get("refresh").is_some_and(|v| v != "false");
-    let routing = params.get("routing").map(String::as_str);
-    if routing.is_none() && i.mappings.routing_required() {
+    let Some(routing) = routing(&i, &name, params.get("routing").map(String::as_str))? else {
         return Err(routing_missing(index, &id));
-    }
+    };
     let shard = i.shard_of(&id, routing);
     let found = shard
         .and_then(|s| (s.get(&id)).filter(|d| realtime || s.searchable(&i.settings, d.seq_no)));
@@ -593,7 +614,7 @@ pub async fn delete(
 }
 
 pub fn delete_doc(state: &AppState, index: &str, id: &str, routing: Option<&str>) -> Reply {
-    let (w, total, index) = write_doc(state, index, (id, routing), |i| {
+    let (w, total, index) = write_doc(state, index, (id, routing), |i, routing| {
         i.delete_routed(id, routing)
     })?;
     Ok(reply(&index, id, w, total))
@@ -662,7 +683,7 @@ pub fn update_doc(
         false => body.get("upsert").cloned(),
     };
     let detect_noop = body["detect_noop"].as_bool() != Some(false);
-    let (w, total, index) = write_doc(state, index, (id, routing), |i| {
+    let (w, total, index) = write_doc(state, index, (id, routing), |i, routing| {
         i.update(id, routing, &partial, upsert, detect_noop)
             .map_err(AppError::DocumentParsing)
     })?;

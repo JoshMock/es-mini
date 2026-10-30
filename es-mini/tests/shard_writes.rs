@@ -377,3 +377,47 @@ async fn required_routing_rejects_requests_without_it() {
     let r = call(&app, "PUT", "/i/_doc/1?routing=x", "{}").await;
     assert_eq!(r["result"], "created", "{r}");
 }
+
+#[tokio::test]
+async fn an_aliass_index_routing_routes_its_writes_and_gets() {
+    let app = es_mini::app();
+    call(
+        &app,
+        "PUT",
+        "/i",
+        r#"{"settings": {"number_of_shards": 3}}"#,
+    )
+    .await;
+    call(&app, "PUT", "/i/_alias/a", r#"{"index_routing": "r2"}"#).await;
+    let r = call(&app, "PUT", "/a/_doc/x", r#"{"v": 1}"#).await;
+    assert_eq!(r["result"], "created", "{r}");
+    let r = call(&app, "GET", "/i/_doc/x?routing=r2", "").await;
+    assert_eq!(r["_routing"], "r2", "{r}");
+    let r = call(&app, "GET", "/a/_doc/x", "").await;
+    assert_eq!(r["found"], true, "{r}");
+    let r = call(
+        &app,
+        "POST",
+        "/a/_bulk",
+        "{\"update\": {\"_id\": \"x\"}}\n{\"doc\": {\"v\": 2}}\n",
+    )
+    .await;
+    assert_eq!(r["items"][0]["update"]["result"], "updated", "{r}");
+
+    let r = call(&app, "PUT", "/a/_doc/y?routing=other", "{}").await;
+    assert_eq!(
+        r["error"]["reason"],
+        "Alias [a] has index routing associated with it [r2], and was provided with routing value [other], rejecting operation",
+        "{r}"
+    );
+    assert_eq!(r["status"], 400, "{r}");
+    call(&app, "PUT", "/i/_alias/b", r#"{"index_routing": "r1,r2"}"#).await;
+    let r = call(&app, "DELETE", "/b/_doc/x", "").await;
+    assert_eq!(
+        r["error"]["reason"],
+        "index/alias [b] provided with routing value [r1,r2] that resolved to several routing values, rejecting operation",
+        "{r}"
+    );
+    let r = call(&app, "DELETE", "/a/_doc/x", "").await;
+    assert_eq!(r["result"], "deleted", "{r}");
+}

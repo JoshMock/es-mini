@@ -130,11 +130,13 @@ fn execute(state: &AppState, params: &HashMap<String, String>, a: Action) -> Val
             .routing
             .as_deref()
             .or(params.get("routing").map(String::as_str));
+        // the name as given, so an alias's index_routing applies
+        let index = &a.index;
         let mut reply = match a.op.as_str() {
-            "index" => put_or_create(state, &target, (&id, routing), body, &a.raw, false, ts),
-            "create" => put_or_create(state, &target, (&id, routing), body, &a.raw, true, ts),
-            "update" => update_doc(state, &target, &id, routing, &body),
-            _ => delete_doc(state, &target, &id, routing),
+            "index" => put_or_create(state, index, (&id, routing), body, &a.raw, false, ts),
+            "create" => put_or_create(state, index, (&id, routing), body, &a.raw, true, ts),
+            "update" => update_doc(state, index, &id, routing, &body),
+            _ => delete_doc(state, index, &id, routing),
         }?;
         force_refresh(state, params, &target, &mut reply)?;
         Ok(reply)

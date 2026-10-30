@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
-/// Alias metadata as ES returns it. Routing is stored and echoed back, but has no effect with
-/// one shard per index.
+/// Alias metadata as ES returns it. `index_routing` routes the document requests sent through
+/// the alias ([`Alias::index_routing`]).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Alias {
@@ -38,6 +38,30 @@ impl Alias {
             v["search_routing"] = r;
         }
         Self::deserialize(&v).map_err(|e| e.to_string())
+    }
+
+    /// The routing of a document request with `routing` sent through this alias, `name`: its
+    /// `index_routing` if it has one, which `routing` must match, as ES's
+    /// `ProjectMetadata.resolveRouting`. `Err` is the reason of an illegal_argument_exception.
+    pub fn index_routing<'a>(
+        &'a self,
+        name: &str,
+        routing: Option<&'a str>,
+    ) -> Result<Option<&'a str>, String> {
+        let Some(own) = self.index_routing.as_deref() else {
+            return Ok(routing);
+        };
+        if own.contains(',') {
+            return Err(format!(
+                "index/alias [{name}] provided with routing value [{own}] that resolved to several routing values, rejecting operation"
+            ));
+        }
+        match routing {
+            Some(r) if r != own => Err(format!(
+                "Alias [{name}] has index routing associated with it [{own}], and was provided with routing value [{r}], rejecting operation"
+            )),
+            _ => Ok(Some(own)),
+        }
     }
 }
 
