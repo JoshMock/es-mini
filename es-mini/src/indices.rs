@@ -878,13 +878,36 @@ pub async fn stats(
             cache_total.3 + cache.3,
         );
         let s = section(docs, cache);
-        per_index.insert(n.clone(), json!({"primaries": s, "total": s}));
+        let mut stats = json!({"primaries": s, "total": s});
+        if params.get("level").map(String::as_str) == Some("shards") {
+            let routing = json!({"state": "STARTED", "primary": true, "node": crate::nodes::NODE_ID, "relocating_node": null});
+            // ponytail: the request cache is counted per index, so shards report it empty; no
+            // commit, seq_no, retention_leases or shard_path sections
+            let shards: Map<String, Value> = (0..indices[n].number_of_shards())
+                .map(|i| {
+                    let docs = indices[n].shards().get(i).map_or(0, |s| s.docs().count());
+                    let mut copy = Map::from_iter([("routing".to_string(), routing.clone())]);
+                    copy.extend(
+                        section(docs, (0, 0, 0, 0))
+                            .as_object()
+                            .cloned()
+                            .unwrap_or_default(),
+                    );
+                    (i.to_string(), json!([copy]))
+                })
+                .collect();
+            stats["shards"] = Value::Object(shards);
+        }
+        per_index.insert(n.clone(), stats);
     }
     let all = section(total, cache_total);
     let shards: usize = names.iter().map(|n| indices[n].number_of_shards()).sum();
-    Ok(Json(json!({
+    let mut out = json!({
         "_shards": {"total": shards, "successful": shards, "failed": 0},
         "_all": {"primaries": all, "total": all},
-        "indices": per_index,
-    })))
+    });
+    if params.get("level").map(String::as_str) != Some("cluster") {
+        out["indices"] = Value::Object(per_index);
+    }
+    Ok(Json(out))
 }

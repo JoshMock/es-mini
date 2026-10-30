@@ -121,3 +121,26 @@ async fn broadcasts_count_every_shard() {
         assert_eq!(r["_shards"], all, "{uri}");
     }
 }
+
+#[tokio::test]
+async fn stats_list_every_shard_at_level_shards() {
+    let app = setup("keyword", "keyword").await;
+    let (_, r) = call(&app, "GET", "/a/_stats/docs?level=shards", Value::Null).await;
+    let shards = r["indices"]["a"]["shards"].as_object().unwrap();
+    assert_eq!(shards.keys().collect::<Vec<_>>(), ["0", "1", "2"]);
+    let mut docs = 0;
+    for copies in shards.values() {
+        let [copy] = copies.as_array().unwrap().as_slice() else {
+            panic!("{copies}")
+        };
+        let routing =
+            json!({"state": "STARTED", "primary": true, "node": NODE, "relocating_node": null});
+        assert_eq!(copy["routing"], routing);
+        docs += copy["docs"]["count"].as_u64().unwrap();
+    }
+    assert_eq!(docs, 6);
+    let (_, r) = call(&app, "GET", "/a/_stats", Value::Null).await;
+    assert!(r["indices"]["a"].get("shards").is_none(), "{r}");
+    let (_, r) = call(&app, "GET", "/a/_stats?level=cluster", Value::Null).await;
+    assert!(r.get("indices").is_none(), "{r}");
+}
