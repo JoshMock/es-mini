@@ -26,10 +26,16 @@ grep -v '^#' /bench/requests.txt | grep . | grep -E "^(${ONLY:-.*})[^|]*\|" | wh
     total=$(printf '%s' "$out" | grep -oE '"(value|count)":[0-9]+' | head -1 || true)
     printf '  %-8s HTTP %s %s\n' "$s" "${out##* HTTP }" "${total:-}"
   done
-  cmds=(); for s in "${SERVERS[@]}"; do cmds+=(-n "$s" "curl ${args[*]} http://$s:9200$path"); done
-  hyperfine -N --warmup "${WARMUP:-5}" --runs "${RUNS:-50}" --style basic \
-    --export-markdown "/results/$name.md" --export-json "/results/$name.json" "${cmds[@]}"
+  # PASSES > 1 alternates which server goes first (hyperfine times one, then the other), so
+  # drift over the run does not favor either; later passes write $name.pN.json.
+  for pass in $(seq "${PASSES:-1}"); do
+    order=("${SERVERS[@]}"); [ $((pass % 2)) = 1 ] || order=("${SERVERS[1]}" "${SERVERS[0]}")
+    out=$name; [ "$pass" = 1 ] || out=$name.p$pass
+    cmds=(); for s in "${order[@]}"; do cmds+=(-n "$s" "curl ${args[*]} http://$s:9200$path"); done
+    hyperfine -N --warmup "${WARMUP:-5}" --runs "${RUNS:-50}" --style basic \
+      --export-markdown "/results/$out.md" --export-json "/results/$out.json" "${cmds[@]}"
+  done
 done
 for f in /results/*.md; do
-  [ "$f" = /results/summary.md ] || printf '### %s\n\n%s\n\n' "$(basename "$f" .md)" "$(cat "$f")"
+  [[ "$f" = /results/summary.md || "$f" = *.p[0-9]*.md ]] || printf '### %s\n\n%s\n\n' "$(basename "$f" .md)" "$(cat "$f")"
 done > /results/summary.md
