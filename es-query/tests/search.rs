@@ -1643,3 +1643,16 @@ fn doc_sort_values_are_doc_ids() {
     let want = [("4", 3), ("3", 2), ("2", 1), ("1", 0)];
     assert_eq!(hits, want.map(|(id, d)| (id, vec![json!(d), json!(d)])));
 }
+
+#[test]
+fn max_score_only_for_a_sort_by_score_alone() {
+    let idx = index();
+    let max = |sort| {
+        let req =
+            SearchRequest::parse(&json!({"query": {"match": {"title": "dog"}}, "sort": sort}));
+        search(&idx, &req.unwrap()).max_score.is_some()
+    };
+    assert!(max(json!(["_score"])));
+    assert!(!max(json!(["_score", "n"])));
+    assert!(!max(json!([{"_score": "asc"}])));
+}

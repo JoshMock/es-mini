@@ -1631,8 +1631,14 @@ pub fn search_many<'a>(
             ..failures.swap_remove(0).1
         });
     }
-    // Elasticsearch collects no top docs for size 0, so it reports no max_score.
-    let max_score = (by_score && req.size > 0)
+    // Elasticsearch collects no top docs for size 0, so it reports no max_score; nor does it
+    // track one for a sort other than by score alone (SortBuilder.buildSort, getMaxScore).
+    let by_score_alone = match &req.sort[..] {
+        [] => true,
+        [f] => f.field == "_score" && f.desc,
+        _ => false,
+    };
+    let max_score = (by_score_alone && req.size > 0)
         .then(|| hits.iter().map(|h| h.score as f32).reduce(f32::max))
         .flatten();
     Ok(SearchResult {
