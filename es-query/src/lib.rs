@@ -1285,16 +1285,7 @@ impl<'a> Searcher<'a> {
                             instant = |f, l, v| es_index::disk::date_nanos(f, l, v).flatten();
                             (format, locale)
                         }
-                        Some(FieldMapping::Boolean) => {
-                            let longs: Vec<Value> = (vals.into_iter())
-                                .filter_map(|v| match v.as_str() {
-                                    Some(s) => s.parse::<bool>().ok(),
-                                    None => v.as_bool(),
-                                })
-                                .map(|b| Value::from(i64::from(b)))
-                                .collect();
-                            return long_sort_value(f, longs.iter().collect());
-                        }
+                        Some(FieldMapping::Boolean) => return bool_sort_value(f, vals),
                         _ => return sort_value(f, vals),
                     };
                     let instants: Vec<Value> = (vals.into_iter())
@@ -1372,22 +1363,26 @@ impl<'a> Searcher<'a> {
             Some(0.0)
         };
         let mut columns = (sort.iter())
-            .map(|f| match self.index.mappings.properties.get(&f.field) {
-                _ if f.field == "_score" => Some(None),
-                // types whose doc values order like their sources
-                Some(
-                    M::Long
-                    | M::Integer
-                    | M::Short
-                    | M::Byte
-                    | M::Double
-                    | M::Boolean
-                    | M::Keyword {
-                        ignore_above: None,
-                        split_queries_on_whitespace: false,
-                    },
-                ) => Some(Some(self.index.disk_values(&f.field))),
-                _ => None,
+            .map(|f| {
+                let value: fn(&SortField, Vec<&Value>) -> Value =
+                    match self.index.mappings.properties.get(&f.field) {
+                        _ if f.field == "_score" => return Some(None),
+                        // types whose doc values order like their sources
+                        Some(
+                            M::Long
+                            | M::Integer
+                            | M::Short
+                            | M::Byte
+                            | M::Double
+                            | M::Keyword {
+                                ignore_above: None,
+                                split_queries_on_whitespace: false,
+                            },
+                        ) => sort_value,
+                        Some(M::Boolean) => bool_sort_value,
+                        _ => return None,
+                    };
+                Some(Some((value, self.index.disk_values(&f.field))))
             })
             .collect::<Option<Vec<_>>>()?;
         let live: HashMap<_, _> = self.index.disk_live().collect();
@@ -1405,7 +1400,7 @@ impl<'a> Searcher<'a> {
             let sort = (sort.iter().zip(&mut columns))
                 .map(|(f, column)| match column {
                     None => Some(Value::from(score as f32)),
-                    Some(read) => Some(sort_value(f, read(id)?.iter().collect())),
+                    Some((value, read)) => Some(value(f, read(id)?.iter().collect())),
                 })
                 .collect::<Option<_>>()?;
             out.push(Found {
@@ -1436,6 +1431,19 @@ fn sort_value(f: &SortField, mut values: Vec<&Value>) -> Value {
         },
         |v| (*v).clone(),
     )
+}
+
+/// [`long_sort_value`] of a boolean field's values (booleans, or strings holding them), as 0
+/// and 1.
+fn bool_sort_value(f: &SortField, values: Vec<&Value>) -> Value {
+    let longs: Vec<Value> = (values.into_iter())
+        .filter_map(|v| match v.as_str() {
+            Some(s) => s.parse::<bool>().ok(),
+            None => v.as_bool(),
+        })
+        .map(|b| Value::from(i64::from(b)))
+        .collect();
+    long_sort_value(f, longs.iter().collect())
 }
 
 /// [`sort_value`] of a field Elasticsearch sorts as longs (dates, booleans): a missing value

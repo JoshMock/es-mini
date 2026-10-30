@@ -601,6 +601,31 @@ fn date_and_boolean_sort_values_are_longs() {
 }
 
 #[test]
+fn boolean_sort_values_of_an_opened_index_are_longs() {
+    let mut i = Index::default();
+    (i.mappings.properties).insert("b".into(), FieldMapping::Boolean);
+    i.put("a", json!({"b": true}));
+    i.put("b", json!({"b": false}));
+    i.put("c", json!({}));
+    let dir = std::env::temp_dir().join(format!("esq-bool-sort-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    es_index::disk::save(&dir, &es_index::Indices::from([("idx".into(), i)])).unwrap();
+    let mut opened = es_index::disk::open(&dir).unwrap().remove("idx").unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    // in memory, beside the documents on disk
+    opened.put("d", json!({"b": false}));
+    let req = SearchRequest::parse(&json!({"sort": ["b"]})).unwrap();
+    let sorts: Vec<_> = (search(&opened, &req).hits.iter())
+        .map(|h| (h.id.to_string(), h.sort.clone()))
+        .collect();
+    let expected = [("b", 0), ("d", 0), ("a", 1), ("c", i64::MAX)];
+    let expected: Vec<_> = (expected.iter())
+        .map(|(id, v)| (id.to_string(), vec![json!(v)]))
+        .collect();
+    assert_eq!(sorts, expected);
+}
+
+#[test]
 fn date_range_compares_instants_not_strings() {
     let mut idx = Index::default();
     idx.mappings.properties.insert(
