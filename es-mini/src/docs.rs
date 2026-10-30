@@ -491,32 +491,36 @@ pub async fn mget(
     let default_index = path.map(|Path(i)| i);
     let body = parse_json(&body)?;
     let missing = |what: &str| AppError::ActionRequestValidation(format!("{what} is missing"));
-    let items: Vec<(Option<String>, String)> = if let Some(docs) = body["docs"].as_array() {
-        let mut v = Vec::new();
-        for d in docs {
-            let id = d["_id"].as_str().ok_or_else(|| missing("id"))?;
-            v.push((d["_index"].as_str().map(String::from), id.to_string()));
-        }
-        v
-    } else if let Some(ids) = body["ids"].as_array() {
-        ids.iter()
-            .map(|i| (None, i.as_str().unwrap_or_default().to_string()))
-            .collect()
-    } else {
-        return Err(AppError::ActionRequestValidation(
-            "no documents to get".into(),
-        ));
-    };
+    let s = |v: &Value| v.as_str().map(String::from);
+    let items: Vec<(Option<String>, String, Option<String>)> =
+        if let Some(docs) = body["docs"].as_array() {
+            let mut v = Vec::new();
+            for d in docs {
+                let id = d["_id"].as_str().ok_or_else(|| missing("id"))?;
+                v.push((s(&d["_index"]), id.to_string(), s(&d["routing"])));
+            }
+            v
+        } else if let Some(ids) = body["ids"].as_array() {
+            ids.iter()
+                .map(|i| (None, i.as_str().unwrap_or_default().to_string(), None))
+                .collect()
+        } else {
+            return Err(AppError::ActionRequestValidation(
+                "no documents to get".into(),
+            ));
+        };
     let mut docs = Vec::new();
-    for (index, id) in items {
+    for (index, id, routing) in items {
         let Some(index) = index.or_else(|| default_index.clone()) else {
             return Err(missing("index"));
         };
+        let mut params = params.clone();
+        params.extend(routing.map(|r| ("routing".to_owned(), r)));
         let r = get(
             State(state.clone()),
             Path((index.clone(), id.clone())),
             uri.clone(),
-            Query(params.clone()),
+            Query(params),
         )
         .await;
         docs.push(match r {

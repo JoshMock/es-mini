@@ -313,3 +313,25 @@ async fn by_query_writes_keep_documents_on_their_shard() {
     assert_eq!(r["deleted"], 1, "{r}");
     assert_eq!(hits(&app).await, 0);
 }
+
+#[tokio::test]
+async fn mget_reads_each_documents_routing() {
+    let app = es_mini::app();
+    call(
+        &app,
+        "PUT",
+        "/i",
+        r#"{"settings": {"number_of_shards": 3}}"#,
+    )
+    .await;
+    call(&app, "PUT", "/i/_doc/a?routing=r2", r#"{"v": 1}"#).await;
+    let body = r#"{"docs": [{"_id": "a", "routing": "r2"}, {"_id": "a"}]}"#;
+    let r = call(&app, "POST", "/i/_mget", body).await;
+    let found: Vec<_> = (r["docs"].as_array().unwrap().iter())
+        .map(|d| d["found"].clone())
+        .collect();
+    assert_eq!(found, [true, false], "{r}");
+    // the URL's routing applies to items without their own
+    let r = call(&app, "POST", "/i/_mget?routing=r2", r#"{"ids": ["a"]}"#).await;
+    assert_eq!(r["docs"][0]["_routing"], "r2", "{r}");
+}
