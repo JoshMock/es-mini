@@ -123,6 +123,7 @@ impl SearchRequest {
                     "fields",
                     "runtime_mappings",
                     "search_after",
+                    "pit",
                 ]
                 .contains(&k.as_str())
             })
@@ -140,7 +141,24 @@ impl SearchRequest {
                 None => Err(format!("[{k}] must be a number").into()),
             },
         };
-        let sort = body.get("sort").map_or(Ok(vec![]), parse_sorts)?;
+        let mut sort = body.get("sort").map_or(Ok(vec![]), parse_sorts)?;
+        // SearchRequest.rewrite: a sorted point-in-time search breaks ties by `_shard_doc`,
+        // unless `search_after` leaves it out
+        let after_len = body
+            .get("search_after")
+            .and_then(Value::as_array)
+            .map(Vec::len);
+        if body.get("pit").is_some()
+            && sort.last().is_some_and(|f| f.field != "_shard_doc")
+            && after_len.is_none_or(|n| n == sort.len() + 1)
+        {
+            sort.push(SortField {
+                field: "_shard_doc".into(),
+                desc: false,
+                unmapped_ok: true,
+                missing: None,
+            });
+        }
         let track_total_hits = match body.get("track_total_hits") {
             None => None,
             Some(v) if v.is_boolean() || v.is_i64() => Some(v.to_string()),

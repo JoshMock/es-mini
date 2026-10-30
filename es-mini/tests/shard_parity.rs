@@ -12,7 +12,7 @@ use std::{collections::BTreeSet, fs};
 
 /// Cases es-mini does not match yet. Like the other xfail lists it may only shrink, and goal
 /// shard-search-merge is done only when it is empty.
-const XFAIL: &[&str] = &["pit_sorted", "pit_score"];
+const XFAIL: &[&str] = &[];
 
 fn req(method: &str, path: &str, body: &Value) -> Req {
     let body = match body {

@@ -215,7 +215,7 @@ pub async fn search(
     let start = Instant::now();
     let raw = body.clone();
     let mut body = parse_body(&body)?;
-    let pit = body.as_object_mut().and_then(|o| o.remove("pit"));
+    let pit = body.get("pit").cloned();
     let pit_id = pit.as_ref().map(|p| p["id"].clone());
     if pit.is_some() && name != "_all" {
         return Err(AppError::ActionRequestValidation(

@@ -1656,3 +1656,30 @@ fn max_score_only_for_a_sort_by_score_alone() {
     assert!(!max(json!(["_score", "n"])));
     assert!(!max(json!([{"_score": "asc"}])));
 }
+
+#[test]
+fn point_in_time_sorts_break_ties_by_shard_doc() {
+    let sorts = |body: Value| -> Vec<String> {
+        let req = SearchRequest::parse(&body).unwrap();
+        req.sort.into_iter().map(|f| f.field).collect()
+    };
+    let pit = json!({"id": "x"});
+    assert_eq!(
+        sorts(json!({"pit": pit, "sort": ["n"]})),
+        ["n", "_shard_doc"]
+    );
+    assert_eq!(
+        sorts(json!({"pit": pit, "sort": ["n"], "search_after": [1, 2]})),
+        ["n", "_shard_doc"]
+    );
+    // search_after without a tiebreak value, an explicit _shard_doc, or no sort: unchanged
+    assert_eq!(
+        sorts(json!({"pit": pit, "sort": ["n"], "search_after": [1]})),
+        ["n"]
+    );
+    assert_eq!(
+        sorts(json!({"pit": pit, "sort": ["_shard_doc"]})),
+        ["_shard_doc"]
+    );
+    assert!(sorts(json!({"pit": pit})).is_empty());
+}
