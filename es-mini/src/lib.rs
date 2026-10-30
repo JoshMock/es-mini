@@ -195,7 +195,8 @@ fn persisted(dir: &std::path::Path) -> Result<(Router, AppState), String> {
             let (dir, state, group) = (dir.clone(), saved.clone(), group.clone());
             async move {
                 let route = req.extensions().get::<axum::extract::MatchedPath>();
-                let reads = req.method().is_safe()
+                let flush = route.is_some_and(|r| r.as_str().ends_with("/_flush"));
+                let reads = (req.method().is_safe() && !flush)
                     || route.is_some_and(|r| {
                         let r = r.as_str();
                         r.contains("/_search")
@@ -390,6 +391,8 @@ fn router(state: AppState) -> Router {
             "/_refresh",
             get(indices::refresh_all).post(indices::refresh_all),
         )
+        .route("/{index}/_flush", get(indices::flush).post(indices::flush))
+        .route("/_flush", get(indices::flush_all).post(indices::flush_all))
         .route(
             "/{index}/_mapping",
             get(indices::get_mapping)

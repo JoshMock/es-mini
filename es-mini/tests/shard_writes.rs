@@ -239,3 +239,45 @@ async fn documents_keep_their_routing() {
     let r = call(&app, "GET", "/i/_doc/a?routing=r1", "").await;
     assert_eq!(r["_routing"], "r1", "{r}");
 }
+
+/// The shard directories of the only index under `dir` with the committed segment `segment`.
+fn committed_shards(dir: &std::path::Path, segment: &str) -> Vec<String> {
+    let index = std::fs::read_dir(dir.join("indices"))
+        .unwrap()
+        .next()
+        .unwrap();
+    let mut shards: Vec<_> = std::fs::read_dir(index.unwrap().path())
+        .unwrap()
+        .map(|s| s.unwrap().path())
+        .filter(|s| s.join(format!("index/{segment}.si")).exists())
+        .map(|s| s.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    shards.sort();
+    shards
+}
+
+#[tokio::test]
+async fn flush_commits_every_shard() {
+    let (dir, _cleanup) = scratch("shard-writes-flush");
+    let app = es_mini::app_persisted(&dir).unwrap();
+    call(
+        &app,
+        "PUT",
+        "/i",
+        r#"{"settings": {"number_of_shards": 3}}"#,
+    )
+    .await;
+    for i in 0..9 {
+        call(&app, "PUT", &format!("/i/_doc/{i}"), "{}").await;
+    }
+    assert!(committed_shards(&dir, "_0").is_empty());
+    let r = call(&app, "POST", "/i/_flush", "").await;
+    assert_eq!(r["_shards"]["failed"], 0, "{r}");
+    assert_eq!(committed_shards(&dir, "_0"), ["0", "1", "2"]);
+
+    call(&app, "PUT", "/i/_doc/9?routing=x", "{}").await;
+    let r = call(&app, "GET", "/_flush", "").await;
+    assert_eq!(r["_shards"]["failed"], 0, "{r}");
+    let shard = shard_id("9", Some("x"), SHARDS).to_string();
+    assert_eq!(committed_shards(&dir, "_1"), [shard]);
+}

@@ -1240,7 +1240,8 @@ fn log(data_dir: &Path, indices: &mut Indices, all: bool) -> es_codec::Result<Pe
         }
     }
     let shard_count: usize = indices.values().map(Index::number_of_shards).sum();
-    let mut flush = !unchanged || logs.len() != shard_count;
+    let mut flush =
+        !unchanged || logs.len() != shard_count || indices.values().any(|ix| ix.flush_requested);
     if flush && all {
         return Ok(pending);
     }
@@ -1282,6 +1283,7 @@ fn log(data_dir: &Path, indices: &mut Indices, all: bool) -> es_codec::Result<Pe
         forget_retries(&mut pending.saving, data_dir);
         // ponytail: rereads every term of every index; cache per segment if commits get slow
         for (meta, ix) in metas.iter().zip(indices.values_mut()) {
+            ix.flush_requested = false;
             for n in 0..ix.number_of_shards() {
                 let shard = ix.shard_mut(n).1;
                 drop(shard.take_unlogged());

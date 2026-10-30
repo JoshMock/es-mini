@@ -263,6 +263,8 @@ pub struct Index {
     pub aliases: BTreeMap<String, aliases::Alias>,
     /// Closed indices keep their metadata but reject document reads, writes, and searches.
     pub closed: bool,
+    /// A flush was asked for: the next persist commits every shard's segments.
+    pub flush_requested: bool,
     /// Its shards, at least shard 0. Those up to `index.number_of_shards` not written yet may
     /// be missing; saves write them empty.
     shards: Vec<Shard>,
@@ -275,6 +277,7 @@ impl Default for Index {
             mappings: Mappings::default(),
             aliases: BTreeMap::new(),
             closed: false,
+            flush_requested: false,
             shards: vec![Shard::default()],
         }
     }

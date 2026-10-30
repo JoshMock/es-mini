@@ -316,6 +316,37 @@ pub async fn refresh(
     ))
 }
 
+pub async fn flush_all(
+    state: State<AppState>,
+    uri: Uri,
+    params: Query<HashMap<String, String>>,
+) -> Result<Json<Value>, AppError> {
+    flush(state, Path("_all".into()), uri, params).await
+}
+
+/// `_flush`: the persist after the request commits every shard of the indices (a no-op without
+/// a data directory).
+pub async fn flush(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    uri: Uri,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, AppError> {
+    check(&uri, &params, &["force", "wait_if_ongoing"])?;
+    let mut indices = state.write();
+    let names = read_indices(&indices, &name, &params)?;
+    for n in &names {
+        indices
+            .get_mut(n)
+            .expect("resolved index exists")
+            .flush_requested = true;
+    }
+    let total = names.len();
+    Ok(Json(
+        json!({"_shards": {"total": total, "successful": total, "failed": 0}}),
+    ))
+}
+
 pub async fn get_settings(
     state: State<AppState>,
     Path(name): Path<String>,
