@@ -4,7 +4,7 @@ use crate::{
     indices::parse_body,
     params,
     scroll::Contexts,
-    security::{Authn, msearch_item},
+    security::{Authn, esql_from, msearch_item},
 };
 use axum::{
     Extension, Json,
@@ -584,6 +584,7 @@ pub async fn count(
 
 pub async fn esql(
     State(state): State<AppState>,
+    authn: Option<Extension<Authn>>,
     uri: Uri,
     Query(params): Query<HashMap<String, String>>,
     body: Bytes,
@@ -599,7 +600,20 @@ pub async fn esql(
         .as_str()
         .filter(|q| !q.is_empty())
         .ok_or_else(|| AppError::ActionRequestValidation("[query] is required".into()))?;
-    let r = esql::run(&state.read().all(), query).map_err(|e| match e {
+    // The narrowing's own error, which ES|QL's errors cannot carry.
+    let refused = std::cell::Cell::new(None);
+    let shared = state.read();
+    let narrow = |expr: &str| {
+        esql_from(authn.as_deref(), &shared, expr).map_err(|e| {
+            refused.set(Some(e));
+            EsqlError::Verification(String::new())
+        })
+    };
+    let r = esql::run_narrowed(&shared.all(), query, &narrow);
+    if let Some(e) = refused.take() {
+        return Err(e);
+    }
+    let r = r.map_err(|e| match e {
         EsqlError::Parse(m) => AppError::ParsingException(m),
         EsqlError::Verification(m) => AppError::Verification(m),
         EsqlError::IndexClosed(i) => AppError::IndexClosedBlock(i),

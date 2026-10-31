@@ -23,7 +23,7 @@ mod authz;
 mod query;
 
 pub use authz::authorize;
-pub(crate) use authz::{bulk_item, mget_shard, msearch_item};
+pub(crate) use authz::{bulk_item, esql_from, mget_shard, msearch_item};
 
 /// The system index keys are stored in, as Elasticsearch names it, behind the [`ALIAS`] alias.
 pub(crate) const INDEX: &str = ".security-7";

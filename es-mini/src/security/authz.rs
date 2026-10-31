@@ -4,7 +4,7 @@
 
 use super::{Authn, Security};
 use crate::error::AppError;
-use crate::store::Store;
+use crate::store::{Shared, Store};
 use axum::{
     Extension, Json,
     body::Bytes,
@@ -72,6 +72,7 @@ const GRANTED_BY: &[(&str, &str)] = &[
     ("indices:data/read/mget", "read,all"),
     ("indices:data/read/mget[shard]", "read,all"),
     ("indices:data/read/esql", "read_cross_cluster,read,all"),
+    ("indices:data/read/esql/search_shards", "read,all"),
     (
         "indices:data/write/bulk",
         "create_doc,create,delete,index,write,all",
@@ -201,8 +202,8 @@ enum Step<'a> {
 
 /// The checks Elasticsearch makes for `method` on the path `segs`, by the actions it names
 /// them.
-// ponytail: ES|QL and POST _aliases are checked by action only, not per index they name yet
-// (bulk, mget and msearch items are, by their handlers)
+// ponytail: POST _aliases is checked by action only, not per index it names yet (bulk, mget,
+// msearch and ES|QL are, by their handlers)
 fn steps<'a>(method: &Method, segs: &[&'a str], params: &HashMap<String, String>) -> Vec<Step<'a>> {
     use Step::*;
     let at = |action, i| Indices {
@@ -390,7 +391,8 @@ impl Key<'_> {
                         Place::Segment(i) => segs[i],
                         Place::Prefix | Place::Suffix => "_all",
                     };
-                    let names = self.indices(&security.store, action, expr, expand, params)?;
+                    let names =
+                        self.indices(&security.store.read(), action, expr, expand, params)?;
                     if expand {
                         let names = expression(&names, encoded);
                         let mut segs: Vec<&str> = segs.clone();
@@ -431,7 +433,7 @@ impl Key<'_> {
     /// `expand`) to those only; a literal name it may not use refuses the request.
     fn indices(
         &self,
-        store: &Store,
+        shared: &Shared,
         action: &'static str,
         expr: &str,
         expand: bool,
@@ -452,7 +454,6 @@ impl Key<'_> {
             _ => IndicesOptions::READ,
         }
         .with_params(params);
-        let shared = store.read();
         let (mut out, mut denied) = (Vec::<String>::new(), vec![]);
         for (n, part) in parts.iter().enumerate() {
             if let (true, true, Some(excluded)) = (expand, n > 0, part.strip_prefix('-')) {
@@ -492,7 +493,7 @@ impl Key<'_> {
             return Err(self.denied(action, &java_order(&denied)));
         }
         let restricted: Vec<&str> = (out.iter())
-            .filter(|n| shared.contains_key(*n) || es_index::aliases::is_alias(&*shared, n))
+            .filter(|n| shared.contains_key(*n) || es_index::aliases::is_alias(&**shared, n))
             .filter(|n| self.field_or_document_level(action, n))
             .map(String::as_str)
             .collect();
@@ -617,8 +618,40 @@ pub(crate) fn msearch_item(
         return Ok(expr);
     };
     let action = "indices:data/read/search";
-    let names = Key { id, roles }.indices(store, action, &expr, true, params)?;
+    let names = Key { id, roles }.indices(&store.read(), action, &expr, true, params)?;
     Ok(expression(&names, |n| n.to_owned()))
+}
+
+/// Narrows the index expression `expr` of an ES|QL `FROM` to the names whoever `authn` is may
+/// read. As in Elasticsearch, a literal name the key may not read is unknown when nothing else
+/// matches, and otherwise refused.
+pub(crate) fn esql_from(
+    authn: Option<&Authn>,
+    shared: &Shared,
+    expr: &str,
+) -> Result<String, AppError> {
+    let Some(Authn::ApiKey { id, roles, .. }) = authn else {
+        return Ok(expr.to_owned());
+    };
+    let key = Key { id, roles };
+    let action = "indices:data/read/esql";
+    let lenient = HashMap::from(
+        ["ignore_unavailable", "allow_no_indices"].map(|o| (o.to_owned(), "true".to_owned())),
+    );
+    let narrowed = expression(&key.indices(shared, action, expr, true, &lenient)?, |n| {
+        n.to_owned()
+    });
+    let denied: Vec<&str> = (expr.split(',').map(str::trim))
+        .filter(|p| !(p.is_empty() || p.contains('*') || p.starts_with('-')))
+        .filter(|p| !key.index(action, p))
+        .collect();
+    if denied.is_empty() {
+        return Ok(narrowed);
+    }
+    match es_index::aliases::resolve_data(&**shared, &narrowed).is_ok_and(|t| !t.is_empty()) {
+        true => Err(key.denied("indices:data/read/esql/search_shards", &java_order(&denied))),
+        false => Err(AppError::Verification(format!("Unknown index [{expr}]"))),
+    }
 }
 
 /// `names` as one index expression, each through `name`; none is Elasticsearch's no-index

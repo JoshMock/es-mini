@@ -2642,8 +2642,18 @@ pub fn run(
     indices: &aliases::Map<impl aliases::IndexMeta + std::borrow::Borrow<Index>>,
     query: &str,
 ) -> Result<Response, EsqlError> {
+    run_narrowed(indices, query, &|e| Ok(e.to_owned()))
+}
+
+/// [`run`], resolving the index expression of `FROM` through `narrow` first (to the names a
+/// user may read, say); "Unknown index" errors still name the expression as written.
+pub fn run_narrowed(
+    indices: &aliases::Map<impl aliases::IndexMeta + std::borrow::Borrow<Index>>,
+    query: &str,
+    narrow: Narrow,
+) -> Result<Response, EsqlError> {
     FAILURE.take();
-    let r = run_at(indices, query, crate::dates::now_millis());
+    let r = run_at(indices, query, crate::dates::now_millis(), narrow);
     // Verification fails a query before anything can fail evaluating it.
     match (r, FAILURE.take()) {
         (Ok(_), Some(e)) => Err(e),
@@ -2656,6 +2666,7 @@ fn run_at(
     indices: &aliases::Map<impl aliases::IndexMeta + std::borrow::Borrow<Index>>,
     query: &str,
     now: i64,
+    narrow: Narrow,
 ) -> Result<Response, EsqlError> {
     let (toks, eof) = lex(query)?;
     let (source, cmds) = Parser {
@@ -2678,7 +2689,7 @@ fn run_at(
     let table = match source {
         Some((sources, metadata, from)) => {
             let names: Vec<String> = metadata.iter().map(|(f, _)| f.clone()).collect();
-            let table = table_from(indices, &sources, &names, &reads)?;
+            let table = table_from(indices, &sources, &names, &reads, narrow)?;
             // Like ES, unknown metadata fails verification once the indices resolve.
             let bad: Vec<&Name> = (metadata.iter())
                 .filter(|(f, _)| metadata_type(f).is_none())
@@ -3526,18 +3537,21 @@ struct Table {
     counted: bool,
 }
 
+/// Narrows the index expression of `FROM` (see [`run_narrowed`]).
+pub type Narrow<'a> = &'a dyn Fn(&str) -> Result<String, EsqlError>;
+
 /// The table of `FROM sources`: every document of the indices they resolve to.
 fn table_from(
     indices: &aliases::Map<impl aliases::IndexMeta + std::borrow::Borrow<Index>>,
     sources: &[String],
     metadata: &[String],
     read: &dyn Fn(&str) -> bool,
+    narrow: Narrow,
 ) -> Result<Arc<Table>, EsqlError> {
+    let expr = narrow(&sources.join(","))?;
     // Like Elasticsearch: a missing index is only "unknown" when no source matches anything.
     let none_match = || {
-        sources
-            .iter()
-            .all(|s| !aliases::resolve_data(indices, s).is_ok_and(|t| !t.is_empty()))
+        (expr.split(',')).all(|s| !aliases::resolve_data(indices, s).is_ok_and(|t| !t.is_empty()))
     };
     let unknown_index = |e| match e {
         ResolveError::IndexClosed(i) => EsqlError::IndexClosed(i),
@@ -3551,7 +3565,7 @@ fn table_from(
             EsqlError::Verification(format!("Unknown index [{i}]"))
         }
     };
-    let targets = aliases::resolve_data(indices, &sources.join(",")).map_err(unknown_index)?;
+    let targets = aliases::resolve_data(indices, &expr).map_err(unknown_index)?;
     let filters = (targets.iter())
         .map(|t| t.filter.as_ref().map(crate::parse_query).transpose())
         .collect::<Result<Vec<_>, _>>()
@@ -4032,7 +4046,10 @@ mod tests {
             i.put(id, serde_json::json!({"n": 1}));
         }
         let indices = BTreeMap::from([("i".to_owned(), i)]);
-        let r = run_at(&indices, "FROM i | EVAL t = NOW() | KEEP t", 1000).unwrap();
+        let r = run_at(&indices, "FROM i | EVAL t = NOW() | KEEP t", 1000, &|e| {
+            Ok(e.to_owned())
+        })
+        .unwrap();
         let t = Value::from("1970-01-01T00:00:01.000Z");
         assert_eq!(r.values, vec![vec![t]; 3]);
     }

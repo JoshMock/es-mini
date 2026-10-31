@@ -640,3 +640,60 @@ async fn msearch_searches_are_authorized_one_by_one() {
     assert_eq!(status, 200, "{out}");
     assert_eq!(out["responses"][0]["hits"]["total"]["value"], 1, "{out}");
 }
+
+async fn esql(app: &axum::Router, auth: &str, q: &str) -> (u16, Value) {
+    call(app, auth, "POST", "/_query", Some(json!({ "query": q }))).await
+}
+
+/// The `_index` of every row `FROM sources` returns, sorted.
+async fn esql_indices(app: &axum::Router, auth: &str, sources: &str) -> Value {
+    let q = format!("FROM {sources} METADATA _index | KEEP _index | SORT _index");
+    let (status, out) = esql(app, auth, &q).await;
+    assert_eq!(status, 200, "{q}: {out}");
+    out["values"].clone()
+}
+
+/// ES|QL reads only the FROM names the key may read: wildcards expand to those, and a name it
+/// may not read is unknown when nothing else matches, else a 403 (recorded from
+/// Elasticsearch 9.5.5).
+#[tokio::test]
+async fn esql_reads_authorized_indices_only() {
+    let app = app().await;
+    let (kr, id) = key(&app, ELASTIC, read_a()).await;
+    let unknown = |names: &str| {
+        let e =
+            json!({"type": "verification_exception", "reason": format!("Unknown index [{names}]")});
+        json!({"error": {"root_cause": [e.clone()], "type": e["type"], "reason": e["reason"]}, "status": 400})
+    };
+    for q in ["b1", "b1,nope", "b*,b1"] {
+        let out = esql(&app, &kr, &format!("FROM {q} | LIMIT 5")).await;
+        assert_eq!(out, (400, unknown(q)), "{q}");
+    }
+    let shards = |id, names| {
+        denied(
+            id,
+            "indices:data/read/esql/search_shards",
+            names,
+            "read,all",
+        )
+    };
+    for (q, names) in [("a1,b1", "b1"), ("a1,nope", "nope")] {
+        let out = esql(&app, &kr, &format!("FROM {q} | LIMIT 5")).await;
+        assert_eq!(out, (403, shards(&id, names)), "{q}");
+    }
+    // `a*` matches the alias `al` of b1 too.
+    assert_eq!(esql_indices(&app, &kr, "*").await, json!([["a1"], ["b1"]]));
+    let (status, out) = esql(&app, &kr, "FROM b* | LIMIT 5").await;
+    assert_eq!((status, &out["values"]), (200, &json!([])), "{out}");
+    let roles = json!({"r": {"indices": [
+        {"names": ["al"], "privileges": ["read"]},
+        {"names": ["c1"], "privileges": ["read"]},
+    ]}});
+    let (kal, id) = key(&app, ELASTIC, roles).await;
+    let all = esql_indices(&app, &kal, "*").await;
+    assert_eq!(all, json!([["b1"], ["c1"]]));
+    let out = esql(&app, &kal, "FROM al,ca | LIMIT 5").await;
+    assert_eq!(out, (403, shards(&id, "ca")));
+    let out = esql(&app, &kal, "FROM b1 | LIMIT 5").await;
+    assert_eq!(out, (400, unknown("b1")));
+}
