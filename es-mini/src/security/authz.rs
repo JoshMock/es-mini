@@ -202,8 +202,7 @@ enum Step<'a> {
 
 /// The checks Elasticsearch makes for `method` on the path `segs`, by the actions it names
 /// them.
-// ponytail: POST _aliases is checked by action only, not per index it names yet (bulk, mget,
-// msearch and ES|QL are, by their handlers)
+// (Bulk, mget, msearch, ES|QL and POST _aliases are checked per item by their handlers.)
 fn steps<'a>(method: &Method, segs: &[&'a str], params: &HashMap<String, String>) -> Vec<Step<'a>> {
     use Step::*;
     let at = |action, i| Indices {
@@ -250,7 +249,7 @@ fn steps<'a>(method: &Method, segs: &[&'a str], params: &HashMap<String, String>
         (_, ["_security", "_query", "api_key"]) => vec![Cluster(QUERY_KEYS)],
         ("PUT", ["_settings"]) => vec![every("indices:admin/settings/update")],
         (_, ["_settings", ..]) => vec![every("indices:monitor/settings/get")],
-        ("POST", ["_aliases"]) => vec![AnyIndex("indices:admin/aliases", "")],
+        ("POST", ["_aliases"]) => vec![],
         (_, ["_alias" | "_aliases", ..]) => vec![every("indices:admin/aliases/get")],
         (_, ["_refresh"]) => vec![every("indices:admin/refresh")],
         (_, ["_flush"]) => vec![every("indices:admin/flush")],
@@ -449,7 +448,8 @@ impl Key<'_> {
             .collect();
         self.any_index(action, &named)?;
         let o = match action {
-            "indices:admin/delete" => IndicesOptions::DELETE,
+            // Alias actions, like deletion, expand wildcards to indices only.
+            "indices:admin/delete" | "indices:admin/aliases" => IndicesOptions::DELETE,
             a if a.starts_with("indices:data/") => IndicesOptions::DATA,
             _ => IndicesOptions::READ,
         }
@@ -652,6 +652,97 @@ pub(crate) fn esql_from(
         true => Err(key.denied("indices:data/read/esql/search_shards", &java_order(&denied))),
         false => Err(AppError::Verification(format!("Unknown index [{expr}]"))),
     }
+}
+
+/// Authorizes `POST /_aliases` `actions` for whoever `authn` is, as Elasticsearch does: every
+/// action's indices need `indices:admin/aliases` (wildcards narrowed to those the key may
+/// use), then its alias names do (removed wildcards narrowed likewise), and an added alias may
+/// not grant more than the indices it is added to.
+pub(crate) fn alias_actions(
+    authn: Option<&Authn>,
+    shared: &Shared,
+    actions: &mut [Value],
+) -> Result<(), AppError> {
+    let Some(Authn::ApiKey { id, roles, .. }) = authn else {
+        return Ok(());
+    };
+    let key = Key { id, roles };
+    let action = "indices:admin/aliases";
+    let strict = HashMap::from([("allow_no_indices".to_owned(), "false".to_owned())]);
+    for (_, a) in bodies(actions) {
+        for k in ["index", "indices"] {
+            if let Some(names) = a.get(k) {
+                let expr = strs_or_str(names).collect::<Vec<_>>().join(",");
+                a[k] = json!(key.indices(shared, action, &expr, true, &strict)?);
+            }
+        }
+    }
+    for (kind, a) in bodies(actions) {
+        for k in ["alias", "aliases"] {
+            let Some(names) = a.get(k) else { continue };
+            let mut out: Vec<String> = vec![];
+            for name in strs_or_str(names) {
+                if kind == "remove" && (name.contains('*') || name == "_all") {
+                    let pattern = if name == "_all" { "*" } else { name };
+                    // ponytail: a pattern matching no alias the key may manage removes nothing;
+                    // Elasticsearch's response to that is not recorded
+                    for n in (shared.values()).flat_map(|i| i.aliases().keys()) {
+                        if glob(pattern, n) && key.index(action, n) && !out.contains(n) {
+                            out.push(n.clone());
+                        }
+                    }
+                } else if key.index(action, name) {
+                    out.push(name.to_owned());
+                } else {
+                    return Err(key.denied(action, &[]));
+                }
+            }
+            if kind == "add" {
+                more_than_indices(&key, &out, &a["index"], &a["indices"])?;
+            }
+            a[k] = json!(out);
+        }
+    }
+    Ok(())
+}
+
+/// Each alias action's kind and body.
+fn bodies(actions: &mut [Value]) -> impl Iterator<Item = (&String, &mut Value)> {
+    (actions.iter_mut()).filter_map(|a| {
+        a.as_object_mut()
+            .filter(|o| o.len() == 1)?
+            .iter_mut()
+            .next()
+    })
+}
+
+/// Refuses adding `aliases` to the indices `index`/`indices` if the key may do an index action
+/// on an alias that it may not on an index.
+// ponytail: compares the actions es-mini knows, not Elasticsearch's action automata
+fn more_than_indices(
+    key: &Key,
+    aliases: &[String],
+    index: &Value,
+    indices: &Value,
+) -> Result<(), AppError> {
+    let mut actions = (GRANTED_BY.iter()).filter(|(a, _)| a.starts_with("indices:"));
+    let names: Vec<&str> = strs_or_str(index).chain(strs_or_str(indices)).collect();
+    let more = actions.any(|(a, _)| {
+        (aliases.iter()).any(|alias| key.index(a, alias) && names.iter().any(|n| !key.index(a, n)))
+    });
+    match more {
+        true => Err(AppError::Other(
+            StatusCode::FORBIDDEN,
+            "security_exception",
+            "Adding an alias is not allowed when the alias has more permissions than any of the indices".into(),
+        )),
+        false => Ok(()),
+    }
+}
+
+/// The names of a string-or-array parameter.
+fn strs_or_str(v: &Value) -> impl Iterator<Item = &str> + Clone {
+    v.as_str().into_iter().chain(strs(v))
 }
 
 /// `names` as one index expression, each through `name`; none is Elasticsearch's no-index

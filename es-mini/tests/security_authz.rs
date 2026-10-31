@@ -697,3 +697,99 @@ async fn esql_reads_authorized_indices_only() {
     let out = esql(&app, &kal, "FROM b1 | LIMIT 5").await;
     assert_eq!(out, (400, unknown("b1")));
 }
+
+/// The aliases of every index, as elastic sees them.
+async fn aliases(app: &axum::Router) -> Value {
+    ok(app, ELASTIC, "GET", "/_alias", None).await
+}
+
+/// POST _aliases checks each action's indices, then their alias names, and expands wildcards
+/// to the names the key may manage; an alias may not grant more than its indices (recorded
+/// from Elasticsearch 9.5.5).
+#[tokio::test]
+async fn alias_actions_need_manage_on_indices_and_aliases() {
+    let app = app().await;
+    let post = |actions: Value| Some(json!({ "actions": actions }));
+    let manage_a = json!({"r": {"indices": [{"names": ["a*"], "privileges": ["manage"]}]}});
+    let (km, id) = key(&app, ELASTIC, manage_a).await;
+    let manage = |names| denied(&id, "indices:admin/aliases", names, "manage,all");
+    for (actions, names) in [
+        (json!([{"add": {"index": "a1", "alias": "x1"}}]), ""),
+        (
+            json!([{"add": {"index": "b1", "alias": "zz"}}, {"add": {"index": "a1", "alias": "yy"}}]),
+            "b1",
+        ),
+        (json!([{"add": {"index": "nope", "alias": "a-v"}}]), "nope"),
+        (json!([{"remove": {"index": "b1", "alias": "*"}}]), "b1"),
+        (json!([{"remove_index": {"index": "b1"}}]), "b1"),
+    ] {
+        let out = call(&app, &km, "POST", "/_aliases", post(actions.clone())).await;
+        assert_eq!(out, (403, manage(names)), "{actions}");
+    }
+    let (status, out) = call(
+        &app,
+        &km,
+        "POST",
+        "/_aliases",
+        post(json!([{"add": {"index": "q*", "alias": "a-v"}}])),
+    )
+    .await;
+    assert_eq!(
+        (status, &out["error"]["reason"]),
+        (404, &json!("no such index [q*]"))
+    );
+    let add_all = json!([{"add": {"index": "*", "alias": "a-v"}}]);
+    ok(&app, &km, "POST", "/_aliases", post(add_all)).await;
+    let all = aliases(&app).await;
+    assert_eq!(all["a1"]["aliases"], json!({"a-v": {}}));
+    assert_eq!(all["b1"]["aliases"], json!({"al": {}}));
+    let remove_all = json!([{"remove": {"index": "*", "alias": "*"}}]);
+    ok(&app, &km, "POST", "/_aliases", post(remove_all)).await;
+    let all = aliases(&app).await;
+    assert_eq!(all["a1"]["aliases"], json!({}));
+    assert_eq!(all["b1"]["aliases"], json!({"al": {}}));
+
+    let roles = json!({"r": {"indices": [
+        {"names": ["a*"], "privileges": ["manage"]},
+        {"names": ["ax*"], "privileges": ["manage", "read"]},
+    ]}});
+    let (ks, _) = key(&app, ELASTIC, roles).await;
+    let reason = "Adding an alias is not allowed when the alias has more permissions than any of the indices";
+    let e = json!({"type": "security_exception", "reason": reason});
+    let more = json!({"error": {"root_cause": [e], "type": "security_exception", "reason": reason}, "status": 403});
+    let out = call(
+        &app,
+        &ks,
+        "POST",
+        "/_aliases",
+        post(json!([{"add": {"index": "a1", "alias": "ax1"}}])),
+    )
+    .await;
+    assert_eq!(out, (403, more));
+    ok(
+        &app,
+        &ks,
+        "POST",
+        "/_aliases",
+        post(json!([{"add": {"index": "a1", "alias": "a-ok"}}])),
+    )
+    .await;
+
+    let delete_a = json!({"r": {"indices": [{"names": ["a*"], "privileges": ["delete_index"]}]}});
+    let (kd, id) = key(&app, ELASTIC, delete_a).await;
+    let out = call(
+        &app,
+        &kd,
+        "POST",
+        "/_aliases",
+        post(json!([{"remove_index": {"index": "a1"}}])),
+    )
+    .await;
+    assert_eq!(
+        out,
+        (
+            403,
+            denied(&id, "indices:admin/aliases", "a1", "manage,all")
+        )
+    );
+}

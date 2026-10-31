@@ -4,9 +4,10 @@ use crate::{
     AppState,
     error::AppError,
     indices::{check, parse_body},
+    security::{Authn, alias_actions},
 };
 use axum::{
-    Json,
+    Extension, Json,
     body::Bytes,
     extract::{Path, Query, State},
     http::{StatusCode, Uri},
@@ -355,13 +356,15 @@ pub async fn update(
     State(state): State<AppState>,
     uri: Uri,
     Query(params): Params,
+    authn: Option<Extension<Authn>>,
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
     check(&uri, &params, &WRITE_PARAMS)?;
-    let body = parse_body(&body)?;
+    let mut body = parse_body(&body)?;
     let actions = body["actions"]
-        .as_array()
+        .as_array_mut()
         .ok_or_else(|| AppError::ActionRequestValidation("no actions specified".into()))?;
+    alias_actions(authn.as_deref(), &state.read(), actions)?;
     let mut indices = state.write();
     let mut tables: BTreeMap<String, BTreeMap<String, Alias>> = indices
         .iter()
