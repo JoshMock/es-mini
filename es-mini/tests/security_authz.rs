@@ -938,3 +938,35 @@ async fn points_in_time_are_authorized_by_their_indices() {
         "{r}"
     );
 }
+
+/// Recorded from Elasticsearch 9.5.5: a point in time is authorized by the concrete indices it was
+/// opened on, even through an alias, so a privilege on the alias alone does not grant it.
+#[tokio::test]
+async fn a_point_in_time_opened_through_an_alias_needs_its_indices() {
+    let app = app().await;
+    ok(&app, ELASTIC, "PUT", "/a1/_alias/aa", None).await;
+    let (a, _) = key(&app, ELASTIC, read_a()).await;
+    let al = json!({"r": {"indices": [{"names": ["al"], "privileges": ["read"]}]}});
+    let (k, id) = key(&app, ELASTIC, al).await;
+    let mut pits = vec![];
+    for alias in ["aa", "al"] {
+        let r = ok(
+            &app,
+            ELASTIC,
+            "POST",
+            &format!("/{alias}/_pit?keep_alive=1m"),
+            None,
+        )
+        .await;
+        pits.push(json!({"size": 0, "pit": {"id": r["id"]}}));
+    }
+    let r = ok(&app, &a, "POST", "/_search", Some(pits[0].clone())).await;
+    assert_eq!(r["hits"]["total"]["value"], 1, "{r}");
+    let (status, r) = call(&app, &a, "POST", "/_search", Some(pits[1].clone())).await;
+    assert_eq!(status, 403, "{r}");
+    // `al` is readable as an alias, but its point in time is not.
+    ok(&app, &k, "POST", "/al/_search", Some(json!({"size": 0}))).await;
+    let (status, r) = call(&app, &k, "POST", "/_search", Some(pits[1].clone())).await;
+    let expected = denied(&id, "indices:data/read/search", "", "read,all");
+    assert_eq!((status, r), (403, expected));
+}
