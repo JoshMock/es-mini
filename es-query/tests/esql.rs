@@ -1181,6 +1181,19 @@ fn to_datetime_and_now_match_elasticsearch() {
     );
 }
 
+/// Week-based pattern letters print in the root locale's weeks (Sunday first), as in
+/// Elasticsearch 9.5.5.
+#[test]
+fn date_week_fields_date_format_prints_week_dates() {
+    let r = q(
+        r#"ROW t = TO_DATETIME("2021-01-03T10:00:00Z") | EVAL a = DATE_FORMAT("YYYY-ww-e c W F Y YY YYYYY", t), b = DATE_FORMAT("YYYY-ww-e", TO_DATETIME("2020-12-28T00:00:00Z")) | DROP t"#,
+    );
+    assert_eq!(
+        r.values,
+        [[json!("2021-02-1 1 2 1 2021 21 02021"), json!("2021-01-2")]]
+    );
+}
+
 #[test]
 fn date_extract_and_date_format_match_elasticsearch() {
     let r = q(

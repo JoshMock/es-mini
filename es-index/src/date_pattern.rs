@@ -29,6 +29,12 @@ enum F {
     Nano,
     MilliOfDay,
     NanoOfDay,
+    AlignedWeekOfMonth,
+    /// `WeekFields` fields, by the pattern's week definition ([`Week`]).
+    WeekBasedYear,
+    WeekOfWeekBasedYear,
+    WeekOfMonth,
+    LocalDayOfWeek,
 }
 
 impl F {
@@ -37,12 +43,12 @@ impl F {
         match self {
             F::Era | F::AmPm => (0, 1),
             F::YearOfEra => (1, 1_000_000_000),
-            F::Year => (-999_999_999, 999_999_999),
+            F::Year | F::WeekBasedYear => (-999_999_999, 999_999_999),
             F::Quarter => (1, 4),
             F::Month => (1, 12),
             F::DayOfYear => (1, 366),
             F::DayOfMonth => (1, 31),
-            F::DayOfWeek => (1, 7),
+            F::DayOfWeek | F::LocalDayOfWeek => (1, 7),
             F::HourOfDay => (0, 23),
             F::ClockHourOfDay => (1, 24),
             F::HourOfAmPm => (0, 11),
@@ -51,7 +57,85 @@ impl F {
             F::Nano => (0, 999_999_999),
             F::MilliOfDay => (0, 86_399_999),
             F::NanoOfDay => (0, 86_399_999_999_999),
+            F::AlignedWeekOfMonth => (1, 5),
+            F::WeekOfWeekBasedYear => (1, 53),
+            F::WeekOfMonth => (0, 6),
         }
+    }
+}
+
+/// `WeekFields`: the first day of the week (Monday 1 to Sunday 7) and the days of a year or
+/// month its first week needs.
+#[derive(Clone, Copy, Debug)]
+struct Week {
+    first: i64,
+    min_days: i64,
+}
+
+impl Week {
+    const ISO: Week = Week {
+        first: 1,
+        min_days: 4,
+    };
+
+    /// `WeekFields.of(locale)` with the JDK's CLDR weekData: by the locale's region, the US's
+    /// when it names none.
+    fn of(locale: &str) -> Week {
+        const MIN_DAYS_4: &str = "AD AN AT AX BE BG CH CZ DE DK EE ES FI FJ FO FR GB GF GG GI GP \
+            GR HU IE IM IS IT JE LI LT LU MC MQ NL NO PL PT RE RU SE SJ SK SM VA";
+        const SUNDAY: &str = "AG AS BD BR BS BT BW BZ CA CO DM DO ET GT GU HK HN ID IL IN IS JM \
+            JP KE KH KR LA MH MM MO MT MX MZ NI NP PA PE PH PK PR PT PY SA SG SV TH TT TW UM US \
+            VE VI WS YE ZA ZW";
+        const SATURDAY: &str = "AF BH DJ DZ EG IQ IR JO KW LY OM QA SD SY";
+        let region = match locale.split(['-', '_']).nth(1) {
+            Some(r) if !r.is_empty() => r.to_ascii_uppercase(),
+            _ => "US".into(),
+        };
+        let has = |list: &str| list.split_whitespace().any(|r| r == region);
+        Week {
+            first: match () {
+                _ if has(SUNDAY) => 7,
+                _ if has(SATURDAY) => 6,
+                _ if region == "MV" => 5,
+                _ => 1,
+            },
+            min_days: if has(MIN_DAYS_4) { 4 } else { 1 },
+        }
+    }
+
+    /// The localized day of the week (1 to 7) of ISO day of the week `iso`.
+    fn local(self, iso: i64) -> i64 {
+        (iso - self.first).rem_euclid(7) + 1
+    }
+
+    /// The localized day of the week of epoch day `days`.
+    fn dow(self, days: i64) -> i64 {
+        self.local((days + 3).rem_euclid(7) + 1)
+    }
+
+    /// The epoch day week 1 of a year or month starts, for its first day `day1`.
+    fn start(self, day1: i64) -> i64 {
+        let d = day1 + self.min_days - 1;
+        d - self.dow(d) + 1
+    }
+
+    /// The week-based year and week of epoch day `days`.
+    fn week_of_year(self, days: i64) -> (i64, i64) {
+        let (y, ..) = crate::civil_from_days(days);
+        let start = |y| self.start(days_from_civil(y, 1, 1));
+        let y = (y - 1..=y + 1).rfind(|&y| start(y) <= days).unwrap_or(y);
+        (y, (days - start(y)) / 7 + 1)
+    }
+
+    /// The weeks in week-based year `y`.
+    fn weeks(self, y: i64) -> i64 {
+        let start = |y| self.start(days_from_civil(y, 1, 1));
+        (start(y + 1) - start(y)) / 7
+    }
+
+    fn week_of_month(self, days: i64) -> i64 {
+        let (y, m, _) = crate::civil_from_days(days);
+        (days - self.start(days_from_civil(y, m, 1))).div_euclid(7) + 1
     }
 }
 
@@ -148,8 +232,8 @@ impl Seq {
 
     /// `DateTimeFormatterBuilder.parseField` and the other letters; `None` for letters Java
     /// rejects or es-mini lacks.
-    // ponytail: no week-based fields (`Y w W e c F`), zone names (`z v`), quarter names
-    // (`QQQ`), day periods (`B`), padding (`p`) or modified Julian days (`g`); add when needed.
+    // ponytail: no zone names (`z v`), quarter names (`QQQ`), day periods (`B`), padding (`p`)
+    // or modified Julian days (`g`); add when needed.
     fn letter(&mut self, c: char, n: usize) -> Option<()> {
         let num = |f, min, max, sign| Tok::Num {
             f,
@@ -173,8 +257,12 @@ impl Seq {
         // `X` and `x` index OFFSET_PATTERNS by `count + (count == 1 ? 0 : 1)`
         let offset = n + usize::from(n != 1);
         match c {
-            'y' | 'u' => {
-                let f = if c == 'y' { F::YearOfEra } else { F::Year };
+            'y' | 'u' | 'Y' => {
+                let f = match c {
+                    'y' => F::YearOfEra,
+                    'u' => F::Year,
+                    _ => F::WeekBasedYear,
+                };
                 self.value(match n {
                     2 => Tok::Num {
                         f,
@@ -193,6 +281,13 @@ impl Seq {
             'M' | 'L' => self.push(text(F::Month, n)?),
             'Q' | 'q' => self.value(one_or_two(F::Quarter)?),
             'E' => self.push(text(F::DayOfWeek, n)?),
+            'e' | 'c' if n >= 3 => self.push(text(F::DayOfWeek, n)?),
+            'e' | 'c' if n == 1 || c == 'e' && n == 2 => {
+                self.value(num(F::LocalDayOfWeek, n, n, Sign::NotNegative));
+            }
+            'w' if n <= 2 => self.value(num(F::WeekOfWeekBasedYear, n, 2, Sign::NotNegative)),
+            'W' if n == 1 => self.value(num(F::WeekOfMonth, 1, 1, Sign::NotNegative)),
+            'F' if n == 1 => self.value(num(F::AlignedWeekOfMonth, 1, 19, Sign::Normal)),
             'G' => self.push(text(F::Era, n)?),
             'a' if n == 1 => self.push(Tok::Text(F::AmPm, Style::Short)),
             'S' if n <= 9 => self.value(Tok::Fraction {
@@ -244,11 +339,13 @@ impl Seq {
 }
 
 /// A compiled pattern, or a formatter DateFormatters builds; `lenient` resolves out-of-range
-/// dates like `ResolverStyle.LENIENT` (only `strict_date` does).
+/// dates like `ResolverStyle.LENIENT` (only `strict_date` does); `week` is the week definition
+/// of its week-based fields, the locale's when `None`.
 #[derive(Clone, Debug)]
 pub struct Pattern {
     toks: Vec<Tok>,
     lenient: bool,
+    week: Option<Week>,
 }
 
 /// The zone a parsed value gave.
@@ -261,7 +358,7 @@ enum Zone {
 /// Parsed field values, by `F as usize`.
 #[derive(Clone, Default)]
 struct Fields {
-    v: [Option<i64>; 18],
+    v: [Option<i64>; 23],
     zone: Option<Zone>,
     lenient: bool,
 }
@@ -291,7 +388,7 @@ impl Fields {
 
 impl Pattern {
     /// Compiles a pattern like `appendPattern`; `None` where Java rejects it or es-mini lacks a
-    /// letter (no week-based fields, zone names, quarter names, day periods or padding).
+    /// letter (no zone names, quarter names, day periods or padding).
     pub fn new(pattern: &str) -> Option<Pattern> {
         let mut stack = vec![Seq::default()];
         append_pattern(&mut stack, pattern)?;
@@ -303,6 +400,7 @@ impl Pattern {
         Some(Pattern {
             toks: stack.pop()?.toks,
             lenient: false,
+            week: None,
         })
     }
 
@@ -330,7 +428,8 @@ impl Pattern {
         if round_up {
             self.round_up_defaults(&mut p);
         }
-        Some(instant(resolve(&mut p)?, p.zone.as_ref(), tz))
+        let week = self.week.unwrap_or_else(|| Week::of(locale));
+        Some(instant(resolve(&mut p, week)?, p.zone.as_ref(), tz))
     }
 
     /// `JavaDateFormatter.defaultRoundUp`: `parseDefaulting` for the fields not parsed.
@@ -340,9 +439,11 @@ impl Pattern {
         let mut default = |f: F, x: i64| {
             p.v[f as usize].get_or_insert(x);
         };
+        // as a `WeekBasedYear` in the formatter's text
+        let week_based = [F::WeekBasedYear, F::WeekOfWeekBasedYear];
         if has.contains(&F::DayOfYear) {
             default(F::DayOfYear, 1);
-        } else {
+        } else if !week_based.iter().any(|f| has.contains(f)) {
             default(F::Month, 1);
             default(F::DayOfMonth, 1);
         }
@@ -364,7 +465,8 @@ impl Pattern {
     /// field.
     pub fn format(&self, t: i64, offset: i64, locale: &str) -> Option<String> {
         let mut out = String::new();
-        format_seq(&self.toks, t + offset, offset, locale, &mut out)?;
+        let week = self.week.unwrap_or_else(|| Week::of(locale));
+        format_seq(&self.toks, t + offset, offset, locale, week, &mut out)?;
         Some(out)
     }
 }
@@ -734,7 +836,7 @@ fn date(y: i64, m: Option<i64>, d: Option<i64>, doy: Option<i64>) -> Option<Opti
 
 /// Local epoch millis of parsed fields: `Parsed.resolve` with ResolverStyle.STRICT, then
 /// `DateFormatters.from`; `None` where either throws.
-fn resolve(p: &mut Fields) -> Option<i128> {
+fn resolve(p: &mut Fields, week: Week) -> Option<i128> {
     // IsoChronology.resolveYMD when lenient: Jan 1, plus months, plus days
     if let (true, Some(y), Some(m), Some(d)) = (
         p.lenient,
@@ -758,20 +860,60 @@ fn resolve(p: &mut Fields) -> Option<i128> {
         }
     }
     p.take(F::Era);
+    // ComputedDayOfField.resolve: a localized day of the week is an ISO one
+    if let Some(ldow) = p.take(F::LocalDayOfWeek) {
+        p.v[F::DayOfWeek as usize] = Some((week.first + ldow - 2).rem_euclid(7) + 1);
+    }
     // the date java.time resolves (with a proleptic year) is cross-checked against other fields
     let (m, d, doy) = (p.get(F::Month), p.get(F::DayOfMonth), p.get(F::DayOfYear));
+    let dow = p.get(F::DayOfWeek);
     let java_date = match p.get(F::Year) {
-        Some(y) => date(y, m, d, doy)?,
-        None => None,
+        Some(y) => match (date(y, m, d, doy)?, m, dow) {
+            (Some(days), ..) => Some(days),
+            // resolveYMAD, then WeekFields' resolveWoM
+            (None, Some(m), Some(dow)) => {
+                let first = days_from_civil(y, m, 1);
+                let days = match (p.get(F::AlignedWeekOfMonth), p.get(F::WeekOfMonth)) {
+                    (Some(aw), _) => {
+                        let d = first + (aw - 1) * 7;
+                        Some(d + (dow - (d + 3).rem_euclid(7) - 1).rem_euclid(7))
+                    }
+                    (None, Some(wom)) => {
+                        Some(week.start(first) + (wom - 1) * 7 + week.local(dow) - 1)
+                    }
+                    (None, None) => None,
+                };
+                match days {
+                    Some(days) if crate::civil_from_days(days).1 != m => return None,
+                    days => days,
+                }
+            }
+            (None, ..) => None,
+        },
+        // resolveWBY, with the week in the year
+        None => match (p.get(F::WeekBasedYear), p.get(F::WeekOfWeekBasedYear), dow) {
+            (Some(y), Some(w), Some(dow)) if w <= week.weeks(y) => {
+                let start = week.start(days_from_civil(y, 1, 1));
+                Some(start + (w - 1) * 7 + week.local(dow) - 1)
+            }
+            (Some(_), Some(_), Some(_)) => return None,
+            _ => None,
+        },
     };
     if let Some(days) = java_date {
         let (y, cm, cd) = crate::civil_from_days(days);
+        let (wby, wowby) = week.week_of_year(days);
         let checks = [
             (F::Month, cm),
             (F::DayOfMonth, cd),
             (F::DayOfYear, days - days_from_civil(y, 1, 1) + 1),
             (F::DayOfWeek, (days + 3).rem_euclid(7) + 1),
             (F::Quarter, (cm - 1) / 3 + 1),
+            (F::YearOfEra, if y > 0 { y } else { 1 - y }),
+            (F::AlignedWeekOfMonth, (cd - 1) / 7 + 1),
+            (F::WeekOfMonth, week.week_of_month(days)),
+            (F::WeekBasedYear, wby),
+            (F::WeekOfWeekBasedYear, wowby),
         ];
         if checks
             .iter()
@@ -831,8 +973,15 @@ fn resolve(p: &mut Fields) -> Option<i128> {
         (None, Some(y)) => date(y, m, d, doy)?,
         (None, None) => None,
     };
+    // localDateFromWeekBasedDate: from 1970-01-01, the week-based year, then the week
+    let week_date = p.get(F::WeekBasedYear).map(|y| {
+        let w = p.get(F::WeekOfWeekBasedYear);
+        let w = w.unwrap_or_else(|| week.week_of_year(0).1.min(week.weeks(y)));
+        week.start(days_from_civil(y, 1, 1)) + (w - 1) * 7
+    });
     let days = match (local_date, time, year, m) {
         (Some(days), ..) => days,
+        (None, Some(_), ..) | (None, None, None, _) if week_date.is_some() => week_date?,
         (None, Some(_), y, Some(m)) | (None, None, y @ None, Some(m)) => {
             date(y.unwrap_or(1970), Some(m), Some(d.unwrap_or(1)), None)??
         }
@@ -844,7 +993,7 @@ fn resolve(p: &mut Fields) -> Option<i128> {
 }
 
 /// The value of field `f` at local epoch millis `t`.
-fn field_at(f: F, t: i64) -> i64 {
+fn field_at(f: F, t: i64, week: Week) -> i64 {
     let (days, ms) = (t.div_euclid(86_400_000), t.rem_euclid(86_400_000));
     let (y, m, d) = crate::civil_from_days(days);
     let h = ms / 3_600_000;
@@ -870,10 +1019,22 @@ fn field_at(f: F, t: i64) -> i64 {
         F::Nano => ms % 1000 * 1_000_000,
         F::MilliOfDay => ms,
         F::NanoOfDay => ms * 1_000_000,
+        F::AlignedWeekOfMonth => (d - 1) / 7 + 1,
+        F::WeekBasedYear => week.week_of_year(days).0,
+        F::WeekOfWeekBasedYear => week.week_of_year(days).1,
+        F::WeekOfMonth => week.week_of_month(days),
+        F::LocalDayOfWeek => week.dow(days),
     }
 }
 
-fn format_seq(toks: &[Tok], t: i64, offset: i64, locale: &str, out: &mut String) -> Option<()> {
+fn format_seq(
+    toks: &[Tok],
+    t: i64,
+    offset: i64,
+    locale: &str,
+    week: Week,
+    out: &mut String,
+) -> Option<()> {
     for tok in toks {
         match tok {
             Tok::Lit(l) => out.push_str(l),
@@ -885,7 +1046,7 @@ fn format_seq(toks: &[Tok], t: i64, offset: i64, locale: &str, out: &mut String)
                 reduced,
                 ..
             } => {
-                let v = field_at(f, t);
+                let v = field_at(f, t, week);
                 let v = if reduced { v.abs() % 100 } else { v };
                 let digits = v.unsigned_abs().to_string();
                 if digits.len() > max {
@@ -902,7 +1063,7 @@ fn format_seq(toks: &[Tok], t: i64, offset: i64, locale: &str, out: &mut String)
             }
             &Tok::Fraction { min, max, dot } => {
                 // trailing zeros are dropped down to `min` digits
-                let nanos = format!("{:09}", field_at(F::Nano, t));
+                let nanos = format!("{:09}", field_at(F::Nano, t, week));
                 let n = nanos.trim_end_matches('0').len().clamp(min, max);
                 if n > 0 && dot {
                     out.push('.');
@@ -910,7 +1071,7 @@ fn format_seq(toks: &[Tok], t: i64, offset: i64, locale: &str, out: &mut String)
                 out.push_str(&nanos[..n]);
             }
             &Tok::Text(f, style) => {
-                let i = field_at(f, t) - first_value(f);
+                let i = field_at(f, t, week) - first_value(f);
                 out.push_str(names(f, style, locale)?[i as usize]);
             }
             &Tok::Offset(pattern, zero) => format_offset(offset, pattern, zero, out),
@@ -937,7 +1098,7 @@ fn format_seq(toks: &[Tok], t: i64, offset: i64, locale: &str, out: &mut String)
             // ponytail: a region zone prints as its offset's ID (`+HH:MM:ss`); keep the zone's
             // ID in TimeZone to print `Europe/Paris`
             Tok::ZoneId => format_offset(offset, 6, "Z", out),
-            Tok::Optional(inner) => format_seq(inner, t, offset, locale, out)?,
+            Tok::Optional(inner) => format_seq(inner, t, offset, locale, week, out)?,
         }
     }
     Some(())
@@ -1014,5 +1175,137 @@ mod tests {
         assert_eq!(parse("yyyy-MM-dd HH:mm a", "2021-05-01 20:00 AM"), None);
         assert_eq!(parse("dd MMM yyyy", "01 MAY 2021"), None);
         assert_eq!(parse("MMMM d", "May 3"), Some(10_540_800_000));
+    }
+
+    fn days(iso: &str) -> i64 {
+        let n: Vec<i64> = iso.rsplitn(3, '-').map(|x| x.parse().unwrap()).collect();
+        days_from_civil(n[2], n[1], n[0]) * 86_400_000
+    }
+
+    /// Week-based fields print by the locale's region as in Elasticsearch 9.5.5.
+    #[test]
+    fn date_week_fields_print_like_elasticsearch() {
+        let print = |p: &str, iso: &str, locale: &str| {
+            Pattern::new(p)
+                .unwrap()
+                .format(days(iso), 0, locale)
+                .unwrap()
+        };
+        let p = "YYYY-ww-e c W F YY Y YYY YYYYY ee eee cccc eeeee w";
+        let root = [
+            (
+                "2020-12-27",
+                "2021-01-1 1 5 4 21 2021 2021 02021 01 Sun Sunday S 1",
+            ),
+            (
+                "2021-01-03",
+                "2021-02-1 1 2 1 21 2021 2021 02021 01 Sun Sunday S 2",
+            ),
+            (
+                "2021-12-31",
+                "2022-01-6 6 5 5 22 2022 2022 02022 06 Fri Friday F 1",
+            ),
+            (
+                "2024-12-31",
+                "2025-01-3 3 5 5 25 2025 2025 02025 03 Tue Tuesday T 1",
+            ),
+            (
+                "2026-05-31",
+                "2026-23-1 1 6 5 26 2026 2026 02026 01 Sun Sunday S 23",
+            ),
+            (
+                "0-01-01",
+                "0000-01-7 7 1 1 00 0 000 00000 07 Sat Saturday S 1",
+            ),
+            (
+                "-5-03-02",
+                "-0005-09-5 5 1 1 05 -5 -005 -00005 05 Thu Thursday T 9",
+            ),
+        ];
+        for (iso, want) in root {
+            assert_eq!(print(p, iso, ""), want, "{iso}");
+        }
+        let p = "YYYY-ww-e c W F";
+        let regions = [
+            ("fr-FR", "2021-01-01", "2020-53-5 5 0 1"),
+            ("fr_FR", "2024-12-31", "2025-01-2 2 5 5"),
+            ("en-GB", "2021-12-31", "2021-52-5 5 5 5"),
+            ("fr", "2021-01-03", "2021-02-1 1 2 1"),
+            ("en-EG", "2021-12-31", "2021-53-7 7 5 5"),
+            ("en-MV", "2021-12-31", "2022-01-1 1 6 5"),
+            ("is-IS", "2021-12-31", "2021-52-6 6 5 5"),
+            ("is-IS", "2022-01-01", "2021-52-7 7 0 1"),
+        ];
+        for (locale, iso, want) in regions {
+            assert_eq!(print(p, iso, locale), want, "{locale} {iso}");
+        }
+    }
+
+    /// Week-based fields parse and resolve as in Elasticsearch 9.5.5.
+    #[test]
+    fn date_week_fields_parse_like_elasticsearch() {
+        let parse = |p: &str, s: &str, locale: &str| {
+            Pattern::new(p)?.parse(s, locale, &TimeZone::UTC, false)
+        };
+        let cases = [
+            ("YYYY-ww-e", "2021-01-1", Some("2020-12-27")),
+            ("YYYY-ww-e", "2021-52-7", Some("2021-12-25")),
+            ("YYYY-ww-e", "2021-53-1", None),
+            ("YYYY-ww-e", "2021-00-1", None),
+            ("YYYY-ww-e", "2021-01-8", None),
+            ("YYYY-ww-e", "2021-01-01", None),
+            ("YYYY-ww", "2021-02", Some("2021-01-03")),
+            ("YYYY-ww", "2021-53", Some("2021-12-26")),
+            ("YYYY-ww", "2021-54", None),
+            ("YYYY", "1970", Some("1969-12-28")),
+            ("uuuu-MM W e", "2021-01 2 1", Some("2021-01-03")),
+            ("uuuu-MM W e", "2021-01 1 6", Some("2021-01-01")),
+            ("uuuu-MM W e", "2021-01 1 1", None),
+            ("uuuu-MM W e", "2021-02 6 1", None),
+            ("uuuu-MM F E", "2021-01 5 Sun", Some("2021-01-31")),
+            ("uuuu-MM F E", "2021-01 5 Tue", None),
+            ("uuuu-MM F E", "2021-01 6 Sun", None),
+            // a year-of-era without an era leaves the week of the month unresolved
+            ("yyyy-MM W e", "2021-01 2 1", Some("2021-01-01")),
+            ("uuuu-MM-dd e", "2021-01-03 2", None),
+            ("uuuu-MM-dd YYYY", "2021-01-03 2020", None),
+            (
+                "yyyy-MM-dd'T'YYYY-ww-e",
+                "2021-01-03T2021-02-1",
+                Some("2021-01-03"),
+            ),
+            ("yyyy-MM-dd'T'YYYY-ww-e", "2020-01-03T2021-02-1", None),
+            ("e", "3", None),
+            ("ww-e", "02-1", None),
+            // a year leaves the week-based fields unresolved
+            ("uuuu YYYY-ww-e", "2020 2021-02-1", Some("2020-01-01")),
+            ("YY-ww-e", "21-02-1", Some("2021-01-03")),
+            ("MM YYYY", "03 2021", Some("2020-12-27")),
+            ("YYYY-ww-c", "2021-02-1", Some("2021-01-03")),
+            ("YYYY'W'wwe", "2021W021", Some("2021-01-03")),
+            ("YYYYwwe", "2021021", Some("2021-01-03")),
+        ];
+        for (p, s, want) in cases {
+            assert_eq!(parse(p, s, ""), want.map(days), "{p} {s}");
+        }
+        let t = parse("YYYY-ww-e HH:mm", "2021-02-3 10:30", "");
+        assert_eq!(t, Some(days("2021-01-05") + 37_800_000));
+        let regional = [
+            ("YYYY-ww-e", "2021-01-1", "fr-FR", Some("2021-01-04")),
+            ("YYYY-ww-e", "2020-53-5", "fr-FR", Some("2021-01-01")),
+            ("YYYY-ww-e", "2021-53-1", "fr-FR", None),
+            // the week of 1970-01-01 is the last of 1969 in Iceland
+            ("YYYY", "2021", "is-IS", Some("2021-12-26")),
+            ("YYYY", "1970", "is-IS", Some("1970-12-27")),
+        ];
+        for (p, s, locale, want) in regional {
+            assert_eq!(parse(p, s, locale), want.map(days), "{p} {s} {locale}");
+        }
+        // rounding up defaults no month or day after a week-based year
+        let up = |p: &str, s: &str| Pattern::new(p)?.parse(s, "", &TimeZone::UTC, true);
+        let end = |iso| days(iso) + 86_399_999;
+        assert_eq!(up("YYYY", "2021"), Some(end("2020-12-27")));
+        assert_eq!(up("YYYY-ww-e", "2021-02-1"), Some(end("2021-01-03")));
+        assert_eq!(up("uuuu-ww", "2021-01"), Some(end("1970-01-01")));
     }
 }

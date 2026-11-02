@@ -1402,8 +1402,8 @@ pub(crate) fn date_instant_in(
         "epoch_second" => json_num(v).map(|x| {
             i128::from((x * 1000.0) as i64) + if round_up && x.fract() == 0.0 { 999 } else { 0 }
         }),
-        // ponytail: formats es-mini lacks (week-based fields, see date_pattern) parse as
-        // strict_date_optional_time
+        // ponytail: formats es-mini lacks (zone names and the other letters date_pattern names)
+        // parse as strict_date_optional_time
         f => {
             // a number parses as its text, as in ES (1000 is the year 1000)
             let s = match v {
@@ -1700,6 +1700,18 @@ mod tests {
             Some(at("2021-05-01T23:59:59.999Z"))
         );
         assert_eq!(up("MMMM d", "May 3"), Some(at("1970-05-03T23:59:59.999Z")));
+    }
+
+    /// A mapping's week-based format reads week dates in its locale's weeks.
+    #[test]
+    fn date_week_fields_mapping_formats_read_week_dates() {
+        let at = |iso: &str| parse_date_millis(&json!(iso)).unwrap();
+        let v = json!("2021-01-1");
+        let f = Some("YYYY-ww-e");
+        assert_eq!(date_millis(f, None, &v), Some(at("2020-12-27")));
+        assert_eq!(date_millis(f, Some("fr-FR"), &v), Some(at("2021-01-04")));
+        let up = date_millis_in(f, None, &v, &tz::TimeZone::UTC, true);
+        assert_eq!(up, Some(at("2020-12-27T23:59:59.999Z")));
     }
 
     #[test]

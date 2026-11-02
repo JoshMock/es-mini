@@ -5,7 +5,7 @@ use super::{
     F::{self, *},
     Pattern, Seq, Sign,
     Sign::*,
-    Tok, Zone, append_pattern, days_in_month, instant,
+    Tok, Week, Zone, append_pattern, days_in_month, instant,
 };
 use crate::{days_from_civil, tz::TimeZone};
 
@@ -484,6 +484,7 @@ fn build(calls: &[B], lenient: bool) -> Option<Pattern> {
     Some(Pattern {
         toks: stack.pop()?.toks,
         lenient,
+        week: Some(Week::ISO),
     })
 }
 

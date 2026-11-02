@@ -1701,8 +1701,8 @@ fn mv_fn(f: &str, v: &Value) -> Option<Value> {
 
 /// `DATE_EXTRACT(part, date)` or `DATE_FORMAT([pattern,] date)` in UTC, like Elasticsearch's
 /// evaluators: `None` for a multi-valued argument or an unknown part (where ES warns).
-// ponytail: DATE_FORMAT prints null for a pattern es_index::format_date lacks (week fields, zone
-// names) or rejects, where ES formats it or fails the query
+// ponytail: DATE_FORMAT is null for a pattern es_index::format_date rejects or lacks (zone names
+// and the other letters es_index::date_pattern names), where ES fails the query or formats it
 fn date_fn(f: &str, args: &[Value]) -> Option<Value> {
     let t = es_index::parse_date_millis(args.last()?)?;
     if f == "DATE_FORMAT" {
