@@ -63,6 +63,12 @@ const MAX_CONSECUTIVE_REJECTIONS = 6;
 const MAX_GOAL_ATTEMPTS = 3;
 /** Stop when the temp filesystem (build cache, test scratch) has less free space than this. */
 const MIN_FREE_TMP_BYTES = 1.5e9;
+/**
+ * Clear the build cache's debug/ when CARGO_TARGET_DIR is larger than this: stale test binaries
+ * pile up there and hit the /tmp quota before free space runs low. A clean debug build is about
+ * 7.8 GB plus 1.2 GB of release; the quota failed one weekend run at 11 GB.
+ */
+const MAX_TARGET_BYTES = 9.5e9;
 /** Marks an iteration in progress, so a restart after a crash can roll it back. */
 const IN_PROGRESS = "ralph/.iteration-start";
 const SONNET = "anthropic/claude-sonnet-5-5", OPUS = "anthropic/claude-opus-5-5";
@@ -307,6 +313,19 @@ function freeTmpBytes(): number {
   return Number(out.trim().split("\n").pop()) || Infinity;
 }
 
+/** Deletes CARGO_TARGET_DIR/debug when the target directory outgrows MAX_TARGET_BYTES. */
+// ponytail: drops the whole debug cache (a full rebuild, about 10 minutes at -j 2), not just
+// stale binaries; prune by age if rebuilds start to cost iterations
+function trimBuildCache() {
+  const dir = process.env.CARGO_TARGET_DIR;
+  if (!dir) return;
+  const out = spawnSync("du", ["-sb", dir], { encoding: "utf8" }).stdout ?? "";
+  const used = Number(out.split("\t")[0]) || 0;
+  if (used <= MAX_TARGET_BYTES) return;
+  report(`build cache ${dir} is ${(used / 1e9).toFixed(1)} GB; deleting its debug/`);
+  rmSync(join(dir, "debug"), { recursive: true, force: true });
+}
+
 /** Runs one iteration and rolls it back if verification fails or the agent errors; returns
  * whether it was accepted. */
 async function iterate(label: string, makePrompt: (m: string) => string, opts: Parameters<typeof verify>[2], spec: string) {
@@ -365,6 +384,7 @@ outer: for (const name of suiteNames) {
   while (true) {
     if (done >= max) { stopReason = `reached --max ${max}`; break outer; }
     if (until && new Date() >= until) { stopReason = "reached --until"; break outer; }
+    if (!dryRun) trimBuildCache();
     if (!dryRun && freeTmpBytes() < MIN_FREE_TMP_BYTES) {
       stopReason = "less than 1.5 GB free in /tmp";
       break outer;
