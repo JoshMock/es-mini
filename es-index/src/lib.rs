@@ -640,8 +640,7 @@ impl Shard {
     }
 
     /// The result of `compute` for `key`, reused until the visible documents or the mappings
-    /// change, like Elasticsearch's shard request cache. Past [`REQUEST_CACHE_BYTES`] it evicts
-    /// the least recently used entries.
+    /// change, like Elasticsearch's shard request cache (see [`Shard::cache_get`]).
     pub fn cached<E>(
         &self,
         settings: &Settings,
@@ -649,70 +648,90 @@ impl Shard {
         key: String,
         compute: impl FnOnce() -> Result<Value, E>,
     ) -> Result<Value, E> {
-        let visible = self.visible_seq_no(settings);
-        let lock = || {
-            self.request_cache
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-        };
-        {
-            let mut c = lock();
-            if !c
-                .reader
-                .as_ref()
-                .is_some_and(|r| r.0 == visible && r.1 == *mappings)
-            {
-                c.reader = Some((visible, mappings.clone()));
-                c.entries.clear();
-                c.recency.clear();
-                c.bytes = 0;
-            }
-            c.tick += 1;
-            let tick = c.tick;
-            if let Some((v, used)) = c.entries.get_mut(&key) {
-                let (v, last) = (v.clone(), std::mem::replace(used, tick));
-                c.recency.remove(&last);
-                c.recency.insert(tick, key);
-                c.hits += 1;
-                return Ok(v);
-            }
-            c.misses += 1;
+        let (found, visible) = self.cache_get(settings, mappings, &key);
+        if let Some(v) = found {
+            return Ok(v);
         }
         // Computed unlocked so that other searches of this index are not held up.
         let v = compute()?;
-        let mut c = lock();
-        if c.reader
+        self.cache_put(mappings, visible, key, &v);
+        Ok(v)
+    }
+
+    /// The request cache's entry for `key`, counted as a hit or a miss, and the visible
+    /// sequence number to hand [`Shard::cache_put`]. Entries last until the visible documents
+    /// or the mappings change.
+    pub fn cache_get(
+        &self,
+        settings: &Settings,
+        mappings: &Mappings,
+        key: &str,
+    ) -> (Option<Value>, u64) {
+        let visible = self.visible_seq_no(settings);
+        let mut c = self.cache_lock();
+        if !c
+            .reader
             .as_ref()
             .is_some_and(|r| r.0 == visible && r.1 == *mappings)
         {
-            c.tick += 1;
-            let tick = c.tick;
-            c.bytes += key.len() + v.to_string().len();
-            c.recency.insert(tick, key.clone());
-            // another search may have computed it at the same time
-            if let Some((old, last)) = c.entries.insert(key.clone(), (v.clone(), tick)) {
-                c.recency.remove(&last);
-                c.bytes -= key.len() + old.to_string().len();
-            }
-            while c.bytes > REQUEST_CACHE_BYTES {
-                let Some((_, k)) = c.recency.pop_first() else {
-                    break;
-                };
-                let (old, _) = c.entries.remove(&k).expect("recency lists cached keys");
-                c.bytes -= k.len() + old.to_string().len();
-                c.evictions += 1;
-            }
+            c.reader = Some((visible, mappings.clone()));
+            c.entries.clear();
+            c.recency.clear();
+            c.bytes = 0;
         }
-        Ok(v)
+        c.tick += 1;
+        let tick = c.tick;
+        if let Some((v, used)) = c.entries.get_mut(key) {
+            let (v, last) = (v.clone(), std::mem::replace(used, tick));
+            c.recency.remove(&last);
+            c.recency.insert(tick, key.to_owned());
+            c.hits += 1;
+            return (Some(v), visible);
+        }
+        c.misses += 1;
+        (None, visible)
+    }
+
+    /// Caches `v` for `key` unless the documents visible at `visible` (from
+    /// [`Shard::cache_get`]) or the mappings changed since. Past [`REQUEST_CACHE_BYTES`] it
+    /// evicts the least recently used entries.
+    pub fn cache_put(&self, mappings: &Mappings, visible: u64, key: String, v: &Value) {
+        let mut c = self.cache_lock();
+        if !(c.reader)
+            .as_ref()
+            .is_some_and(|r| r.0 == visible && r.1 == *mappings)
+        {
+            return;
+        }
+        c.tick += 1;
+        let tick = c.tick;
+        c.bytes += key.len() + v.to_string().len();
+        c.recency.insert(tick, key.clone());
+        // another search may have computed it at the same time
+        if let Some((old, last)) = c.entries.insert(key.clone(), (v.clone(), tick)) {
+            c.recency.remove(&last);
+            c.bytes -= key.len() + old.to_string().len();
+        }
+        while c.bytes > REQUEST_CACHE_BYTES {
+            let Some((_, k)) = c.recency.pop_first() else {
+                break;
+            };
+            let (old, _) = c.entries.remove(&k).expect("recency lists cached keys");
+            c.bytes -= k.len() + old.to_string().len();
+            c.evictions += 1;
+        }
+    }
+
+    fn cache_lock(&self) -> std::sync::MutexGuard<'_, RequestCache> {
+        self.request_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// The request cache's (hit count, miss count, eviction count, size of its entries in
     /// bytes).
     pub fn request_cache_stats(&self) -> (u64, u64, u64, usize) {
-        let c = self
-            .request_cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let c = self.cache_lock();
         (c.hits, c.misses, c.evictions, c.bytes)
     }
 

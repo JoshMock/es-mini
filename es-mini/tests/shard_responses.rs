@@ -224,3 +224,25 @@ async fn shard_reads_stats_count_the_request_cache_of_each_shard() {
         "{r}"
     );
 }
+
+#[tokio::test]
+async fn shard_reads_searches_cache_each_shard_of_every_index() {
+    let app = setup("keyword", "keyword").await;
+    let search = || call(&app, "POST", "/a,b/_search", json!({"size": 0}));
+    search().await;
+    search().await;
+    // a write to b leaves the entries of a's shards, and the next search sees it
+    call(&app, "PUT", "/b/_doc/new?refresh=true", json!({"f": "x"})).await;
+    let (_, r) = search().await;
+    assert_eq!(r["hits"]["total"]["value"], 13, "{r}");
+    let uri = "/a,b/_stats/request_cache?level=shards";
+    let (_, r) = call(&app, "GET", uri, Value::Null).await;
+    let counts = |c: &Value| (c["hit_count"].as_u64(), c["miss_count"].as_u64());
+    let a = &r["indices"]["a"];
+    for n in ["0", "1", "2"] {
+        let c = &a["shards"][n][0]["request_cache"];
+        assert_eq!(counts(c), (Some(2), Some(1)), "shard {n}: {r}");
+    }
+    let b = &r["indices"]["b"]["total"]["request_cache"];
+    assert_eq!(counts(b), (Some(1), Some(2)), "{r}");
+}

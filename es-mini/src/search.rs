@@ -273,6 +273,17 @@ pub async fn search(
         None => None,
     };
     let (shared, indices, resolved, split);
+    // Like Elasticsearch's IndicesService.canCache, per shard of each index searched.
+    // ponytail: each shard caches the merged response rather than its own result, so the
+    // counts and invalidation are per shard but a miss on any shard recomputes the search
+    let mut cache: Vec<(&es_index::Index, &es_index::Shard)> = vec![];
+    let mut uncached = false;
+    let flag = params.get("request_cache").map(String::as_str);
+    let cacheable = |index: &es_index::Index| match flag {
+        _ if scroll.is_some() || snapshot.is_some() || req.profile => false,
+        Some(v) => v == "true",
+        None => req.size == 0 && index.settings.get("index.requests.cache.enable") != Some("false"),
+    };
     let targets = match &snapshot {
         Some(s) => s
             .iter()
@@ -283,6 +294,13 @@ pub async fn search(
             resolved = crate::indices::data_targets(&*shared, &name, &params)?;
             indices = shared.lock(resolved.iter().map(|t| &t.index));
             split = self::split(&indices, &resolved);
+            for t in &resolved {
+                let index: &es_index::Index = &indices[&t.index];
+                match cacheable(index) {
+                    true => cache.extend(index.shards().iter().map(|s| (index, s))),
+                    false => uncached = true,
+                }
+            }
             targets(&indices, &resolved, &split)
         }
     };
@@ -300,21 +318,6 @@ pub async fn search(
         }
     }
     es_query::check_sortable(&targets, &req)?;
-    let page = req.size;
-    // Like Elasticsearch's IndicesService.canCache; the key is the request after terms lookups.
-    // ponytail: only single-index searches are cached; ES caches each shard's result
-    let cache = match (
-        &targets[..],
-        params.get("request_cache").map(String::as_str),
-    ) {
-        (_, Some("false")) => None,
-        _ if scroll.is_some() || snapshot.is_some() || req.profile => None,
-        ([(_, index, _)], Some("true")) => Some(index),
-        ([(_, index, _)], _) => (page == 0
-            && index.settings.get("index.requests.cache.enable") != Some("false"))
-        .then_some(index),
-        _ => None,
-    };
     let as_int = params
         .get("rest_total_hits_as_int")
         .is_some_and(|v| v == "true");
@@ -385,15 +388,29 @@ pub async fn search(
         }
         Ok(resp)
     };
-    let mut resp = match cache {
-        Some(index) => {
-            let mut key: Vec<_> = (params.iter())
-                .filter(|(k, _)| !matches!(k.as_str(), "request_cache" | "preference"))
-                .collect();
-            key.sort();
-            index.cached(format!("{body}{key:?}{:?}", targets[0].2), respond)?
+    let mut resp = if cache.is_empty() {
+        respond()?
+    } else {
+        // the request after terms lookups, and the shards it searches
+        let mut key: Vec<_> = (params.iter())
+            .filter(|(k, _)| !matches!(k.as_str(), "request_cache" | "preference"))
+            .collect();
+        key.sort();
+        let searched: Vec<_> = targets.iter().map(|(name, _, f)| (name, f)).collect();
+        let key = format!("{body}{key:?}{searched:?}");
+        let found: Vec<_> = (cache.iter())
+            .map(|(index, s)| s.cache_get(&index.settings, &index.mappings, &key))
+            .collect();
+        match &found[..] {
+            [(Some(v), _), ..] if !uncached && found.iter().all(|f| f.0.is_some()) => v.clone(),
+            _ => {
+                let v = respond()?;
+                for ((index, s), (_, visible)) in cache.iter().zip(&found) {
+                    s.cache_put(&index.mappings, *visible, key.clone(), &v);
+                }
+                v
+            }
         }
-        None => respond()?,
     };
     resp["took"] = (start.elapsed().as_millis() as u64).into();
     if let Some(p) = &pit_id {
