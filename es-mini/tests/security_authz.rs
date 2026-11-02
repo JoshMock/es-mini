@@ -793,3 +793,21 @@ async fn alias_actions_need_manage_on_indices_and_aliases() {
         )
     );
 }
+
+#[tokio::test]
+async fn percent_encoded_paths_are_authorized_decoded() {
+    let app = app().await;
+    let (k, _) = key(&app, ELASTIC, read_a()).await;
+    // `a1%2Cb1` is `a1,b1` once decoded: b1 must not be readable through it.
+    for uri in ["/a1%2Cb1/_search", "/a1%2cb1/_count", "/%62%31/_search"] {
+        let (status, body) = call(&app, &k, "GET", uri, None).await;
+        assert_eq!(status, 403, "{uri}: {body}");
+    }
+    // An encoded name the key may read still works.
+    let (status, body) = call(&app, &k, "GET", "/%61%31/_search", None).await;
+    assert_eq!(
+        (status, &body["hits"]["total"]["value"]),
+        (200, &json!(1)),
+        "{body}"
+    );
+}

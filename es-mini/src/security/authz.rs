@@ -374,8 +374,11 @@ impl Key<'_> {
         uri: &Uri,
         params: &HashMap<String, String>,
     ) -> Result<Option<Uri>, AppError> {
-        let path = uri.path();
-        let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        // Checked decoded, as the handlers' `Path` extractors see them: `a1%2Cb1` names b1 too.
+        let decoded: Vec<String> = (uri.path().split('/').filter(|s| !s.is_empty()))
+            .map(decode)
+            .collect::<Result<_, _>>()?;
+        let segs: Vec<&str> = decoded.iter().map(String::as_str).collect();
         let mut rewritten = None;
         for step in steps(method, &segs, params) {
             match step {
@@ -394,11 +397,11 @@ impl Key<'_> {
                         self.indices(&security.store.read(), action, expr, expand, params)?;
                     if expand {
                         let names = expression(&names, encoded);
-                        let mut segs: Vec<&str> = segs.clone();
+                        let mut segs: Vec<String> = segs.iter().map(|s| encoded(s)).collect();
                         match at {
-                            Place::Segment(i) => segs[i] = &names,
-                            Place::Prefix => segs.insert(0, &names),
-                            Place::Suffix => segs.push(&names),
+                            Place::Segment(i) => segs[i] = names,
+                            Place::Prefix => segs.insert(0, names),
+                            Place::Suffix => segs.push(names),
                         }
                         rewritten = Some(format!("/{}", segs.join("/")));
                     }
@@ -1142,14 +1145,36 @@ fn covers(e: &Value, action: &str, name: &str) -> bool {
     names.filter_map(Value::as_str).any(|n| glob(n, name)) && grants(&e["privileges"], action)
 }
 
-/// `name` with the bytes a path segment cannot hold percent-encoded (`%` is kept: names taken
-/// from the path are still encoded).
+/// The path segment `seg` percent-decoded, as axum's `Path` extractor decodes it.
+fn decode(seg: &str) -> Result<String, AppError> {
+    let bytes = seg.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = bytes
+            .get(i + 1..i + 3)
+            .filter(|h| h.iter().all(u8::is_ascii_hexdigit));
+        match hex
+            .filter(|_| bytes[i] == b'%')
+            .and_then(|h| std::str::from_utf8(h).ok())
+        {
+            Some(h) => (
+                out.push(u8::from_str_radix(h, 16).unwrap_or_default()),
+                i += 3,
+            ),
+            _ => (out.push(bytes[i]), i += 1),
+        };
+    }
+    String::from_utf8(out).map_err(|e| AppError::IllegalArgument(e.to_string()))
+}
+
+/// `name` with the bytes a path segment cannot hold percent-encoded.
 fn encoded(name: &str) -> String {
     let mut out = String::new();
     for b in name.bytes() {
         match b {
             b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' => out.push(b.into()),
-            _ if b"-._~!$&'()*+,;=:@%".contains(&b) => out.push(b.into()),
+            _ if b"-._~!$&'()*+,;=:@".contains(&b) => out.push(b.into()),
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }
@@ -1182,6 +1207,11 @@ mod tests {
     #[test]
     fn names_are_encoded_for_paths() {
         assert_eq!(super::encoded("logs-é 1"), "logs-%C3%A9%201");
+        assert_eq!(
+            super::decode("a%2Cb%2c%C3%A9%zz%+1%").unwrap(),
+            "a,b,é%zz%+1%"
+        );
+        assert_eq!(super::encoded("50%"), "50%25");
     }
 
     #[test]
