@@ -546,12 +546,14 @@ async fn error_shapes_bad_dates_report_their_location_and_cause() {
             "type": "illegal_argument_exception",
             "reason": format!("failed to parse date field [{value}] with format [{format}]"),
         });
-        if format.contains("||") {
-            cause["caused_by"] = json!({
-                "type": "date_time_parse_exception",
-                "reason": "Failed to parse with all enclosed parsers",
-            });
-        }
+        // one pattern names where the text stopped parsing
+        cause["caused_by"] = json!({
+            "type": "date_time_parse_exception",
+            "reason": match format.contains("||") {
+                true => "Failed to parse with all enclosed parsers".to_owned(),
+                false => format!("Text '{value}' could not be parsed at index 0"),
+            },
+        });
         let root = json!({"type": "document_parsing_exception", "reason": reason});
         json!({"root_cause": [root], "type": "document_parsing_exception", "reason": reason,
             "caused_by": cause})

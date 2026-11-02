@@ -430,6 +430,9 @@ fn is_zone(c: u8) -> bool {
     c == b'+' || c == b'-' || c.is_ascii_alphabetic()
 }
 
+/// The `DateTimeParseException` reason when all of several parsers fail.
+pub(crate) const ENCLOSED: &str = "Failed to parse with all enclosed parsers";
+
 /// One of a format's parsers.
 #[derive(Clone, Debug)]
 enum Parser {
@@ -470,6 +473,17 @@ impl DateFormat {
             Parser::Java(p) => p.parse_wide(s, locale, tz, round_up),
             Parser::Iso(iso) => iso.parse(s, tz, round_up),
         })
+    }
+
+    /// The `DateTimeParseException` reason of `s` failing to parse, as
+    /// `JavaDateFormatter.doParse` gives it; `None` if it parses but does not resolve.
+    pub fn parse_error(&self, s: &str, locale: &str) -> Option<String> {
+        match self.parsers.as_slice() {
+            [Parser::Java(p)] => p.parse_error(s, locale),
+            // ponytail: Iso8601DateTimeParser's index (a lone strict_date_optional_time) is left out
+            [Parser::Iso(_)] => None,
+            _ => Some(ENCLOSED.into()),
+        }
     }
 
     /// Instant `t` in zone `tz` (see [`Pattern::format`]).

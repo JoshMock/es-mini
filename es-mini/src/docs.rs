@@ -299,12 +299,12 @@ pub fn put_or_create(
                     "type": "illegal_argument_exception",
                     "reason": format!("failed to parse date field [{text}] with format [{format}]"),
                 });
-                // ponytail: a one-pattern format's date_time_parse_exception cause (naming where
-                // the text stopped parsing) is left out
-                if format.contains("||") {
+                // ponytail: a value that parses but does not resolve gets this cause, where ES's
+                // is a date_time_exception naming the field out of range
+                if let Some(reason) = es_index::date_parse_error(format, locale, &text) {
                     cause["caused_by"] = json!({
                         "type": "date_time_parse_exception",
-                        "reason": "Failed to parse with all enclosed parsers",
+                        "reason": reason,
                     });
                 }
                 return Err(AppError::Caused(Box::new(error), cause));

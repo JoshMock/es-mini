@@ -8,6 +8,7 @@ use std::{collections::HashMap, sync::OnceLock};
 
 mod named;
 pub use named::DateFormat;
+pub(crate) use named::ENCLOSED;
 
 /// The `ChronoField`s patterns can name.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -376,6 +377,8 @@ struct Fields {
     zone: Option<Zone>,
     lenient: bool,
     insensitive: bool,
+    /// Whether a parser set a field out of its range, which only resolving fails.
+    out_of_range: bool,
 }
 
 impl Fields {
@@ -394,6 +397,14 @@ impl Fields {
             Some(old) if old != x => None,
             _ => Some(()),
         }
+    }
+
+    /// A field as a parser sets it (`Parsed.fieldValues`): `false` on a conflicting value; a
+    /// value out of range fails only the resolving, as in java.time.
+    fn parsed(&mut self, f: F, x: i64) -> bool {
+        let (lo, hi) = f.range();
+        self.out_of_range |= !self.lenient && !(lo..=hi).contains(&x);
+        self.v[f as usize].replace(x).is_none_or(|old| old == x)
     }
 
     fn take(&mut self, f: F) -> Option<i64> {
@@ -437,7 +448,7 @@ impl Pattern {
             lenient: self.lenient,
             ..Fields::default()
         };
-        if parse_seq(&self.toks, s, 0, &mut p, locale)? != s.len() {
+        if parse_seq(&self.toks, s, 0, &mut p, locale).ok()? != s.len() || p.out_of_range {
             return None;
         }
         if round_up {
@@ -445,6 +456,32 @@ impl Pattern {
         }
         let week = self.week.unwrap_or_else(|| Week::of(locale));
         Some(instant(resolve(&mut p, week)?, p.zone.as_ref(), tz))
+    }
+
+    /// The `DateTimeParseException` reason of `s` failing to parse, like
+    /// `DateTimeFormatter.createError`, with java.time's UTF-16 indices; `None` if it parses.
+    pub(crate) fn parse_error(&self, s: &str, locale: &str) -> Option<String> {
+        let mut p = Fields {
+            lenient: self.lenient,
+            ..Fields::default()
+        };
+        let index = |at: usize| s[..at].encode_utf16().count();
+        let why = match parse_seq(&self.toks, s, 0, &mut p, locale) {
+            Err(at) => format!("could not be parsed at index {}", index(at)),
+            Ok(end) if end < s.len() => {
+                format!(
+                    "could not be parsed, unparsed text found at index {}",
+                    index(end)
+                )
+            }
+            Ok(_) => return None,
+        };
+        let utf16: Vec<u16> = s.encode_utf16().collect();
+        let text = match utf16.len() > 64 {
+            true => String::from_utf16_lossy(&utf16[..64]) + "...",
+            false => s.to_owned(),
+        };
+        Some(format!("Text '{text}' {why}"))
     }
 
     /// `JavaDateFormatter.defaultRoundUp`: `parseDefaulting` for the fields not parsed.
@@ -603,13 +640,24 @@ fn first_value(f: F) -> i64 {
     }
 }
 
-fn parse_seq(toks: &[Tok], s: &str, mut pos: usize, p: &mut Fields, locale: &str) -> Option<usize> {
+/// Parses `toks` from `pos` of `s` into `p`: the position after them, or where java.time's
+/// parser failed (its `~position`).
+fn parse_seq(
+    toks: &[Tok],
+    s: &str,
+    mut pos: usize,
+    p: &mut Fields,
+    locale: &str,
+) -> Result<usize, usize> {
     for t in toks {
         let rest = &s[pos..];
+        let at = pos;
+        let fail = |ok: bool| if ok { Ok(()) } else { Err(at) };
         pos += match t {
             Tok::Lit(l) => {
-                let text = rest.get(..l.len())?;
-                (text == l || p.insensitive && text.eq_ignore_ascii_case(l)).then_some(l.len())?
+                let text = rest.get(..l.len()).ok_or(at)?;
+                fail(text == l || p.insensitive && text.eq_ignore_ascii_case(l))?;
+                l.len()
             }
             &Tok::Num {
                 f,
@@ -619,13 +667,21 @@ fn parse_seq(toks: &[Tok], s: &str, mut pos: usize, p: &mut Fields, locale: &str
                 subsequent,
                 reduced,
             } => {
-                let (v, n) = parse_num(rest.as_bytes(), min, max, sign, subsequent)?;
-                p.set(f, if reduced { 2000 + v } else { v })?;
+                let (v, n) =
+                    parse_num(rest.as_bytes(), min, max, sign, subsequent).map_err(|i| at + i)?;
+                // the value's position is after its sign
+                let signed = usize::from(rest.starts_with(['+', '-']));
+                if !p.parsed(f, if reduced { 2000 + v } else { v }) {
+                    return Err(at + signed);
+                }
                 n
             }
             &Tok::Fraction { min, max, dot } => {
                 let start = match dot {
-                    true if !rest.starts_with('.') => (min == 0).then_some(0)?,
+                    true if !rest.starts_with('.') => match min {
+                        0 => 0,
+                        _ => return Err(at),
+                    },
                     true => 1,
                     false => 0,
                 };
@@ -635,30 +691,39 @@ fn parse_seq(toks: &[Tok], s: &str, mut pos: usize, p: &mut Fields, locale: &str
                     .take_while(u8::is_ascii_digit)
                     .count();
                 if digits < min {
-                    return None;
+                    return Err(at + start);
                 }
-                if digits > 0 || dot && start == 1 {
-                    let d = &rest[start..start + digits];
-                    p.set(F::Nano, format!("{d:0<9}").parse().unwrap_or(0))?;
+                if (digits > 0 || dot && start == 1)
+                    && !p.parsed(
+                        F::Nano,
+                        format!("{:0<9}", &rest[start..start + digits])
+                            .parse()
+                            .unwrap_or(0),
+                    )
+                {
+                    return Err(at + start);
                 }
                 start + digits
             }
             &Tok::Text(f, style) => {
-                let names = names(f, style, locale)?;
+                let names = names(f, style, locale).ok_or(at)?;
                 let (i, name) = (names.iter().enumerate())
                     .filter(|(_, n)| rest.starts_with(*n))
-                    .max_by_key(|(i, n)| (n.len(), std::cmp::Reverse(*i)))?;
-                p.set(f, first_value(f) + i as i64)?;
+                    .max_by_key(|(i, n)| (n.len(), std::cmp::Reverse(*i)))
+                    .ok_or(at)?;
+                fail(p.parsed(f, first_value(f) + i as i64))?;
                 name.len()
             }
             &Tok::Offset(pattern, zero) => {
-                let (o, n) = parse_offset(rest, pattern, zero, p.insensitive)?;
-                set_zone(p, Zone::Offset(o))?;
+                // ponytail: an hour past 23 fails at the offset, where java.time throws
+                // "Value out of range"
+                let (o, n) = parse_offset(rest, pattern, zero, p.insensitive).ok_or(at)?;
+                fail(set_zone(p, Zone::Offset(o)).is_some())?;
                 n
             }
             &Tok::Gmt { full } => {
-                let (o, n) = parse_gmt(rest, full)?;
-                set_zone(p, Zone::Offset(o))?;
+                let (o, n) = parse_gmt(rest, full).ok_or(at)?;
+                fail(set_zone(p, Zone::Offset(o)).is_some())?;
                 n
             }
             Tok::ZoneId => {
@@ -673,8 +738,9 @@ fn parse_seq(toks: &[Tok], s: &str, mut pos: usize, p: &mut Fields, locale: &str
                 };
                 let (n, zone) = (1..=end)
                     .rev()
-                    .find_map(|n| Some((n, TimeZone::parse(&id(n))?)))?;
-                set_zone(p, Zone::Region(zone))?;
+                    .find_map(|n| Some((n, TimeZone::parse(&id(n))?)))
+                    .ok_or(at)?;
+                fail(set_zone(p, Zone::Region(zone)).is_some())?;
                 n
             }
             Tok::Insensitive => {
@@ -684,16 +750,16 @@ fn parse_seq(toks: &[Tok], s: &str, mut pos: usize, p: &mut Fields, locale: &str
             Tok::Optional(inner) => {
                 let mut q = p.clone();
                 match parse_seq(inner, s, pos, &mut q, locale) {
-                    Some(end) => {
+                    Ok(end) => {
                         *p = q;
                         end - pos
                     }
-                    None => 0,
+                    Err(_) => 0,
                 }
             }
         };
     }
-    Some(pos)
+    Ok(pos)
 }
 
 fn set_zone(p: &mut Fields, zone: Zone) -> Option<()> {
@@ -710,44 +776,45 @@ fn set_zone(p: &mut Fields, zone: Zone) -> Option<()> {
     }
 }
 
-/// `NumberPrinterParser.parse` in strict mode: the value and the bytes it took.
+/// `NumberPrinterParser.parse` in strict mode: the value and the bytes it took, or the index
+/// where it failed.
 fn parse_num(
     s: &[u8],
     min: usize,
     max: usize,
     sign: Sign,
     subsequent: usize,
-) -> Option<(i64, usize)> {
-    let (negative, positive) = match s.first()? {
+) -> Result<(i64, usize), usize> {
+    let (negative, positive) = match s.first().ok_or(0usize)? {
         b'+' if sign == Sign::ExceedsPad => (false, true),
         b'-' if sign != Sign::NotNegative => (true, false),
-        b'+' | b'-' => return None,
+        b'+' | b'-' => return Err(0),
         _ => (false, false),
     };
     let start = usize::from(negative || positive);
     let digits = s[start..].iter().take_while(|b| b.is_ascii_digit()).count();
     let mut n = digits.min(max + subsequent);
     if n < min {
-        return None;
+        return Err(start);
     }
     if subsequent > 0 {
         n = min.max(n.saturating_sub(subsequent));
     }
-    let text = std::str::from_utf8(&s[start..start + n]).ok()?;
+    let text = std::str::from_utf8(&s[start..start + n]).map_err(|_| start)?;
     // Java parses one digit less when the value would overflow a long
     let (mut v, n) = match text.parse::<i64>() {
         Ok(v) => (v, n),
-        Err(_) => (text[..n - 1].parse().ok()?, n - 1),
+        Err(_) => (text[..n - 1].parse().map_err(|_| start)?, n - 1),
     };
     if negative {
         if v == 0 {
-            return None;
+            return Err(0);
         }
         v = -v;
     } else if sign == Sign::ExceedsPad && positive != (n > min) {
-        return None;
+        return Err(0);
     }
-    Some((v, start + n))
+    Ok((v, start + n))
 }
 
 /// `OffsetIdPrinterParser.parse` in strict mode for a padded-hour pattern: millis and bytes taken.

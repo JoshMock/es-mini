@@ -1364,6 +1364,17 @@ pub fn parse_date_millis(v: &serde_json::Value) -> Option<i64> {
     )
 }
 
+/// The reason of the `date_time_parse_exception` a date field's `format` (`||` alternatives)
+/// fails text `s` with, like `JavaDateFormatter.doParse`; `None` if `s` parses but does not
+/// resolve, or the format is one es-mini lacks.
+pub fn date_parse_error(format: &str, locale: Option<&str>, s: &str) -> Option<String> {
+    match format.contains("||") || format.trim().starts_with("epoch_") {
+        // the epoch formats have several parsers too
+        true => Some(date_pattern::ENCLOSED.into()),
+        false => date_pattern::DateFormat::new(format)?.parse_error(s, locale.unwrap_or("")),
+    }
+}
+
 /// Epoch millis of a value of a date field with `format` and `locale`.
 pub fn date_millis(format: Option<&str>, locale: Option<&str>, v: &Value) -> Option<i64> {
     date_millis_in(format, locale, v, &tz::TimeZone::UTC, false)
@@ -1613,6 +1624,107 @@ mod tests {
             !snap.shards[0].searchable(&snap.settings, second),
             "a snapshot is not refreshed"
         );
+    }
+
+    #[test]
+    fn date_field_formats_parse_errors_name_where_the_text_stopped() {
+        // date_time_parse_exception reasons Elasticsearch 9.5.5 gives for these values
+        let long = "01/01/2016 is a date with quite a lot of trailing text after it, yes";
+        for (format, text, want) in [
+            (
+                "dd/MM/yyyy",
+                "x",
+                Some("Text 'x' could not be parsed at index 0"),
+            ),
+            (
+                "dd/MM/yyyy",
+                "01-01-2016",
+                Some("Text '01-01-2016' could not be parsed at index 2"),
+            ),
+            (
+                "dd/MM/yyyy",
+                "1/01/2016",
+                Some("Text '1/01/2016' could not be parsed at index 0"),
+            ),
+            (
+                "dd/MM/yyyy",
+                "01/01/16",
+                Some("Text '01/01/16' could not be parsed at index 6"),
+            ),
+            (
+                "dd/MM/yyyy",
+                "01/01/2016x",
+                Some("Text '01/01/2016x' could not be parsed, unparsed text found at index 10"),
+            ),
+            (
+                "dd/MM/yyyy",
+                long,
+                Some(
+                    "Text '01/01/2016 is a date with quite a lot of trailing text after it,...' \
+                     could not be parsed, unparsed text found at index 10",
+                ),
+            ),
+            (
+                "yyyy-MM-dd'T'HH:mm:ss.SSS",
+                "2016-01-01T00:00:00",
+                Some("Text '2016-01-01T00:00:00' could not be parsed at index 19"),
+            ),
+            (
+                "yyyy-MM-dd'T'HH:mm:ss.SSS",
+                "2016-01-01T00:00:00.1",
+                Some("Text '2016-01-01T00:00:00.1' could not be parsed at index 20"),
+            ),
+            (
+                "yyyy-MM-dd HH:mm:ss Z",
+                "2016-01-01 00:00:00 +1",
+                Some("Text '2016-01-01 00:00:00 +1' could not be parsed at index 20"),
+            ),
+            (
+                "yyyy-MM",
+                "2016-1",
+                Some("Text '2016-1' could not be parsed at index 5"),
+            ),
+            (
+                "uuuu-MM-dd[ HH:mm]",
+                "2016-01-01 1",
+                Some("Text '2016-01-01 1' could not be parsed, unparsed text found at index 10"),
+            ),
+            (
+                "MMM dd yyyy",
+                "Foo 01 2016",
+                Some("Text 'Foo 01 2016' could not be parsed at index 0"),
+            ),
+            (
+                "MMM dd yyyy",
+                "Jan 01 2016x",
+                Some("Text 'Jan 01 2016x' could not be parsed, unparsed text found at index 11"),
+            ),
+            (
+                "strict_date",
+                "2016-01-0x",
+                Some("Text '2016-01-0x' could not be parsed at index 8"),
+            ),
+            // several parsers, as in `||` formats and the epoch formats
+            (
+                "epoch_second",
+                "abc",
+                Some("Failed to parse with all enclosed parsers"),
+            ),
+            (
+                "yyyy-MM-dd HH:mm||yyyy-MM-dd",
+                "foo",
+                Some("Failed to parse with all enclosed parsers"),
+            ),
+            // values that parse but do not resolve fail with other exceptions
+            ("dd/MM/yyyy", "01/13/2016", None),
+            ("yyyy-MM", "2016-13", None),
+        ] {
+            assert_eq!(
+                date_parse_error(format, None, text).as_deref(),
+                want,
+                "{format} {text}"
+            );
+        }
     }
 
     #[test]
