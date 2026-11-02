@@ -4,13 +4,13 @@ use crate::{
     indices::parse_body,
     params,
     scroll::Contexts,
-    security::{Authn, esql_from, msearch_item},
+    security::{Authn, esql_from, msearch_item, pit_indices},
 };
 use axum::{
     Extension, Json,
     body::Bytes,
-    extract::{Path, Query, State},
-    http::{StatusCode, Uri},
+    extract::{OriginalUri, Path, Query, State},
+    http::{StatusCode, Uri, uri::InvalidUri},
 };
 use es_index::aliases;
 use es_query::{
@@ -198,8 +198,8 @@ pub async fn search_all(
         state,
         contexts,
         authn,
+        OriginalUri(uri),
         Path("_all".into()),
-        uri,
         params,
         body,
     )
@@ -224,8 +224,9 @@ pub async fn search(
     State(state): State<AppState>,
     Extension(contexts): Extension<Contexts>,
     authn: Option<Extension<Authn>>,
+    // As sent: authorization may have rewritten the path (not the query) to name indices.
+    OriginalUri(uri): OriginalUri,
     Path(name): Path<String>,
-    uri: Uri,
     Query(params): Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
@@ -235,7 +236,9 @@ pub async fn search(
     let mut body = parse_body(&body)?;
     let pit = body.get("pit").cloned();
     let pit_id = pit.as_ref().map(|p| p["id"].clone());
-    if pit.is_some() && name != "_all" {
+    // Authorization narrows an absent index expression to the key's indices.
+    let first = uri.path().split('/').find(|s| !s.is_empty());
+    if pit.is_some() && !matches!(first, Some("_search" | "_all") | None) {
         return Err(AppError::ActionRequestValidation(
             "[indices] cannot be used with point in time. Do not specify any index with point in time.".into(),
         ));
@@ -259,7 +262,12 @@ pub async fn search(
         ));
     }
     let snapshot = match pit {
-        Some(p) => Some(crate::scroll::pit(&contexts, &p, &raw)?),
+        Some(p) => {
+            let snapshot = crate::scroll::pit(&contexts, &p, &raw)?;
+            let names: Vec<&str> = snapshot.iter().map(|(n, ..)| n.as_str()).collect();
+            pit_indices(authn.as_deref(), &names)?;
+            Some(snapshot)
+        }
         None if scroll.is_some() => Some(crate::scroll::snapshot(&state, &name, &params)?),
         None => None,
     };
@@ -434,8 +442,8 @@ pub async fn search_template_all(
         state,
         contexts,
         authn,
+        OriginalUri(uri),
         Path("_all".into()),
-        uri,
         params,
         body,
     )
@@ -447,13 +455,13 @@ pub async fn search_template(
     state: State<AppState>,
     contexts: Extension<Contexts>,
     authn: Option<Extension<Authn>>,
+    uri: OriginalUri,
     name: Path<String>,
-    uri: Uri,
     params: Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
     let body = crate::template::search_body(&body)?;
-    search(state, contexts, authn, name, uri, params, body).await
+    search(state, contexts, authn, uri, name, params, body).await
 }
 
 pub async fn msearch(
@@ -518,6 +526,17 @@ async fn msearch_impl(
                     _ => drop(params.insert(k.clone(), v)),
                 }
             }
+            // The search as if sent alone: whether it names indices, before authorization
+            // narrows them, and the msearch's own query parameters.
+            let path = if name == "_all" {
+                "/_search"
+            } else {
+                "/named/_search"
+            };
+            let query = uri.query().map_or(String::new(), |q| format!("?{q}"));
+            let original = format!("{path}{query}")
+                .parse()
+                .map_err(|e: InvalidUri| AppError::IllegalArgument(e.to_string()))?;
             let name = msearch_item(authn.as_deref(), &state, name, &params)?;
             let mut search_body = Bytes::copy_from_slice(search_body.as_bytes());
             if template {
@@ -527,8 +546,8 @@ async fn msearch_impl(
                 State(state.clone()),
                 Extension(contexts.clone()),
                 authn.clone(),
+                OriginalUri(original),
                 Path(name),
-                uri.clone(),
                 Query(params),
                 search_body,
             )

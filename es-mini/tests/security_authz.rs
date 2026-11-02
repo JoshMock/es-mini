@@ -903,3 +903,38 @@ async fn only_the_scrolls_creator_may_continue_it() {
     let r = ok(&app, &b, "DELETE", "/_search/scroll", Some(scroll.clone())).await;
     assert_eq!(r, json!({"succeeded": true, "num_freed": 1}));
 }
+
+/// Recorded from Elasticsearch 9.5.5: a key searches a point in time by the indices it was opened
+/// on, whoever opened it; one it may not read is refused without naming the indices, and an
+/// index in the path is still invalid with a point in time.
+#[tokio::test]
+async fn points_in_time_are_authorized_by_their_indices() {
+    let app = app().await;
+    let (a, id) = key(&app, ELASTIC, read_a()).await;
+    let (b, _) = key(&app, ELASTIC, read_a()).await;
+    let pit = |auth: String, path: &'static str| {
+        let app = app.clone();
+        async move {
+            let r = ok(&app, &auth, "POST", path, None).await;
+            json!({"size": 1, "pit": {"id": r["id"]}})
+        }
+    };
+    let mine = pit(a.clone(), "/a1/_pit?keep_alive=1m").await;
+    for auth in [&a, &b] {
+        let r = ok(&app, auth, "POST", "/_search", Some(mine.clone())).await;
+        assert_eq!(r["hits"]["total"]["value"], 1, "{r}");
+    }
+    let search = "indices:data/read/search";
+    for path in ["/a1,b1/_pit?keep_alive=1m", "/b1/_pit?keep_alive=1m"] {
+        let body = pit(ELASTIC.to_owned(), path).await;
+        let expected = denied(&id, search, "", "read,all");
+        let (status, r) = call(&app, &a, "POST", "/_search", Some(body)).await;
+        assert_eq!((status, r), (403, expected), "{path}");
+    }
+    let (status, r) = call(&app, &a, "POST", "/a1/_search", Some(mine)).await;
+    assert_eq!(
+        (status, &r["error"]["type"]),
+        (400, &json!("action_request_validation_exception")),
+        "{r}"
+    );
+}

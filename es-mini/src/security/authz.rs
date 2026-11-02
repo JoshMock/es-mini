@@ -633,6 +633,20 @@ pub(crate) fn msearch_item(
     Ok(expression(&names, |n| n.to_owned()))
 }
 
+/// Authorizes a search of a point in time opened on `indices` for whoever `authn` is: the key
+/// must read all of them, whoever opened it, and a refusal names none (as Elasticsearch's).
+pub(crate) fn pit_indices(authn: Option<&Authn>, indices: &[&str]) -> Result<(), AppError> {
+    let Some(Authn::ApiKey { id, roles, .. }) = authn else {
+        return Ok(());
+    };
+    let key = Key { id, roles };
+    let action = "indices:data/read/search";
+    match indices.iter().all(|i| key.index(action, i)) {
+        true => Ok(()),
+        false => Err(key.denied(action, &[])),
+    }
+}
+
 /// Narrows the index expression `expr` of an ES|QL `FROM` to the names whoever `authn` is may
 /// read. As in Elasticsearch, a literal name the key may not read is unknown when nothing else
 /// matches, and otherwise refused.
