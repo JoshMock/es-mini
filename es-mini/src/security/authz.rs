@@ -204,7 +204,7 @@ enum Step<'a> {
         item: &'static str,
         index: &'a str,
     },
-    /// The alias names of an alias change, which need `indices:admin/aliases` too.
+    /// The alias name of an added alias, which needs `indices:admin/aliases` too.
     AliasNames(&'a str),
 }
 
@@ -303,6 +303,8 @@ fn steps<'a>(method: &Method, segs: &[&'a str], params: &HashMap<String, String>
         (_, [_, "_close"]) => vec![at("indices:admin/close", 0)],
         (_, [_, "_open"]) => vec![at("indices:admin/open", 0)],
         ("GET", [_, "_alias" | "_aliases", ..]) => vec![at("indices:admin/aliases/get", 0)],
+        // A deleted alias's wildcards are narrowed by the handler, as POST _aliases' are.
+        ("DELETE", [_, "_alias" | "_aliases", _]) => vec![at("indices:admin/aliases", 0)],
         (_, [_, "_alias" | "_aliases", alias]) => {
             vec![at("indices:admin/aliases", 0), AliasNames(alias)]
         }
@@ -422,11 +424,10 @@ impl Key<'_> {
                     self.any_index(action, &[index])?;
                     self.write(&security.store, item, index)?;
                 }
-                Step::AliasNames(aliases) => {
+                // An added alias is one name, wildcards and commas included.
+                Step::AliasNames(alias) => {
                     let action = "indices:admin/aliases";
-                    // ponytail: alias wildcards are not checked
-                    let literal = aliases.split(',').filter(|a| !a.contains('*'));
-                    if !literal.into_iter().all(|a| self.index(action, a)) {
+                    if !self.index(action, alias) {
                         return Err(self.denied(action, &[]));
                     }
                 }

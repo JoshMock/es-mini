@@ -1180,3 +1180,54 @@ async fn security_authz_gaps_alias_removal_without_manageable_match() {
     let a1 = &aliases(&app).await["a1"]["aliases"];
     assert_eq!(a1, &json!({"al2": {}, "bl1": {}}));
 }
+
+/// Alias names in paths are checked as Elasticsearch checks them: a deleted wildcard narrows to
+/// the aliases the key may manage (failing if none), and an added name is one literal name
+/// (recorded from Elasticsearch 9.5.5).
+#[tokio::test]
+async fn security_authz_gaps_alias_wildcards_in_paths() {
+    let app = app().await;
+    let add = |names: Value| {
+        let actions = json!([{"add": {"index": "a1", "aliases": names}}]);
+        Some(json!({ "actions": actions }))
+    };
+    ok(
+        &app,
+        ELASTIC,
+        "POST",
+        "/_aliases",
+        add(json!(["al1", "al2", "bl1"])),
+    )
+    .await;
+    let roles = json!({"r": {"indices": [{"names": ["a1", "al*"], "privileges": ["manage"]}]}});
+    let (k, id) = key(&app, ELASTIC, roles).await;
+    let manage = denied(&id, "indices:admin/aliases", "", "manage,all");
+    let (status, out) = call(&app, &k, "DELETE", "/a1/_alias/bl*", None).await;
+    assert_eq!(status, 404, "{out}");
+    assert_eq!(out["error"]["reason"], "aliases [bl*] missing");
+    let out = call(&app, &k, "DELETE", "/a1/_alias/bl*,zz", None).await;
+    assert_eq!(out, (403, manage.clone()));
+    ok(&app, &k, "DELETE", "/a1/_alias/b*,al1", None).await;
+    let a1 = |all: Value| all["a1"]["aliases"].clone();
+    assert_eq!(a1(aliases(&app).await), json!({"al2": {}, "bl1": {}}));
+    ok(&app, &k, "DELETE", "/a1/_alias/*", None).await;
+    assert_eq!(a1(aliases(&app).await), json!({"bl1": {}}));
+    ok(
+        &app,
+        ELASTIC,
+        "POST",
+        "/_aliases",
+        add(json!(["al1", "al2"])),
+    )
+    .await;
+    ok(&app, &k, "DELETE", "/a1/_alias/al*,-al2", None).await;
+    assert_eq!(a1(aliases(&app).await), json!({"al2": {}, "bl1": {}}));
+
+    let out = call(&app, &k, "PUT", "/a1/_alias/b*", None).await;
+    assert_eq!(out, (403, manage));
+    // Elasticsearch authorizes these, then refuses them as invalid alias names.
+    for name in ["al*", "al9,b9"] {
+        let (status, out) = call(&app, &k, "PUT", &format!("/a1/_alias/{name}"), None).await;
+        assert_ne!(status, 403, "{name}: {out}");
+    }
+}

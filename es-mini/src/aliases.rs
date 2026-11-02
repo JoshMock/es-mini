@@ -175,15 +175,20 @@ pub async fn delete(
     Path((index, names)): Path<(String, String)>,
     uri: Uri,
     Query(params): Params,
+    authn: Option<Extension<Authn>>,
 ) -> Result<Json<Value>, AppError> {
     check(&uri, &params, &WRITE_PARAMS)?;
+    // Narrowed as a `POST /_aliases` removal is; the indices were by the security layer.
+    let mut action = [json!({"remove": {"aliases": split(&names)}})];
+    alias_actions(authn.as_deref(), &state.read(), &mut action)?;
+    let narrowed = names_of(&action[0]["remove"], "alias", "aliases");
+    let patterns: Vec<&str> = narrowed.iter().map(String::as_str).collect();
     let mut indices = state.write();
     let mut removed = false;
     for name in resolved_names(&indices, &index)? {
         if let Some(i) = indices.get_mut(&name) {
             let before = i.aliases.len();
-            i.aliases
-                .retain(|a, _| !split(&names).iter().any(|p| alias_glob(p, a)));
+            i.aliases.retain(|a, _| !matches(&patterns, a));
             removed |= i.aliases.len() != before;
         }
     }
