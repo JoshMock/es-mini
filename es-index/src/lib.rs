@@ -284,22 +284,6 @@ impl Default for Index {
     }
 }
 
-// ponytail: reads not routed to a shard read shard 0, which searches of a multi-shard index
-// (and ES|QL alias filters) avoid by searching each shard's snapshot; search shards in place
-// if those copies cost too much
-impl std::ops::Deref for Index {
-    type Target = Shard;
-    fn deref(&self) -> &Shard {
-        &self.shards[0]
-    }
-}
-
-impl std::ops::DerefMut for Index {
-    fn deref_mut(&mut self) -> &mut Shard {
-        &mut self.shards[0]
-    }
-}
-
 /// One shard of an index: its documents, segments and translog state, with its own versions
 /// and sequence numbers.
 #[derive(Debug, Default)]
@@ -372,7 +356,7 @@ impl std::fmt::Debug for Memo {
     }
 }
 
-/// Elasticsearch's shard request cache (see [`Index::cached`]).
+/// Elasticsearch's shard request cache (see [`Shard::cached`]).
 #[derive(Debug, Default)]
 struct RequestCache {
     hits: u64,
@@ -1020,6 +1004,11 @@ impl Index {
         self.shards.get(self.shard_for(id, routing))
     }
 
+    /// The live document `id` routes to, as a get without routing reads it.
+    pub fn get(&self, id: &str) -> Option<Cow<'_, Document>> {
+        self.shard_of(id, None)?.get(id)
+    }
+
     /// Every shard's documents, in no particular order.
     pub fn docs(&self) -> impl Iterator<Item = (&str, Cow<'_, Document>)> {
         self.shards.iter().flat_map(Shard::docs)
@@ -1088,16 +1077,6 @@ impl Index {
         self.shards.iter_mut().for_each(Shard::refresh);
     }
 
-    /// See [`Shard::searchable`].
-    pub fn searchable(&self, seq_no: u64) -> bool {
-        self.shards[0].searchable(&self.settings, seq_no)
-    }
-
-    /// See [`Shard::visible_seq_no`].
-    pub fn visible_seq_no(&self) -> u64 {
-        self.shards[0].visible_seq_no(&self.settings)
-    }
-
     /// See [`Shard::memo`].
     pub fn memo<T: std::any::Any + Send + Sync>(
         &self,
@@ -1110,33 +1089,6 @@ impl Index {
             return Arc::new(build());
         }
         self.shards[0].memo(&self.mappings, build, follow)
-    }
-
-    /// See [`Shard::cached`].
-    pub fn cached<E>(
-        &self,
-        key: String,
-        compute: impl FnOnce() -> Result<Value, E>,
-    ) -> Result<Value, E> {
-        self.shards[0].cached(&self.settings, &self.mappings, key, compute)
-    }
-
-    /// See [`Shard::disk_numbers`].
-    pub fn disk_numbers(
-        &self,
-        field: &str,
-        place: impl Fn(&Value) -> Ordering,
-        exact: bool,
-    ) -> Option<BTreeSet<disk::DiskPos>> {
-        self.shards[0].disk_numbers(&self.mappings, field, place, exact)
-    }
-
-    /// See [`Shard::disk_values`].
-    pub fn disk_values<'a>(
-        &'a self,
-        field: &'a str,
-    ) -> impl FnMut(&str) -> Option<Vec<Value>> + 'a {
-        self.shards[0].disk_values(&self.mappings, field)
     }
 
     /// A copy for point-in-time searches: later writes to `self` do not change it. It shares
@@ -1538,11 +1490,12 @@ mod tests {
         let mut ix = Index::default();
         let mut runs = 0;
         let mut search = |ix: &Index, key: &str| {
-            ix.cached(key.into(), || {
-                runs += 1;
-                Ok::<_, ()>(json!(runs))
-            })
-            .unwrap()
+            ix.shards[0]
+                .cached(&ix.settings, &ix.mappings, key.into(), || {
+                    runs += 1;
+                    Ok::<_, ()>(json!(runs))
+                })
+                .unwrap()
         };
         assert_eq!(search(&ix, "a"), json!(1));
         assert_eq!(search(&ix, "a"), json!(1));
@@ -1551,7 +1504,7 @@ mod tests {
         assert_eq!(search(&ix, "a"), json!(3));
         ix.mappings.source = Some(json!({"enabled": false}));
         assert_eq!(search(&ix, "a"), json!(4));
-        let (hits, misses, evictions, bytes) = ix.request_cache_stats();
+        let (hits, misses, evictions, bytes) = ix.shards[0].request_cache_stats();
         assert_eq!((hits, misses, evictions), (1, 4, 0));
         assert!(bytes > 0);
     }
@@ -1602,12 +1555,13 @@ mod tests {
         let ix = Index::default();
         let mut runs = 0;
         let mut search = |key: &str| {
-            ix.cached(key.into(), || {
-                runs += 1;
-                // three entries fit
-                Ok::<_, ()>(json!("x".repeat(REQUEST_CACHE_BYTES / 3 - 16)))
-            })
-            .unwrap();
+            ix.shards[0]
+                .cached(&ix.settings, &ix.mappings, key.into(), || {
+                    runs += 1;
+                    // three entries fit
+                    Ok::<_, ()>(json!("x".repeat(REQUEST_CACHE_BYTES / 3 - 16)))
+                })
+                .unwrap();
             runs
         };
         for key in ["a", "b", "c"] {
@@ -1615,7 +1569,7 @@ mod tests {
         }
         assert_eq!(search("a"), 3, "a is cached and now the most recently used");
         assert_eq!(search("d"), 4, "evicts b, the least recently used");
-        let (hits, misses, evictions, bytes) = ix.request_cache_stats();
+        let (hits, misses, evictions, bytes) = ix.shards[0].request_cache_stats();
         assert_eq!((hits, misses, evictions), (1, 4, 1));
         assert!(bytes <= REQUEST_CACHE_BYTES);
         assert_eq!(search("a"), 4);
@@ -1627,17 +1581,17 @@ mod tests {
         let mut ix = Index::default();
         ix.settings.merge(&json!({"index.refresh_interval": "1s"}));
         let first = ix.put("1", json!({})).seq_no;
-        assert!(!ix.searchable(first));
+        assert!(!ix.shards[0].searchable(&ix.settings, first));
         ix.refresh();
-        assert!(ix.searchable(first));
+        assert!(ix.shards[0].searchable(&ix.settings, first));
         let second = ix.put("2", json!({})).seq_no;
-        assert!(!ix.searchable(second));
+        assert!(!ix.shards[0].searchable(&ix.settings, second));
         std::thread::sleep(Duration::from_millis(1100));
-        assert!(ix.searchable(second));
+        assert!(ix.shards[0].searchable(&ix.settings, second));
         // the default interval keeps writes searchable at once (as search-idle shards do)
         let mut ix = Index::default();
         let seq_no = ix.put("1", json!({})).seq_no;
-        assert!(ix.searchable(seq_no));
+        assert!(ix.shards[0].searchable(&ix.settings, seq_no));
     }
 
     #[test]
@@ -1649,10 +1603,16 @@ mod tests {
         std::thread::sleep(Duration::from_millis(200));
         let second = ix.put("2", json!({})).seq_no;
         let snap = ix.snapshot();
-        assert!(snap.searchable(first) && !snap.searchable(second));
+        assert!(
+            snap.shards[0].searchable(&snap.settings, first)
+                && !snap.shards[0].searchable(&snap.settings, second)
+        );
         std::thread::sleep(Duration::from_millis(200));
-        assert!(ix.searchable(second));
-        assert!(!snap.searchable(second), "a snapshot is not refreshed");
+        assert!(ix.shards[0].searchable(&ix.settings, second));
+        assert!(
+            !snap.shards[0].searchable(&snap.settings, second),
+            "a snapshot is not refreshed"
+        );
     }
 
     #[test]
@@ -2181,7 +2141,7 @@ mod tests {
         let (id, ts) = auto_id();
         assert_eq!(id.len(), 20);
         ix.put_auto(&id, None, json!({}), ts);
-        let stamps: Vec<i64> = ix
+        let stamps: Vec<i64> = ix.shards[0]
             .take_unlogged()
             .into_iter()
             .map(|op| match op {
@@ -2244,7 +2204,7 @@ mod tests {
         idx.delete("1");
         // The expired tombstone is forgotten, so the doc starts over like a new one.
         assert_eq!(idx.put("1", json!({})).version, 1);
-        assert_eq!(idx.tombstones(), 0);
+        assert_eq!(idx.shards[0].tombstones(), 0);
     }
 
     #[test]
@@ -2411,7 +2371,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
         let ix = opened.get_mut("i").unwrap();
         ix.put("3", json!({"n": 9}));
-        let read = |field: &str, id: &str| ix.disk_values(field)(id);
+        let read = |field: &str, id: &str| ix.shards[0].disk_values(&ix.mappings, field)(id);
         assert_eq!(read("n", "1"), Some(vec![json!(-2), json!(3)]));
         assert_eq!(read("d", "1"), Some(vec![json!(-1.5)]));
         assert_eq!(read("f", "1"), Some(vec![json!(f64::from(1.1f32))]));
@@ -2447,8 +2407,12 @@ mod tests {
                     Ordering::Equal
                 }
             };
-            let docs = ix.disk_numbers("f", place, true);
-            let has = |id: &&str| docs.as_ref().unwrap().contains(&ix.disk_pos(id).unwrap());
+            let docs = ix.shards[0].disk_numbers(&ix.mappings, "f", place, true);
+            let has = |id: &&str| {
+                docs.as_ref()
+                    .unwrap()
+                    .contains(&ix.shards[0].disk_pos(id).unwrap())
+            };
             ["1", "2", "3"].into_iter().filter(has).collect::<Vec<_>>()
         };
         // values are their f32 values
@@ -2483,9 +2447,11 @@ mod tests {
                 Ordering::Equal
             }
         };
-        let docs = ix.disk_numbers("n", place, true).unwrap();
+        let docs = ix.shards[0]
+            .disk_numbers(&ix.mappings, "n", place, true)
+            .unwrap();
         let want: BTreeSet<_> = (2000..2010)
-            .map(|i| ix.disk_pos(&i.to_string()).unwrap())
+            .map(|i| ix.shards[0].disk_pos(&i.to_string()).unwrap())
             .collect();
         assert_eq!(docs, want);
         assert!(calls.get() < 1000, "{} values compared", calls.get());
@@ -2511,18 +2477,18 @@ mod tests {
         ix.put("4", json!({"t": "dog"}));
         // per document: (freq, field length as its norm stands for it)
         let fox = |ix: &Index, id: &str| {
-            let f = ix.term_freqs("t", "t", true, "fox").unwrap();
+            let f = ix.shards[0].term_freqs("t", "t", true, "fox").unwrap();
             f.memory
                 .get(id)
                 .map(|p| p.at)
-                .or_else(|| f.disk.get(&ix.disk_pos(id)?).copied())
+                .or_else(|| f.disk.get(&ix.shards[0].disk_pos(id)?).copied())
         };
         let a = |ix: &Index, id: &str| {
-            let f = ix.term_freqs("k", "k", false, "a").unwrap();
+            let f = ix.shards[0].term_freqs("k", "k", false, "a").unwrap();
             f.memory
                 .get(id)
                 .map(|p| p.at)
-                .or_else(|| f.disk.get(&ix.disk_pos(id)?).copied())
+                .or_else(|| f.disk.get(&ix.shards[0].disk_pos(id)?).copied())
         };
         let all = |ix: &Index| {
             let ids = ["1", "2", "3", "4"];
@@ -2539,10 +2505,10 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
         let ix = opened.get_mut("i").unwrap();
         assert_eq!(all(ix), expected);
-        assert!(ix.disk_pos("1").is_some());
+        assert!(ix.shards[0].disk_pos("1").is_some());
         // a write replaces the document on disk
         ix.put("1", json!({"t": "fox"}));
-        assert_eq!(ix.disk_pos("1"), None);
+        assert_eq!(ix.shards[0].disk_pos("1"), None);
         assert_eq!(fox(ix, "1"), Some((1, 1)));
     }
 
@@ -2574,7 +2540,7 @@ mod tests {
         disk::save(&dir, &Indices::from([("i".to_owned(), ix)])).unwrap();
         let opened = disk::open(&dir).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
-        let read = opened["i"].disk_values("h")("1");
+        let read = opened["i"].shards[0].disk_values(&opened["i"].mappings, "h")("1");
         assert_eq!(read, Some(vec![json!(-2.5), json!(0.01519775390625)]));
     }
 
@@ -2595,7 +2561,7 @@ mod tests {
         let opened = disk::open(&dir).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(
-            opened["i"].disk_values("ip")("1"),
+            opened["i"].shards[0].disk_values(&opened["i"].mappings, "ip")("1"),
             Some(vec![json!("::1"), json!("127.0.0.1")])
         );
     }

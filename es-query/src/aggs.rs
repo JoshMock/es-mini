@@ -1565,7 +1565,7 @@ fn values_source(m: &FieldMapping) -> &'static str {
     }
 }
 
-/// Reads a field's doc values for on-disk documents (see `Index::disk_values`).
+/// Reads a field's doc values for on-disk documents (see `Shard::disk_values`).
 type DiskValues<'s> = Box<dyn FnMut(&str) -> Option<Vec<Value>> + 's>;
 
 /// Collects one index's matches for every aggregation of a request.
@@ -1683,7 +1683,9 @@ impl<'s, 'a> Collector<'s, 'a> {
             c.mappings.push(m);
             let initialize = nanos(start);
             let start = Instant::now();
-            c.disk.push(Box::new(index.disk_values(&agg.field)));
+            c.disk.push(Box::new(
+                searcher.shard.disk_values(&index.mappings, &agg.field),
+            ));
             if let Some(t) = &mut c.timings {
                 t.push(Timings {
                     initialize,
@@ -1969,10 +1971,13 @@ impl Collector<'_, '_> {
     /// documents if `min_doc_count` is 0.
     /// Also collects every document into each `global` aggregation.
     fn finish_terms(&mut self, stats: &mut [Stats]) {
-        let index = self.searcher.index;
+        let (index, shard) = (self.searcher.index, self.searcher.shard);
         for (i, st) in stats.iter_mut().enumerate() {
             if self.aggs[i].metric == Metric::Global {
-                for (id, doc) in index.docs().filter(|(_, d)| index.searchable(d.seq_no)) {
+                for (id, doc) in shard
+                    .docs()
+                    .filter(|(_, d)| shard.searchable(&index.settings, d.seq_no))
+                {
                     st.count += 1;
                     if let Some(sub) = &mut self.subs[i] {
                         // ES scores `global` matches as match_all does
@@ -2001,7 +2006,10 @@ impl Collector<'_, '_> {
             if let Some(t) = terms
                 && t.wants_zero_buckets(b)
             {
-                for (id, doc) in index.docs().filter(|(_, d)| index.searchable(d.seq_no)) {
+                for (id, doc) in shard
+                    .docs()
+                    .filter(|(_, d)| shard.searchable(&index.settings, d.seq_no))
+                {
                     b.add_zero(self.values(i, id, &doc));
                 }
             }

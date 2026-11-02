@@ -2387,7 +2387,7 @@ mod tests {
         let even = rounds.iter().filter(|&&r| r % 2 == 0).count();
         assert_eq!(merged.points("n").unwrap().len(), even);
         let back = open(&dir).unwrap();
-        let disk = back["i"].disk.as_ref().unwrap();
+        let disk = back["i"].shards[0].disk.as_ref().unwrap();
         let late = disk.number_docs("late", |v| v.cmp(&3), false).unwrap();
         assert!(late.contains(&disk.pos("3").unwrap()));
     }
@@ -2402,8 +2402,11 @@ mod tests {
         let mut ix = open(&dir).unwrap().remove("i").unwrap();
         ix.put("memory", json!({"n": 2}));
         let snap = ix.snapshot();
-        assert!(Arc::ptr_eq(&ix.docs["memory"], &snap.docs["memory"]));
-        let segments = |ix: &Index| Arc::clone(&ix.disk.as_ref().unwrap().segments);
+        assert!(Arc::ptr_eq(
+            &ix.shards[0].docs["memory"],
+            &snap.shards[0].docs["memory"]
+        ));
+        let segments = |ix: &Index| Arc::clone(&ix.shards[0].disk.as_ref().unwrap().segments);
         assert!(Arc::ptr_eq(&segments(&ix), &segments(&snap)));
         // later writes do not change it, nor deleting the files of its segments
         ix.put("disk", json!({"n": 3}));

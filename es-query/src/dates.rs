@@ -59,7 +59,8 @@ pub(crate) fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, 
             max_expansions,
             ..
         } => {
-            let (kind, path) = Searcher::unscored(index, &Query::MatchAll).kind(&field);
+            let searcher = Searcher::unscored(index, &Query::MatchAll);
+            let (kind, path) = searcher.kind(&field);
             if kind != Kind::Text {
                 let name = type_name(index, &field, kind);
                 return Err(QueryError::illegal(format!(
@@ -68,7 +69,9 @@ pub(crate) fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, 
             }
             let last = query_terms(kind, &query).pop();
             let expansions = last.map_or_else(Vec::new, |last| {
-                index.prefixed_terms(&field, path, &last, max_expansions)
+                searcher
+                    .shard
+                    .prefixed_terms(&field, path, &last, max_expansions)
             });
             Query::MatchPhrasePrefix {
                 field,

@@ -207,7 +207,7 @@ fn disk_writer_completeness_reads_stats_of_every_field_but_id_from_elasticsearch
             indexed.extend(fields.map(|f| f.name.clone()));
         }
         assert!(indexed.remove("_id"), "{}", meta.name);
-        let stats = indices[&meta.name].stats.as_ref().unwrap();
+        let stats = indices[&meta.name].shards()[0].stats.as_ref().unwrap();
         let with_stats: BTreeSet<_> = stats.fields.keys().cloned().collect();
         assert_eq!(with_stats, indexed, "{}", meta.name);
         checked += indexed.len();
@@ -340,21 +340,24 @@ fn disk_writer_completeness_reads_back_segments_with_nested_documents() {
     let dir = root.join("data");
     disk::save(&dir, &Indices::from([("idx".to_owned(), nested_index())])).unwrap();
     let mut indices = disk::open(&dir).unwrap();
-    let ix = &indices["idx"];
-    let mut live: Vec<_> = ix
+    let (ix, shard) = (&indices["idx"], &indices["idx"].shards()[0]);
+    let mut live: Vec<_> = shard
         .disk_live()
         .map(|(p, (id, _))| (id.to_owned(), p))
         .collect();
     live.sort();
     assert_eq!(live, [("1".to_owned(), (0, 3)), ("2".to_owned(), (0, 4))]);
-    assert_eq!(ix.disk_term("c.a", "p", true), None);
+    assert_eq!(shard.disk_term("c.a", "p", true), None);
     assert_eq!(
-        ix.disk_numbers("c.r.n", |_| std::cmp::Ordering::Equal, true),
+        shard.disk_numbers(&ix.mappings, "c.r.n", |_| std::cmp::Ordering::Equal, true),
         None
     );
-    assert_eq!(ix.disk_values("c.r.n")("1"), None);
-    assert_eq!(ix.disk_term("t", "x", true), Some([(0, 3)].into()));
-    assert_eq!(ix.disk_values("t")("2"), Some(vec![json!("y")]));
+    assert_eq!(shard.disk_values(&ix.mappings, "c.r.n")("1"), None);
+    assert_eq!(shard.disk_term("t", "x", true), Some([(0, 3)].into()));
+    assert_eq!(
+        shard.disk_values(&ix.mappings, "t")("2"),
+        Some(vec![json!("y")])
+    );
     assert_eq!(ix.get("1").unwrap().source["c"][1]["a"], "q");
     // Enough other docs that the deletes stay under the 20% that makes a merge drop the segment
     let ix = indices.get_mut("idx").unwrap();

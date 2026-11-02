@@ -1013,7 +1013,10 @@ fn match_phrase_prefix_expands_from_an_opened_index() {
     es_index::disk::save(&dir, &es_index::Indices::from([("idx".into(), idx)])).unwrap();
     let mut opened = es_index::disk::open(&dir).unwrap().remove("idx").unwrap();
     let _ = std::fs::remove_dir_all(&dir);
-    assert_eq!(opened.prefixed_terms("title", "title", "b", 50), ["brown"]);
+    assert_eq!(
+        opened.shards()[0].prefixed_terms("title", "title", "b", 50),
+        ["brown"]
+    );
     opened.put("5", json!({"title": "quick brawny bear"}));
     let q = json!({"query": {"match_phrase_prefix": {"title": "quick b"}}});
     let req = SearchRequest::parse(&q).unwrap();

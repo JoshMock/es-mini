@@ -30,7 +30,7 @@ pub use query_string::parse_query_string;
 pub use request::{ErrorKind, MAX_BUCKETS, QueryError, SearchRequest, SortField};
 
 use es_index::postings::{TermFreqs, text, values};
-use es_index::{Document, FieldMapping, Index, analysis::Analyzer, disk::DiskPos};
+use es_index::{Document, FieldMapping, Index, Shard, analysis::Analyzer, disk::DiskPos};
 use serde_json::{Map, Value};
 use std::{
     borrow::Cow,
@@ -201,11 +201,13 @@ type DocFreqs = HashMap<String, HashMap<String, f64>>;
 
 struct Searcher<'a> {
     index: &'a Index,
+    /// The index's shard it reads (see [`Searcher::unscored`]).
+    shard: &'a Shard,
     /// Per field: (docs with the field, their summed length).
     field_stats: FieldStats,
     /// Per field, per term: its document frequency.
     doc_freq: DocFreqs,
-    /// Per scored field, per term: its frequencies and field lengths (see [`Index::term_freqs`]).
+    /// Per scored field, per term: its frequencies and field lengths (see [`Shard::term_freqs`]).
     freqs: HashMap<String, HashMap<String, TermFreqs>>,
     /// Resolved field types, so unmapped fields are sampled once per search.
     /// Per field: its kind, and whether a literal `x.keyword` source key overrides `x`.
@@ -222,7 +224,7 @@ struct Searcher<'a> {
     runtime_source: Vec<String>,
     /// The shard's position among the searched targets, as `_shard_doc` encodes it.
     shard_index: usize,
-    /// The shard's [`Index::seq_nos`], read for the first `_doc` or `_shard_doc` sort value.
+    /// The shard's [`Shard::seq_nos`], read for the first `_doc` or `_shard_doc` sort value.
     seq_nos: OnceCell<Vec<u64>>,
 }
 
@@ -238,10 +240,15 @@ impl<'a> Searcher<'a> {
         s
     }
 
-    /// A searcher without BM25 statistics or candidates, for queries that only match.
+    /// A searcher without BM25 statistics or candidates, for queries that only match. It
+    /// reads one shard, so an index of several is searched through its
+    /// [`Index::shard_snapshots`]; unwritten shards are empty, so an index whose only written
+    /// one is shard 0 is searched in place.
     fn unscored(index: &'a Index, q: &Query) -> Self {
+        debug_assert_eq!(index.shards().len(), 1, "a searcher reads one shard");
         Searcher {
             index,
+            shard: &index.shards()[0],
             field_stats: HashMap::new(),
             doc_freq: HashMap::new(),
             freqs: HashMap::new(),
@@ -321,12 +328,15 @@ impl<'a> Searcher<'a> {
             return;
         }
         for w in &wanted {
-            if let Some(f) = self.index.term_freqs(field, path, kind == Kind::Text, w) {
+            if let Some(f) = self.shard.term_freqs(field, path, kind == Kind::Text, w) {
                 let freqs = self.freqs.entry(field.clone()).or_default();
                 freqs.insert(w.clone(), f);
             }
         }
-        if let Some(m) = (self.index).field_stats(field, path, kind == Kind::Text, &wanted) {
+        if let Some(m) = self
+            .shard
+            .field_stats(field, path, kind == Kind::Text, &wanted)
+        {
             self.field_stats
                 .insert(field.clone(), (m.docs, m.total_terms));
             self.doc_freq
@@ -342,7 +352,7 @@ impl<'a> Searcher<'a> {
             Cow::Owned(d) => Cow::Owned(d.source),
         });
         for source in live.chain(
-            self.index
+            self.shard
                 .superseded()
                 .iter()
                 .map(|d| Cow::Borrowed(&d.source)),
@@ -447,16 +457,20 @@ impl<'a> Searcher<'a> {
                 (Kind::Number, _) => None,
                 (_, Some(w)) => {
                     Some(
-                        self.index
+                        self.shard
                             .memory_docs_in(path, kind == Kind::Text, terms, all, w),
                     )
                 }
-                _ => self.index.memory_docs(path, kind == Kind::Text, terms, all),
+                _ => self.shard.memory_docs(path, kind == Kind::Text, terms, all),
             }
         };
         let numbers = |field: &str, bounds| {
             let (_, path) = self.kind(field);
-            self.index.memory_numbers(field, path, bounds).map(narrow)
+            self.index
+                .mappings
+                .field(field)
+                .and_then(|m| self.shard.memory_numbers(m, path, bounds))
+                .map(narrow)
         };
         match q {
             // An `_id` term matches the document's id, not a source field.
@@ -522,7 +536,7 @@ impl<'a> Searcher<'a> {
 
     /// How many in-memory documents `q` matches, and the first `n` of them in order, with
     /// their score: for a range query sorted by its own field alone (see
-    /// [`Index::memory_numbers_first`]), and for a query with a
+    /// [`Shard::memory_numbers_first`]), and for a query with a
     /// [`memory_score`](Self::memory_score) sorted by score, whose hits rank in write order.
     fn memory_sorted(
         &self,
@@ -534,7 +548,8 @@ impl<'a> Searcher<'a> {
         if let (Query::Term { field, value }, []) = (q, sort) {
             let score = self.memory_score(q)?;
             let (count, page) =
-                (self.index).memory_term_first(self.kind(field).1, &text(value), n, visible);
+                self.shard
+                    .memory_term_first(self.kind(field).1, &text(value), n, visible);
             return Some((score, count, page));
         }
         let (
@@ -554,13 +569,16 @@ impl<'a> Searcher<'a> {
         let bounds = [gt, gte, lt, lte].map(Option::as_deref);
         let path = self.kind(field).1;
         (f.field == *field)
-            .then(|| (self.index).memory_numbers_first(field, path, bounds, f.desc, n, visible))
-            .flatten()
+            .then(|| self.index.mappings.field(field))?
+            .and_then(|m| {
+                self.shard
+                    .memory_numbers_first(m, path, bounds, f.desc, n, visible)
+            })
             .map(|(count, page)| (1.0, count, page))
     }
 
     /// The on-disk documents indexing all (or any) of `terms` in `field` (see
-    /// [`Index::disk_term`]).
+    /// [`Shard::disk_term`]).
     fn term_docs(
         &self,
         field: &str,
@@ -576,14 +594,14 @@ impl<'a> Searcher<'a> {
                 (Kind::Bool, "false") => "F",
                 (_, t) => t,
             };
-            self.index.disk_term(field, t, exact)
+            self.shard.disk_term(field, t, exact)
         });
         let first = sets.next().unwrap_or(Some(BTreeSet::new()))?;
         sets.try_fold(first, |a, b| Some(if all { &a & &b? } else { &a | &b? }))
     }
 
     /// The on-disk documents whose values of numeric or date `field` are within `bounds`
-    /// (see [`range_place`] and [`Index::disk_numbers`]).
+    /// (see [`range_place`] and [`Shard::disk_numbers`]).
     fn number_docs(
         &self,
         field: &str,
@@ -599,7 +617,8 @@ impl<'a> Searcher<'a> {
             };
         }
         let instant = self.instant(field);
-        self.index.disk_numbers(
+        self.shard.disk_numbers(
+            &self.index.mappings,
             field,
             |v| {
                 range_place(bounds, |b| match &instant {
@@ -627,7 +646,8 @@ impl<'a> Searcher<'a> {
                 place => place,
             }
         };
-        self.index.disk_numbers(field, place, false)
+        self.shard
+            .disk_numbers(&self.index.mappings, field, place, false)
     }
 
     /// For a date field, how it reads a value as epoch millis.
@@ -643,7 +663,7 @@ impl<'a> Searcher<'a> {
 
     /// The documents the query may match: all in memory, and on disk those its postings allow.
     fn docs(&self) -> impl Iterator<Item = (&'a str, Cow<'a, Document>)> + '_ {
-        self.index
+        self.shard
             .docs_at(self.in_memory.as_ref(), self.on_disk.as_ref())
     }
 
@@ -1012,7 +1032,7 @@ impl<'a> Searcher<'a> {
     /// (`Some(None)` if it does not hold the term); `None` without postings (see `gather`).
     fn posting(&self, field: &str, term: &str, id: &str) -> Option<Option<(u32, u32)>> {
         let f = self.freqs.get(field)?.get(term)?;
-        let on_disk = || f.disk.get(&self.index.disk_pos(id)?).copied();
+        let on_disk = || f.disk.get(&self.shard.disk_pos(id)?).copied();
         Some(f.memory.get(id).map(|p| p.at).or_else(on_disk))
     }
 
@@ -1264,7 +1284,7 @@ impl<'a> Searcher<'a> {
             .map(|f| match f.field.as_str() {
                 "_score" => Value::from(score as f32),
                 "_doc" | "_shard_doc" => {
-                    let ids = self.seq_nos.get_or_init(|| self.index.seq_nos());
+                    let ids = self.seq_nos.get_or_init(|| self.shard.seq_nos());
                     let doc_id = ids.partition_point(|&s| s < doc.seq_no) as u64;
                     match f.field.as_str() {
                         "_doc" => doc_id.into(),
@@ -1340,10 +1360,15 @@ impl<'a> Searcher<'a> {
         let on_disk = if docs.is_empty() {
             0
         } else {
-            let live: HashSet<_> = self.index.disk_live().map(|(p, _)| p).collect();
+            let live: HashSet<_> = self.shard.disk_live().map(|(p, _)| p).collect();
             docs.iter().filter(|p| live.contains(p)).count()
         };
-        Some(on_disk + (self.index).memory_term_count(path, kind == Kind::Text, &text(value)))
+        Some(
+            on_disk
+                + self
+                    .shard
+                    .memory_term_count(path, kind == Kind::Text, &text(value)),
+        )
     }
 
     /// The searchable on-disk documents `q` matches, as hits of `target` ordered by `sort`
@@ -1382,12 +1407,15 @@ impl<'a> Searcher<'a> {
                         Some(M::Boolean) => bool_sort_value,
                         _ => return None,
                     };
-                Some(Some((value, self.index.disk_values(&f.field))))
+                Some(Some((
+                    value,
+                    self.shard.disk_values(&self.index.mappings, &f.field),
+                )))
             })
             .collect::<Option<Vec<_>>>()?;
-        let live: HashMap<_, _> = self.index.disk_live().collect();
+        let live: HashMap<_, _> = self.shard.disk_live().collect();
         let matched = exact(q, &live.keys().copied().collect(), &|c| self.disk_leaf(c))?;
-        let visible = self.index.visible_seq_no();
+        let visible = self.shard.visible_seq_no(&self.index.settings);
         let mut out = vec![];
         for (id, seq_no) in matched.iter().map(|p| live[p]) {
             if seq_no >= visible {
@@ -1558,7 +1586,7 @@ pub fn search_many<'a>(
             Some(_) => Some(BTreeSet::new()),
             None => s.candidates(&query, false),
         };
-        let visible = index.visible_seq_no();
+        let visible = s.shard.visible_seq_no(&index.settings);
         // a range sorted by its own field, or a keyword term by score, pages its in-memory hits
         let n = req.from.saturating_add(req.size);
         let memory_page = (req.aggs.is_empty() && !req.profile && req.search_after.is_none())
@@ -1689,7 +1717,7 @@ pub fn search_many<'a>(
             .filter_map(|h| {
                 let s = &searchers[&h.target];
                 // ponytail: a hit whose segment cannot be read is left out
-                let doc = h.doc.or_else(|| s.index.get(h.id))?;
+                let doc = h.doc.or_else(|| s.shard.get(h.id))?;
                 Some(Hit {
                     index: targets[h.target].0,
                     id: h.id,
@@ -1744,7 +1772,7 @@ pub fn count_many(targets: &[Target], q: &Query) -> Result<usize, QueryError> {
             n += c;
             continue;
         }
-        let (disk, memory) = index.live();
+        let (disk, memory) = s.shard.live();
         let on_disk = exact(&q, &disk, &|c| s.disk_leaf(c));
         let in_memory = exact(&q, &memory, &|c| match c {
             Query::Term { field, .. } if s.kind(field).0 == Kind::Number => None,
@@ -2073,7 +2101,10 @@ mod tests {
             let on_disk = Searcher::new(ix, &q)
                 .candidates(&q, false)
                 .expect("narrowed");
-            let mut ids: Vec<_> = ix.docs_at(None, Some(&on_disk)).map(|(id, _)| id).collect();
+            let mut ids: Vec<_> = ix.shards()[0]
+                .docs_at(None, Some(&on_disk))
+                .map(|(id, _)| id)
+                .collect();
             ids.sort_by_key(|id| id.parse::<u32>().unwrap());
             ids.join(",")
         };
@@ -2116,7 +2147,10 @@ mod tests {
             let on_disk = Searcher::new(ix, &q)
                 .candidates(&q, false)
                 .expect("narrowed");
-            let mut ids: Vec<_> = ix.docs_at(None, Some(&on_disk)).map(|(id, _)| id).collect();
+            let mut ids: Vec<_> = ix.shards()[0]
+                .docs_at(None, Some(&on_disk))
+                .map(|(id, _)| id)
+                .collect();
             ids.sort_by_key(|id| id.parse::<u32>().unwrap());
             ids.join(",")
         };
@@ -2185,7 +2219,10 @@ mod tests {
             // values a strict bound excludes may round onto it, so floats only narrow
             assert_eq!(s.candidates(&q, true), None);
             let on_disk = s.candidates(&q, false).expect("narrowed");
-            let mut ids: Vec<_> = ix.docs_at(None, Some(&on_disk)).map(|(id, _)| id).collect();
+            let mut ids: Vec<_> = ix.shards()[0]
+                .docs_at(None, Some(&on_disk))
+                .map(|(id, _)| id)
+                .collect();
             ids.sort_by_key(|id| id.parse::<u32>().unwrap());
             ids.join(",")
         };

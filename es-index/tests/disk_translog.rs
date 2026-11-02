@@ -230,7 +230,9 @@ fn flushed_statistics_match_the_committed_segments() {
         .insert("t".into(), FieldMapping::Text { store: false });
     let mut indices = Indices::from([("idx".to_owned(), ix)]);
     let stats = |ix: &Index| {
-        let s = ix.field_stats("t", "t", true, &["fox".into()]).unwrap();
+        let s = ix.shards()[0]
+            .field_stats("t", "t", true, &["fox".into()])
+            .unwrap();
         (s.docs, s.total_terms, s.doc_freq["fox"])
     };
     // Committing the empty index leaves in-memory postings, not empty segment statistics.
@@ -273,7 +275,9 @@ fn replacing_a_committed_document_counts_it_once() {
     disk::persist(&dir, &mut indices).unwrap();
     let ix = indices.get_mut("idx").unwrap();
     ix.put("a", json!({"t": "cat"}));
-    let s = ix.field_stats("t", "t", true, &["fox".into()]).unwrap();
+    let s = ix.shards()[0]
+        .field_stats("t", "t", true, &["fox".into()])
+        .unwrap();
     // The deleted "fox" in the segment, and "cat" in memory.
     assert_eq!((s.docs, s.total_terms, s.doc_freq["fox"]), (2.0, 2.0, 1.0));
 }

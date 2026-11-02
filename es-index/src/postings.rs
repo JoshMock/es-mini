@@ -579,32 +579,6 @@ impl crate::Shard {
     }
 }
 
-impl crate::Index {
-    /// See [`Shard::memory_numbers`](crate::Shard::memory_numbers).
-    pub fn memory_numbers(
-        &self,
-        field: &str,
-        path: &str,
-        bounds: [Option<&Value>; 4],
-    ) -> Option<HashSet<String>> {
-        (**self).memory_numbers(self.mappings.field(field)?, path, bounds)
-    }
-
-    /// See [`Shard::memory_numbers_first`](crate::Shard::memory_numbers_first).
-    pub fn memory_numbers_first(
-        &self,
-        field: &str,
-        path: &str,
-        bounds: [Option<&Value>; 4],
-        desc: bool,
-        n: usize,
-        visible: u64,
-    ) -> Option<(usize, Vec<(&str, &crate::Document)>)> {
-        let mapping = self.mappings.field(field)?;
-        (**self).memory_numbers_first(mapping, path, bounds, desc, n, visible)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use crate::Index;
@@ -629,21 +603,24 @@ mod tests {
     fn analyzed_and_exact_terms_by_source_path() {
         let i = index();
         assert_eq!(
-            ids(i.memory_docs("t", true, &["quick".into()], false)),
+            ids(i.shards[0].memory_docs("t", true, &["quick".into()], false)),
             ["1", "2"]
         );
         assert_eq!(
-            ids(i.memory_docs("t", true, &["quick".into(), "fox".into()], true)),
+            ids(i.shards[0].memory_docs("t", true, &["quick".into(), "fox".into()], true)),
             ["1"]
         );
-        assert_eq!(ids(i.memory_docs("k", false, &["b".into()], false)), ["2"]);
         assert_eq!(
-            ids(i.memory_docs("o.x", true, &["deep".into()], false)),
+            ids(i.shards[0].memory_docs("k", false, &["b".into()], false)),
+            ["2"]
+        );
+        assert_eq!(
+            ids(i.shards[0].memory_docs("o.x", true, &["deep".into()], false)),
             ["1"]
         );
         // Exact terms are whole values: "Quick fox" is not "quick", but the array value is.
         assert_eq!(
-            ids(i.memory_docs("t", false, &["quick".into()], false)),
+            ids(i.shards[0].memory_docs("t", false, &["quick".into()], false)),
             ["2"]
         );
     }
@@ -655,30 +632,39 @@ mod tests {
         let quick = ["quick".into()];
         let ids = |v| ids(Some(v));
         assert_eq!(
-            ids(i.memory_docs_in("t", true, &quick, false, &within)),
+            ids(i.shards[0].memory_docs_in("t", true, &quick, false, &within)),
             ["2"]
         );
         let quick_dog = ["quick".into(), "dog".into()];
         assert_eq!(
-            ids(i.memory_docs_in("t", true, &quick_dog, true, &within)),
+            ids(i.shards[0].memory_docs_in("t", true, &quick_dog, true, &within)),
             ["2"]
         );
         let quick_fox = ["quick".into(), "fox".into()];
-        assert!(ids(i.memory_docs_in("t", true, &quick_fox, true, &within)).is_empty());
-        assert!(ids(i.memory_docs_in("t", true, &[], false, &within)).is_empty());
-        assert!(ids(i.memory_docs_in("t", true, &[], true, &within)).is_empty());
+        assert!(ids(i.shards[0].memory_docs_in("t", true, &quick_fox, true, &within)).is_empty());
+        assert!(ids(i.shards[0].memory_docs_in("t", true, &[], false, &within)).is_empty());
+        assert!(ids(i.shards[0].memory_docs_in("t", true, &[], true, &within)).is_empty());
     }
 
     #[test]
     fn writes_keep_built_postings_current() {
         let mut i = index();
-        assert_eq!(ids(i.memory_docs("t", true, &["fox".into()], false)), ["1"]);
+        assert_eq!(
+            ids(i.shards[0].memory_docs("t", true, &["fox".into()], false)),
+            ["1"]
+        );
         i.put("1", json!({"t": "slow cat"}));
         i.put("4", json!({"t": "red fox"}));
         i.delete("2");
-        assert_eq!(ids(i.memory_docs("t", true, &["fox".into()], false)), ["4"]);
-        assert_eq!(ids(i.memory_docs("t", true, &["cat".into()], false)), ["1"]);
-        assert!(ids(i.memory_docs("t", true, &["lazy".into()], false)).is_empty());
+        assert_eq!(
+            ids(i.shards[0].memory_docs("t", true, &["fox".into()], false)),
+            ["4"]
+        );
+        assert_eq!(
+            ids(i.shards[0].memory_docs("t", true, &["cat".into()], false)),
+            ["1"]
+        );
+        assert!(ids(i.shards[0].memory_docs("t", true, &["lazy".into()], false)).is_empty());
     }
 
     #[test]
@@ -700,7 +686,11 @@ mod tests {
         i.put("3", json!({"n": "20", "d": 1704067200001i64}));
         i.put("4", json!({"k": "x"}));
         let range = |i: &Index, f: &str, b: [Option<serde_json::Value>; 4]| {
-            ids(i.memory_numbers(f, f, b.each_ref().map(Option::as_ref)))
+            ids(i.shards[0].memory_numbers(
+                i.mappings.field(f).unwrap(),
+                f,
+                b.each_ref().map(Option::as_ref),
+            ))
         };
         let (n, s) = (|x: i64| Some(json!(x)), |x: &str| Some(json!(x)));
         assert_eq!(range(&i, "n", [None, n(10), None, n(20)]), ["2", "3"]);
@@ -722,11 +712,19 @@ mod tests {
         assert_eq!(range(&i, "n", [None, n(10), None, n(20)]), ["1", "3"]);
         // Fields that are not numbers or dates, and bounds that are not, cannot narrow.
         assert_eq!(
-            i.memory_numbers("k", "k", [None, Some(&json!("x")), None, None]),
+            i.shards[0].memory_numbers(
+                i.mappings.field("k").unwrap(),
+                "k",
+                [None, Some(&json!("x")), None, None]
+            ),
             None
         );
         assert_eq!(
-            i.memory_numbers("n", "n", [None, Some(&json!("x")), None, None]),
+            i.shards[0].memory_numbers(
+                i.mappings.field("n").unwrap(),
+                "n",
+                [None, Some(&json!("x")), None, None]
+            ),
             None
         );
     }
@@ -744,7 +742,14 @@ mod tests {
         i.put("3", json!({"n": 5}));
         let first = |i: &Index, b: [Option<serde_json::Value>; 4], desc, visible| {
             let b = b.each_ref().map(Option::as_ref);
-            let r = i.memory_numbers_first("n", "n", b, desc, 2, visible)?;
+            let r = i.shards[0].memory_numbers_first(
+                i.mappings.field("n")?,
+                "n",
+                b,
+                desc,
+                2,
+                visible,
+            )?;
             Some((
                 r.0,
                 r.1.iter().map(|(id, _)| *id).collect::<Vec<_>>().join(","),
@@ -780,7 +785,9 @@ mod tests {
     #[test]
     fn stats_count_superseded_docs_like_soft_deletes() {
         let stats = |i: &Index| {
-            let s = i.field_stats("t", "t", true, &["fox".into()]).unwrap();
+            let s = i.shards[0]
+                .field_stats("t", "t", true, &["fox".into()])
+                .unwrap();
             (s.docs, s.total_terms, s.doc_freq["fox"])
         };
         let mut i = Index::default();

@@ -180,3 +180,18 @@ fn a_missing_shard_directory_fails_open() {
         );
     }
 }
+
+/// A get without routing reads the shard its id routes to, not shard 0.
+#[test]
+fn shard_reads_get_reads_the_shard_an_id_routes_to() {
+    let mut indices = sharded(3);
+    let ix = indices.get_mut("idx").unwrap();
+    let ids: Vec<String> = (0..12).map(|n| n.to_string()).collect();
+    for id in &ids {
+        ix.put(id, json!({"n": id}));
+    }
+    assert!(ids.iter().any(|id| ix.shard_for(id, None) != 0));
+    for id in &ids {
+        assert_eq!(ix.get(id).unwrap().source["n"], *id, "{id}");
+    }
+}
