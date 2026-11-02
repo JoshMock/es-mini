@@ -1231,3 +1231,55 @@ async fn security_authz_gaps_alias_wildcards_in_paths() {
         assert_ne!(status, 403, "{name}: {out}");
     }
 }
+
+/// `_has_privileges` compares any named privilege with action patterns through the actions
+/// Elasticsearch's `ClusterPrivilegeResolver` and `IndexPrivilege` give it, with an action name
+/// standing for itself and its sub-actions (`name*`) (recorded from Elasticsearch 9.5.5).
+#[tokio::test]
+async fn security_authz_gaps_named_privileges_implied_by_action_patterns() {
+    let app = app().await;
+    let cases = [
+        (
+            json!({"cluster": ["cluster:admin/slm/*", "cluster:admin/ilm/start", "cluster:admin/ilm/stop", "cluster:admin/ilm/operation_mode/get"],
+                "indices": [{"names": ["a*"], "privileges": ["indices:admin/create", "indices:admin/auto_create", "indices:admin/data_stream/*"]}]}),
+            json!({"cluster": ["manage_slm", "read_slm", "monitor_snapshot", "manage_ilm", "monitor_data_stream_global_retention"],
+                "index": [{"names": ["a1"], "privileges": ["create_index", "delete_index", "auto_configure", "manage_data_stream_lifecycle"]}]}),
+            json!({"username":"elastic","has_all_requested":false,"cluster":{"manage_ilm":false,"read_slm":true,"monitor_data_stream_global_retention":true,"manage_slm":true,"monitor_snapshot":false},"index":{"a1":{"auto_configure":false,"create_index":true,"delete_index":false,"manage_data_stream_lifecycle":true}},"application":{}}),
+        ),
+        (
+            json!({"cluster": ["all"], "indices": [{"names": ["*"], "privileges": ["all"]}]}),
+            json!({"cluster": ["manage_slm", "create_snapshot", "manage_connector", "read_fleet_secrets"],
+                "index": [{"names": ["a1"], "privileges": ["manage_view", "view_index_metadata", "cross_cluster_replication_internal", "read_failure_store"]}]}),
+            json!({"username":"elastic","has_all_requested":true,"cluster":{"read_fleet_secrets":true,"manage_slm":true,"manage_connector":true,"create_snapshot":true},"index":{"a1":{"cross_cluster_replication_internal":true,"manage_view":true,"read_failure_store":true,"view_index_metadata":true}},"application":{}}),
+        ),
+        (
+            json!({"cluster": ["manage"], "indices": [{"names": ["a1"], "privileges": ["read"]}, {"names": ["b1"], "privileges": ["view_index_metadata"]}]}),
+            json!({"cluster": ["manage_saml", "manage_connector", "read_connector_secrets", "manage_slm", "delegate_pki"],
+                "index": [{"names": ["a1"], "privileges": ["read_cross_cluster", "indices:data/read/search", "view_index_metadata", "read_failure_store", "indices:admin/resolve/cluster"]},
+                    {"names": ["b1"], "privileges": ["indices:admin/validate/query", "indices:data/read/field_caps", "indices:admin/mappings/fields/get[index]", "read"]}]}),
+            json!({"username":"elastic","has_all_requested":false,"cluster":{"read_connector_secrets":true,"manage_slm":true,"delegate_pki":false,"manage_connector":true,"manage_saml":false},"index":{"a1":{"indices:admin/resolve/cluster":false,"indices:data/read/search":true,"read_cross_cluster":true,"read_failure_store":false,"view_index_metadata":false},"b1":{"indices:admin/mappings/fields/get[index]":true,"indices:admin/validate/query":true,"indices:data/read/field_caps":true,"read":false}},"application":{}}),
+        ),
+        (
+            json!({"cluster": ["manage_connector"]}),
+            json!({"cluster": ["monitor_connector", "read_connector_secrets", "manage_connector", "none"]}),
+            json!({"username":"elastic","has_all_requested":false,"cluster":{"monitor_connector":true,"read_connector_secrets":false,"none":true,"manage_connector":true},"index":{},"application":{}}),
+        ),
+        (
+            json!({"cluster": ["manage_own_api_key"]}),
+            json!({"cluster": ["monitor_data_stream_global_retention", "none"]}),
+            json!({"username":"elastic","has_all_requested":false,"cluster":{"monitor_data_stream_global_retention":false,"none":false},"index":{},"application":{}}),
+        ),
+        (
+            json!({"cluster": ["none"]}),
+            json!({"cluster": ["monitor_data_stream_global_retention", "none"]}),
+            json!({"username":"elastic","has_all_requested":true,"cluster":{"monitor_data_stream_global_retention":true,"none":true},"index":{},"application":{}}),
+        ),
+    ];
+    for (role, request, expected) in cases {
+        let (k, _) = key(&app, ELASTIC, json!({"r": role})).await;
+        let uri = "/_security/user/_has_privileges";
+        let out = ok(&app, &k, "POST", uri, Some(request.clone())).await;
+        // Compared as text, for the order of the keys.
+        assert_eq!(out.to_string(), expected.to_string(), "{role} {request}");
+    }
+}

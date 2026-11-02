@@ -803,21 +803,14 @@ struct Kind {
     implies: &'static [(&'static str, &'static str)],
     /// The action patterns of named privileges as (name, included, excluded), from
     /// Elasticsearch's `ClusterPrivilegeResolver` and `IndexPrivilege`, to compare named
-    /// privileges with privileges that are action patterns.
-    // ponytail: only these privileges; any other named one is never implied by action patterns
+    /// privileges with privileges that are action patterns. The failure store's privileges are
+    /// left out: they grant another selector than action patterns do, so imply only by name.
     actions: &'static [(
         &'static str,
         &'static [&'static str],
         &'static [&'static str],
     )],
 }
-
-const ALL_CLUSTER: &[&str] = &[
-    "cluster:*",
-    "indices:admin/template/*",
-    "indices:admin/index_template/*",
-];
-const API_KEYS: &[&str] = &["cluster:admin/xpack/security/api_key/*"];
 
 const CLUSTER: Kind = Kind {
     implies: &[
@@ -844,26 +837,449 @@ const CLUSTER: Kind = Kind {
         ("manage_ccr", "manage_ccr,none,read_ccr"),
     ],
     actions: &[
-        ("all", ALL_CLUSTER, &[]),
-        ("manage", ALL_CLUSTER, &["cluster:admin/xpack/security/*"]),
         (
-            "monitor",
+            "all",
             &[
-                "cluster:monitor/*",
-                "indices:admin/template/get",
-                "indices:admin/index_template/get",
-                "cluster:admin/component_template/get",
+                "cluster:*",
+                "indices:admin/index_template/*",
+                "indices:admin/template/*",
             ],
             &[],
         ),
+        (
+            "monitor",
+            &[
+                "cluster:admin/component_template/get",
+                "cluster:monitor/*",
+                "indices:admin/index_template/get",
+                "indices:admin/template/get",
+            ],
+            &[],
+        ),
+        (
+            "monitor_inference",
+            &[
+                "cluster:monitor/xpack/inference*",
+                "cluster:monitor/xpack/ml/trained_models/deployment/infer",
+            ],
+            &[],
+        ),
+        ("monitor_ml", &["cluster:monitor/xpack/ml/*"], &[]),
+        (
+            "monitor_data_frame_transforms",
+            &[
+                "cluster:monitor/data_frame/*",
+                "cluster:monitor/transform/*",
+            ],
+            &[],
+        ),
+        (
+            "monitor_text_structure",
+            &["cluster:monitor/text_structure/*"],
+            &[],
+        ),
+        (
+            "monitor_transform",
+            &[
+                "cluster:monitor/data_frame/*",
+                "cluster:monitor/transform/*",
+            ],
+            &[],
+        ),
+        ("monitor_watcher", &["cluster:monitor/xpack/watcher/*"], &[]),
+        ("monitor_reindex", &["cluster:monitor/reindex/*"], &[]),
+        ("monitor_rollup", &["cluster:monitor/xpack/rollup/*"], &[]),
+        (
+            "monitor_enrich",
+            &[
+                "cluster:admin/xpack/enrich/get",
+                "cluster:monitor/xpack/enrich/*",
+            ],
+            &[],
+        ),
+        ("monitor_esql", &["cluster:monitor/xpack/esql/*"], &[]),
         ("monitor_stats", &["cluster:monitor/stats*"], &[]),
+        (
+            "manage",
+            &[
+                "cluster:*",
+                "indices:admin/index_template/*",
+                "indices:admin/template/*",
+            ],
+            &["cluster:admin/xpack/security/*"],
+        ),
+        (
+            "manage_inference",
+            &[
+                "cluster:admin/xpack/inference/*",
+                "cluster:admin/xpack/ml/trained_models/deployment/start",
+                "cluster:admin/xpack/ml/trained_models/deployment/stop",
+                "cluster:monitor/xpack/inference*",
+                "cluster:monitor/xpack/ml/trained_models/deployment/infer",
+            ],
+            &[],
+        ),
+        (
+            "manage_ml",
+            &["cluster:admin/xpack/ml/*", "cluster:monitor/xpack/ml/*"],
+            &[],
+        ),
+        (
+            "manage_data_frame_transforms",
+            &[
+                "cluster:admin/data_frame/*",
+                "cluster:admin/transform/*",
+                "cluster:monitor/data_frame/*",
+                "cluster:monitor/transform/*",
+            ],
+            &[],
+        ),
+        (
+            "manage_transform",
+            &[
+                "cluster:admin/data_frame/*",
+                "cluster:admin/transform/*",
+                "cluster:monitor/data_frame/*",
+                "cluster:monitor/transform/*",
+            ],
+            &[],
+        ),
+        (
+            "manage_token",
+            &["cluster:admin/xpack/security/token/*"],
+            &[],
+        ),
+        (
+            "manage_watcher",
+            &[
+                "cluster:admin/xpack/watcher/*",
+                "cluster:monitor/xpack/watcher/*",
+            ],
+            &[],
+        ),
+        (
+            "manage_reindex",
+            &["cluster:admin/reindex/*", "cluster:monitor/reindex/*"],
+            &[],
+        ),
+        (
+            "manage_rollup",
+            &[
+                "cluster:admin/xpack/rollup/*",
+                "cluster:monitor/xpack/rollup/*",
+            ],
+            &[],
+        ),
+        (
+            "manage_index_templates",
+            &[
+                "cluster:admin/component_template/*",
+                "indices:admin/index_template/*",
+                "indices:admin/template/*",
+            ],
+            &[],
+        ),
+        (
+            "manage_ingest_pipelines",
+            &["cluster:admin/ingest/pipeline/*"],
+            &[],
+        ),
+        (
+            "read_pipeline",
+            &[
+                "cluster:admin/ingest/pipeline/get",
+                "cluster:admin/ingest/pipeline/simulate",
+            ],
+            &[],
+        ),
+        (
+            "read_project_routing",
+            &[
+                "cluster:monitor/project/*",
+                "cluster:monitor/project_routing/*",
+            ],
+            &[],
+        ),
+        (
+            "transport_client",
+            &["cluster:monitor/nodes/liveness", "cluster:monitor/state"],
+            &[],
+        ),
         (
             "manage_security",
             &["cluster:admin/xpack/security/*"],
             &["cluster:admin/xpack/security/delegate_pki"],
         ),
-        ("manage_api_key", API_KEYS, &[]),
-        ("manage_own_api_key", API_KEYS, &[]),
+        (
+            "read_security",
+            &[
+                "cluster:admin/xpack/security/api_key/get",
+                "cluster:admin/xpack/security/api_key/query",
+                "cluster:admin/xpack/security/privilege/builtin/get",
+                "cluster:admin/xpack/security/privilege/get",
+                "cluster:admin/xpack/security/profile/get",
+                "cluster:admin/xpack/security/profile/has_privileges",
+                "cluster:admin/xpack/security/profile/suggest",
+                "cluster:admin/xpack/security/role/get",
+                "cluster:admin/xpack/security/role/query",
+                "cluster:admin/xpack/security/role_mapping/get",
+                "cluster:admin/xpack/security/service_account/credential/get*",
+                "cluster:admin/xpack/security/service_account/get",
+                "cluster:admin/xpack/security/settings/get",
+                "cluster:admin/xpack/security/user/get",
+                "cluster:admin/xpack/security/user/has_privileges",
+                "cluster:admin/xpack/security/user/list_privileges",
+                "cluster:admin/xpack/security/user/query",
+            ],
+            &[],
+        ),
+        (
+            "manage_saml",
+            &[
+                "cluster:admin/xpack/security/saml/*",
+                "cluster:admin/xpack/security/token/invalidate",
+                "cluster:admin/xpack/security/token/refresh",
+                "cluster:monitor/xpack/security/saml/metadata",
+            ],
+            &[],
+        ),
+        ("manage_oidc", &["cluster:admin/xpack/security/oidc/*"], &[]),
+        (
+            "manage_api_key",
+            &["cluster:admin/xpack/security/api_key/*"],
+            &[],
+        ),
+        (
+            "manage_service_account",
+            &["cluster:admin/xpack/security/service_account/*"],
+            &[],
+        ),
+        (
+            "manage_user_profile",
+            &["cluster:admin/xpack/security/profile/*"],
+            &[],
+        ),
+        (
+            "grant_api_key",
+            &["cluster:admin/xpack/security/api_key/grant*"],
+            &[],
+        ),
+        (
+            "clone_api_key",
+            &["cluster:admin/xpack/security/api_key/clone*"],
+            &[],
+        ),
+        ("manage_pipeline", &["cluster:admin/ingest/pipeline/*"], &[]),
+        (
+            "manage_project_routing",
+            &[
+                "cluster:admin/project_routing/*",
+                "cluster:monitor/project/*",
+                "cluster:monitor/project_routing/*",
+            ],
+            &[],
+        ),
+        ("manage_autoscaling", &["cluster:admin/autoscaling/*"], &[]),
+        (
+            "manage_ccr",
+            &[
+                "cluster:admin/xpack/ccr/*",
+                "cluster:admin/xpack/security/user/has_privileges",
+                "cluster:monitor/state",
+            ],
+            &[],
+        ),
+        (
+            "read_ccr",
+            &[
+                "cluster:admin/xpack/security/user/has_privileges",
+                "cluster:monitor/state",
+            ],
+            &[],
+        ),
+        (
+            "create_snapshot",
+            &[
+                "cluster:admin/repository/get",
+                "cluster:admin/snapshot/create",
+                "cluster:admin/snapshot/get",
+                "cluster:admin/snapshot/status",
+                "cluster:admin/snapshot/status*",
+            ],
+            &[],
+        ),
+        (
+            "monitor_snapshot",
+            &[
+                "cluster:admin/repository/get",
+                "cluster:admin/snapshot/get",
+                "cluster:admin/snapshot/status",
+                "cluster:admin/snapshot/status*",
+            ],
+            &[],
+        ),
+        ("manage_ilm", &["cluster:admin/ilm/*"], &[]),
+        (
+            "read_ilm",
+            &[
+                "cluster:admin/ilm/get",
+                "cluster:admin/ilm/operation_mode/get",
+            ],
+            &[],
+        ),
+        (
+            "manage_slm",
+            &[
+                "cluster:admin/ilm/operation_mode/get",
+                "cluster:admin/ilm/start",
+                "cluster:admin/ilm/stop",
+                "cluster:admin/slm/*",
+            ],
+            &[],
+        ),
+        (
+            "read_slm",
+            &[
+                "cluster:admin/ilm/operation_mode/get",
+                "cluster:admin/slm/get",
+                "cluster:admin/slm/status",
+            ],
+            &[],
+        ),
+        (
+            "delegate_pki",
+            &[
+                "cluster:admin/xpack/security/delegate_pki",
+                "cluster:admin/xpack/security/token/invalidate",
+            ],
+            &[],
+        ),
+        (
+            "manage_enrich",
+            &[
+                "cluster:admin/xpack/enrich/*",
+                "cluster:monitor/xpack/enrich/*",
+            ],
+            &[],
+        ),
+        (
+            "manage_logstash_pipelines",
+            &["cluster:admin/logstash/pipeline/*"],
+            &[],
+        ),
+        (
+            "read_fleet_secrets",
+            &["cluster:admin/fleet/secrets/get"],
+            &[],
+        ),
+        (
+            "write_fleet_secrets",
+            &[
+                "cluster:admin/fleet/secrets/delete",
+                "cluster:admin/fleet/secrets/post",
+            ],
+            &[],
+        ),
+        ("cancel_task", &["cluster:admin/tasks/cancel*"], &[]),
+        (
+            "manage_search_application",
+            &["cluster:admin/xpack/application/search_application/*"],
+            &[],
+        ),
+        (
+            "manage_connector",
+            &["cluster:admin/xpack/connector/*"],
+            &[
+                "cluster:admin/xpack/connector/secret/delete",
+                "cluster:admin/xpack/connector/secret/get",
+                "cluster:admin/xpack/connector/secret/post",
+                "cluster:admin/xpack/connector/secret/put",
+            ],
+        ),
+        (
+            "monitor_connector",
+            &[
+                "cluster:admin/xpack/connector/get",
+                "cluster:admin/xpack/connector/list",
+                "cluster:admin/xpack/connector/sync_job/get",
+                "cluster:admin/xpack/connector/sync_job/list",
+            ],
+            &[],
+        ),
+        (
+            "manage_search_synonyms",
+            &[
+                "cluster:admin/synonym_rules/*",
+                "cluster:admin/synonyms/*",
+                "cluster:admin/synonyms_sets/*",
+            ],
+            &[],
+        ),
+        (
+            "manage_behavioral_analytics",
+            &["cluster:admin/xpack/application/analytics/*"],
+            &[],
+        ),
+        (
+            "post_behavioral_analytics_event",
+            &["cluster:admin/xpack/application/analytics/post_event"],
+            &[],
+        ),
+        (
+            "manage_search_query_rules",
+            &["cluster:admin/xpack/query_rules/*"],
+            &[],
+        ),
+        (
+            "cross_cluster_search",
+            &[
+                "cluster:internal/admin/tasks/ban",
+                "cluster:internal/admin/tasks/cancel_child",
+                "cluster:internal/remote_cluster/handshake",
+                "cluster:internal/remote_cluster/nodes",
+                "cluster:internal:data/read/esql/exchange",
+                "cluster:internal:data/read/esql/open_exchange",
+                "cluster:monitor/stats",
+                "cluster:monitor/stats/remote",
+                "cluster:monitor/stats[n]",
+                "cluster:monitor/xpack/enrich/esql/resolve_policy",
+                "cluster:monitor/xpack/info",
+            ],
+            &[],
+        ),
+        (
+            "cross_cluster_replication",
+            &[
+                "cluster:internal/admin/tasks/ban",
+                "cluster:internal/admin/tasks/cancel_child",
+                "cluster:internal/remote_cluster/handshake",
+                "cluster:internal/remote_cluster/nodes",
+                "cluster:monitor/state",
+                "cluster:monitor/xpack/info",
+            ],
+            &[],
+        ),
+        (
+            "read_connector_secrets",
+            &["cluster:admin/xpack/connector/secret/get"],
+            &[],
+        ),
+        (
+            "write_connector_secrets",
+            &[
+                "cluster:admin/xpack/connector/secret/delete",
+                "cluster:admin/xpack/connector/secret/post",
+                "cluster:admin/xpack/connector/secret/put",
+            ],
+            &[],
+        ),
+        ("monitor_data_stream_global_retention", &[], &[]),
+        ("manage_data_stream_global_retention", &[], &[]),
+        (
+            "manage_own_api_key",
+            &["cluster:admin/xpack/security/api_key/*"],
+            &[],
+        ),
     ],
 };
 
@@ -900,12 +1316,47 @@ const INDEX: Kind = Kind {
                 "indices:data/read/*",
                 "internal:transport/proxy/indices:data/read/*",
                 "indices:admin/resolve/index",
+                "indices:admin/resolve/cluster",
+                "indices:admin/inference/fields/get",
+                "indices:admin/shards/search_shards",
+                "indices:admin/search/search_shards",
             ],
             &[],
         ),
         (
-            "write",
-            &["indices:data/write/*", "indices:admin/mapping/auto_put"],
+            "read_cross_cluster",
+            &[
+                "internal:transport/proxy/indices:data/read/*",
+                "indices:admin/shards/search_shards",
+                "indices:admin/search/search_shards",
+                "indices:admin/resolve/cluster",
+                "indices:data/read/esql",
+                "indices:data/read/esql/compute",
+            ],
+            &[],
+        ),
+        (
+            "create",
+            &[
+                "indices:data/write/index*",
+                "indices:data/write/bulk*",
+                "indices:data/write/simulate/bulk*",
+                "indices:data/write/otlp/*",
+                "indices:data/write/prometheus/*",
+            ],
+            &[],
+        ),
+        (
+            "create_doc",
+            &[
+                "indices:data/write/index",
+                "indices:data/write/index[*",
+                "indices:data/write/index:op_type/create",
+                "indices:data/write/bulk*",
+                "indices:data/write/simulate/bulk*",
+                "indices:data/write/otlp/*",
+                "indices:data/write/prometheus/*",
+            ],
             &[],
         ),
         (
@@ -914,7 +1365,20 @@ const INDEX: Kind = Kind {
                 "indices:data/write/index*",
                 "indices:data/write/bulk*",
                 "indices:data/write/update*",
+                "indices:data/write/simulate/bulk*",
+                "indices:data/write/otlp/*",
+                "indices:data/write/prometheus/*",
             ],
+            &[],
+        ),
+        (
+            "delete",
+            &["indices:data/write/delete*", "indices:data/write/bulk*"],
+            &[],
+        ),
+        (
+            "write",
+            &["indices:data/write/*", "indices:admin/mapping/auto_put"],
             &[],
         ),
         ("monitor", &["indices:monitor/*"], &[]),
@@ -924,7 +1388,127 @@ const INDEX: Kind = Kind {
                 "indices:monitor/*",
                 "indices:admin/*",
                 "indices:data/read/field_caps*",
+                "indices:data/read/xpack/rollup/get/index/caps*",
             ],
+            &[],
+        ),
+        (
+            "create_index",
+            &[
+                "indices:admin/create",
+                "indices:admin/auto_create",
+                "indices:admin/data_stream/create",
+                "indices:admin/data_stream/auto_create_past_tsdb",
+            ],
+            &[],
+        ),
+        (
+            "delete_index",
+            &["indices:admin/delete", "indices:admin/data_stream/delete"],
+            &[],
+        ),
+        (
+            "view_index_metadata",
+            &[
+                "indices:admin/aliases/get",
+                "indices:admin/get",
+                "indices:admin/mappings/fields/get*",
+                "indices:admin/mappings/get",
+                "indices:admin/shards/search_shards",
+                "indices:admin/search/search_shards",
+                "indices:admin/validate/query*",
+                "indices:monitor/settings/get",
+                "indices:admin/ilm/explain",
+                "indices:admin/data_stream/lifecycle/get",
+                "indices:admin/data_stream/lifecycle/explain",
+                "indices:admin/data_stream/get",
+                "indices:admin/resolve/index",
+                "indices:admin/resolve/cluster",
+                "indices:data/read/field_caps*",
+                "indices:data/read/xpack/rollup/get/index/caps*",
+                "indices:monitor/transform/checkpoint*",
+                "indices:monitor/get/metering/stats",
+                "indices:admin/get/metering/stats",
+            ],
+            &[],
+        ),
+        (
+            "manage_follow_index",
+            &[
+                "indices:admin/xpack/ccr/put_follow",
+                "indices:admin/xpack/ccr/unfollow",
+                "indices:admin/close*",
+                "indices:admin/data_stream/promote",
+                "indices:admin/rollover",
+            ],
+            &[],
+        ),
+        (
+            "manage_leader_index",
+            &["indices:admin/xpack/ccr/forget_follower*"],
+            &[],
+        ),
+        ("manage_ilm", &["indices:admin/ilm/*"], &[]),
+        (
+            "manage_data_stream_lifecycle",
+            &["indices:admin/data_stream/lifecycle/*"],
+            &[],
+        ),
+        (
+            "maintenance",
+            &[
+                "indices:admin/refresh*",
+                "indices:admin/flush*",
+                "indices:admin/synced_flush",
+                "indices:admin/forcemerge*",
+            ],
+            &[],
+        ),
+        (
+            "auto_configure",
+            &[
+                "indices:admin/mapping/auto_put",
+                "indices:admin/auto_create",
+                "indices:admin/data_stream/auto_create_past_tsdb",
+            ],
+            &[],
+        ),
+        (
+            "cross_cluster_replication",
+            &[
+                "indices:data/read/xpack/ccr/shard_changes*",
+                "indices:monitor/stats*",
+                "indices:admin/seq_no/add_retention_lease*",
+                "indices:admin/seq_no/remove_retention_lease*",
+                "indices:admin/seq_no/renew_retention_lease*",
+            ],
+            &[],
+        ),
+        (
+            "cross_cluster_replication_internal",
+            &[
+                "indices:internal/admin/ccr/restore/session/clear*",
+                "indices:internal/admin/ccr/restore/file_chunk/get*",
+                "indices:internal/admin/ccr/restore/session/put*",
+                "internal:transport/proxy/indices:internal/admin/ccr/restore/session/clear*",
+                "internal:transport/proxy/indices:internal/admin/ccr/restore/file_chunk/get*",
+            ],
+            &[],
+        ),
+        ("manage_view", &["indices:admin/esql/view*"], &[]),
+        ("create_view", &["indices:admin/esql/view/put"], &[]),
+        ("delete_view", &["indices:admin/esql/view/delete"], &[]),
+        ("read_view_metadata", &["indices:admin/esql/view/get"], &[]),
+        ("manage_dataset", &["indices:admin/esql/dataset/*"], &[]),
+        ("create_dataset", &["indices:admin/esql/dataset/put"], &[]),
+        (
+            "delete_dataset",
+            &["indices:admin/esql/dataset/delete"],
+            &[],
+        ),
+        (
+            "read_dataset_metadata",
+            &["indices:admin/esql/dataset/get"],
             &[],
         ),
     ],
@@ -947,31 +1531,27 @@ impl Kind {
         if requested == "none" {
             return granted.iter().any(|g| !named(g));
         }
-        if !named(requested) && !requested.contains('*') {
-            let named_by = granted_by(requested).split(',');
-            if acting().any(|g| named_by.clone().any(|n| n == *g)) {
-                return true;
-            }
-        }
         let Some((wanted, _)) = self.actions(requested) else {
             return false;
         };
-        let covered = |w: &&str| {
+        let covered = |w: &String| {
             acting().filter_map(|g| self.actions(g)).any(|(inc, exc)| {
                 inc.iter().any(|i| glob(i, w)) && !exc.iter().any(|e| glob(e, w) || glob(w, e))
             })
         };
-        wanted.iter().all(covered)
+        // No actions (as `none`) are implied by any privilege with actions.
+        acting().next().is_some() && wanted.iter().all(covered)
     }
 
-    /// The action patterns of `privilege` as (included, excluded), if known.
-    fn actions<'a>(&self, privilege: &'a str) -> Option<(Vec<&'a str>, &'static [&'static str])> {
+    /// The action patterns of `privilege` as (included, excluded), if known; an action name
+    /// stands for itself and its sub-actions, as Elasticsearch's `Privilege.actionToPattern`.
+    fn actions(&self, privilege: &str) -> Option<(Vec<String>, &'static [&'static str])> {
         if privilege.contains(':') {
-            return Some((vec![privilege], &[]));
+            return Some((vec![format!("{privilege}*")], &[]));
         }
         (self.actions.iter())
             .find(|(n, ..)| *n == privilege)
-            .map(|(_, inc, exc)| (inc.to_vec(), *exc))
+            .map(|(_, inc, exc)| (inc.iter().map(|i| i.to_string()).collect(), *exc))
     }
 }
 
