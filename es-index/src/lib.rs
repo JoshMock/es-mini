@@ -992,7 +992,7 @@ impl Index {
     }
 
     /// The shard [`routing::shard_id`] picks for `id` and `routing`.
-    fn shard_for(&self, id: &str, routing: Option<&str>) -> usize {
+    pub fn shard_for(&self, id: &str, routing: Option<&str>) -> usize {
         routing::shard_id(id, routing, self.number_of_shards() as u32) as usize
     }
 

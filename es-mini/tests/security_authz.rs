@@ -608,6 +608,31 @@ async fn mget_items_are_authorized_by_index() {
     assert_eq!(out["docs"][0]["error"], on("b1", "b1")["error"]);
 }
 
+/// mget items are authorized per shard like Elasticsearch's shard requests: a name the key may
+/// not read fails the items on its shard only (ids 12 and 1 route to shards 0 and 1 of two).
+#[tokio::test]
+async fn shard_reads_mget_items_are_authorized_by_shard() {
+    let app = app().await;
+    let body = json!({"settings": {"number_of_shards": 2}, "aliases": {"sx": {}}});
+    ok(&app, ELASTIC, "PUT", "/s2", Some(body)).await;
+    for id in ["1", "12"] {
+        let uri = format!("/s2/_doc/{id}?refresh=true");
+        ok(&app, ELASTIC, "PUT", &uri, Some(json!({"x": 1}))).await;
+    }
+    let roles = json!({"r": {"indices": [{"names": ["s2"], "privileges": ["read"]}]}});
+    let (k, id) = key(&app, ELASTIC, roles).await;
+    let docs = json!([
+        {"_index": "sx", "_id": "12"},
+        {"_index": "s2", "_id": "12"},
+        {"_index": "s2", "_id": "1"},
+    ]);
+    let out = ok(&app, &k, "POST", "/_mget", Some(json!({"docs": docs}))).await;
+    let error = denied(&id, "indices:data/read/mget[shard]", "sx", "read,all")["error"].clone();
+    assert_eq!(out["docs"][0]["error"], error, "{out}");
+    assert_eq!(out["docs"][1]["error"], error, "{out}");
+    assert_eq!(out["docs"][2]["found"], true, "{out}");
+}
+
 /// Each msearch search is authorized alone as `indices:data/read/search`: a name the key may
 /// not read fails its search with the 403, unmatched wildcards find nothing (recorded from
 /// Elasticsearch 9.5.5).

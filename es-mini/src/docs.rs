@@ -570,13 +570,18 @@ pub async fn mget(
         .map(|(index, id, routing)| Some((index.or_else(|| default_index.clone())?, id, routing)))
         .collect::<Option<Vec<_>>>()
         .ok_or_else(|| missing("index"))?;
-    // ponytail: items are grouped by index, where Elasticsearch groups them by shard
-    let concrete: Vec<Option<String>> = {
+    // Grouped by shard like Elasticsearch's shard requests; items that fail to resolve are in
+    // none.
+    let concrete: Vec<Option<(String, usize)>> = {
         let shared = state.read();
         (items.iter())
-            .map(|(index, ..)| match index.contains('*') {
-                true => None,
-                false => single_index(&*shared, index).ok(),
+            .map(|(index, id, r)| {
+                let c = single_index(&*shared, index)
+                    .ok()
+                    .filter(|_| !index.contains('*'))?;
+                let i = shared.read(&c).expect("resolved");
+                let r = routing(&i, index, r.as_deref()).ok()??;
+                Some((c.clone(), i.shard_for(id, r)))
             })
             .collect()
     };
@@ -588,7 +593,7 @@ pub async fn mget(
                 .map(|((name, ..), _)| name.as_str())
                 .collect();
             if let Err(e) = mget_shard(authn.as_deref(), &names) {
-                docs.push(json!({"_index": c, "_id": id, "error": e.parts().1}));
+                docs.push(json!({"_index": c.0, "_id": id, "error": e.parts().1}));
                 continue;
             }
         }
