@@ -1324,7 +1324,7 @@ pub fn format_date(format: &str, t: i64, tz: &tz::TimeZone) -> Option<String> {
         "epoch_millis" => t.to_string(),
         "epoch_second" if t % 1000 == 0 => (t / 1000).to_string(),
         "epoch_second" => (t as f64 / 1000.0).to_string(),
-        f => date_pattern::DateFormat::new(f)?.format(t, tz.offset(t), "")?,
+        f => date_pattern::DateFormat::new(f)?.format(t, tz, "")?,
     })
 }
 
@@ -1670,6 +1670,28 @@ mod tests {
             format_date("[uuuu]G hh a O", t, &tz::TimeZone::UTC).as_deref(),
             Some("2021AD 08 PM GMT")
         );
+    }
+
+    /// Outputs checked against Elasticsearch 9.5.5's date_histogram `key_as_string`.
+    #[test]
+    fn date_locales_zones_zone_id_prints_the_region() {
+        let t = 1_619_899_200_000; // 2021-05-01T20:00:00Z
+        let cases = [
+            ("Europe/Paris", "2021-05-01 Europe/Paris"),
+            ("America/New_York", "2021-05-01 America/New_York"),
+            ("US/Eastern", "2021-05-01 US/Eastern"),
+            ("UTC", "2021-05-01 UTC"),
+            ("GMT", "2021-05-01 GMT"),
+            ("Z", "2021-05-01 Z"),
+            ("+00:00", "2021-05-01 Z"),
+            ("+01:00", "2021-05-01 +01:00"),
+            ("+5", "2021-05-02 +05:00"),
+        ];
+        for (zone, want) in cases {
+            let tz = tz::TimeZone::parse(zone).unwrap();
+            let got = format_date("yyyy-MM-dd VV", t, &tz);
+            assert_eq!(got.as_deref(), Some(want), "{zone}");
+        }
     }
 
     #[test]

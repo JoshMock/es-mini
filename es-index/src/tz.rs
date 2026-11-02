@@ -15,6 +15,8 @@ pub struct TimeZone {
     transitions: Vec<(i64, i64)>,
     /// The daylight saving rule of the TZif footer, for instants past the last transition.
     rule: Option<Rule>,
+    /// The region ID (`Europe/Paris`, `UTC`) java.time prints for the zone; `None` for an offset.
+    region: Option<Box<str>>,
 }
 
 /// A POSIX TZ string's daylight saving rule: standard and daylight offsets, and the dates and
@@ -41,6 +43,7 @@ impl TimeZone {
         initial: 0,
         transitions: Vec::new(),
         rule: None,
+        region: None,
     };
 
     /// The transitions that matter around instant (or local time) `t`: the listed ones, or
@@ -67,8 +70,10 @@ impl TimeZone {
 
     /// The zone with ID `id`, if it is a known zone.
     pub fn parse(id: &str) -> Option<TimeZone> {
-        if matches!(id, "Z" | "UTC" | "GMT") {
-            return Some(TimeZone::UTC);
+        match id {
+            "Z" => return Some(TimeZone::UTC),
+            "UTC" | "GMT" => return Some(TimeZone::UTC.in_region(id)),
+            _ => {}
         }
         if let Some(rest) = id.strip_prefix(['+', '-']) {
             return fixed(id.starts_with('-'), rest);
@@ -83,7 +88,19 @@ impl TimeZone {
         if !id.split('/').all(valid) {
             return None;
         }
-        tzif(&fs::read(format!("/usr/share/zoneinfo/{id}")).ok()?)
+        Some(tzif(&fs::read(format!("/usr/share/zoneinfo/{id}")).ok()?)?.in_region(id))
+    }
+
+    fn in_region(self, id: &str) -> TimeZone {
+        TimeZone {
+            region: Some(id.into()),
+            ..self
+        }
+    }
+
+    /// The region ID java.time prints for the zone (`VV`), or `None` for a fixed offset.
+    pub fn region(&self) -> Option<&str> {
+        self.region.as_deref()
     }
 
     /// The offset at instant `t`.
@@ -180,6 +197,7 @@ fn fixed(negative: bool, s: &str) -> Option<TimeZone> {
         initial: if negative { -ms } else { ms },
         transitions: vec![],
         rule: None,
+        region: None,
     })
 }
 
@@ -235,6 +253,7 @@ fn tzif(b: &[u8]) -> Option<TimeZone> {
         initial,
         transitions,
         rule,
+        region: None,
     })
 }
 

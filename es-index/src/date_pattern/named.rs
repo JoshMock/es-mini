@@ -472,9 +472,9 @@ impl DateFormat {
         })
     }
 
-    /// Instant `t` at `offset` (see [`Pattern::format`]).
-    pub fn format(&self, t: i64, offset: i64, locale: &str) -> Option<String> {
-        self.printer.format(t, offset, locale)
+    /// Instant `t` in zone `tz` (see [`Pattern::format`]).
+    pub fn format(&self, t: i64, tz: &TimeZone, locale: &str) -> Option<String> {
+        self.printer.format(t, tz, locale)
     }
 }
 
@@ -1124,7 +1124,7 @@ mod tests {
         ];
         for (name, want) in cases {
             let f = DateFormat::new(name).unwrap();
-            let got = instants.map(|t| f.format(t, 0, "").unwrap());
+            let got = instants.map(|t| f.format(t, &TimeZone::UTC, "").unwrap());
             assert_eq!(got, want, "{name}");
         }
     }
@@ -1395,7 +1395,7 @@ mod tests {
         for (name, want) in cases {
             let f = DateFormat::new(name).unwrap_or_else(|| panic!("{name}"));
             // ISO weeks whatever the locale
-            let got = instants.map(|t| f.format(t, 0, "en-US").unwrap());
+            let got = instants.map(|t| f.format(t, &TimeZone::UTC, "en-US").unwrap());
             assert_eq!(got, want, "{name}");
         }
     }

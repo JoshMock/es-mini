@@ -464,12 +464,13 @@ impl Pattern {
         default(F::Nano, 999_999_999);
     }
 
-    /// Instant `t` (epoch millis) at `offset` (millis), or `None` for a value too wide for its
-    /// field.
-    pub fn format(&self, t: i64, offset: i64, locale: &str) -> Option<String> {
+    /// Instant `t` (epoch millis) in zone `tz`, or `None` for a value too wide for its field.
+    pub fn format(&self, t: i64, tz: &TimeZone, locale: &str) -> Option<String> {
         let mut out = String::new();
         let week = self.week.unwrap_or_else(|| Week::of(locale));
-        format_seq(&self.toks, t + offset, offset, locale, week, &mut out)?;
+        let offset = tz.offset(t);
+        let zone = (offset, tz.region());
+        format_seq(&self.toks, t + offset, zone, locale, week, &mut out)?;
         Some(out)
     }
 }
@@ -1045,14 +1046,16 @@ fn field_at(f: F, t: i64, week: Week) -> i64 {
     }
 }
 
+/// Prints local time `t` in a zone of `(offset, region ID)`.
 fn format_seq(
     toks: &[Tok],
     t: i64,
-    offset: i64,
+    zone: (i64, Option<&str>),
     locale: &str,
     week: Week,
     out: &mut String,
 ) -> Option<()> {
+    let offset = zone.0;
     for tok in toks {
         match tok {
             Tok::Lit(l) => out.push_str(l),
@@ -1113,10 +1116,11 @@ fn format_seq(
                     }
                 }
             }
-            // ponytail: a region zone prints as its offset's ID (`+HH:MM:ss`); keep the zone's
-            // ID in TimeZone to print `Europe/Paris`
-            Tok::ZoneId => format_offset(offset, 6, "Z", out),
-            Tok::Optional(inner) => format_seq(inner, t, offset, locale, week, out)?,
+            Tok::ZoneId => match zone.1 {
+                Some(region) => out.push_str(region),
+                None => format_offset(offset, 6, "Z", out),
+            },
+            Tok::Optional(inner) => format_seq(inner, t, zone, locale, week, out)?,
             Tok::Insensitive => {}
         }
     }
@@ -1159,7 +1163,7 @@ mod tests {
         let t = 1_619_899_200_000; // 2021-05-01T20:00:00Z
         let print = |p: &str, zone: &str| {
             let tz = TimeZone::parse(zone).unwrap();
-            Pattern::new(p).unwrap().format(t, tz.offset(t), "")
+            Pattern::new(p).unwrap().format(t, &tz, "")
         };
         let cases = [
             (
@@ -1207,7 +1211,7 @@ mod tests {
         let print = |p: &str, iso: &str, locale: &str| {
             Pattern::new(p)
                 .unwrap()
-                .format(days(iso), 0, locale)
+                .format(days(iso), &TimeZone::UTC, locale)
                 .unwrap()
         };
         let p = "YYYY-ww-e c W F YY Y YYY YYYYY ee eee cccc eeeee w";

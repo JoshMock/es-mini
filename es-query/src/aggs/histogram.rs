@@ -1094,6 +1094,23 @@ mod tests {
         );
     }
 
+    /// Keys checked against Elasticsearch 9.5.5.
+    #[test]
+    fn date_locales_zones_histogram_keys_print_the_zone_id() {
+        let mut ix = index(&[]);
+        ix.put("1", json!({"at": "2021-05-01T20:00:00Z"}));
+        for (zone, want) in [
+            ("Europe/Paris", "2021-05-01 Europe/Paris"),
+            ("UTC", "2021-05-01 UTC"),
+            ("Z", "2021-05-01 Z"),
+        ] {
+            let h = json!({"field": "at", "calendar_interval": "day", "time_zone": zone,
+                "format": "yyyy-MM-dd VV"});
+            let got = run(&[&ix], json!({"h": {"date_histogram": h}})).unwrap();
+            assert_eq!(got["h"]["buckets"][0]["key_as_string"], want, "{zone}");
+        }
+    }
+
     #[test]
     fn date_histogram_keyed_typed_and_bad_requests() {
         let mut ix = index(&[]);
