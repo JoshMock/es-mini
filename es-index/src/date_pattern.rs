@@ -185,6 +185,8 @@ enum Tok {
     /// ZoneIdPrinterParser (`VV`).
     ZoneId,
     Optional(Vec<Tok>),
+    /// `parseCaseInsensitive`: what follows parses ignoring case.
+    Insensitive,
 }
 
 /// A sequence of tokens and the value parser later fixed-width fields reserve digits from.
@@ -361,6 +363,7 @@ struct Fields {
     v: [Option<i64>; 23],
     zone: Option<Zone>,
     lenient: bool,
+    insensitive: bool,
 }
 
 impl Fields {
@@ -604,7 +607,10 @@ fn parse_seq(toks: &[Tok], s: &str, mut pos: usize, p: &mut Fields, locale: &str
     for t in toks {
         let rest = &s[pos..];
         pos += match t {
-            Tok::Lit(l) => rest.starts_with(l.as_str()).then_some(l.len())?,
+            Tok::Lit(l) => {
+                let text = rest.get(..l.len())?;
+                (text == l || p.insensitive && text.eq_ignore_ascii_case(l)).then_some(l.len())?
+            }
             &Tok::Num {
                 f,
                 min,
@@ -646,7 +652,7 @@ fn parse_seq(toks: &[Tok], s: &str, mut pos: usize, p: &mut Fields, locale: &str
                 name.len()
             }
             &Tok::Offset(pattern, zero) => {
-                let (o, n) = parse_offset(rest, pattern, zero)?;
+                let (o, n) = parse_offset(rest, pattern, zero, p.insensitive)?;
                 set_zone(p, Zone::Offset(o))?;
                 n
             }
@@ -659,11 +665,21 @@ fn parse_seq(toks: &[Tok], s: &str, mut pos: usize, p: &mut Fields, locale: &str
                 let ok = |c: char| c.is_ascii_alphanumeric() || "_/+-:".contains(c);
                 let end = rest.find(|c| !ok(c)).unwrap_or(rest.len());
                 // ZoneIdPrinterParser takes the longest known ID
+                // ponytail: ignoring case matches only `Z`, `UTC` and `GMT`, not region IDs; list
+                // /usr/share/zoneinfo to match those
+                let id = |n: usize| match rest[..n].to_ascii_uppercase() {
+                    up if p.insensitive && ["Z", "UTC", "GMT"].contains(&up.as_str()) => up,
+                    _ => rest[..n].to_owned(),
+                };
                 let (n, zone) = (1..=end)
                     .rev()
-                    .find_map(|n| Some((n, TimeZone::parse(&rest[..n])?)))?;
+                    .find_map(|n| Some((n, TimeZone::parse(&id(n))?)))?;
                 set_zone(p, Zone::Region(zone))?;
                 n
+            }
+            Tok::Insensitive => {
+                p.insensitive = true;
+                0
             }
             Tok::Optional(inner) => {
                 let mut q = p.clone();
@@ -735,8 +751,10 @@ fn parse_num(
 }
 
 /// `OffsetIdPrinterParser.parse` in strict mode for a padded-hour pattern: millis and bytes taken.
-fn parse_offset(s: &str, pattern: usize, zero: &str) -> Option<(i64, usize)> {
-    if s.starts_with(zero) {
+fn parse_offset(s: &str, pattern: usize, zero: &str, insensitive: bool) -> Option<(i64, usize)> {
+    if s.get(..zero.len())
+        .is_some_and(|z| z == zero || insensitive && z.eq_ignore_ascii_case(zero))
+    {
         return Some((0, zero.len()));
     }
     let sign = match s.as_bytes().first()? {
@@ -1099,6 +1117,7 @@ fn format_seq(
             // ID in TimeZone to print `Europe/Paris`
             Tok::ZoneId => format_offset(offset, 6, "Z", out),
             Tok::Optional(inner) => format_seq(inner, t, offset, locale, week, out)?,
+            Tok::Insensitive => {}
         }
     }
     Some(())

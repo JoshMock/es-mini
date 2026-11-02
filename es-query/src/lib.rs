@@ -2003,8 +2003,9 @@ mod tests {
         assert!(bad_date(f, None, &json!("2021-05-01")));
         assert!(!bad_date(f, None, &json!("2021-05-01T00:00:00Z")));
         assert!(!bad_date(Some("basic_date"), None, &json!("20210501")));
+        assert!(bad_date(Some("week_date"), None, &json!("2021-05-01")));
         // a format es-mini lacks reads values as the default format, so none are refused
-        assert!(!bad_date(Some("week_date"), None, &json!("2021-05-01")));
+        assert!(!bad_date(Some("yyyy-MM-dd z"), None, &json!("2021-05-01")));
     }
 
     #[test]

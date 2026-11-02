@@ -27,6 +27,8 @@ enum B {
     A(&'static [B]),
     /// `optionalStart()`, these calls, `optionalEnd()`
     Opt(&'static [B]),
+    /// `parseCaseInsensitive()`
+    Insensitive,
 }
 use B::*;
 
@@ -176,6 +178,46 @@ const ORDINAL_DATE_TIME_BASE: &[B] = &[
     Opt(&[L(":"), V(Second, 1, 2, NN), Frac(1, 9, true)]),
 ];
 const ORDINAL_DATE_TIME_NO_MILLIS_BASE: &[B] = &[A(ORDINAL_DATE), L("T"), A(HOUR_MINUTE_SECOND)];
+// IsoFields' and WEEK_FIELDS_ROOT's week-based fields both have ISO weeks, as named formats do
+const BASIC_WEEK_DATE: &[B] = &[
+    v(WeekBasedYear),
+    L("W"),
+    V(WeekOfWeekBasedYear, 1, 2, NN),
+    v(DayOfWeek),
+];
+const STRICT_BASIC_WEEK_DATE: &[B] = &[
+    V(WeekBasedYear, 4, 4, NN),
+    L("W"),
+    V(WeekOfWeekBasedYear, 1, 2, NN),
+    v(DayOfWeek),
+];
+const STRICT_BASIC_WEEK_DATE_PRINTER: &[B] = &[
+    V(WeekBasedYear, 4, 10, Normal),
+    L("W"),
+    V(WeekOfWeekBasedYear, 2, 2, NN),
+    v(DayOfWeek),
+];
+const ISO_WEEK_DATE: &[B] = &[
+    Insensitive,
+    V(WeekBasedYear, 4, 10, ExceedsPad),
+    L("-W"),
+    V(WeekOfWeekBasedYear, 2, 2, NN),
+    L("-"),
+    V(DayOfWeek, 1, 1, NN),
+];
+const ISO_WEEK_DATE_T: &[B] = &[A(ISO_WEEK_DATE), L("T")];
+const WEEK_DATE: &[B] = &[
+    V(WeekBasedYear, 4, 10, ExceedsPad),
+    L("-W"),
+    V(WeekOfWeekBasedYear, 1, 2, NN),
+    L("-"),
+    V(DayOfWeek, 1, 1, NN),
+];
+const STRICT_WEEKYEAR_WEEK: &[B] = &[
+    V(WeekBasedYear, 4, 10, ExceedsPad),
+    L("-W"),
+    V(WeekOfWeekBasedYear, 2, 2, NN),
+];
 
 /// `Iso8601Parser`'s fields, by index: year, month, day, hour, minute, second, nano.
 const YEAR: usize = 0;
@@ -406,7 +448,6 @@ pub struct DateFormat {
 impl DateFormat {
     /// `DateFormatters.forPattern`: a named format, else a pattern; `None` where Elasticsearch
     /// rejects the format or es-mini lacks it (see [`Pattern::new`]).
-    // ponytail: no week-based named formats (`week_date`, `weekyear_week_day`, ...)
     pub fn new(format: &str) -> Option<DateFormat> {
         let format = format.trim();
         named(format).or_else(|| {
@@ -460,6 +501,7 @@ fn append(stack: &mut Vec<Seq>, calls: &[B]) -> Option<()> {
             }
             Off(pattern) => seq.push(Tok::Offset(pattern, "Z")),
             Zone => seq.push(Tok::ZoneId),
+            Insensitive => seq.push(Tok::Insensitive),
             P(p) => append_pattern(stack, p)?,
             A(inner) => {
                 let toks = build(inner, false)?.toks;
@@ -559,6 +601,25 @@ fn named(name: &str) -> Option<DateFormat> {
             zoned(base, base)
         }
         "basic_time" => zoned(BASIC_TIME_PRINTER, BASIC_TIME),
+        "basic_week_date" => java(STRICT_BASIC_WEEK_DATE_PRINTER, &[BASIC_WEEK_DATE]),
+        "basic_week_date_time" => java(
+            &[A(STRICT_BASIC_WEEK_DATE_PRINTER), P("'T'HHmmss.SSSX")],
+            &[
+                &[A(BASIC_WEEK_DATE), A(BASIC_T_TIME), Zone],
+                &[A(BASIC_WEEK_DATE), A(BASIC_T_TIME), OFFSET_NO_COLON],
+            ],
+        ),
+        "basic_week_date_time_no_millis" => {
+            let base = [A(BASIC_WEEK_DATE), L("T"), A(BASIC_TIME_NO_MILLIS_BASE)];
+            let (zone, no_colon) = (
+                [&base[..], &[Zone]].concat(),
+                [&base[..], &[OFFSET_NO_COLON]].concat(),
+            );
+            java(
+                &[A(STRICT_BASIC_WEEK_DATE_PRINTER), P("'T'HHmmssX")],
+                &[&zone, &no_colon],
+            )
+        }
         "basic_time_no_millis" => zoned(BASIC_TIME_NO_MILLIS_BASE, BASIC_TIME_NO_MILLIS_BASE),
         "basic_t_time" => zoned(BASIC_T_TIME_PRINTER, BASIC_T_TIME),
         "basic_t_time_no_millis" => {
@@ -731,6 +792,58 @@ fn named(name: &str) -> Option<DateFormat> {
             Iso::new(MONTH, MONTH, false, Some(MONTH)).tz(Tz::Forbidden),
         ),
         "strict_year_month_day" => one(STRICT_YEAR_MONTH_DAY),
+        "strict_basic_week_date" => java(STRICT_BASIC_WEEK_DATE_PRINTER, &[STRICT_BASIC_WEEK_DATE]),
+        "strict_basic_week_date_time" => java(
+            &[A(STRICT_BASIC_WEEK_DATE_PRINTER), P("'T'HHmmss.SSSX")],
+            &[
+                &[A(STRICT_BASIC_WEEK_DATE), A(BASIC_T_TIME), Zone],
+                &[A(STRICT_BASIC_WEEK_DATE), A(BASIC_T_TIME), OFFSET_NO_COLON],
+            ],
+        ),
+        "strict_basic_week_date_time_no_millis" => {
+            let base = &[
+                A(STRICT_BASIC_WEEK_DATE_PRINTER),
+                L("T"),
+                A(BASIC_TIME_NO_MILLIS_BASE),
+            ];
+            zoned(base, base)
+        }
+        "week_date" => java(ISO_WEEK_DATE, &[WEEK_DATE]),
+        "week_date_time" => zoned(
+            &[A(ISO_WEEK_DATE_T), A(STRICT_TIME_PRINTER)],
+            &[A(WEEK_DATE), L("T"), A(TIME_PREFIX)],
+        ),
+        "week_date_time_no_millis" => zoned(
+            &[A(ISO_WEEK_DATE_T), A(STRICT_HOUR_MINUTE_SECOND)],
+            &[A(WEEK_DATE), L("T"), A(TIME_NO_MILLIS)],
+        ),
+        "strict_week_date" => one(ISO_WEEK_DATE),
+        "strict_week_date_time" => zoned(
+            &[A(ISO_WEEK_DATE_T), A(STRICT_TIME_PRINTER)],
+            &[A(ISO_WEEK_DATE_T), A(STRICT_TIME_BASE)],
+        ),
+        "strict_week_date_time_no_millis" => {
+            let base = &[A(ISO_WEEK_DATE_T), A(STRICT_HOUR_MINUTE_SECOND)];
+            zoned(base, base)
+        }
+        "weekyear" => one(&[v(WeekBasedYear)]),
+        "weekyear_week" => java(
+            STRICT_WEEKYEAR_WEEK,
+            &[&[v(WeekBasedYear), L("-W"), v(WeekOfWeekBasedYear)]],
+        ),
+        "weekyear_week_day" => java(
+            &[A(STRICT_WEEKYEAR_WEEK), L("-"), v(LocalDayOfWeek)],
+            &[&[
+                v(WeekBasedYear),
+                L("-W"),
+                v(WeekOfWeekBasedYear),
+                L("-"),
+                v(LocalDayOfWeek),
+            ]],
+        ),
+        "strict_weekyear" => one(&[V(WeekBasedYear, 4, 10, ExceedsPad)]),
+        "strict_weekyear_week" => one(STRICT_WEEKYEAR_WEEK),
+        "strict_weekyear_week_day" => one(&[A(STRICT_WEEKYEAR_WEEK), L("-"), v(LocalDayOfWeek)]),
         _ => None,
     }
 }
@@ -1189,5 +1302,186 @@ mod tests {
             let f = DateFormat::new(name).unwrap();
             assert_eq!(f.parse(s, "", &TimeZone::UTC, false), want, "{name} {s}");
         }
+    }
+
+    /// Elasticsearch 9.5.5's ISO week-based named formats print 2021-01-03T10:00:00.123Z,
+    /// 2021-05-01T20:00:00Z and -0001-05-01T00:00:00Z so.
+    #[test]
+    fn date_week_fields_named_formats_print_like_elasticsearch() {
+        let instants = [1_609_668_000_123, 1_619_899_200_000, -62_188_387_200_000];
+        let cases = [
+            ("basic_week_date", ["2020W537", "2021W176", "-0001W176"]),
+            (
+                "basic_week_date_time",
+                [
+                    "2020W537T100000.123Z",
+                    "2021W176T200000.000Z",
+                    "-0001W176T000000.000Z",
+                ],
+            ),
+            (
+                "basic_week_date_time_no_millis",
+                ["2020W537T100000Z", "2021W176T200000Z", "-0001W176T000000Z"],
+            ),
+            (
+                "strict_basic_week_date",
+                ["2020W537", "2021W176", "-0001W176"],
+            ),
+            (
+                "strict_basic_week_date_time",
+                [
+                    "2020W537T100000.123Z",
+                    "2021W176T200000.000Z",
+                    "-0001W176T000000.000Z",
+                ],
+            ),
+            (
+                "strict_basic_week_date_time_no_millis",
+                ["2020W537T100000Z", "2021W176T200000Z", "-0001W176T000000Z"],
+            ),
+            ("week_date", ["2020-W53-7", "2021-W17-6", "-0001-W17-6"]),
+            (
+                "week_date_time",
+                [
+                    "2020-W53-7T10:00:00.123Z",
+                    "2021-W17-6T20:00:00.000Z",
+                    "-0001-W17-6T00:00:00.000Z",
+                ],
+            ),
+            (
+                "week_date_time_no_millis",
+                [
+                    "2020-W53-7T10:00:00Z",
+                    "2021-W17-6T20:00:00Z",
+                    "-0001-W17-6T00:00:00Z",
+                ],
+            ),
+            (
+                "strict_week_date",
+                ["2020-W53-7", "2021-W17-6", "-0001-W17-6"],
+            ),
+            (
+                "strict_week_date_time",
+                [
+                    "2020-W53-7T10:00:00.123Z",
+                    "2021-W17-6T20:00:00.000Z",
+                    "-0001-W17-6T00:00:00.000Z",
+                ],
+            ),
+            (
+                "strict_week_date_time_no_millis",
+                [
+                    "2020-W53-7T10:00:00Z",
+                    "2021-W17-6T20:00:00Z",
+                    "-0001-W17-6T00:00:00Z",
+                ],
+            ),
+            ("weekyear", ["2020", "2021", "-1"]),
+            ("weekyear_week", ["2020-W53", "2021-W17", "-0001-W17"]),
+            (
+                "weekyear_week_day",
+                ["2020-W53-7", "2021-W17-6", "-0001-W17-6"],
+            ),
+            ("strict_weekyear", ["2020", "2021", "-0001"]),
+            (
+                "strict_weekyear_week",
+                ["2020-W53", "2021-W17", "-0001-W17"],
+            ),
+            (
+                "strict_weekyear_week_day",
+                ["2020-W53-7", "2021-W17-6", "-0001-W17-6"],
+            ),
+        ];
+        for (name, want) in cases {
+            let f = DateFormat::new(name).unwrap_or_else(|| panic!("{name}"));
+            // ISO weeks whatever the locale
+            let got = instants.map(|t| f.format(t, 0, "en-US").unwrap());
+            assert_eq!(got, want, "{name}");
+        }
+    }
+
+    /// Values Elasticsearch 9.5.5 reads or rejects in its week-based named formats.
+    #[test]
+    fn date_week_fields_named_formats_parse_like_elasticsearch() {
+        let iso = DateFormat::new("strict_date_optional_time").unwrap();
+        let at = |s: &str| iso.parse(s, "", &TimeZone::UTC, false).unwrap();
+        let cases = [
+            ("basic_week_date", "2021W176", Some("2021-05-01")),
+            ("basic_week_date", "21W176", Some("0021-05-01")),
+            ("basic_week_date", "2020W537", Some("2021-01-03")),
+            ("basic_week_date", "2021W536", None),
+            ("basic_week_date", "2021W11", None),
+            ("basic_week_date", "2021w176", None),
+            ("strict_basic_week_date", "2021W016", Some("2021-01-09")),
+            ("strict_basic_week_date", "21W176", None),
+            ("strict_basic_week_date", "2021W16", None),
+            (
+                "basic_week_date_time",
+                "2021W176T200000.5+0100",
+                Some("2021-05-01T19:00:00.500Z"),
+            ),
+            ("basic_week_date_time", "2021W176T200000Z", None),
+            (
+                "basic_week_date_time_no_millis",
+                "2021W176T200000+01:00",
+                Some("2021-05-01T19:00:00Z"),
+            ),
+            (
+                "strict_basic_week_date_time",
+                "2021W176T200000.1+0100",
+                Some("2021-05-01T19:00:00.100Z"),
+            ),
+            ("strict_basic_week_date_time", "T10:00:00+0100", None),
+            (
+                "strict_basic_week_date_time_no_millis",
+                "2021W176T200000Europe/Paris",
+                Some("2021-05-01T18:00:00Z"),
+            ),
+            ("week_date", "2021-W1-6", Some("2021-01-09")),
+            ("week_date", "2021-w17-6", None),
+            ("strict_week_date", "2021-w17-6", Some("2021-05-01")),
+            ("strict_week_date", "2021-W1-6", None),
+            (
+                "week_date_time",
+                "2021-W17-6T2:0:0.1Z",
+                Some("2021-05-01T02:00:00.100Z"),
+            ),
+            (
+                "week_date_time_no_millis",
+                "2021-W17-6T20:00:00+0100",
+                Some("2021-05-01T19:00:00Z"),
+            ),
+            (
+                "strict_week_date_time",
+                "2021-w17-6t20:00:00.123z",
+                Some("2021-05-01T20:00:00.123Z"),
+            ),
+            (
+                "strict_week_date_time_no_millis",
+                "2021-W17-6T20:00:00utc",
+                Some("2021-05-01T20:00:00Z"),
+            ),
+            ("weekyear", "21", Some("0021-01-04")),
+            ("weekyear", "-1", Some("-0001-01-04")),
+            ("weekyear_week", "2021-W5", Some("2021-02-01")),
+            ("weekyear_week", "2021-W53", Some("2022-01-03")),
+            ("weekyear_week", "2021-w17", None),
+            ("weekyear_week_day", "2021-W17-06", Some("2021-05-01")),
+            ("weekyear_week_day", "2021-W53-1", None),
+            ("strict_weekyear", "2021", Some("2021-01-04")),
+            ("strict_weekyear", "21", None),
+            ("strict_weekyear_week", "2021-W17", Some("2021-04-26")),
+            ("strict_weekyear_week", "2021-W5", None),
+            ("strict_weekyear_week_day", "2021-W17-8", None),
+        ];
+        for (name, s, want) in cases {
+            let f = DateFormat::new(name).unwrap_or_else(|| panic!("{name}"));
+            let got = f.parse(s, "", &TimeZone::UTC, false);
+            assert_eq!(got, want.map(at), "{name} {s}");
+        }
+        let up = |name, s| DateFormat::new(name)?.parse(s, "", &TimeZone::UTC, true);
+        let end = at("2021-01-04T23:59:59.999Z");
+        assert_eq!(up("weekyear", "2021"), Some(end));
+        assert_eq!(up("strict_weekyear_week", "2021-W01"), Some(end));
     }
 }
