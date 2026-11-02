@@ -41,16 +41,24 @@ pub fn open(data_dir: &Path) -> es_codec::Result<Indices> {
             index.mappings = Mappings::deserialize(&m["_doc"]).unwrap_or_default();
         }
         // An index whose shards never started (e.g. a system index made just before shutdown)
-        // has no shard directory.
-        if !shard_dir(data_dir, &meta.uuid, 0).exists() {
+        // has no shard directory. Some but not all is damage: loading the missing ones empty
+        // would let the next save erase their documents.
+        let shards = index.number_of_shards();
+        let missing: Vec<usize> = (0..shards)
+            .filter(|&n| !shard_dir(data_dir, &meta.uuid, n).exists())
+            .collect();
+        if missing.len() == shards {
             continue;
         }
-        for n in 0..index.number_of_shards() {
+        if let Some(n) = missing.first() {
+            let name = &meta.name;
+            return Err(es_codec::Error(format!(
+                "index [{name}]: shard [{n}]: missing"
+            )));
+        }
+        for n in 0..shards {
             let dir = shard_dir(data_dir, &meta.uuid, n);
             let shard = index.shard_mut(n).1;
-            if !dir.exists() {
-                continue;
-            }
             load_shard(shard, &dir).map_err(|e| {
                 es_codec::Error(format!("index [{}]: shard [{n}]: {}", meta.name, e.0))
             })?;

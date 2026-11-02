@@ -159,3 +159,24 @@ fn snapshots_copy_every_shard() {
     ix.delete_in(1, "a");
     assert_eq!(ids(&contents(&snap)[1]), ["a"]);
 }
+
+/// A shard directory missing beside its index's others is damage, not an empty shard: opening it
+/// as empty would let the next save erase that shard's documents.
+#[test]
+fn a_missing_shard_directory_fails_open() {
+    for missing in [0, 1] {
+        let dir = Scratch::new(&format!("shards-missing-{missing}"), Some("data"));
+        let mut indices = sharded(2);
+        let ix = indices.get_mut("idx").unwrap();
+        ix.put_in(0, "a", json!({"v": 1}));
+        ix.put_in(1, "b", json!({"v": 2}));
+        disk::save(&dir, &indices).unwrap();
+        std::fs::remove_dir_all(shard_dir(&dir, missing)).unwrap();
+        let err = disk::open(&dir).err().map(|e| e.0);
+        let expected = format!("index [idx]: shard [{missing}]: missing");
+        assert!(
+            err.as_ref().is_some_and(|e| e.contains(&expected)),
+            "{err:?}"
+        );
+    }
+}
