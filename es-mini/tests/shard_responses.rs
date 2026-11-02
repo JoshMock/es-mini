@@ -199,3 +199,28 @@ async fn cat_shards_lists_every_shard() {
         (404, &json!("index_not_found_exception"))
     );
 }
+
+#[tokio::test]
+async fn shard_reads_stats_count_the_request_cache_of_each_shard() {
+    let app = setup("keyword", "keyword").await;
+    let body = json!({"size": 0});
+    call(&app, "POST", "/b/_search", body.clone()).await;
+    call(&app, "POST", "/b/_search", body).await;
+    let (_, r) = call(
+        &app,
+        "GET",
+        "/b/_stats/request_cache?level=shards",
+        Value::Null,
+    )
+    .await;
+    let index = &r["indices"]["b"]["total"]["request_cache"];
+    assert_eq!(
+        (index["hit_count"].as_u64(), index["miss_count"].as_u64()),
+        (Some(1), Some(1)),
+        "{r}"
+    );
+    assert_eq!(
+        r["indices"]["b"]["shards"]["0"][0]["request_cache"], *index,
+        "{r}"
+    );
+}

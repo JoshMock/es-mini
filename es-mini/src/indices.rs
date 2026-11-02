@@ -878,7 +878,10 @@ pub async fn stats(
     for n in &names {
         let docs = indices[n].docs().count();
         total += docs;
-        let cache = indices[n].request_cache_stats();
+        let cache = (indices[n].shards().iter().map(|s| s.request_cache_stats()))
+            .fold((0, 0, 0, 0), |a, c| {
+                (a.0 + c.0, a.1 + c.1, a.2 + c.2, a.3 + c.3)
+            });
         cache_total = (
             cache_total.0 + cache.0,
             cache_total.1 + cache.1,
@@ -889,14 +892,15 @@ pub async fn stats(
         let mut stats = json!({"primaries": s, "total": s});
         if level == "shards" {
             let routing = json!({"state": "STARTED", "primary": true, "node": crate::nodes::NODE_ID, "relocating_node": null});
-            // ponytail: the request cache is counted per index, so shards report it empty; no
-            // commit, seq_no, retention_leases or shard_path sections
+            // ponytail: no commit, seq_no, retention_leases or shard_path sections
             let shards: Map<String, Value> = (0..indices[n].number_of_shards())
                 .map(|i| {
-                    let docs = indices[n].shards().get(i).map_or(0, |s| s.docs().count());
+                    let shard = indices[n].shards().get(i);
+                    let docs = shard.map_or(0, |s| s.docs().count());
+                    let cache = shard.map_or((0, 0, 0, 0), |s| s.request_cache_stats());
                     let mut copy = Map::from_iter([("routing".to_string(), routing.clone())]);
                     copy.extend(
-                        section(docs, (0, 0, 0, 0))
+                        section(docs, cache)
                             .as_object()
                             .cloned()
                             .unwrap_or_default(),
