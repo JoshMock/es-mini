@@ -811,3 +811,53 @@ async fn percent_encoded_paths_are_authorized_decoded() {
         "{body}"
     );
 }
+
+/// Every route the server defines (read from its source, so a new route is covered without
+/// editing this list) refuses a key with no privileges, except those Elasticsearch lets any
+/// key use. Guards against a route reaching `steps`' catch-all, which checks nothing.
+#[tokio::test]
+async fn every_route_needs_a_privilege() {
+    // Handlers that check items themselves, or actions that need no privilege in Elasticsearch.
+    let open = [
+        "GET /_security/_authenticate",
+        "GET /_security/user/_has_privileges",
+        "POST /_security/user/_has_privileges",
+        "DELETE /_pit",
+        "DELETE /_search/scroll",
+        "DELETE /_search/scroll/{scroll_id}",
+        // Each action is authorized by the handler; `{}` has none and fails validation first.
+        "POST /_aliases",
+    ];
+    let source = [
+        include_str!("../src/lib.rs"),
+        include_str!("../src/security.rs"),
+    ]
+    .concat();
+    let route =
+        regex::Regex::new(r#"\.route\(\s*"([^"]+)",\s*((?:\.?\w+\([\w:]+\)\s*)+)"#).unwrap();
+    let method = regex::Regex::new(r"(\w+)\([\w:]+\)").unwrap();
+    let app = app().await;
+    let (k, _) = key(&app, ELASTIC, json!({"none": {}})).await;
+    let mut open_routes = vec![];
+    let mut checked = 0;
+    for r in route.captures_iter(&source) {
+        let path = &r[1];
+        for m in method.captures_iter(&r[2]) {
+            let m = m[1].to_uppercase();
+            let route = format!("{m} {path}");
+            let uri = (path.replace("{index}", "a1").replace("{id}", "1"))
+                .replace("{name}", "x")
+                .replace("{metric}", "docs")
+                .replace("{filter}", "_all")
+                .replace("{scroll_id}", "x");
+            let body = (m != "GET" && m != "HEAD" && m != "DELETE").then(|| json!({}));
+            let (status, out) = call(&app, &k, &m, &uri, body).await;
+            checked += 1;
+            if (status == 403) == open.contains(&route.as_str()) {
+                open_routes.push(format!("{route}: {status} {out}"));
+            }
+        }
+    }
+    assert!(checked > 60, "parsed only {checked} routes from the source");
+    assert!(open_routes.is_empty(), "{}", open_routes.join("\n"));
+}
