@@ -1122,3 +1122,61 @@ async fn security_authz_gaps_question_marks_and_regexes_in_role_names() {
         assert_eq!(out["error"]["reason"], reason, "{bad}");
     }
 }
+
+/// A removed alias pattern matching no alias the key may manage removes nothing and fails as
+/// Elasticsearch's does: an action that removes nothing is a 404 naming the aliases as given,
+/// and `-` excludes (recorded from Elasticsearch 9.5.5).
+#[tokio::test]
+async fn security_authz_gaps_alias_removal_without_manageable_match() {
+    let app = app().await;
+    let post = |actions: Value| Some(json!({ "actions": actions }));
+    let add = json!([{"add": {"index": "a1", "aliases": ["al1", "al2", "bl1"]}}]);
+    ok(&app, ELASTIC, "POST", "/_aliases", post(add)).await;
+    let roles = json!({"r": {"indices": [{"names": ["a1", "al*"], "privileges": ["manage"]}]}});
+    let (k, _) = key(&app, ELASTIC, roles).await;
+    let missing = |out: &Value, names: &str| {
+        let reason = format!("aliases [{names}] missing");
+        assert_eq!(out["error"]["type"], "aliases_not_found_exception", "{out}");
+        assert_eq!(out["error"]["reason"], reason, "{out}");
+    };
+    let remove = |extra: Value| {
+        let mut r = json!({"index": "a1", "alias": "bl*"});
+        r.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        post(json!([{ "remove": r }]))
+    };
+    let (status, out) = call(&app, &k, "POST", "/_aliases", remove(json!({}))).await;
+    assert_eq!(status, 404, "{out}");
+    missing(&out, "bl*");
+    let (status, out) = call(
+        &app,
+        &k,
+        "POST",
+        "/_aliases",
+        remove(json!({"must_exist": true})),
+    )
+    .await;
+    assert_eq!(status, 404, "{out}");
+    missing(&out, "*");
+
+    let actions = json!([
+        {"remove": {"index": "a1", "alias": "bl*"}},
+        {"add": {"index": "a1", "alias": "al3"}},
+    ]);
+    let out = ok(&app, &k, "POST", "/_aliases", post(actions)).await;
+    assert_eq!(out["errors"], true, "{out}");
+    let results = &out["action_results"];
+    let action = json!({"type": "remove", "indices": ["a1"], "aliases": ["bl*"]});
+    assert_eq!(
+        (&results[0]["action"], &results[0]["status"]),
+        (&action, &json!(404))
+    );
+    missing(&json!({"error": results[0]["error"]}), "bl*");
+    assert_eq!(results[1]["status"], 200);
+
+    let actions = json!([{"remove": {"index": "a1", "aliases": ["al*", "-al2"]}}]);
+    ok(&app, &k, "POST", "/_aliases", post(actions)).await;
+    let a1 = &aliases(&app).await["a1"]["aliases"];
+    assert_eq!(a1, &json!({"al2": {}, "bl1": {}}));
+}

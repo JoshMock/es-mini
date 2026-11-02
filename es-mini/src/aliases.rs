@@ -142,6 +142,15 @@ fn alias_glob(pattern: &str, name: &str) -> bool {
     glob(if pattern == "_all" { "*" } else { pattern }, name)
 }
 
+/// Whether the alias `name` matches `patterns`, where a later `-x` removes what earlier
+/// patterns matched.
+fn matches(patterns: &[&str], name: &str) -> bool {
+    (patterns.iter()).fold(false, |acc, p| match p.strip_prefix('-') {
+        Some(r) => acc && !alias_glob(r, name),
+        None => acc || alias_glob(p, name),
+    })
+}
+
 pub async fn put(
     State(state): State<AppState>,
     Path((index, alias)): Path<(String, String)>,
@@ -212,15 +221,7 @@ fn lookup(
                     }
                 }
             })
-            .filter(|(a, _)| {
-                patterns.as_ref().is_none_or(|ps| {
-                    // Later `-x` patterns remove what earlier patterns matched.
-                    ps.iter().fold(false, |acc, p| match p.strip_prefix('-') {
-                        Some(r) => acc && !alias_glob(r, a),
-                        None => acc || alias_glob(p, a),
-                    })
-                })
-            })
+            .filter(|(a, _)| patterns.as_ref().is_none_or(|ps| matches(ps, a)))
             .map(|(a, meta)| (a.clone(), json!(meta)))
             .collect();
         if patterns.is_none() || !aliases.is_empty() {
@@ -364,6 +365,16 @@ pub async fn update(
     let actions = body["actions"]
         .as_array_mut()
         .ok_or_else(|| AppError::ActionRequestValidation("no actions specified".into()))?;
+    // Results name the aliases as given, before security narrows their wildcards.
+    let originals: Vec<Vec<String>> = (actions.iter())
+        .map(|a| {
+            let body = a
+                .as_object()
+                .filter(|o| o.len() == 1)
+                .and_then(|o| o.values().next());
+            body.map_or(vec![], |b| names_of(b, "alias", "aliases"))
+        })
+        .collect();
     alias_actions(authn.as_deref(), &state.read(), actions)?;
     let mut indices = state.write();
     let mut tables: BTreeMap<String, BTreeMap<String, Alias>> = indices
@@ -373,7 +384,8 @@ pub async fn update(
     let mut drop = BTreeSet::new();
     let mut added = Vec::new();
     let mut results = Vec::new();
-    for action in actions {
+    let mut changed = false;
+    for (action, original) in actions.iter().zip(&originals) {
         let Some((kind, a)) = action
             .as_object()
             .filter(|o| o.len() == 1)
@@ -401,7 +413,7 @@ pub async fn update(
         let mut failure = None;
         let mut result_action = json!({"type": kind, "indices": targets});
         if kind != "remove_index" {
-            result_action["aliases"] = json!(names_of(a, "alias", "aliases"));
+            result_action["aliases"] = json!(original);
         }
         match kind.as_str() {
             "add" => {
@@ -416,29 +428,36 @@ pub async fn update(
                             .get_mut(t)
                             .map(|m| m.insert(alias.clone(), meta.clone()));
                     }
+                    changed = true;
                     added.push(alias);
                 }
             }
             "remove" => {
                 let must_exist = a["must_exist"].as_bool() == Some(true);
-                for pattern in names_of(a, "alias", "aliases") {
-                    let mut hit = false;
-                    for t in &targets {
-                        let Some(m) = tables.get_mut(t) else { continue };
-                        let before = m.len();
-                        m.retain(|name, _| !alias_glob(&pattern, name));
-                        hit |= m.len() != before;
+                let names = names_of(a, "alias", "aliases");
+                let patterns: Vec<&str> = names.iter().map(String::as_str).collect();
+                let mut removed = false;
+                for t in &targets {
+                    let Some(m) = tables.get_mut(t) else { continue };
+                    let before = m.len();
+                    m.retain(|name, _| !matches(&patterns, name));
+                    if m.len() == before && must_exist {
+                        // Elasticsearch then removes the names as given, failing on the first.
+                        return Err(AppError::AliasesNotFound(
+                            names.into_iter().take(1).collect(),
+                        ));
                     }
-                    if !hit {
-                        let e = AppError::AliasesNotFound(vec![pattern]);
-                        if must_exist {
-                            return Err(e);
-                        }
-                        failure.get_or_insert(e);
-                    }
+                    removed |= m.len() != before;
+                }
+                match removed {
+                    true => changed = true,
+                    false => failure = Some(AppError::AliasesNotFound(original.clone())),
                 }
             }
-            "remove_index" => drop.extend(targets),
+            "remove_index" => {
+                changed = true;
+                drop.extend(targets);
+            }
             other => {
                 return Err(AppError::IllegalArgument(format!(
                     "unknown alias action [{other}]"
@@ -452,6 +471,12 @@ pub async fn update(
                 json!({"action": result_action, "status": status.as_u16(), "error": error})
             }
         });
+    }
+    if !changed {
+        // ponytail: in the actions' order, not that of Elasticsearch's HashSet
+        let mut all: Vec<String> = originals.concat();
+        all.dedup();
+        return Err(AppError::AliasesNotFound(all));
     }
     // Checked after the loop so a later remove_index may free the name.
     for alias in &added {

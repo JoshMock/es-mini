@@ -707,23 +707,39 @@ pub(crate) fn alias_actions(
             let Some(names) = a.get(k) else { continue };
             let mut out: Vec<String> = vec![];
             for name in strs_or_str(names) {
+                // Removals narrow wildcards to the aliases the key may manage, and `-` excludes.
+                let (include, name) = match (kind == "remove", name.strip_prefix('-')) {
+                    (true, Some(n)) => (false, n),
+                    _ => (true, name),
+                };
                 if kind == "remove" && (name.contains('*') || name == "_all") {
                     let pattern = if name == "_all" { "*" } else { name };
-                    // ponytail: a pattern matching no alias the key may manage removes nothing;
-                    // Elasticsearch's response to that is not recorded
-                    for n in (shared.values()).flat_map(|i| i.aliases().keys()) {
-                        if glob(pattern, n) && key.index(action, n) && !out.contains(n) {
+                    let matched: Vec<&String> = (shared.values())
+                        .flat_map(|i| i.aliases().keys())
+                        .filter(|n| glob(pattern, n) && key.index(action, n))
+                        .collect();
+                    if !include {
+                        out.retain(|n| !matched.contains(&n));
+                    }
+                    for n in matched.into_iter().filter(|_| include) {
+                        if !out.contains(n) {
                             out.push(n.clone());
                         }
                     }
-                } else if key.index(action, name) {
+                } else if include {
                     out.push(name.to_owned());
                 } else {
-                    return Err(key.denied(action, &[]));
+                    out.retain(|n| n != name);
                 }
             }
-            if kind == "add" {
-                more_than_indices(&key, &out, &a["index"], &a["indices"])?;
+            if !out.iter().all(|n| key.index(action, n)) {
+                return Err(key.denied(action, &[]));
+            }
+            match kind.as_str() {
+                "add" => more_than_indices(&key, &out, &a["index"], &a["indices"])?,
+                // Elasticsearch's expression for no aliases (an empty list would be all).
+                "remove" if out.is_empty() => out = vec!["*".into(), "-*".into()],
+                _ => {}
             }
             a[k] = json!(out);
         }
