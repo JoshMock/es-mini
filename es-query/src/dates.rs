@@ -1,5 +1,14 @@
 use super::*;
 
+/// The error of a failed [`es_index::date_math::parse`].
+pub(crate) fn date_math_error(msg: String) -> QueryError {
+    let kind = match msg.ends_with(es_index::date_math::TOO_FAR) {
+        true => ErrorKind::IllegalArgument,
+        false => ErrorKind::Parse,
+    };
+    QueryError::new(kind, msg)
+}
+
 /// The current time in epoch millis, for date math's `now`.
 pub(crate) fn now_millis() -> i64 {
     let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
@@ -235,13 +244,7 @@ pub(crate) fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, 
                 let parse = |b: Box<Value>| {
                     es_index::date_math::parse(&text(&b), format, locale, &tz, round_up, now)
                 };
-                b.map(parse).transpose().map_err(|msg| {
-                    let kind = match msg.ends_with(es_index::date_math::TOO_FAR) {
-                        true => ErrorKind::IllegalArgument,
-                        false => ErrorKind::Parse,
-                    };
-                    QueryError::new(kind, msg)
-                })
+                b.map(parse).transpose().map_err(date_math_error)
             };
             // parse_query keeps one of `gt` and `gte`, and of `lt` and `lte`
             let [gt, gte, lt, lte] = [

@@ -625,6 +625,8 @@ pub(super) struct Buckets {
     exclude: Option<Filter>,
     /// A new bucket's sub-aggregation results.
     pub(super) empty: Vec<Stats>,
+    /// A histogram's extended and hard bounds on the shard (the first shard's once merged).
+    pub(super) bounds: (super::histogram::Bounds, Option<super::histogram::Bounds>),
 }
 
 impl Buckets {

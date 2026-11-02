@@ -1741,7 +1741,17 @@ impl<'s, 'a> Collector<'s, 'a> {
                         let parse = |s: &str| as_doc_value(&Value::from(s));
                         Some(t.buckets(&agg.name, format, parse, empty)?)
                     }
-                    Metric::Histogram(_) => Some(histogram::buckets(Format::of(m), empty)),
+                    Metric::Histogram(h) => {
+                        let (format, locale) = match m {
+                            Some(
+                                FieldMapping::Date { format, locale, .. }
+                                | FieldMapping::DateNanos { format, locale },
+                            ) => (format.as_deref(), locale.as_deref()),
+                            _ => (None, None),
+                        };
+                        let bounds = h.bounds(format, locale)?;
+                        Some(histogram::buckets(Format::of(m), empty, bounds))
+                    }
                     _ => None,
                 },
                 ..Stats::default()
@@ -1893,7 +1903,13 @@ impl<'s, 'a> Collector<'s, 'a> {
 
     fn add(&mut self, i: usize, vals: Vec<Value>, id: &str, doc: &Document, score: f64) {
         let vals = match &self.aggs[i].metric {
-            Metric::Histogram(h) => match h.keys(vals) {
+            Metric::Histogram(h) => match h.keys(
+                vals,
+                self.stats[i]
+                    .terms
+                    .as_ref()
+                    .and_then(|b| b.bounds.1.as_ref()),
+            ) {
                 Ok(keys) => keys,
                 Err(e) => {
                     self.failed.get_or_insert(e);

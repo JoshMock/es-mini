@@ -170,10 +170,12 @@ fn next_interval(tz: &TimeZone, t: i64, interval: i64) -> Result<i64, i64> {
 }
 
 /// ES's DoubleBounds (or LongBounds of dates): either end may be open.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-struct Bounds {
+#[derive(Debug, Clone, PartialEq, Default)]
+pub(super) struct Bounds {
     min: Option<f64>,
     max: Option<f64>,
+    /// LongBounds' date strings, parsed per shard in its field's format by [`Histogram::bounds`].
+    dates: [Option<String>; 2],
 }
 
 impl Bounds {
@@ -186,11 +188,12 @@ impl Bounds {
                 || QueryError::x_content(format!("[double_bounds] failed to parse field [{k}]"));
             let x = match v {
                 Value::Null => None,
-                // LongBounds takes numbers as millis
+                // LongBounds takes numbers as millis, and strings in the field's format
                 Value::Number(n) if date => Some(n.as_i64().ok_or_else(bad)? as f64),
-                // ponytail: dates parse in the default format, not the field's, which LongBounds
-                // takes; that needs bounds resolved per index, after this request-time validation
-                v if date => Some(es_index::date_millis(None, None, v).ok_or_else(bad)? as f64),
+                Value::String(s) if date => {
+                    b.dates[usize::from(k == "max")] = Some(s.clone());
+                    None
+                }
                 v => Some(num(v).ok_or_else(bad)?),
             };
             match k.as_str() {
@@ -199,6 +202,16 @@ impl Bounds {
                 _ => return Err(format!("[double_bounds] unknown field [{k}]").into()),
             }
         }
+        if date {
+            return Ok(b);
+        }
+        b.check()?;
+        Ok(b)
+    }
+
+    /// DoubleBounds' checks: both ends finite, in order.
+    fn check(&self) -> Result<(), QueryError> {
+        let b = self;
         for (end, x) in [("min", b.min), ("max", b.max)] {
             if let Some(x) = x.filter(|x| !x.is_finite()) {
                 let x = super::java_double(x);
@@ -215,7 +228,7 @@ impl Bounds {
                 "max bound [{max}] must be greater than min bound [{min}]"
             )));
         }
-        Ok(b)
+        Ok(())
     }
 
     /// Whether `x` is in the bounds; LongBounds exclude `max`.
@@ -329,8 +342,44 @@ impl Histogram {
                 "interval must be positive, got: {interval}"
             )));
         }
-        if let Some(hard) = h.hard_bounds {
-            let ext = h.extended_bounds;
+        if !date {
+            h.check_bounds(&h.extended_bounds, h.hard_bounds.as_ref())?;
+        }
+        Ok(h)
+    }
+
+    /// A shard's extended and hard bounds, date strings parsed like LongBounds.parseAndValidate
+    /// in the aggregation's `format`, else the field's (`field_format` and `locale`), in its
+    /// time zone.
+    pub(super) fn bounds(
+        &self,
+        field_format: Option<&str>,
+        locale: Option<&str>,
+    ) -> Result<(Bounds, Option<Bounds>), QueryError> {
+        let (mut ext, mut hard) = (self.extended_bounds.clone(), self.hard_bounds.clone());
+        if !self.date {
+            return Ok((ext, hard));
+        }
+        let format = self.format.as_deref().or(field_format);
+        let tz = self.time_zone.clone().unwrap_or(TimeZone::UTC);
+        let now = crate::dates::now_millis();
+        for b in std::iter::once(&mut ext).chain(&mut hard) {
+            for (end, s) in [&mut b.min, &mut b.max].into_iter().zip(&b.dates) {
+                if let Some(s) = s {
+                    let t = es_index::date_math::parse(s, format, locale, &tz, false, now)
+                        .map_err(crate::dates::date_math_error)?;
+                    *end = Some(t as f64);
+                }
+            }
+            b.check()?;
+        }
+        self.check_bounds(&ext, hard.as_ref())?;
+        Ok((ext, hard))
+    }
+
+    /// That the extended bounds are inside the hard ones.
+    fn check_bounds(&self, ext: &Bounds, hard: Option<&Bounds>) -> Result<(), QueryError> {
+        if let Some(hard) = hard {
             let outside = |h: Option<f64>, e: Option<f64>, f: fn(f64, f64) -> bool| matches!((h, e), (Some(h), Some(e)) if f(h, e));
             if outside(hard.max, ext.max, |h, e| h < e) || outside(hard.min, ext.min, |h, e| h > e)
             {
@@ -345,12 +394,17 @@ impl Histogram {
                 )));
             }
         }
-        Ok(h)
+        Ok(())
     }
 
     /// The bucket keys of a document's doc values (sorted, so equal keys are adjacent), as
     /// NumericHistogramAggregator collects them.
-    pub(super) fn keys(&self, vals: Vec<Value>) -> Result<Vec<Value>, QueryError> {
+    /// `hard` the shard's hard bounds.
+    pub(super) fn keys(
+        &self,
+        vals: Vec<Value>,
+        hard: Option<&Bounds>,
+    ) -> Result<Vec<Value>, QueryError> {
         // NumericHistogramAggregator tests hard bounds on the unshifted key, DateHistogramAggregator
         // on the rounded one
         let unshifted = |k: f64| match self.date {
@@ -360,12 +414,12 @@ impl Histogram {
         let mut keys = vec![];
         for x in vals.iter().filter_map(num) {
             let k = self.round(x)?;
-            if (self.hard_bounds).is_none_or(|b| b.contains(unshifted(k), self.date)) {
+            if hard.is_none_or(|b| b.contains(unshifted(k), self.date)) {
                 keys.push(k);
             }
         }
         for r in vals.iter().filter_map(Value::as_array) {
-            self.range_keys(num(&r[0]), num(&r[1]), &mut keys)?;
+            self.range_keys(num(&r[0]), num(&r[1]), hard, &mut keys)?;
         }
         keys.sort_by(f64::total_cmp);
         keys.dedup();
@@ -380,12 +434,13 @@ impl Histogram {
         &self,
         from: Option<f64>,
         to: Option<f64>,
+        hard: Option<&Bounds>,
         keys: &mut Vec<f64>,
     ) -> Result<(), QueryError> {
         let (Some(mut from), Some(mut to)) = (from, to) else {
             return Ok(());
         };
-        if let Some(b) = self.hard_bounds {
+        if let Some(b) = hard {
             from = b.min.map_or(from, |m| from.max(m));
             to = b.max.map_or(to, |m| to.min(m));
         }
@@ -460,7 +515,7 @@ impl Histogram {
         let mut empty = Map::new();
         if self.min_doc_count == 0 {
             // InternalHistogram.iterateEmptyBuckets
-            let (mut min, mut max) = (self.extended_bounds.min, self.extended_bounds.max);
+            let (mut min, mut max) = (b.bounds.0.min, b.bounds.0.max);
             if self.date {
                 // LongBounds.round: dates round without the offset, then shift by it
                 let round = |x: f64| Ok::<_, QueryError>(self.round_from(x, false)? + self.offset);
@@ -559,11 +614,16 @@ fn time_millis(s: &str) -> Option<f64> {
 }
 
 /// A shard's empty buckets of a field with `format`; `empty` is a new bucket's
-/// sub-aggregation results.
-pub(super) fn buckets(format: Format, empty: Vec<Stats>) -> Buckets {
+/// sub-aggregation results, `bounds` the shard's [`Histogram::bounds`].
+pub(super) fn buckets(
+    format: Format,
+    empty: Vec<Stats>,
+    bounds: (Bounds, Option<Bounds>),
+) -> Buckets {
     let mut b = Buckets::default();
     b.format = format;
     b.empty = empty;
+    b.bounds = bounds;
     b
 }
 
@@ -714,6 +774,50 @@ mod tests {
             "missing": "1451606400000"}}});
         let got = run(&[&ix], terms).unwrap();
         assert_eq!(got["t"]["buckets"][0]["key"], 1_451_606_400_000_i64);
+    }
+
+    #[test]
+    fn date_field_formats_histogram_bounds_parse_in_the_field_format() {
+        let mut ix = Index::default();
+        let at = FieldMapping::Date {
+            format: Some("dd/MM/yyyy".into()),
+            locale: None,
+            fields: Default::default(),
+        };
+        ix.mappings.properties.insert("at".into(), at);
+        ix.put("1", json!({"at": "02/01/2016"}));
+        let keys = |params: Value| {
+            let got = run(&[&ix], json!({"h": {"date_histogram": params}})).unwrap();
+            let buckets = got["h"]["buckets"].as_array().unwrap().iter();
+            buckets
+                .map(|b| json!([b["key_as_string"], b["doc_count"]]))
+                .collect::<Value>()
+        };
+        // extended and hard bounds read the field's format, in the time zone
+        let ext = json!({"field": "at", "calendar_interval": "day",
+            "extended_bounds": {"min": "01/01/2016", "max": "03/01/2016"}});
+        assert_eq!(
+            keys(ext),
+            json!([["01/01/2016", 0], ["02/01/2016", 1], ["03/01/2016", 0]])
+        );
+        let hard = json!({"field": "at", "calendar_interval": "day",
+            "hard_bounds": {"min": "03/01/2016"}});
+        assert_eq!(keys(hard), json!([]));
+        let zoned = json!({"field": "at", "fixed_interval": "12h", "time_zone": "+12:00",
+            "extended_bounds": {"min": "01/01/2016"}});
+        assert_eq!(
+            keys(zoned),
+            json!([
+                ["01/01/2016", 0],
+                ["01/01/2016", 0],
+                ["02/01/2016", 0],
+                ["02/01/2016", 1]
+            ])
+        );
+        // or the aggregation's format, if it has one
+        let own = json!({"field": "at", "calendar_interval": "day", "format": "yyyy-MM-dd",
+            "extended_bounds": {"max": "2016-01-03"}});
+        assert_eq!(keys(own), json!([["2016-01-02", 1], ["2016-01-03", 0]]));
     }
 
     #[test]
