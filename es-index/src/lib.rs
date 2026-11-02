@@ -1318,7 +1318,7 @@ pub fn parse_pattern(pattern: &str, s: &str) -> Option<i64> {
 }
 
 /// Epoch milliseconds `t` in an Elasticsearch date format (the first of its `||` alternatives)
-/// at its offset in `tz`, in the root locale; `None` for a format es-mini cannot print.
+/// in `tz`, in English names; `None` for a format es-mini cannot print.
 pub fn format_date(format: &str, t: i64, tz: &tz::TimeZone) -> Option<String> {
     Some(match format.split("||").next()? {
         "epoch_millis" => t.to_string(),

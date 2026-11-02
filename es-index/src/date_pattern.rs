@@ -4,6 +4,7 @@
 //! the start of the year, a missing date to 1970-01-01).
 
 use crate::{days_from_civil, tz::TimeZone};
+use std::{collections::HashMap, sync::OnceLock};
 
 mod named;
 pub use named::DateFormat;
@@ -146,11 +147,15 @@ enum Sign {
     NotNegative,
 }
 
+/// java.time's TextStyle, in the order of a `cldr_names.tsv` row.
 #[derive(Clone, Copy, Debug)]
 enum Style {
     Short,
     Full,
     Narrow,
+    ShortStandalone,
+    FullStandalone,
+    NarrowStandalone,
 }
 
 #[derive(Clone, Debug)]
@@ -245,11 +250,18 @@ impl Seq {
             subsequent: 0,
             reduced: false,
         };
-        let text = |f, n: usize| match n {
-            1..=3 => Some(Tok::Text(f, Style::Short)),
-            4 => Some(Tok::Text(f, Style::Full)),
-            5 => Some(Tok::Text(f, Style::Narrow)),
-            _ => None,
+        // `L` and `c` print the standalone forms
+        let text = |f, n: usize| {
+            let style = match (n, matches!(c, 'L' | 'c')) {
+                (1..=3, false) => Style::Short,
+                (4, false) => Style::Full,
+                (5, false) => Style::Narrow,
+                (1..=3, true) => Style::ShortStandalone,
+                (4, true) => Style::FullStandalone,
+                (5, true) => Style::NarrowStandalone,
+                _ => return None,
+            };
+            Some(Tok::Text(f, style))
         };
         let one_or_two = |f| match n {
             1 => Some(num(f, 1, 19, Sign::Normal)),
@@ -544,56 +556,43 @@ fn fields(toks: &[Tok], out: &mut Vec<F>) {
     }
 }
 
-/// Month, day-of-week (Monday first), AM/PM and era (BC first) names, `|`-separated, in the
-/// JDK's CLDR data.
+/// Month, day-of-week (Monday first), AM/PM and era (BC first) names in the JDK's CLDR data, as
+/// Elasticsearch's `LocaleUtils.parse` reads `locale`: `lang[_COUNTRY[_variant]]` (or with `-`),
+/// `ROOT`, or English when empty; languages without data fall back to the root locale's names.
 fn names(f: F, style: Style, locale: &str) -> Option<Vec<&'static str>> {
-    // [short, full, narrow] for months, days, AM/PM and eras
-    const EN: [[&str; 3]; 4] = [
-        [
-            "Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec",
-            "January|February|March|April|May|June|July|August|September|October|November|December",
-            "J|F|M|A|M|J|J|A|S|O|N|D",
-        ],
-        [
-            "Mon|Tue|Wed|Thu|Fri|Sat|Sun",
-            "Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday",
-            "M|T|W|T|F|S|S",
-        ],
-        ["AM|PM", "AM|PM", "a|p"],
-        ["BC|AD", "Before Christ|Anno Domini", "B|A"],
-    ];
-    const FR: [[&str; 3]; 4] = [
-        [
-            "janv.|févr.|mars|avr.|mai|juin|juil.|août|sept.|oct.|nov.|déc.",
-            "janvier|février|mars|avril|mai|juin|juillet|août|septembre|octobre|novembre|décembre",
-            "J|F|M|A|M|J|J|A|S|O|N|D",
-        ],
-        [
-            "lun.|mar.|mer.|jeu.|ven.|sam.|dim.",
-            "lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche",
-            "L|M|M|J|V|S|D",
-        ],
-        ["AM|PM", "AM|PM", "AM|PM"],
-        [
-            "av. J.-C.|ap. J.-C.",
-            "avant Jésus-Christ|après Jésus-Christ",
-            "av. J.-C.|ap. J.-C.",
-        ],
-    ];
-    // ponytail: names for the root, English and French locales only; add CLDR tables per locale
-    let lang = locale.split(['-', '_']).next()?.to_ascii_lowercase();
-    let table = match lang.as_str() {
-        "" | "root" | "en" => &EN,
-        "fr" => &FR,
-        _ => return None,
+    static ROWS: OnceLock<HashMap<&str, Vec<&str>>> = OnceLock::new();
+    let rows = ROWS.get_or_init(|| {
+        let rows = include_str!("date_pattern/cldr_names.tsv").lines();
+        rows.filter_map(|l| {
+            let mut fields = l.split('\t');
+            Some((fields.next()?, fields.collect()))
+        })
+        .collect()
+    });
+    let mut parts = locale.split(['-', '_']);
+    let lang = match parts.next().unwrap_or("") {
+        "" => "en".to_owned(),
+        l if l.eq_ignore_ascii_case("root") => "root".to_owned(),
+        l => l.to_ascii_lowercase(),
     };
-    let row = match f {
-        F::Month => 0,
-        F::DayOfWeek => 1,
-        F::AmPm => 2,
-        _ => 3,
+    let i = style as usize
+        + match f {
+            F::Month => 0,
+            F::DayOfWeek => 6,
+            F::AmPm => 12,
+            _ => 15,
+        };
+    // see scripts/gen_cldr_names.sh for which fields are left empty
+    let lang_row = rows.get(lang.as_str()).or_else(|| rows.get("root"))?;
+    let country = parts.next().filter(|c| !c.is_empty());
+    let region =
+        country.and_then(|c| rows.get(format!("{lang}_{}", c.to_ascii_uppercase()).as_str()));
+    let field = match region.map(|r| r[i]) {
+        Some(s) if !s.is_empty() => s,
+        _ if lang_row[i].is_empty() => lang_row[i - 3],
+        _ => lang_row[i],
     };
-    Some(table[row][style as usize].split('|').collect())
+    Some(field.split('|').collect())
 }
 
 /// The first value of a text field.
@@ -1203,6 +1202,52 @@ mod tests {
     fn days(iso: &str) -> i64 {
         let n: Vec<i64> = iso.rsplitn(3, '-').map(|x| x.parse().unwrap()).collect();
         days_from_civil(n[2], n[1], n[0]) * 86_400_000
+    }
+
+    /// Names print as Elasticsearch 9.5.5 printed them in docvalue_fields of fields with these
+    /// locales (`""` is a mapping without one), and parse back.
+    #[test]
+    fn date_locales_zones_names_follow_the_locale() {
+        let t = 1_630_526_400_000; // 2021-09-01T20:00:00Z
+        let cases = [
+            (
+                "",
+                "G GGGG GGGGG MMMMM LLLL ccccc",
+                "AD Anno Domini A S September W",
+            ),
+            ("ROOT", "G GGGG MMMM MMMMM EEEE a", "CE CE Sep 9 Wed PM"),
+            (
+                "de",
+                "G GGGG MMM MMMM LLL EEE EEEE a",
+                "n. Chr. n. Chr. Sept. September Sep Mi. Mittwoch PM",
+            ),
+            (
+                "ru",
+                "G MMM MMMM LLL LLLL EEE EEEE cccc a",
+                "н. э. сент. сентября сент. сентябрь ср среда среда PM",
+            ),
+            ("en_GB", "MMM", "Sept"),
+            ("zh-TW", "MMM EEE a", "9月 週三 下午"),
+            ("de_US", "MMM EEE", "Sept. Mi."),
+            ("ab", "G MMMM EEEE a", "CE Sep Wed PM"),
+        ];
+        for (locale, p, want) in cases {
+            let p = Pattern::new(p).unwrap();
+            assert_eq!(
+                p.format(t, &TimeZone::UTC, locale).as_deref(),
+                Some(want),
+                "{locale}"
+            );
+        }
+        let p = Pattern::new("d MMMM yyyy HH").unwrap();
+        assert_eq!(
+            p.parse("1 сентября 2021 20", "ru", &TimeZone::UTC, false),
+            Some(t)
+        );
+        assert_eq!(
+            p.parse("1 сентябрь 2021 20", "ru", &TimeZone::UTC, false),
+            None
+        );
     }
 
     /// Week-based fields print by the locale's region as in Elasticsearch 9.5.5.
