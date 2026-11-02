@@ -189,11 +189,21 @@ fn terms_lookups(shared: &crate::store::Shared, v: &mut Value) -> Result<(), App
 pub async fn search_all(
     state: State<AppState>,
     contexts: Extension<Contexts>,
+    authn: Option<Extension<Authn>>,
     uri: Uri,
     params: Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
-    search(state, contexts, Path("_all".into()), uri, params, body).await
+    search(
+        state,
+        contexts,
+        authn,
+        Path("_all".into()),
+        uri,
+        params,
+        body,
+    )
+    .await
 }
 
 /// The `q`/`df`/`default_operator` URI query as a parsed query.
@@ -213,6 +223,7 @@ pub(crate) fn query_from_params(
 pub async fn search(
     State(state): State<AppState>,
     Extension(contexts): Extension<Contexts>,
+    authn: Option<Extension<Authn>>,
     Path(name): Path<String>,
     uri: Uri,
     Query(params): Query<HashMap<String, String>>,
@@ -380,7 +391,10 @@ pub async fn search(
         resp["pit_id"] = p.clone();
     }
     Ok(Json(match (scroll, snapshot) {
-        (Some(keep), Some(snapshot)) => crate::scroll::open(&contexts, resp, snapshot, req, keep),
+        (Some(keep), Some(snapshot)) => {
+            let owner = authn.map(|a| a.owner());
+            crate::scroll::open(&contexts, resp, snapshot, req, keep, owner)
+        }
         _ => resp,
     }))
 }
@@ -411,24 +425,35 @@ pub(crate) fn render_hits(hits: &[es_query::Hit]) -> Vec<Value> {
 pub async fn search_template_all(
     state: State<AppState>,
     contexts: Extension<Contexts>,
+    authn: Option<Extension<Authn>>,
     uri: Uri,
     params: Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
-    search_template(state, contexts, Path("_all".into()), uri, params, body).await
+    search_template(
+        state,
+        contexts,
+        authn,
+        Path("_all".into()),
+        uri,
+        params,
+        body,
+    )
+    .await
 }
 
 /// `_search/template`: renders the inline template, then runs it as a `_search`.
 pub async fn search_template(
     state: State<AppState>,
     contexts: Extension<Contexts>,
+    authn: Option<Extension<Authn>>,
     name: Path<String>,
     uri: Uri,
     params: Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
     let body = crate::template::search_body(&body)?;
-    search(state, contexts, name, uri, params, body).await
+    search(state, contexts, authn, name, uri, params, body).await
 }
 
 pub async fn msearch(
@@ -501,6 +526,7 @@ async fn msearch_impl(
             search(
                 State(state.clone()),
                 Extension(contexts.clone()),
+                authn.clone(),
                 Path(name),
                 uri.clone(),
                 Query(params),

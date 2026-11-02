@@ -1,7 +1,7 @@
 //! Search contexts that expire: a `?scroll=` search and a point in time keep a snapshot of
 //! their indices (see [`es_index::Index::snapshot`]).
 
-use crate::{AppState, error::AppError, indices::parse_body};
+use crate::{AppState, error::AppError, indices::parse_body, security::Authn};
 use axum::{
     Extension, Json,
     body::Bytes,
@@ -23,6 +23,8 @@ struct Scroll {
     /// The search without aggregations, from the next page.
     req: es_query::SearchRequest,
     expires: Instant,
+    /// Who opened it ([`Authn::owner`]; `None` without security): only they may continue it.
+    owner: Option<String>,
 }
 
 /// The indices a point in time was opened on: name, snapshot, and alias filter.
@@ -82,6 +84,7 @@ pub(crate) fn open(
     targets: Snapshot,
     mut req: es_query::SearchRequest,
     keep: Duration,
+    owner: Option<String>,
 ) -> Value {
     let mut template = resp.clone();
     template["hits"]["hits"] = json!([]);
@@ -98,6 +101,7 @@ pub(crate) fn open(
             targets,
             req,
             expires: Instant::now() + keep,
+            owner,
         },
     );
     resp["_scroll_id"] = encode(id).into();
@@ -298,6 +302,7 @@ fn request(
 /// `GET`/`POST /_search/scroll`: the next page of a scroll context.
 pub async fn next(
     Extension(contexts): Extension<Contexts>,
+    authn: Option<Extension<Authn>>,
     path: Option<Path<String>>,
     Query(params): Query<HashMap<String, String>>,
     body: Bytes,
@@ -310,20 +315,28 @@ pub async fn next(
         ));
     };
     let keep = scroll.as_deref().map(keep_alive).transpose()?;
-    let mut resp = page(&contexts, decode(id)?, keep)?;
+    let owner = authn.map(|a| a.owner());
+    let mut resp = page(&contexts, decode(id)?, keep, owner)?;
     resp["took"] = (start.elapsed().as_millis() as u64).into();
     resp["_scroll_id"] = id.clone().into();
     Ok(Json(resp))
 }
 
-/// The next page of scroll `n`, renewing its keep-alive with `keep`.
-fn page(contexts: &Contexts, n: u64, keep: Option<Duration>) -> Result<Value, AppError> {
+/// The next page of scroll `n` for `owner`, renewing its keep-alive with `keep`. Like
+/// Elasticsearch, a scroll that someone else continues is missing to them and freed.
+fn page(
+    contexts: &Contexts,
+    n: u64,
+    keep: Option<Duration>,
+    owner: Option<String>,
+) -> Result<Value, AppError> {
     let (mut resp, targets, req) = {
         let mut store = contexts.lock().expect("lock poisoned");
-        let s = store
-            .live()
-            .get_mut(&n)
-            .ok_or(AppError::SearchContextMissing(n))?;
+        let live = store.live();
+        if live.get(&n).is_some_and(|s| s.owner != owner) {
+            live.remove(&n);
+        }
+        let s = live.get_mut(&n).ok_or(AppError::SearchContextMissing(n))?;
         if let Some(keep) = keep {
             s.expires = Instant::now() + keep;
         }
@@ -398,7 +411,14 @@ mod tests {
         let req = es_query::SearchRequest::parse(&json!({"size": 2, "sort": ["n"]})).unwrap();
         let contexts = Contexts::default();
         let first = json!({"hits": {"hits": ["first page"]}});
-        let first = open(&contexts, first, targets, req, Duration::from_secs(60));
+        let first = open(
+            &contexts,
+            first,
+            targets,
+            req,
+            Duration::from_secs(60),
+            None,
+        );
         assert_eq!(first["_scroll_id"], "esmini-scroll-1");
         let template = contexts.lock().unwrap().scrolls[&1].template.clone();
         assert_eq!(template["hits"]["hits"], json!([]));
@@ -407,8 +427,8 @@ mod tests {
             let hits = r["hits"]["hits"].as_array().unwrap().iter();
             hits.map(|h| h["_id"].clone()).collect()
         };
-        assert_eq!(ids(page(&contexts, 1, None).unwrap()), ["2", "3"]);
-        assert_eq!(ids(page(&contexts, 1, None).unwrap()), ["4"]);
-        assert!(ids(page(&contexts, 1, None).unwrap()).is_empty());
+        assert_eq!(ids(page(&contexts, 1, None, None).unwrap()), ["2", "3"]);
+        assert_eq!(ids(page(&contexts, 1, None, None).unwrap()), ["4"]);
+        assert!(ids(page(&contexts, 1, None, None).unwrap()).is_empty());
     }
 }

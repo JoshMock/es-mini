@@ -861,3 +861,45 @@ async fn every_route_needs_a_privilege() {
     assert!(checked > 60, "parsed only {checked} routes from the source");
     assert!(open_routes.is_empty(), "{}", open_routes.join("\n"));
 }
+
+/// Recorded from Elasticsearch 9.5.5: only the key that opened a scroll may continue it; another
+/// key finds no context, and its attempt frees the scroll. Anyone may clear a scroll. (Points in
+/// time are not tied to their creator either.)
+#[tokio::test]
+async fn only_the_scrolls_creator_may_continue_it() {
+    let app = app().await;
+    let (a, _) = key(&app, ELASTIC, read_a()).await;
+    let (b, _) = key(&app, ELASTIC, read_a()).await;
+    let open = |auth: String| {
+        let app = app.clone();
+        async move {
+            let r = ok(
+                &app,
+                &auth,
+                "POST",
+                "/a1/_search?scroll=1m",
+                Some(json!({"size": 1})),
+            )
+            .await;
+            json!({"scroll": "1m", "scroll_id": r["_scroll_id"]})
+        }
+    };
+    let missing = |(status, r): (u16, Value)| {
+        let kind = &r["error"]["root_cause"][0]["type"];
+        assert_eq!(
+            (status, kind),
+            (404, &json!("search_context_missing_exception")),
+            "{r}"
+        );
+    };
+
+    let scroll = open(a.clone()).await;
+    ok(&app, &a, "POST", "/_search/scroll", Some(scroll.clone())).await;
+    missing(call(&app, &b, "POST", "/_search/scroll", Some(scroll.clone())).await);
+    missing(call(&app, &a, "POST", "/_search/scroll", Some(scroll.clone())).await);
+    missing(call(&app, ELASTIC, "POST", "/_search/scroll", Some(scroll)).await);
+
+    let scroll = open(a.clone()).await;
+    let r = ok(&app, &b, "DELETE", "/_search/scroll", Some(scroll.clone())).await;
+    assert_eq!(r, json!({"succeeded": true, "num_freed": 1}));
+}

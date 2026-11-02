@@ -51,6 +51,16 @@ pub(crate) enum Authn {
     },
 }
 
+impl Authn {
+    /// Who owns the scroll contexts this request opens (see [`crate::scroll`]).
+    pub(crate) fn owner(&self) -> String {
+        match self {
+            Authn::Elastic => "elastic".into(),
+            Authn::ApiKey { id, .. } => format!("api_key:{id}"),
+        }
+    }
+}
+
 /// Security as the node settings `xpack.security.enabled` (default false) and
 /// `bootstrap.password` configure it; `None` when disabled.
 pub fn from_settings(
