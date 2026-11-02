@@ -143,10 +143,18 @@ fn grants(privileges: &Value, action: &str) -> bool {
     let named = granted_by(action);
     (privileges.as_array().into_iter().flatten())
         .filter_map(Value::as_str)
-        // ponytail: manage_own_api_key does not let a key query its own keys (Elasticsearch
-        // narrows the query to the key itself), so it is refused rather than over-granted
-        .filter(|p| !(action == QUERY_KEYS && *p == "manage_own_api_key"))
         .any(|p| named.split(',').any(|n| n == p) || (p.contains(':') && glob(p, action)))
+}
+
+/// Whether API key `roles` may query every key, not just itself: Elasticsearch narrows a
+/// query that only `manage_own_api_key` grants to the key's own id.
+pub(super) fn queries_all_keys(roles: &[Value]) -> bool {
+    let wider = |r: &Value| {
+        let p = r["cluster"].as_array().into_iter().flatten();
+        let p: Vec<&Value> = p.filter(|p| *p != "manage_own_api_key").collect();
+        grants(&json!(p), QUERY_KEYS)
+    };
+    roles.iter().all(|set| self::roles(set).any(wider))
 }
 
 /// The role descriptors an API key is authorized by: its own (if it has any), then those it is

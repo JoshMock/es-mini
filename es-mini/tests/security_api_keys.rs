@@ -1445,3 +1445,50 @@ async fn aggregation_requests_are_validated() {
     let got = query(&app, ELASTIC, "", Some(body)).await;
     assert_eq!(got, (400, error(400, &chain, 1)));
 }
+
+/// Recorded from Elasticsearch 9.5.5: a key whose only API key privilege is `manage_own_api_key`
+/// finds only itself, whatever it queries; `manage_api_key` sees every key.
+#[tokio::test]
+async fn query_with_manage_own_api_key_finds_only_the_key_itself() {
+    let app = secured();
+    create(&app, ELASTIC, json!({"name": "other1"})).await;
+    let own = json!({"r": {"cluster": ["manage_own_api_key"]}});
+    let (mine, auth) = create(
+        &app,
+        ELASTIC,
+        json!({"name": "mine", "role_descriptors": own}),
+    )
+    .await;
+    let all = json!({"r": {"cluster": ["manage_api_key"]}});
+    let (_, admin) = create(
+        &app,
+        ELASTIC,
+        json!({"name": "admin", "role_descriptors": all}),
+    )
+    .await;
+    let names = |r: &Value| -> Vec<String> {
+        let keys = r["api_keys"].as_array().unwrap_or_else(|| panic!("{r}"));
+        keys.iter()
+            .map(|k| k["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let (status, r) = call(&app, &auth, "POST", "/_security/_query/api_key", None).await;
+    assert_eq!(
+        (status, names(&r), &r["total"]),
+        (200, vec!["mine".into()], &json!(1)),
+        "{r}"
+    );
+    assert_eq!(r["api_keys"][0]["id"], mine["id"]);
+    let other = json!({"query": {"term": {"name": "other1"}}});
+    let (_, r) = call(
+        &app,
+        &auth,
+        "POST",
+        "/_security/_query/api_key",
+        Some(other),
+    )
+    .await;
+    assert_eq!(r, json!({"total": 0, "count": 0, "api_keys": []}));
+    let (_, r) = call(&app, &admin, "GET", "/_security/_query/api_key", None).await;
+    assert_eq!(r["total"], 3, "{r}");
+}

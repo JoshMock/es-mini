@@ -2,10 +2,10 @@
 //! `RestQueryApiKeyAction` and `TransportQueryApiKeyAction` run it: the request's field names are
 //! translated to [`INDEX`]'s (`FieldNameTranslators`), and the search runs there.
 
-use super::{INDEX, Security, info, validate};
+use super::{Authn, INDEX, Security, authz, info, validate};
 use crate::error::AppError;
 use axum::{
-    Json,
+    Extension, Json,
     body::Bytes,
     extract::{Query, State},
     http::Uri,
@@ -32,6 +32,7 @@ const FIELDS: [(&str, &str); 9] = [
 
 pub(super) async fn query_keys(
     State(security): State<Arc<Security>>,
+    Extension(authn): Extension<Authn>,
     uri: Uri,
     Query(params): Query<HashMap<String, String>>,
     body: Bytes,
@@ -108,6 +109,12 @@ pub(super) async fn query_keys(
     }
 
     let mut query = json!({"bool": {"filter": [{"term": {"doc_type": "api_key"}}]}});
+    if let Authn::ApiKey { id, roles, .. } = &authn
+        && !authz::queries_all_keys(roles)
+    {
+        let filter = query["bool"]["filter"].as_array_mut().expect("built above");
+        filter.push(json!({"ids": {"values": [id]}}));
+    }
     if let Some(q) = search.get("query") {
         query["bool"]["must"] = json!([q]);
     }
