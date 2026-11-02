@@ -33,15 +33,15 @@ Every `ponytail:` marker as of 2026-10-27 (its first comment line), with what ha
 - `es-mini/src/lib.rs:217` **write-failure-handling**: the change stays applied in memory but its translog operations are
 - `es-mini/src/lib.rs:274` **write-failure-handling**: only the last failure is kept, so a later round's failure also fails a write
 - `es-mini/src/lib.rs:497` **keep**: axum adds HEAD wherever GET is routed, so `allowed` may list HEAD where ES does not
-- `es-index/src/disk.rs:193` **after-bench**: reads the field's norms once per term; cache them per query if that shows up
+- `es-index/src/disk.rs:193` **disk-speed**: reads the field's norms once per term; cache them per query if that shows up
 - `es-index/src/disk.rs:294` **disk-writer-completeness**: fields in formats the codec lacks (e.g. ES812Postings `_id`) get no stats
 - `es-index/src/disk.rs:451` **disk-writer-completeness**: fields the writer cannot encode yet are left out of the segment, which only
 - `es-index/src/disk.rs:572` **disk-writer-completeness**: date_nanos and ranges are not indexed on disk; their `_source` is kept
-- `es-index/src/disk.rs:831` **after-bench**: one timer for all indices, so some sync more often than they ask (never less)
-- `es-index/src/disk.rs:903` **after-bench**: rereads every term of every index; cache per segment if commits get slow
-- `es-index/src/disk.rs:1007` **after-bench**: one merge per commit and ties broken by position, not name; Lucene may pick several
+- `es-index/src/disk.rs:831` **disk-speed**: one timer for all indices, so some sync more often than they ask (never less)
+- `es-index/src/disk.rs:903` **disk-speed**: rereads every term of every index; cache per segment if commits get slow
+- `es-index/src/disk.rs:1007` **disk-fidelity**: one merge per commit and ties broken by position, not name; Lucene may pick several
 - `es-index/src/disk.rs:1270` **memory-bounds**: holds the merged documents in memory; stream them if large merges need it
-- `es-index/src/disk.rs:1411` **after-bench**: Lucene refuses unsorted segments in a sorted index; sort docs to support it
+- `es-index/src/disk.rs:1411` **disk-fidelity**: Lucene refuses unsorted segments in a sorted index; sort docs to support it
 - `es-index/src/disk.rs:1498` **keep**: each shard commits on its own, so a crash during a write spanning indices (a bulk)
 - `es-query/src/query_string.rs:43` **query-dsl-gaps**: no `\uXXXX` escapes
 - `es-query/src/query_string.rs:303` **query-dsl-gaps**: no boosts until queries carry one
@@ -51,7 +51,7 @@ Every `ponytail:` marker as of 2026-10-27 (its first comment line), with what ha
 - `es-mini/src/field_caps.rs:59` **api-gaps**: `index_filter` and `runtime_mappings` are ignored; every resolved index is reported
 - `es-index/src/aliases.rs:141` **keep**: `hidden` is accepted and ignored; es-mini has no hidden indices
 - `es-mini/src/search.rs:101` **keep**: every index has exactly one shard, so total is the number of targets
-- `es-mini/src/search.rs:249` **after-bench**: only single-index searches are cached; ES caches each shard's result
+- `es-mini/src/search.rs:249` **shard-reads**: only single-index searches are cached; ES caches each shard's result
 - `es-query/src/esql.rs:224` **esql-es-semantics**: not checked against Elasticsearch (`LIMIT 1 x` lexes as a time span there).
 - `es-query/src/esql.rs:456` **esql-es-semantics**: message not checked against Elasticsearch
 - `es-query/src/esql.rs:525` **esql-es-semantics**: not checked against Elasticsearch's expected-token sets
@@ -59,7 +59,7 @@ Every `ponytail:` marker as of 2026-10-27 (its first comment line), with what ha
 - `es-query/src/esql.rs:834` **esql-es-semantics**: not checked against Elasticsearch's follow set after a call
 - `es-query/src/esql.rs:981` **keep**: ISO dates sort as strings, right for years 0000-9999
 - `es-query/src/esql.rs:1030` **keep**: only DATE_TRUNC and BUCKET read a time span, straight from the literal
-- `es-query/src/esql.rs:1036` **after-bench**: parsed again per row; `resolve` checked that it parses
+- `es-query/src/esql.rs:1036` **esql-speed**: parsed again per row; `resolve` checked that it parses
 - `es-query/src/esql.rs:1104` **esql-es-semantics**: read per row; ES fixes `now` once per query
 - `es-query/src/esql.rs:1125` **keep**: multi-valued fields compare as null, like ES (which also warns)
 - `es-query/src/esql.rs:1230` **esql-es-semantics**: this message is not checked against Elasticsearch
@@ -85,9 +85,9 @@ Every `ponytail:` marker as of 2026-10-27 (its first comment line), with what ha
 - `es-query/src/esql.rs:2398` **after-bench**: linear group lookup, O(rows × groups); hash keys when that matters
 - `es-query/src/esql.rs:2450` **esql-conversions**: dates, IPs and versions hash their text where ES hashes
 - `es-query/src/esql.rs:2484` **esql-es-semantics**: an overflowing long sum is null, where ES fails the query
-- `es-query/src/esql.rs:2798` **after-bench**: the plan is cut at an EVAL, RENAME or STATS as if at a LIMIT, though ES pushes a
-- `es-query/src/esql.rs:2872` **after-bench**: reads every match; ES's source can stop early once a plain LIMIT fills
-- `es-query/src/esql.rs:2904` **after-bench**: ES may rewrite `age + 1 > 30` into a pushable `age > 29`; this does not
+- `es-query/src/esql.rs:2798` **esql-speed**: the plan is cut at an EVAL, RENAME or STATS as if at a LIMIT, though ES pushes a
+- `es-query/src/esql.rs:2872` **esql-speed**: reads every match; ES's source can stop early once a plain LIMIT fills
+- `es-query/src/esql.rs:2904` **esql-speed**: ES may rewrite `age + 1 > 30` into a pushable `age > 29`; this does not
 - `es-mini/src/template.rs:3` **keep**: plain mustache only (variables, `{{{ }}}`/`{{& }}`, sections, inverted sections,
 - `es-mini/src/template.rs:95` **error-shapes**: arrays/objects render as JSON, where ES prints Java's toString
 - `es-query/src/lib.rs:86` **query-dsl-gaps**: prefix and wildcard queries match their JSON strings
@@ -96,13 +96,13 @@ Every `ponytail:` marker as of 2026-10-27 (its first comment line), with what ha
 - `es-query/src/lib.rs:97` **keep**: unmapped fields are typed from their first value, mimicking ES dynamic mapping
 - `es-query/src/lib.rs:113` **date-formats**: named formats only parse as the default format, so they never reject values
 - `es-query/src/lib.rs:180` **keep**: names sharing a bucket keep query order (Java's follows Map.copyOf's), and a
-- `es-query/src/lib.rs:524` **after-bench**: a superset, so exact answers read sources; exact once scoring rounds too
+- `es-query/src/lib.rs:524` **search-speed**: a superset, so exact answers read sources; exact once scoring rounds too
 - `es-query/src/lib.rs:618` **keep**: filter/must_not clauses are left out of the explanation
 - `es-query/src/lib.rs:634` **keep**: constant-score queries describe themselves generically, not as
 - `es-query/src/lib.rs:694` **keep**: Lucene's doc id is segment-local; the sequence number stands in
 - `es-query/src/lib.rs:840` **keep**: only match, term and phrase terms; prefix, wildcard and range queries highlight nothing
 - `es-query/src/lib.rs:869` **keep**: whole values, not 100-character fragments; no custom tags or encoders
-- `es-query/src/lib.rs:954` **after-bench**: postings positions are not read; scores come from the source
+- `es-query/src/lib.rs:954` **search-speed**: postings positions are not read; scores come from the source
 - `es-query/src/lib.rs:1132` **mapping-validation**: a path a source has but the mappings lack is accepted; ES refuses it
 - `es-query/src/lib.rs:1167` **date-formats**: date_nanos sort by their JSON values, not epoch nanos
 - `es-query/src/lib.rs:1391` **keep**: ties fall back to index order then write order, standing in for shard/doc order
@@ -150,7 +150,7 @@ Every `ponytail:` marker as of 2026-10-27 (its first comment line), with what ha
 - `es-query/src/aggs.rs:1123` **aggs-gaps**: no per-field `format` or wildcard patterns
 - `es-query/src/aggs.rs:1135` **keep**: only `text` can be stored; metadata fields (`_id`, `_routing`) are not rendered
 - `es-query/src/aggs.rs:1249` **date-formats**: date_range's `format` is ignored
-- `es-query/src/aggs.rs:1503` **after-bench**: re-sorts at twice the kept hits; a heap if top_hits get large
+- `es-query/src/aggs.rs:1503` **search-speed**: re-sorts at twice the kept hits; a heap if top_hits get large
 - `es-query/src/aggs.rs:1740` **keep**: ES may run a filter as FilterByFilterAggregator; not profiled yet
 - `es-query/src/aggs.rs:1745` **keep**: ES may run filters as FilterByFilterAggregator; not profiled yet
 - `es-query/src/aggs.rs:1747` **keep**: ES runs ranges as NoOverlap, Overlap or from filters; not profiled yet
@@ -163,12 +163,104 @@ Every `ponytail:` marker as of 2026-10-27 (its first comment line), with what ha
 - `es-query/src/aggs/histogram.rs:125` **aggs-gaps**: ES fails after 5,000 attempts; this gives up on the last one
 - `es-query/src/aggs/histogram.rs:368` **keep**: a range whose keys stop advancing (f64 precision) ends there; ES loops forever
 - `es-query/src/aggs/histogram.rs:378` **keep**: open date ends stop at ±2^53 millis so rounding cannot overflow
-- `es-codec/src/inflate.rs:52` **after-bench**: one table of 2^maxlen entries (up to 32K); use two-level tables if building them shows up in profiles.
-- `es-codec/src/inflate.rs:268` **after-bench**: fixed Huffman codes and a single-candidate hash match; add dynamic Huffman blocks and
+- `es-codec/src/inflate.rs:52` **disk-speed**: one table of 2^maxlen entries (up to 32K); use two-level tables if building them shows up in profiles.
+- `es-codec/src/inflate.rs:268` **disk-speed**: fixed Huffman codes and a single-candidate hash match; add dynamic Huffman blocks and
 - `es-codec/src/lib.rs:3` **keep**: a compound file's sub-files are `pread` from disk, whole via `file` or by range via
-- `es-codec/src/points.rs:22` **after-bench**: reads the whole .kdd per call; slice out the leaves it visits if files get huge.
+- `es-codec/src/points.rs:22` **disk-speed**: reads the whole .kdd per call; slice out the leaves it visits if files get huge.
 - `es-codec/src/translog.rs:275` **keep**: older formats; Elasticsearch 9.5.5 writes these two
 - `es-codec/src/zstd.rs:85` **keep**: XXH64 content checksum skipped; Lucene's footer CRC covers the file
 - `es-codec/src/norms.rs:65` **keep**: norms are 1 byte each (Lucene's `SmallFloat` encoding yields signed bytes); add wider
 - `es-codec/src/terms.rs:16` **keep**: a crafted index could otherwise recurse until the stack overflows; real block trees
 - `es-codec/src/terms.rs:566` **keep**: no offsets or payloads (`.pay`); ES text fields index neither by default.
+
+## Added 2026-11-02
+
+Markers added since 2026-10-27 (shard, security and later goals), plus `needs-scope`: the fix needs a feature
+es-mini deliberately lacks (a human decides), and `keep` proposed for behavior that matches Elasticsearch or
+a single node. The 16 `after-bench` markers above are retagged to the perf goals that now hold them.
+
+- `es-codec/src/points.rs:473` **points-fidelity**: more dimensions recompute their bounds every few splits; port that with them
+- `es-codec/src/points.rs:555` **points-fidelity**: Lucene's selector and sorter order points equal in the split (or leaf sort)
+- `es-index/src/date_pattern.rs:151` **date-week-fields**: no week-based fields (`Y w W e c F`), zone names (`z v`), quarter names
+- `es-index/src/date_pattern.rs:477` **date-locales-zones**: names for the root, English and French locales only; add CLDR tables per locale
+- `es-index/src/date_pattern.rs:937` **date-locales-zones**: a region zone prints as its offset's ID (`+HH:MM:ss`); keep the zone's
+- `es-index/src/date_pattern/named.rs:409` **date-week-fields**: no week-based named formats (`week_date`, `weekyear_week_day`, ...)
+- `es-index/src/disk.rs:1729` **memory-bounds-2**: holds one field's merged postings, doc values, norms and points at a time, plus the
+- `es-index/src/disk.rs:332` **keep**: only Lucene104 postings are read, which Elasticsearch writes for every field
+- `es-index/src/disk.rs:504` **disk-fidelity**: fields holding values Elasticsearch would truncate or reject but es-mini matches as
+- `es-index/src/disk.rs:647` **disk-fidelity**: a dotted source key that crosses into a nested path (`{"c.a": 1}` with `c` nested)
+- `es-index/src/disk.rs:888` **disk-fidelity**: ip ranges are sorted where ES writes its HashSet's order; readers
+- `es-index/src/index_settings.rs:532` **keep**: Lucene codec names are the Lucene9x/10x ones; SimpleText is not shipped
+- `es-index/src/lib.rs:1088` **shard-search-speed**: an index of several shards builds anew each time; one memo per shard if
+- `es-index/src/lib.rs:1150` **shard-search-speed**: copies each shard's document ids on every search of a multi-shard index, and
+- `es-index/src/lib.rs:1434` **date-week-fields**: formats es-mini lacks (week-based fields, see date_pattern) parse as
+- `es-index/src/lib.rs:287` **shard-reads**: reads not routed to a shard read shard 0, which searches of a multi-shard index
+- `es-index/src/lib.rs:350` **memory-bounds-2**: each index is capped on its own, where ES caps all of a node's together; es-mini
+- `es-index/src/lib.rs:579` **memory-bounds-2**: copies the ids and versions of the documents (not their sources); memory grows
+- `es-index/src/lib.rs:817` **memory-bounds-2**: Lucene ids also count deleted documents until a merge; add a doc id per
+- `es-index/src/mapping.rs:352` **mapping-and-settings**: `text` fields declared with `fields` drop them on parse (only dynamic text keeps
+- `es-index/src/mapping.rs:71` **needs-scope**: es-mini searches nested objects as part of their root document (only segments
+- `es-mini/src/docs.rs:302` **date-field-formats**: a one-pattern format's date_time_parse_exception cause (naming where
+- `es-mini/src/docs.rs:573` **shard-reads**: items are grouped by index, where Elasticsearch groups them by shard
+- `es-mini/src/error.rs:373` **error-positions**: query_string syntax errors fail while the request is parsed, before any
+- `es-mini/src/field_caps.rs:59` **api-fidelity**: `index_filter` keeps empty indices and those with a matching document; Elasticsearch only drops those it can prove empty of matches
+- `es-mini/src/indices.rs:518` **mapping-and-settings**: the registry lacks some rarely used IndexScopedSettings (merge, store, time series); they fail as unknown
+- `es-mini/src/indices.rs:645` **keep**: keys render in request order; Elasticsearch renders them in HashMap order
+- `es-mini/src/indices.rs:688` **stats-and-cat**: only docs and request_cache are counted; the other sections report zeros (es-mini keeps no such counters)
+- `es-mini/src/indices.rs:892` **shard-reads**: the request cache is counted per index, so shards report it empty; no
+- `es-mini/src/indices.rs:925` **stats-and-cat**: only the default columns; no h, s, bytes or help. Store sizes are 0b like _stats.
+- `es-mini/src/lib.rs:126` **keep**: every shard is a green primary, no replicas
+- `es-mini/src/scroll.rs:158` **api-fidelity**: ES reads a base64 id on and fails on what it holds; es-mini, whose ids are
+- `es-mini/src/scroll.rs:17` **search-speed**: a page reruns the query, costing a search of the hits before it, and reads `now`
+- `es-mini/src/search.rs:136` **search-profile**: only
+- `es-mini/src/security.rs:1176` **needs-scope**: ES hashes the bootstrap password with bcrypt; it never leaves memory, so SSHA256
+- `es-mini/src/security.rs:195` **security-validation**: refused with security off too, where ES has no .security-7 to protect
+- `es-mini/src/security.rs:657` **needs-scope**: applications are kept as given, unvalidated; remote_indices, remote_cluster and
+- `es-mini/src/security/authz.rs:1092` **security-validation**: of the validations of application privileges, only the name's length
+- `es-mini/src/security/authz.rs:1163` **security-authz-gaps**: names match with `*` wildcards only (Elasticsearch also takes `?` and /regex/), and
+- `es-mini/src/security/authz.rs:427` **security-authz-gaps**: alias wildcards are not checked
+- `es-mini/src/security/authz.rs:712` **security-authz-gaps**: a pattern matching no alias the key may manage removes nothing;
+- `es-mini/src/security/authz.rs:746` **security-authz-gaps**: compares the actions es-mini knows, not Elasticsearch's action automata
+- `es-mini/src/security/authz.rs:790` **security-authz-gaps**: only these privileges; any other named one is never implied by action patterns
+- `es-mini/src/security/authz.rs:969` **security-authz-gaps**: Elasticsearch restricts every system index; es-mini has only these
+- `es-mini/src/security/query.rs:202` **needs-scope**: es-mini has no flattened type; a metadata subfield reads as an unmapped
+- `es-mini/src/security/query.rs:292` **security-validation**: ES turns on `lenient` for `*`, so values a field cannot hold match nothing
+- `es-mini/src/security/query.rs:412` **needs-scope**: composite is allowed by ES, but es-query has no composite aggregation
+- `es-mini/src/security/query.rs:56` **security-validation**: translated before it is parsed, so an unknown query type gets the
+- `es-mini/src/security/query.rs:75` **needs-scope**: es-query has no scripts in aggregations; ES parses them and
+- `es-mini/src/template.rs:140` **api-fidelity**: integers past u64 print as doubles; Java's are BigIntegers
+- `es-mini/tests/security_api_keys.rs:1244` **error-positions**: ES also gives the parsing_exception's line and col
+- `es-mini/tests/security_api_keys.rs:1275` **needs-scope**: aggregations on metadata are left out: es-mini has no flattened type, so they
+- `es-mini/tests/security_api_keys.rs:1396` **needs-scope**: recorded with a script query, which es-query cannot parse
+- `es-mini/tests/security_api_keys.rs:1425` **error-positions**: ES also gives the line and col
+- `es-query/src/aggs.rs:1136` **error-positions**: malformed elements (`[x]`, `a[`) are names, not ES's invalid path element error
+- `es-query/src/aggs.rs:1215` **search-speed**: clones the digest per comparison; cache values per bucket if
+- `es-query/src/aggs.rs:1429` **aggs-gaps-2**: a `format` a field cannot take is ignored, and text fields matched by a pattern
+- `es-query/src/aggs.rs:1542` **aggs-gaps-2**: ip ranges are not aggregated
+- `es-query/src/aggs.rs:1602` **aggs-profile**: a shard profiles as one segment.
+- `es-query/src/aggs.rs:2036` **aggs-profile**: counts accepted terms, not all ords.
+- `es-query/src/aggs.rs:2103` **aggs-profile**: no deleted docs.
+- `es-query/src/aggs.rs:2232` **aggs-gaps-2**: counts the buckets rendered; ES also counts buckets it drops (min_doc_count, size),
+- `es-query/src/aggs.rs:2422` **date-field-formats**: date_range's `time_zone` is not read
+- `es-query/src/aggs.rs:509` **error-positions**: a malformed pattern formats as best it can; ES rejects it
+- `es-query/src/aggs/histogram.rs:191` **date-field-formats**: dates parse in the default format, not the field's, which LongBounds
+- `es-query/src/aggs/terms.rs:31` **aggs-profile**: hints and modes pick only ES's profiled collector.
+- `es-query/src/esql.rs:1544` **needs-scope**: no spatial types exist here (no geo fields or TO_GEOPOINT) for ES to refuse
+- `es-query/src/esql.rs:1704` **date-week-fields**: DATE_FORMAT prints null for a pattern es_index::format_date lacks (week fields, zone
+- `es-query/src/esql.rs:1793` **esql-semantics-2**: a zero or negative span is null, where ES fails the query
+- `es-query/src/esql.rs:2063` **esql-semantics-2**: a subnormal result may round twice (scaling after rounding to 53 bits)
+- `es-query/src/esql.rs:2294` **needs-scope**: no dense_vector operands; es-mini maps no dense_vector fields
+- `es-query/src/esql.rs:2340` **needs-scope**: date_nanos and folding two time spans are not computed
+- `es-query/src/esql.rs:2443` **esql-semantics-2**: TO_INTEGER and TO_LONG with a base fail here; ES parses in that base
+- `es-query/src/esql.rs:2451` **needs-scope**: no TO_VERSION, as es-mini has no version type; no TO_IP leading_zeros
+- `es-query/src/esql.rs:2494` **esql-semantics-2**: ES's list of what TO_STRING takes is not spelled out here
+- `es-query/src/esql.rs:294` **esql-semantics-2**: other STATS aggregate endings keep the plain set, unchecked against ES
+- `es-query/src/esql.rs:3115` **needs-scope**: date_nanos read in the default format; es-mini has no
+- `es-query/src/esql.rs:3459` **esql-speed**: an uncached table (several indices, an alias filter, METADATA) builds them per
+- `es-query/src/esql.rs:3574` **esql-speed**: holds every value of the index in memory until its next write; cache per
+- `es-query/src/esql.rs:60` **esql-semantics-2**: fails only when a row is evaluated; ES also fails folding a constant expression,
+- `es-query/src/lib.rs:1739` **api-fidelity**: an index the query fails on fails the whole count, unwrapped; ES counts the
+- `es-query/src/parse.rs:397` **error-positions**: on other than keyword or text fields it fails with the wildcard's error
+- `es-query/src/parse.rs:629` **query-gaps-2**: no cross_fields or bool_prefix types
+- `es-query/src/parse.rs:695` **query-gaps-2**: no `+ | - " * ( ) ~` operators or default `*` fields
+- `es-query/src/regexp.rs:231` **query-gaps-2**: effort counts this module's NFA states, not Lucene's, so a pattern near the
