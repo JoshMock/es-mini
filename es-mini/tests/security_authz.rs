@@ -1079,3 +1079,46 @@ async fn msearch_points_in_time_are_authorized_one_by_one() {
         );
     }
 }
+
+/// Role index names are Elasticsearch's `Automatons` patterns: `?` is any one character, `\`
+/// escapes, and `/.../` is a Lucene regular expression (recorded from Elasticsearch 9.5.5).
+#[tokio::test]
+async fn security_authz_gaps_question_marks_and_regexes_in_role_names() {
+    let app = app().await;
+    let roles = json!({"r": {"indices": [{"names": ["a?", "/c.*/"], "privileges": ["read"]}]}});
+    let (k, id) = key(&app, ELASTIC, roles).await;
+    assert_eq!(hit_indices(&app, &k, "/a1/_search").await, ["a1"]);
+    // `a?` matches alias `al`, which reaches b1.
+    assert_eq!(
+        hit_indices(&app, &k, "/*/_search").await,
+        ["a1", "b1", "c1"]
+    );
+    let read = "read,all";
+    let expected = denied(&id, "indices:data/read/search", "b1", read);
+    assert_denied(&app, &k, "GET", "/b1/_search", expected).await;
+    let body = json!({"index": [{"names": ["a1", "b1", "ca"], "privileges": ["read"]}]});
+    let out = ok(
+        &app,
+        &k,
+        "POST",
+        "/_security/user/_has_privileges",
+        Some(body),
+    )
+    .await;
+    let expected = json!({"a1": {"read": true}, "b1": {"read": false}, "ca": {"read": true}});
+    assert_eq!(out["index"], expected);
+
+    let roles =
+        json!({"r": {"indices": [{"names": ["a\\1", "/~([ab].*)/"], "privileges": ["read"]}]}});
+    let (k, _) = key(&app, ELASTIC, roles).await;
+    assert_eq!(hit_indices(&app, &k, "/*/_search").await, ["a1", "c1"]);
+
+    for bad in ["/[a/", "/abc", "/"] {
+        let roles = json!({"r": {"indices": [{"names": [bad], "privileges": ["read"]}]}});
+        let body = json!({"name": "k", "role_descriptors": roles});
+        let (status, out) = call(&app, ELASTIC, "POST", "/_security/api_key", Some(body)).await;
+        assert_eq!(status, 400, "{bad}: {out}");
+        let reason = format!("Validation Failed: 1: invalid regular expression pattern [{bad}];");
+        assert_eq!(out["error"]["reason"], reason, "{bad}");
+    }
+}

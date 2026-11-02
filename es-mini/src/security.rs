@@ -739,8 +739,9 @@ fn strings(field: &str, v: &Value) -> Result<Value, String> {
     }
 }
 
-/// The unknown privileges of a parsed role, as Elasticsearch's `RoleDescriptorRequestValidator`
-/// reports them: the first unknown cluster privilege, then one per index entry.
+/// The unknown privileges and invalid index name regexes of a parsed role, as Elasticsearch's
+/// `RoleDescriptorRequestValidator` reports them: the first unknown cluster privilege, then per
+/// index entry its first unknown privilege and each invalid regex.
 fn privilege_errors(role: &Value) -> Vec<String> {
     let unknown = |v: &Value, known: &[&str], pattern: &str| {
         (v.as_array().into_iter().flatten())
@@ -755,6 +756,16 @@ fn privilege_errors(role: &Value) -> Vec<String> {
     for entry in role["indices"].as_array().into_iter().flatten() {
         if let Some(p) = unknown(&entry["privileges"], INDEX_PRIVILEGES, "indices:") {
             errors.push(format!("unknown index privilege [{p}]. a privilege must be either one of the predefined fixed indices privileges [{}] or a pattern over one of the available index actions", INDEX_PRIVILEGES.join(",")));
+        }
+        let names = entry["names"].as_array().into_iter().flatten();
+        for name in names
+            .filter_map(Value::as_str)
+            .filter(|n| n.starts_with('/'))
+        {
+            let re = name[1..].strip_suffix('/');
+            if re.is_none_or(|re| es_query::regexp_matches(re, "").is_err()) {
+                errors.push(format!("invalid regular expression pattern [{name}]"));
+            }
         }
     }
     errors

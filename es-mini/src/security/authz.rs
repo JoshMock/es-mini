@@ -971,7 +971,7 @@ fn names_cover(e: &Value, name: &str, allow_restricted: bool) -> bool {
     let restricted = [super::INDEX, super::ALIAS];
     let reaches_restricted = restricted.contains(&name)
         || (allow_restricted && name.contains('*') && restricted.iter().any(|r| glob(name, r)));
-    strs(&e["names"]).any(|n| glob(n, name))
+    strs(&e["names"]).any(|n| role_name(n, name))
         && (e["allow_restricted_indices"] == true || !reaches_restricted)
 }
 
@@ -1160,11 +1160,33 @@ fn entries(set: &Value) -> impl Iterator<Item = &Value> {
 }
 
 /// Whether the index privilege entry `e` grants `action` on `name`.
-// ponytail: names match with `*` wildcards only (Elasticsearch also takes `?` and /regex/), and
-// restricted indices are left to the handlers' own refusal
+// ponytail: restricted indices are left to the handlers' own refusal
 fn covers(e: &Value, action: &str, name: &str) -> bool {
-    let names = e["names"].as_array().into_iter().flatten();
-    names.filter_map(Value::as_str).any(|n| glob(n, name)) && grants(&e["privileges"], action)
+    strs(&e["names"]).any(|n| role_name(n, name)) && grants(&e["privileges"], action)
+}
+
+/// Whether the role index name pattern `pattern` matches `name`, as Elasticsearch's
+/// `Automatons.pattern` does: `/.../` is a Lucene regular expression (one that does not compile
+/// matches nothing), and otherwise `*` is any string, `?` any character and `\` escapes.
+fn role_name(pattern: &str, name: &str) -> bool {
+    fn wildcard(p: &[char], s: &[char]) -> bool {
+        match (p, s) {
+            ([], _) => s.is_empty(),
+            (['*', rest @ ..], _) => (0..=s.len()).any(|i| wildcard(rest, &s[i..])),
+            (['?', rest @ ..], [_, tail @ ..]) => wildcard(rest, tail),
+            (['\\', c, rest @ ..] | [c, rest @ ..], [d, tail @ ..]) => {
+                c == d && wildcard(rest, tail)
+            }
+            _ => false,
+        }
+    }
+    match pattern.strip_prefix('/').and_then(|p| p.strip_suffix('/')) {
+        Some(re) => es_query::regexp_matches(re, name).unwrap_or(false),
+        None => wildcard(
+            &pattern.chars().collect::<Vec<_>>(),
+            &name.chars().collect::<Vec<_>>(),
+        ),
+    }
 }
 
 /// The path segment `seg` percent-decoded, as axum's `Path` extractor decodes it.

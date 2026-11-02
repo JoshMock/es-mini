@@ -39,6 +39,12 @@ use std::{
     collections::{BTreeSet, HashMap, HashSet},
 };
 
+/// Whether the whole of `s` matches the Lucene regular expression `pattern`, compiled with
+/// `RegExp.ALL | RegExp.DEPRECATED_COMPLEMENT` as Elasticsearch does; the error is Lucene's.
+pub fn regexp_matches(pattern: &str, s: &str) -> Result<bool, String> {
+    Ok(regexp::compile(pattern)?.matches(s))
+}
+
 /// One node of Lucene's Explanation, with its value as the float Lucene computes.
 fn explanation(value: f64, description: String, details: Vec<Value>) -> Value {
     serde_json::json!({"value": value as f32, "description": description, "details": details})
