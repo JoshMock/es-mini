@@ -6,7 +6,7 @@ use super::Stats;
 use super::terms::{Buckets, Format};
 use crate::{MAX_BUCKETS, QueryError, int, num};
 use es_index::tz::TimeZone;
-use es_index::{civil_from_days, days_from_civil, iso_date};
+use es_index::{civil_from_days, days_from_civil};
 use serde_json::{Map, Value};
 use std::cell::Cell;
 
@@ -564,17 +564,11 @@ impl Histogram {
         let rendered = v.into_iter().map(|(key, count, subs)| {
             let mut out = Map::new();
             let key_as_string = match (b.format, &self.format) {
-                (Format::Date, _) => {
-                    let (t, tz) = (key as i64, self.time_zone.as_ref());
-                    let pattern = self.format.as_deref().or(date);
-                    let utc = &es_index::tz::TimeZone::UTC;
-                    Some(
-                        match pattern.and_then(|p| es_index::format_date(p, t, tz.unwrap_or(utc))) {
-                            Some(s) => s,
-                            None => tz.map_or_else(|| iso_date(t), |tz| tz.format(t)),
-                        },
-                    )
-                }
+                (Format::Date, _) => Some(super::date_string_in(
+                    self.format.as_deref().or(date),
+                    key as i64,
+                    self.time_zone.as_ref(),
+                )),
                 (_, Some(p)) => Some(super::decimal_format(p, key)),
                 _ => None,
             };

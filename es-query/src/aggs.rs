@@ -21,7 +21,7 @@ use crate::{
 use bucket_selector::BucketSelector;
 use bucket_sort::BucketSort;
 use derivative::Derivative;
-use es_index::{Document, FieldMapping, iso_date, postings::values};
+use es_index::{Document, FieldMapping, iso_date, postings::values, tz::TimeZone};
 use histogram::Histogram;
 pub use max_bucket::MaxBucket;
 use serde_json::{Map, Value};
@@ -273,6 +273,8 @@ struct Ranges {
     format: Option<String>,
     /// A `date_range`: bounds read as dates, even of an unmapped field.
     date: bool,
+    /// A `date_range`'s `time_zone` other than UTC: of bounds without an offset, and their strings.
+    time_zone: Option<TimeZone>,
 }
 
 /// A `range` bucket's key, requested bounds (open ends infinite) and their strings.
@@ -291,12 +293,17 @@ impl Ranges {
             keyed: false,
             format: None,
             date: ty == "date_range",
+            time_zone: None,
         };
         for (k, v) in params {
             match k.as_str() {
                 "field" | "missing" => {}
                 "keyed" => r.keyed = v.as_bool().ok_or_else(|| bad(k))?,
                 "format" => r.format = Some(v.as_str().ok_or_else(|| bad(k))?.into()),
+                "time_zone" if r.date => {
+                    let tz = v.as_str().and_then(TimeZone::parse).ok_or_else(|| bad(k))?;
+                    r.time_zone = Some(tz).filter(|tz| *tz != TimeZone::UTC);
+                }
                 "ranges" => {
                     for range in v.as_array().ok_or_else(|| bad(k))? {
                         let o = range.as_object().ok_or_else(|| bad(k))?;
@@ -324,13 +331,7 @@ impl Ranges {
 
     /// Empty buckets of the ranges sorted by `from` then `to`, with their bounds parsed like
     /// values of `field` (`m` its mapping).
-    fn buckets(
-        &self,
-        s: &Searcher,
-        field: &str,
-        m: Option<&FieldMapping>,
-        empty: &[Stats],
-    ) -> Result<Vec<Stats>, QueryError> {
+    fn buckets(&self, m: Option<&FieldMapping>, empty: &[Stats]) -> Result<Vec<Stats>, QueryError> {
         let field_format = match m {
             Some(FieldMapping::Date { format, .. } | FieldMapping::DateNanos { format, .. }) => {
                 Some(format.as_deref())
@@ -338,10 +339,9 @@ impl Ranges {
             None if self.date => Some(None),
             _ => None,
         };
-        let date = |v: &Value| match s.instant(field) {
-            Some(instant) => instant(v),
-            None => es_index::date_millis(None, None, v),
-        };
+        let (format, locale) = date_format(m);
+        let tz = self.time_zone.clone().unwrap_or(TimeZone::UTC);
+        let date = |v: &Value| es_index::date_millis_in(format, locale, v, &tz, false);
         let parse = |v: &Value, open: f64| {
             match v {
                 Value::Null => Some(open),
@@ -355,7 +355,11 @@ impl Ranges {
             })
         };
         let as_string = |x: f64| match field_format {
-            Some(f) => Some(date_string(self.format.as_deref().or(f), x as i64)),
+            Some(f) => Some(date_string_in(
+                self.format.as_deref().or(f),
+                x as i64,
+                self.time_zone.as_ref(),
+            )),
             None => self.format.as_deref().map(|p| decimal_format(p, x)),
         };
         let mut ranges = (self.ranges.iter())
@@ -1723,7 +1727,7 @@ impl<'s, 'a> Collector<'s, 'a> {
                         };
                         vec![bucket; n]
                     }
-                    Metric::Range(r) => r.buckets(searcher, &agg.field, m, &empty)?,
+                    Metric::Range(r) => r.buckets(m, &empty)?,
                     _ => vec![],
                 },
                 hll: match agg.metric {
@@ -1742,13 +1746,7 @@ impl<'s, 'a> Collector<'s, 'a> {
                         Some(t.buckets(&agg.name, format, parse, empty)?)
                     }
                     Metric::Histogram(h) => {
-                        let (format, locale) = match m {
-                            Some(
-                                FieldMapping::Date { format, locale, .. }
-                                | FieldMapping::DateNanos { format, locale },
-                            ) => (format.as_deref(), locale.as_deref()),
-                            _ => (None, None),
-                        };
+                        let (format, locale) = date_format(m);
                         let bounds = h.bounds(format, locale)?;
                         Some(histogram::buckets(Format::of(m), empty, bounds))
                     }
@@ -2443,11 +2441,25 @@ fn render_counted(
 }
 
 /// Epoch millis `t` in a date field's `format` (the first of its `||` alternatives), in UTC.
-// ponytail: date_range's `time_zone` is not read
 fn date_string(format: Option<&str>, t: i64) -> String {
-    format
-        .and_then(|f| es_index::format_date(f, t, &es_index::tz::TimeZone::UTC))
-        .unwrap_or_else(|| iso_date(t))
+    date_string_in(format, t, None)
+}
+
+/// [`date_string`] in time zone `tz`, UTC if `None`.
+fn date_string_in(format: Option<&str>, t: i64, tz: Option<&TimeZone>) -> String {
+    let utc = &TimeZone::UTC;
+    (format.and_then(|f| es_index::format_date(f, t, tz.unwrap_or(utc))))
+        .unwrap_or_else(|| tz.map_or_else(|| iso_date(t), |tz| tz.format(t)))
+}
+
+/// The `format` and `locale` of a date field's mapping `m`, if it is one.
+fn date_format(m: Option<&FieldMapping>) -> (Option<&str>, Option<&str>) {
+    match m {
+        Some(
+            FieldMapping::Date { format, locale, .. } | FieldMapping::DateNanos { format, locale },
+        ) => (format.as_deref(), locale.as_deref()),
+        _ => (None, None),
+    }
 }
 
 /// Buckets as an object by key, or else an array.
@@ -3227,6 +3239,25 @@ mod tests {
             "none": {"buckets": [{"key": "2020-01-01T00:00:00.000Z-*", "from": 1_577_836_800_000.0,
                 "from_as_string": "2020-01-01T00:00:00.000Z", "doc_count": 0}]},
         });
+        assert_eq!(aggs_of(&ix, body), want);
+    }
+
+    #[test]
+    fn date_field_formats_date_range_reads_and_prints_bounds_in_its_time_zone() {
+        let mut ix = Index::default();
+        let m = FieldMapping::Date {
+            format: Some("yyyy-MM-dd HH:mm||yyyy-MM-dd".into()),
+            locale: None,
+            fields: Default::default(),
+        };
+        ix.mappings.properties.insert("at".into(), m);
+        ix.put("1", json!({"at": "2016-01-01 22:00"}));
+        ix.put("2", json!({"at": "2016-01-01 23:30"}));
+        let body = json!({"aggs": {"r": {"date_range": {"field": "at", "time_zone": "+01:00",
+            "ranges": [{"from": "2016-01-01", "to": "2016-01-02"}]}}}});
+        let want = json!({"r": {"buckets": [{"key": "2016-01-01 00:00-2016-01-02 00:00",
+            "from": 1_451_602_800_000.0, "from_as_string": "2016-01-01 00:00",
+            "to": 1_451_689_200_000.0, "to_as_string": "2016-01-02 00:00", "doc_count": 1}]}});
         assert_eq!(aggs_of(&ix, body), want);
     }
 
