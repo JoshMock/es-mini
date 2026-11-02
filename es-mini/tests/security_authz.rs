@@ -939,6 +939,25 @@ async fn points_in_time_are_authorized_by_their_indices() {
     );
 }
 
+/// The responses of `_msearch` at `path` with the NDJSON `lines`, as `auth`.
+async fn msearch(app: &axum::Router, auth: &str, path: &str, lines: &[Value]) -> (u16, Value) {
+    let ndjson: String = lines.iter().map(|l| format!("{l}\n")).collect();
+    let req = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("authorization", auth)
+        .header("content-type", "application/x-ndjson")
+        .body(Body::from(ndjson))
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    let status = res.status().as_u16();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
 /// Recorded from Elasticsearch 9.5.5: a point in time is authorized by the concrete indices it was
 /// opened on, even through an alias, so a privilege on the alias alone does not grant it.
 #[tokio::test]
@@ -969,4 +988,69 @@ async fn a_point_in_time_opened_through_an_alias_needs_its_indices() {
     let (status, r) = call(&app, &k, "POST", "/_search", Some(pits[1].clone())).await;
     let expected = denied(&id, "indices:data/read/search", "", "read,all");
     assert_eq!((status, r), (403, expected));
+}
+
+/// Recorded from Elasticsearch 9.5.5: each point-in-time search of an msearch is authorized
+/// alone, failing only its own entry; an index named beside a point in time anywhere fails the
+/// whole request.
+#[tokio::test]
+async fn msearch_points_in_time_are_authorized_one_by_one() {
+    let app = app().await;
+    let (a, id) = key(&app, ELASTIC, read_a()).await;
+    let mut pit = std::collections::HashMap::new();
+    for target in ["a1", "b1", "a1,b1"] {
+        let r = ok(
+            &app,
+            ELASTIC,
+            "POST",
+            &format!("/{target}/_pit?keep_alive=1m"),
+            None,
+        )
+        .await;
+        pit.insert(target, json!({"size": 0, "pit": {"id": r["id"]}}));
+    }
+    let lines = [
+        json!({}),
+        pit["a1"].clone(),
+        json!({}),
+        pit["b1"].clone(),
+        json!({}),
+        pit["a1,b1"].clone(),
+        json!({"index": "a1"}),
+        json!({"size": 0}),
+    ];
+    let (status, r) = msearch(&app, &a, "/_msearch", &lines).await;
+    assert_eq!(status, 200, "{r}");
+    let statuses: Vec<&Value> = (r["responses"].as_array().unwrap().iter())
+        .map(|i| &i["status"])
+        .collect();
+    assert_eq!(
+        statuses,
+        [&json!(200), &json!(403), &json!(403), &json!(200)],
+        "{r}"
+    );
+    let mut expected = denied(&id, "indices:data/read/search", "", "read,all");
+    assert_eq!(r["responses"][0]["hits"]["total"]["value"], 1, "{r}");
+    expected["status"] = 403.into();
+    assert_eq!(r["responses"][1], expected);
+
+    let invalid = "action_request_validation_exception";
+    for (path, header) in [
+        ("/_msearch", json!({"index": "a1"})),
+        ("/_msearch", json!({"index": "_all"})),
+        ("/a1/_msearch", json!({})),
+    ] {
+        let lines = [
+            json!({}),
+            json!({"size": 0}),
+            header.clone(),
+            pit["a1"].clone(),
+        ];
+        let (status, r) = msearch(&app, &a, path, &lines).await;
+        assert_eq!(
+            (status, &r["error"]["type"]),
+            (400, &json!(invalid)),
+            "{path} {header}: {r}"
+        );
+    }
 }

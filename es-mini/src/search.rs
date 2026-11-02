@@ -220,6 +220,9 @@ pub(crate) fn query_from_params(
     )
 }
 
+const PIT_WITH_INDICES: &str =
+    "[indices] cannot be used with point in time. Do not specify any index with point in time.";
+
 pub async fn search(
     State(state): State<AppState>,
     Extension(contexts): Extension<Contexts>,
@@ -239,9 +242,7 @@ pub async fn search(
     // Authorization narrows an absent index expression to the key's indices.
     let first = uri.path().split('/').find(|s| !s.is_empty());
     if pit.is_some() && !matches!(first, Some("_search" | "_all") | None) {
-        return Err(AppError::ActionRequestValidation(
-            "[indices] cannot be used with point in time. Do not specify any index with point in time.".into(),
-        ));
+        return Err(AppError::ActionRequestValidation(PIT_WITH_INDICES.into()));
     }
     terms_lookups(&state.read(), &mut body)?;
     let mut req = SearchRequest::parse(&body).map_err(AppError::from)?;
@@ -498,9 +499,19 @@ async fn msearch_impl(
     template: bool,
 ) -> Result<Json<Value>, AppError> {
     let start = Instant::now();
+    let named = path.is_some();
     let default = path.map_or("_all".to_string(), |Path(p)| p);
     let text = std::str::from_utf8(&body)
         .map_err(|e| AppError::IllegalArgument(format!("request body is not UTF-8: {e}")))?;
+    // Like Elasticsearch's request validation: an index beside any point in time (in the path or
+    // that search's header) fails the whole msearch, not just its entry.
+    let mut pairs = text.lines().filter(|l| !l.trim().is_empty());
+    while let (false, Some(header), Some(body)) = (template, pairs.next(), pairs.next()) {
+        let json = |l: &str| serde_json::from_str::<Value>(l).unwrap_or_default();
+        if json(body).get("pit").is_some() && (named || json(header).get("index").is_some()) {
+            return Err(AppError::ActionRequestValidation(PIT_WITH_INDICES.into()));
+        }
+    }
     let mut lines = text.lines().filter(|l| !l.trim().is_empty());
     let mut responses = Vec::new();
     while let Some(header) = lines.next() {
