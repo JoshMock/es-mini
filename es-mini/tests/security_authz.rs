@@ -1326,3 +1326,64 @@ async fn patterns_cannot_reach_the_security_index() {
         );
     }
 }
+
+/// Recorded from Elasticsearch 9.5.5 (fixtures/security_has_privileges.json): what a key holding
+/// one named privilege reports for every named privilege es-mini knows.
+#[tokio::test]
+async fn has_privileges_matches_elasticsearch_for_each_named_privilege() {
+    let recorded: Value =
+        serde_json::from_str(include_str!("../../fixtures/security_has_privileges.json")).unwrap();
+    let app = app().await;
+    for (case, expected) in recorded.as_object().unwrap() {
+        let (kind, held) = case.split_once(':').unwrap();
+        let (roles, body) = match kind {
+            "cluster" => (
+                json!({"r": {"cluster": [held]}}),
+                json!({"cluster": expected["cluster"].as_object().unwrap().keys().collect::<Vec<_>>()}),
+            ),
+            _ => {
+                let asked = expected["index"]["i1"]
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .collect::<Vec<_>>();
+                (
+                    json!({"r": {"indices": [{"names": ["i*"], "privileges": [held]}]}}),
+                    json!({"index": [{"names": ["i1"], "privileges": asked}]}),
+                )
+            }
+        };
+        let (k, _) = key(&app, ELASTIC, roles).await;
+        let r = ok(
+            &app,
+            &k,
+            "POST",
+            "/_security/user/_has_privileges",
+            Some(body),
+        )
+        .await;
+        for field in ["has_all_requested", "cluster", "index"] {
+            assert_eq!(r[field], expected[field], "{case}: {field}");
+        }
+    }
+}
+
+/// Recorded from Elasticsearch 9.5.5: a `must_exist` removal fails with 404 if any of its indices
+/// lacks the alias, whatever their order, and removes nothing.
+#[tokio::test]
+async fn must_exist_alias_removal_needs_the_alias_on_every_index() {
+    let app = app().await;
+    ok(&app, ELASTIC, "PUT", "/a1/_alias/x", None).await;
+    for indices in [json!(["a1", "c1"]), json!(["c1", "a1"])] {
+        let action = json!({"remove": {"indices": indices, "alias": "x", "must_exist": true}});
+        let body = json!({"actions": [action]});
+        let (status, r) = call(&app, ELASTIC, "POST", "/_aliases", Some(body)).await;
+        assert_eq!(
+            (status, &r["error"]["reason"]),
+            (404, &json!("aliases [x] missing")),
+            "{indices}: {r}"
+        );
+    }
+    let r = ok(&app, ELASTIC, "GET", "/a1/_alias/x", None).await;
+    assert_eq!(r["a1"]["aliases"], json!({"x": {}}));
+}
