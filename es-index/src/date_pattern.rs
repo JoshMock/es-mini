@@ -81,7 +81,9 @@ impl Week {
     };
 
     /// `WeekFields.of(locale)` with the JDK's CLDR weekData: by the locale's region, the US's
-    /// when it names none.
+    /// when it names none. Checked against `WeekFields.of(Locale.of("und", region))` for all 250
+    /// regions of Elasticsearch 9.5.5's JDK (Iceland is Sunday-first with 4 minimal days, and
+    /// `Locale.ROOT` gives Sunday and 1, as the US does); `AN` is not among its regions.
     fn of(locale: &str) -> Week {
         const MIN_DAYS_4: &str = "AD AN AT AX BE BG CH CZ DE DK EE ES FI FJ FO FR GB GF GG GI GP \
             GR HU IE IM IS IT JE LI LT LU MC MQ NL NO PL PT RE RU SE SJ SK SM VA";
