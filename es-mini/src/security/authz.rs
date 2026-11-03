@@ -648,6 +648,21 @@ pub(crate) fn pit_indices(authn: Option<&Authn>, indices: &[&str]) -> Result<(),
     }
 }
 
+/// The indices whose aliases `GET /_cat/aliases` lists for whoever `authn` is: for an API key,
+/// those `GET /_alias` expands to; `None` for every index.
+pub(crate) fn cat_aliases(
+    authn: Option<&Authn>,
+    shared: &Shared,
+) -> Result<Option<String>, AppError> {
+    let Some(Authn::ApiKey { id, roles, .. }) = authn else {
+        return Ok(None);
+    };
+    let key = Key { id, roles };
+    let action = "indices:admin/aliases/get";
+    let names = key.indices(shared, action, "_all", true, &HashMap::new())?;
+    Ok(Some(expression(&names, str::to_owned)))
+}
+
 /// Narrows the index expression `expr` of an ES|QL `FROM` to the names whoever `authn` is may
 /// read. As in Elasticsearch, a literal name the key may not read is unknown when nothing else
 /// matches, and otherwise refused.

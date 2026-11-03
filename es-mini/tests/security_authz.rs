@@ -1430,3 +1430,26 @@ async fn histogram_bound_date_math_rounds_down() {
         "{r}"
     );
 }
+
+/// `_cat/aliases` sends `_alias`'s request (Elasticsearch's RestAliasAction), so a key sees the
+/// aliases of the indices it may view, and one with no such index privilege is refused alike.
+#[tokio::test]
+async fn cat_aliases_lists_what_get_aliases_would() {
+    let app = app().await;
+    let roles =
+        json!({"r": {"indices": [{"names": ["a*", "b*"], "privileges": ["view_index_metadata"]}]}});
+    let (kv, _) = key(&app, ELASTIC, roles).await;
+    let out = ok(&app, &kv, "GET", "/_cat/aliases?format=json", None).await;
+    let al = json!({"alias": "al", "index": "b1", "filter": "-", "routing.index": "-", "routing.search": "-", "is_write_index": "-"});
+    assert_eq!(out, json!([al]));
+    let out = ok(&app, &kv, "GET", "/_cat/aliases/ca?format=json", None).await;
+    assert_eq!(out, json!([]));
+    let (kr, id) = key(&app, ELASTIC, read_a()).await;
+    let expected = denied(
+        &id,
+        "indices:admin/aliases/get",
+        "",
+        "view_index_metadata,manage,all",
+    );
+    assert_denied(&app, &kr, "GET", "/_cat/aliases", expected).await;
+}

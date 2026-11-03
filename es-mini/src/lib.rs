@@ -475,6 +475,8 @@ fn router(state: AppState, security: Option<Arc<security::Security>>) -> Router 
         .route("/{index}/_stats/{metric}", get(indices::stats))
         .route("/_cat/indices", get(indices::cat_indices))
         .route("/_cat/indices/{index}", get(indices::cat_indices))
+        .route("/_cat/aliases", get(aliases::cat))
+        .route("/_cat/aliases/{alias}", get(aliases::cat))
         .route("/_cat/shards", get(indices::cat_shards))
         .route("/_cat/shards/{index}", get(indices::cat_shards))
         .route("/_query", post(search::esql))

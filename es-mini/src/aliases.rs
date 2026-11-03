@@ -4,7 +4,7 @@ use crate::{
     AppState,
     error::AppError,
     indices::{check, parse_body},
-    security::{Authn, alias_actions},
+    security::{Authn, alias_actions, cat_aliases},
 };
 use axum::{
     Extension, Json,
@@ -311,6 +311,57 @@ pub async fn get_for_index_named(
 ) -> Result<Response, AppError> {
     check(&uri, &params, &["local"])?;
     get_response(&state, Some(&index), Some(&names))
+}
+
+/// `GET /_cat/aliases[/{alias}]`: `GET /_alias[/{alias}]`'s aliases as a table, as
+/// Elasticsearch's RestAliasAction, where names that match nothing are left out.
+pub async fn cat(
+    State(state): State<AppState>,
+    authn: Option<Extension<Authn>>,
+    names: Option<Path<String>>,
+    uri: Uri,
+    Query(params): Params,
+) -> Result<Response, AppError> {
+    check(&uri, &params, &["format", "v"])?;
+    const COLUMNS: [&str; 6] = [
+        "alias",
+        "index",
+        "filter",
+        "routing.index",
+        "routing.search",
+        "is_write_index",
+    ];
+    let shared = state.read();
+    let index = cat_aliases(authn.as_deref(), &shared)?;
+    let names = names.as_ref().map(|Path(n)| n.as_str());
+    let (body, _) = lookup(&*shared, index.as_deref(), names)?;
+    let cell = |v: &Value| match v {
+        Value::String(s) => s.clone(),
+        Value::Bool(b) => b.to_string(),
+        _ => "-".into(),
+    };
+    let rows = (body.as_object().into_iter().flatten())
+        .flat_map(|(index, v)| {
+            let aliases = v["aliases"].as_object().into_iter().flatten();
+            aliases.map(move |(alias, a)| {
+                let filter = if a.get("filter").is_some() { "*" } else { "-" };
+                vec![
+                    alias.clone(),
+                    index.clone(),
+                    filter.into(),
+                    cell(&a["index_routing"]),
+                    cell(&a["search_routing"]),
+                    cell(&a["is_write_index"]),
+                ]
+            })
+        })
+        .collect();
+    Ok(crate::indices::cat_table(
+        &COLUMNS,
+        rows,
+        |_| false,
+        &params,
+    ))
 }
 
 fn exists(state: &AppState, index: Option<&str>, names: &str) -> StatusCode {

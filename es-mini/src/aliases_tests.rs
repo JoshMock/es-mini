@@ -330,3 +330,54 @@ fn date_math_names_resolve_now_units_formats_and_zones() {
     assert!(r("<l-{now/q}>").is_none());
     assert!(r("<l-{now/d>").is_none());
 }
+
+/// Recorded from Elasticsearch 9.5.5, which lists indices in hash order (h, a, b) where
+/// es-mini lists them by name.
+#[tokio::test]
+async fn cat_aliases_lists_each_alias_of_each_index() {
+    let app = app();
+    let b = json!({"aliases": {"zz": {}, "aa": {"filter": {"term": {"x": 1}}, "index_routing": "1", "search_routing": "2,3", "is_write_index": true}}});
+    let a = json!({"aliases": {"zz": {"is_write_index": false}, "mm": {"routing": "5"}}});
+    let h = json!({"settings": {"index.hidden": true}, "aliases": {"hh": {"is_hidden": true}}});
+    for (uri, body) in [("/b", b), ("/a", a), ("/h", h)] {
+        assert_eq!(
+            call(&app, Method::PUT, uri, Some(body)).await.0,
+            StatusCode::OK
+        );
+    }
+    let row = |alias, index, filter, ri, rs, w| json!({"alias": alias, "index": index, "filter": filter, "routing.index": ri, "routing.search": rs, "is_write_index": w});
+    let mm = row("mm", "a", "-", "5", "5", "-");
+    let zz_a = row("zz", "a", "-", "-", "-", "false");
+    let aa = row("aa", "b", "*", "1", "2,3", "true");
+    let zz_b = row("zz", "b", "-", "-", "-", "-");
+    let hh = row("hh", "h", "-", "-", "-", "-");
+    for (uri, rows) in [
+        ("/_cat/aliases?format=json", json!([mm, zz_a, aa, zz_b, hh])),
+        ("/_cat/aliases/zz?format=json", json!([zz_a, zz_b])),
+        ("/_cat/aliases/z*,mm?format=json", json!([mm, zz_a, zz_b])),
+        ("/_cat/aliases/nope?format=json", json!([])),
+        ("/_cat/aliases/nope,zz?format=json", json!([zz_a, zz_b])),
+        ("/_cat/aliases/-zz?format=json", json!([])),
+    ] {
+        assert_eq!(
+            call(&app, Method::GET, uri, None).await,
+            (StatusCode::OK, rows),
+            "{uri}"
+        );
+    }
+    let req = axum::http::Request::get("/_cat/aliases/z*,mm?v")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let res = tower::ServiceExt::oneshot(app, req).await.unwrap();
+    let text = http_body_util::BodyExt::collect(res.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    assert_eq!(
+        std::str::from_utf8(&text).unwrap(),
+        "alias index filter routing.index routing.search is_write_index\n\
+         mm    a     -      5             5              -\n\
+         zz    a     -      -             -              false\n\
+         zz    b     -      -             -              -\n"
+    );
+}

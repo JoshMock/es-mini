@@ -1034,7 +1034,7 @@ pub async fn cat_indices(
 
 /// A `_cat` response: `rows` as JSON objects (empty cells null) with `format=json`, else as an
 /// aligned text table (with a header row if `v`), its `right` columns aligned right.
-fn cat_table(
+pub(crate) fn cat_table(
     columns: &[&str],
     rows: Vec<Vec<String>>,
     right: impl Fn(usize) -> bool,
