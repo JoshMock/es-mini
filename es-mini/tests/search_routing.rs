@@ -155,3 +155,18 @@ async fn by_query_writes_only_the_routed_shards() {
     assert_eq!((&r["total"], &r["deleted"]), (&json!(0), &json!(0)));
     assert_eq!(search(&app, "r", "").await, (json!(3), vec![3, 4, 5, 6, 7]));
 }
+
+#[tokio::test]
+async fn top_hits_show_routing() {
+    let app = setup().await;
+    let body = json!({"size": 0, "aggs": {"t": {"top_hits": {"sort": ["n"], "size": 3, "_source": false}}}});
+    let r = call(&app, "GET", "/r/_search", body).await;
+    assert_eq!(
+        r["aggregations"]["t"]["hits"]["hits"],
+        json!([
+            {"_index": "r", "_id": "1", "_score": null, "_routing": "a", "sort": [1]},
+            {"_index": "r", "_id": "2", "_score": null, "_routing": "b", "sort": [2]},
+            {"_index": "r", "_id": "3", "_score": null, "_routing": "c", "sort": [3]},
+        ])
+    );
+}

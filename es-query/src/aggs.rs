@@ -230,6 +230,9 @@ impl TopHits {
                 hit.insert("_primary_term".into(), 1.into());
             }
             hit.insert("_score".into(), score(h).into());
+            if let Some(r) = &h.doc.routing {
+                hit.insert("_routing".into(), r.as_str().into());
+            }
             if let Some(filter) = &self.source {
                 let source = match filter.is_empty() {
                     true => h.doc.source.clone(),
