@@ -386,6 +386,8 @@ if (!dryRun && existsSync(join(repo, IN_PROGRESS))) {
   rmSync(join(repo, IN_PROGRESS), { force: true });
 }
 if (git("status", "--porcelain")) throw new Error("working tree must be clean before starting");
+// Before the first check.sh too: an overgrown cache made its linker die (SIGBUS on full /tmp).
+if (!dryRun) trimBuildCache();
 if (!dryRun && unattended && capped("scripts/check.sh").status !== 0) {
   notify("ralph: not started", "scripts/check.sh fails on main; fix it first.");
   console.error("scripts/check.sh fails before the first iteration");
