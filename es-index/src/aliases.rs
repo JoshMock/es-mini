@@ -133,6 +133,16 @@ impl IndexMeta for Index {
     }
 }
 
+/// So indices of different kinds resolve as one map of `&dyn IndexMeta`.
+impl<T: IndexMeta + ?Sized> IndexMeta for &T {
+    fn aliases(&self) -> &BTreeMap<String, Alias> {
+        (**self).aliases()
+    }
+    fn closed(&self) -> bool {
+        (**self).closed()
+    }
+}
+
 pub fn is_alias(indices: &Map<impl IndexMeta>, name: &str) -> bool {
     indices.values().any(|i| i.aliases().contains_key(name))
 }

@@ -190,6 +190,22 @@ fn put_key(system: &mut Indices, id: &str, doc: Value) {
     index.put(id, doc);
 }
 
+/// Whether `authn` sees the system indices in alias listings and reads them: only `elastic`,
+/// as Elasticsearch's superuser may read restricted indices; no API key reaches them.
+pub(crate) fn reads_restricted(authn: Option<&Authn>) -> bool {
+    matches!(authn, Some(Authn::Elastic))
+}
+
+/// A snapshot of [`INDEX`], if `authn` [`reads_restricted`] and names it or [`ALIAS`] by `name`.
+// ponytail: exact names only, without the deprecation Warning header; Elasticsearch also
+// resolves it from wildcards (`.security*`, `expand_wildcards=all`)
+pub(crate) fn restricted_read(store: &Store, authn: Option<&Authn>, name: &str) -> Option<Index> {
+    let named = name == INDEX || name == ALIAS;
+    (reads_restricted(authn) && named)
+        .then(|| store.system().get(INDEX).map(Index::snapshot))
+        .flatten()
+}
+
 /// Refuses `action` on [`INDEX`] or [`ALIAS`] (`name`) to any request but the security APIs,
 /// with the error Elasticsearch gives `elastic`; `privileges` are those it says grant `action`.
 // ponytail: refused with security off too, where ES has no .security-7 to protect

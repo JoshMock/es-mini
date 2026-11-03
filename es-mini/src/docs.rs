@@ -465,6 +465,7 @@ fn filter_source(source: &Value, params: &HashMap<String, String>) -> Option<Val
 
 pub async fn get_source(
     state: State<AppState>,
+    authn: Option<Extension<Authn>>,
     path: Path<(String, String)>,
     uri: Uri,
     Query(params): Query<HashMap<String, String>>,
@@ -474,7 +475,7 @@ pub async fn get_source(
             "fetching source can not be disabled".into(),
         ));
     }
-    let (_, Json(mut r)) = get(state, path, uri, Query(params)).await?;
+    let (_, Json(mut r)) = get(state, authn, path, uri, Query(params)).await?;
     let what = match (r.get_mut("_source").map(Value::take), r["found"] == true) {
         (Some(src), _) => return Ok(Json(src)),
         (None, true) => "Source",
@@ -490,19 +491,28 @@ pub async fn get_source(
 
 pub async fn get(
     State(state): State<AppState>,
+    authn: Option<Extension<Authn>>,
     Path((index, id)): Path<(String, String)>,
     uri: Uri,
     Query(params): Query<HashMap<String, String>>,
 ) -> Reply {
     params::check(&uri, &params, &GET_PARAMS)?;
+    let system = crate::security::restricted_read(&state, authn.as_deref(), &index);
     let shared = state.read();
     let name = index;
-    let index = single_index(&*shared, &name)?;
-    let i = shared.read(&index).expect("resolved");
+    let locked;
+    let (index, i): (String, &Index) = match &system {
+        Some(i) => (crate::security::INDEX.to_owned(), i),
+        None => {
+            let index = single_index(&*shared, &name)?;
+            locked = shared.read(&index).expect("resolved");
+            (index, &locked)
+        }
+    };
     // A non-realtime get sees what search sees, unless it asks for a refresh first.
     let realtime = params.get("realtime").is_none_or(|v| v != "false")
         || params.get("refresh").is_some_and(|v| v != "false");
-    let Some(routing) = routing(&i, &name, params.get("routing").map(String::as_str))? else {
+    let Some(routing) = routing(i, &name, params.get("routing").map(String::as_str))? else {
         return Err(routing_missing(index, &id));
     };
     let shard = i.shard_of(&id, routing);
@@ -600,7 +610,14 @@ pub async fn mget(
             true => Err(AppError::IndexNotFound(index.clone())),
             false => {
                 let path = Path((index.clone(), id.clone()));
-                get(State(state.clone()), path, uri.clone(), Query(params)).await
+                get(
+                    State(state.clone()),
+                    authn.clone(),
+                    path,
+                    uri.clone(),
+                    Query(params),
+                )
+                .await
             }
         };
         docs.push(match r {

@@ -255,12 +255,31 @@ fn lookup(
     Ok((Value::Object(out), missing))
 }
 
+/// [`lookup`] over every index, with the system indices too if `authn`
+/// [`crate::security::reads_restricted`], as Elasticsearch lists them to its superuser.
+fn visible_lookup(
+    state: &AppState,
+    authn: Option<&Authn>,
+    index: Option<&str>,
+    names: Option<&str>,
+) -> Result<(Value, Vec<String>), AppError> {
+    let shared = state.read();
+    let system = state.system();
+    let mut all: aliases::Map<&dyn aliases::IndexMeta> =
+        (shared.iter()).map(|(n, s)| (n.clone(), s as _)).collect();
+    if crate::security::reads_restricted(authn) {
+        all.extend(system.iter().map(|(n, i)| (n.clone(), i as _)));
+    }
+    lookup(&all, index, names)
+}
+
 fn get_response(
     state: &AppState,
+    authn: Option<Extension<Authn>>,
     index: Option<&str>,
     names: Option<&str>,
 ) -> Result<Response, AppError> {
-    let (mut body, missing) = lookup(&*state.read(), index, names)?;
+    let (mut body, missing) = visible_lookup(state, authn.as_deref(), index, names)?;
     if missing.is_empty() {
         return Ok(Json(body).into_response());
     }
@@ -276,41 +295,45 @@ fn get_response(
 
 pub async fn get_all(
     State(state): State<AppState>,
+    authn: Option<Extension<Authn>>,
     uri: Uri,
     Query(params): Params,
 ) -> Result<Response, AppError> {
     check(&uri, &params, &["local"])?;
-    get_response(&state, None, None)
+    get_response(&state, authn, None, None)
 }
 
 pub async fn get_named(
     State(state): State<AppState>,
+    authn: Option<Extension<Authn>>,
     Path(names): Path<String>,
     uri: Uri,
     Query(params): Params,
 ) -> Result<Response, AppError> {
     check(&uri, &params, &["local"])?;
-    get_response(&state, None, Some(&names))
+    get_response(&state, authn, None, Some(&names))
 }
 
 pub async fn get_for_index(
     State(state): State<AppState>,
+    authn: Option<Extension<Authn>>,
     Path(index): Path<String>,
     uri: Uri,
     Query(params): Params,
 ) -> Result<Response, AppError> {
     check(&uri, &params, &["local"])?;
-    get_response(&state, Some(&index), None)
+    get_response(&state, authn, Some(&index), None)
 }
 
 pub async fn get_for_index_named(
     State(state): State<AppState>,
+    authn: Option<Extension<Authn>>,
     Path((index, names)): Path<(String, String)>,
     uri: Uri,
     Query(params): Params,
 ) -> Result<Response, AppError> {
     check(&uri, &params, &["local"])?;
-    get_response(&state, Some(&index), Some(&names))
+    get_response(&state, authn, Some(&index), Some(&names))
 }
 
 /// `GET /_cat/aliases[/{alias}]`: `GET /_alias[/{alias}]`'s aliases as a table, as
@@ -331,10 +354,9 @@ pub async fn cat(
         "routing.search",
         "is_write_index",
     ];
-    let shared = state.read();
-    let index = cat_aliases(authn.as_deref(), &shared)?;
+    let index = cat_aliases(authn.as_deref(), &state.read())?;
     let names = names.as_ref().map(|Path(n)| n.as_str());
-    let (body, _) = lookup(&*shared, index.as_deref(), names)?;
+    let (body, _) = visible_lookup(&state, authn.as_deref(), index.as_deref(), names)?;
     let cell = |v: &Value| match v {
         Value::String(s) => s.clone(),
         Value::Bool(b) => b.to_string(),
@@ -364,8 +386,13 @@ pub async fn cat(
     ))
 }
 
-fn exists(state: &AppState, index: Option<&str>, names: &str) -> StatusCode {
-    match lookup(&*state.read(), index, Some(names)) {
+fn exists(
+    state: &AppState,
+    authn: Option<Extension<Authn>>,
+    index: Option<&str>,
+    names: &str,
+) -> StatusCode {
+    match visible_lookup(state, authn.as_deref(), index, Some(names)) {
         Ok((body, missing))
             if missing.is_empty() && body.as_object().is_some_and(|o| !o.is_empty()) =>
         {
@@ -377,22 +404,24 @@ fn exists(state: &AppState, index: Option<&str>, names: &str) -> StatusCode {
 
 pub async fn head_named(
     State(state): State<AppState>,
+    authn: Option<Extension<Authn>>,
     Path(names): Path<String>,
     uri: Uri,
     Query(params): Params,
 ) -> Result<StatusCode, AppError> {
     check(&uri, &params, &["local"])?;
-    Ok(exists(&state, None, &names))
+    Ok(exists(&state, authn, None, &names))
 }
 
 pub async fn head_for_index_named(
     State(state): State<AppState>,
+    authn: Option<Extension<Authn>>,
     Path((index, names)): Path<(String, String)>,
     uri: Uri,
     Query(params): Params,
 ) -> Result<StatusCode, AppError> {
     check(&uri, &params, &["local"])?;
-    Ok(exists(&state, Some(&index), &names))
+    Ok(exists(&state, authn, Some(&index), &names))
 }
 
 /// String-or-array parameter of an alias action, under its singular or plural key.

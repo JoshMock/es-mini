@@ -20,7 +20,7 @@ use es_query::{
 };
 use serde_json::{Value, json};
 use std::borrow::Borrow;
-use std::{collections::HashMap, time::Instant};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 
 /// The shards of each multi-shard index of `resolved`, copied to be searched one by one (see
 /// [`es_index::Index::shard_snapshots`]); none for an index of one shard, searched in place.
@@ -272,7 +272,10 @@ pub async fn search(
             "using [from] is not allowed in a scroll context".into(),
         ));
     }
+    let system = crate::security::restricted_read(&state, authn.as_deref(), &name)
+        .map(|i| Arc::new(vec![(crate::security::INDEX.to_owned(), i, None)]));
     let snapshot = match pit {
+        None if system.is_some() => system,
         Some(p) => {
             let snapshot = crate::scroll::pit(&contexts, &p, &raw)?;
             let names: Vec<&str> = snapshot.iter().map(|(n, ..)| n.as_str()).collect();

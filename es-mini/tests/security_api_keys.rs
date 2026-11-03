@@ -893,7 +893,7 @@ async fn keys_survive_restart_in_a_hidden_index() {
     let got = call(&app, &a2, "GET", "/_security/_authenticate", None).await;
     assert_eq!(got, (401, unauthorized(&why)));
 
-    // Ordinary requests see no .security-7 and cannot write it.
+    // Searches of every index skip the hidden .security-7; elastic may read it but not write it.
     let id = k1["id"].as_str().unwrap();
     let got = call(&app, ELASTIC, "GET", "/_search", None).await;
     assert_eq!(got.1["hits"]["total"]["value"], 0, "{}", got.1);
@@ -907,9 +907,14 @@ async fn keys_survive_restart_in_a_hidden_index() {
         None,
     )
     .await;
-    assert_eq!(got.0, 404, "{}", got.1);
+    assert_eq!(
+        (got.0, &got.1["_source"]["name"]),
+        (200, &json!("k1")),
+        "{}",
+        got.1
+    );
     let got = call(&app, ELASTIC, "GET", "/.security/_search", None).await;
-    assert_eq!(got.0, 404, "{}", got.1);
+    assert_eq!(got.1["hits"]["total"]["value"], 2, "{}", got.1);
     for index in [".security-7", ".security"] {
         let uri = format!("/{index}/_doc/x");
         let got = call(&app, ELASTIC, "PUT", &uri, Some(json!({"a": 1}))).await;
