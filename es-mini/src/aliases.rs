@@ -120,11 +120,26 @@ fn resolved_names(
         .collect())
 }
 
+pub(crate) const SAME_NAME: &str =
+    "an index, data stream, ESQL view, or ESQL dataset exists with the same name as the alias";
+
+/// Port of `AliasValidator.validateAliasStandalone`'s name rules.
+pub(crate) fn validate_alias_name(alias: &str) -> Result<(), AppError> {
+    match crate::indices::index_or_alias_name_error(alias) {
+        Some(reason) => Err(AppError::InvalidAliasName {
+            alias: alias.to_owned(),
+            reason,
+        }),
+        None => Ok(()),
+    }
+}
+
 fn check_alias_name(indices: &Indices, alias: &str) -> Result<(), AppError> {
+    validate_alias_name(alias)?;
     match indices.contains_key(alias) {
         true => Err(AppError::InvalidAliasName {
             alias: alias.to_owned(),
-            reason: "an index or data stream exists with the same name as the alias".into(),
+            reason: SAME_NAME.into(),
         }),
         false => Ok(()),
     }
@@ -160,6 +175,7 @@ pub async fn put(
 ) -> Result<Json<Value>, AppError> {
     check(&uri, &params, &WRITE_PARAMS)?;
     let meta = parse_alias(&parse_body(&body)?)?;
+    let alias = resolve_date_math(&alias)?;
     let mut indices = state.write();
     check_alias_name(&indices, &alias)?;
     for name in resolved_names(&indices, &index)? {
@@ -508,6 +524,8 @@ pub async fn update(
                 }
                 let meta = parse_alias(&meta)?;
                 for alias in names_of(a, "alias", "aliases") {
+                    let alias = resolve_date_math(&alias)?;
+                    validate_alias_name(&alias)?;
                     for t in &targets {
                         tables
                             .get_mut(t)

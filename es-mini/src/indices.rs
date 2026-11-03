@@ -48,40 +48,43 @@ fn check_field_type(field: &str, spec: &Value) -> Result<(), AppError> {
     Ok(())
 }
 
-/// Port of `MetadataCreateIndexService.validateIndexOrAliasName` (index-name rules).
-pub fn validate_index_name(name: &str) -> Result<(), AppError> {
-    let bad = |reason: String| AppError::InvalidIndexName {
-        index: name.to_owned(),
-        reason,
-    };
+/// Port of `MetadataCreateIndexService.validateIndexOrAliasName`: why `name` is refused.
+pub(crate) fn index_or_alias_name_error(name: &str) -> Option<String> {
     if name.contains([' ', '"', '*', ',', '/', '<', '>', '?', '\\', '|']) {
-        return Err(bad(
+        return Some(
             r#"must not contain the following characters [' ','"','*',',','/','<','>','?','\','|']"#
                 .into(),
-        ));
+        );
     }
     if name.contains('#') {
-        return Err(bad("must not contain '#'".into()));
+        return Some("must not contain '#'".into());
     }
     if name.contains(':') {
-        return Err(bad("must not contain ':'".into()));
+        return Some("must not contain ':'".into());
     }
     if name.starts_with(['_', '-', '+']) {
-        return Err(bad("must not start with '_', '-', or '+'".into()));
+        return Some("must not start with '_', '-', or '+'".into());
     }
     if name.len() > 255 {
-        return Err(bad(format!(
-            "index name is too long, ({} > 255)",
-            name.len()
-        )));
+        return Some(format!("index name is too long, ({} > 255)", name.len()));
     }
     if name == "." || name == ".." {
-        return Err(bad("must not be '.' or '..'".into()));
+        return Some("must not be '.' or '..'".into());
     }
-    if name.to_lowercase() != name {
-        return Err(bad("must be lowercase".into()));
+    None
+}
+
+/// Port of `MetadataCreateIndexService.validateIndexName`'s name rules.
+pub fn validate_index_name(name: &str) -> Result<(), AppError> {
+    let reason = index_or_alias_name_error(name)
+        .or_else(|| (name.to_lowercase() != name).then(|| "must be lowercase".into()));
+    match reason {
+        Some(reason) => Err(AppError::InvalidIndexName {
+            index: name.to_owned(),
+            reason,
+        }),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 pub async fn create(
@@ -177,10 +180,11 @@ pub async fn create(
         });
     }
     for alias in index.aliases.keys() {
+        crate::aliases::validate_alias_name(alias)?;
         if indices.contains_key(alias) || *alias == name {
             return Err(AppError::InvalidAliasName {
                 alias: alias.clone(),
-                reason: "an index or data stream exists with the same name as the alias".into(),
+                reason: crate::aliases::SAME_NAME.into(),
             });
         }
     }
