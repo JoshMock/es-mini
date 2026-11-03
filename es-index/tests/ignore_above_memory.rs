@@ -70,3 +70,18 @@ fn ignore_above_values_are_left_out_of_postings_in_memory_as_on_disk() {
     assert!(docs("abcd").is_empty() && docs("abcde").is_empty());
     assert_eq!(stats, (3.0, 3.0, vec![1.0, 2.0, 0.0, 0.0, 0.0]));
 }
+
+#[test]
+fn ignored_lists_the_same_fields_in_memory_as_on_disk() {
+    let dir = Scratch::new("ignore-above-ignored", Some("data"));
+    disk::save(&dir, &Indices::from([("i".into(), index())])).unwrap();
+    let opened = disk::open(&dir).unwrap().remove("i").unwrap();
+    let memory = index();
+    let ignored = |idx: &Index| -> BTreeMap<_, _> {
+        idx.shards()[0].ignored(&idx.mappings).into_iter().collect()
+    };
+    let both = || vec!["k".to_owned(), "s.keyword".to_owned()];
+    let want = BTreeMap::from([("1".to_owned(), both()), ("3".to_owned(), both())]);
+    assert_eq!(ignored(&memory), want);
+    assert_eq!(ignored(&opened), want);
+}

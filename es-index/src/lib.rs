@@ -875,6 +875,7 @@ impl Shard {
     /// Reads the doc values of `field` for live on-disk documents by id: numbers (dates as
     /// epoch millis), booleans, or keyword terms and ips in order. `None` for a document in memory, or
     /// in a segment without doc values for the field. Each segment's column is decoded once.
+    /// `_ignored` reads as a keyword field.
     pub fn disk_values<'a>(
         &'a self,
         mappings: &'a Mappings,
@@ -893,7 +894,15 @@ impl Shard {
                 Some(D::Numbers(n)) => Some(n[doc].iter().map(|v| f(*v)).collect()),
                 _ => None,
             };
-            match mappings.properties.get(field)? {
+            const IGNORED: M = M::Keyword {
+                ignore_above: None,
+                split_queries_on_whitespace: false,
+            };
+            let mapping = match field {
+                "_ignored" => Some(&IGNORED),
+                _ => mappings.properties.get(field),
+            };
+            match mapping? {
                 M::Long | M::Integer | M::Short | M::Byte | M::Date { .. } => numbers(Value::from),
                 M::Double => numbers(|v| Value::from(sortable_double(v))),
                 M::Float => numbers(|v| Value::from(sortable_float(v))),
@@ -919,6 +928,22 @@ impl Shard {
                 _ => None,
             }
         }
+    }
+
+    /// The `_ignored` fields of each live document listing any (see [`Mappings::ignored`]):
+    /// those its segment indexed for a document on disk, those of `mappings` for one in memory.
+    pub fn ignored(&self, mappings: &Mappings) -> HashMap<String, Vec<String>> {
+        let mut disk = self.disk_values(mappings, "_ignored");
+        let on_disk = (self.disk_live()).filter_map(|(_, (id, _))| {
+            Some((
+                id.to_owned(),
+                disk(id)?.iter().map(postings::text).collect(),
+            ))
+        });
+        let in_memory = (self.docs.iter()).map(|(id, d)| (id.clone(), mappings.ignored(&d.source)));
+        (on_disk.chain(in_memory))
+            .filter(|(_, fields)| !fields.is_empty())
+            .collect()
     }
 
     /// Takes the statistics of `segments`, just committed with every write so far (`None`

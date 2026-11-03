@@ -102,6 +102,9 @@ pub enum Query {
     /// The documents written with this `_routing`, scoring 1: what `resolve_dates` makes of a
     /// `term` query on `_routing`, boosted by the shard's BM25 score for it.
     Routing(String),
+    /// The documents listing this field in `_ignored`, scored by the shard's BM25 for it: what
+    /// `resolve_dates` makes of a `term` or `match` query on `_ignored`.
+    Ignored(String),
 }
 
 /// RangeQueryBuilder's allowed ShapeRelations: how a document's range relates to the query's.

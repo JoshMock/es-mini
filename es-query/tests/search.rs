@@ -1826,8 +1826,31 @@ fn ignore_above_values_are_not_indexed_in_memory_or_on_disk() {
             json!({"exists": {"field": "k"}}),
             h(&[("1", 1.0), ("2", 1.0), ("4", 1.0)]),
         ),
+        // `_ignored` lists the fields that left a value out
+        (
+            json!({"term": {"_ignored": "k"}}),
+            h(&[("1", 0.22920), ("3", 0.22920)]),
+        ),
+        (
+            json!({"match": {"_ignored": "s.keyword"}}),
+            h(&[("1", 0.22920), ("3", 0.22920)]),
+        ),
+        (
+            json!({"terms": {"_ignored": ["k"]}}),
+            h(&[("1", 1.0), ("3", 1.0)]),
+        ),
+        (
+            json!({"exists": {"field": "_ignored"}}),
+            h(&[("1", 1.0), ("3", 1.0)]),
+        ),
     ] {
         assert_eq!(hits(&idx, q.clone()), want, "in memory: {q}");
         assert_eq!(hits(&opened, q.clone()), want, "reopened: {q}");
     }
+    let agg = json!({"size": 0, "aggs": {"a": {"terms": {"field": "_ignored"}}}});
+    let req = SearchRequest::parse(&agg).unwrap();
+    let want = json!({"a": {"doc_count_error_upper_bound": 0, "sum_other_doc_count": 0,
+        "buckets": [{"key": "k", "doc_count": 2}, {"key": "s.keyword", "doc_count": 2}]}});
+    assert_eq!(search(&idx, &req).aggregations, Some(want.clone()));
+    assert_eq!(search(&opened, &req).aggregations, Some(want));
 }

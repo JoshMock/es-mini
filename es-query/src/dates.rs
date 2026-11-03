@@ -53,6 +53,8 @@ pub(crate) fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, 
     let ip = |field: &str| matches!(index.mappings.field(field), Some(FieldMapping::Ip));
     Ok(match q {
         Query::Term { field, value } if field == "_routing" => routing_term(index, text(&value)),
+        Query::Term { field, value } if field == "_ignored" => Query::Ignored(text(&value)),
+        Query::Match { field, query, .. } if field == "_ignored" => Query::Ignored(query),
         Query::Term { field, value } if ip(&field) => ranges::ip_term(field, &value)?,
         Query::Term { field, value } if ranged(&field) => term(field, value)?,
         // non-text fields read a match query as a term query
@@ -311,17 +313,23 @@ fn type_name(index: &Index, field: &str, kind: Kind) -> &'static str {
 }
 
 /// A `term` query on `_routing`, scored as Lucene's BM25 scores a match of the shard's
-/// `_routing` field (no norms, so every length is 1) under ES's LegacyBM25Similarity.
+/// `_routing` field, one term per document.
 fn routing_term(index: &Index, value: String) -> Query {
     let routings: Vec<_> = (index.docs())
         .filter_map(|(_, d)| d.routing.clone())
         .collect();
     let n = routings.len() as f64;
     let df = routings.iter().filter(|r| **r == value).count() as f64;
+    Query::Routing(value).boosted(f64::from(no_norms_score(n, df, 1.0)))
+}
+
+/// Lucene's BM25 score, under ES's LegacyBM25Similarity, of a term matched once in a field
+/// without norms (so every length is 1) that `n` documents hold, `df` of them the term, with
+/// `avg_len` terms on average.
+pub(crate) fn no_norms_score(n: f64, df: f64, avg_len: f32) -> f32 {
     let idf = (1.0 + (n - df + 0.5) / (df + 0.5)).ln() as f32;
     let (k1, b) = (1.2f32, 0.75f32);
     let weight = (1.0 + k1) * idf;
-    let norm_inverse = 1.0 / (k1 * ((1.0 - b) + b));
-    let score = weight - weight / (1.0 + norm_inverse);
-    Query::Routing(value).boosted(f64::from(score))
+    let norm_inverse = 1.0 / (k1 * ((1.0 - b) + b / avg_len));
+    weight - weight / (1.0 + norm_inverse)
 }

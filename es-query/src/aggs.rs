@@ -1362,6 +1362,11 @@ impl Stats {
 
 /// A document's doc values of `field`, read from its source.
 fn doc_values(s: &Searcher, field: &str, mapping: &FieldMapping, doc: &Document) -> Vec<Value> {
+    if field == "_ignored" {
+        return (s.index.mappings.ignored(&doc.source).into_iter())
+            .map(Value::from)
+            .collect();
+    }
     let mut v: Vec<Value> = values(&doc.source, source_path(s.index, field))
         .into_iter()
         .filter_map(|v| doc_value(s, field, mapping, v))
@@ -1638,7 +1643,10 @@ impl<'s, 'a> Collector<'s, 'a> {
         };
         for agg in aggs {
             let start = Instant::now();
-            let m = index.mappings.field(&agg.field);
+            let m = match agg.field.as_str() {
+                "_ignored" => Some(&terms::KEYWORD),
+                f => index.mappings.field(f),
+            };
             match m {
                 Some(FieldMapping::Text { .. } | FieldMapping::TextKeyword { .. }) => {
                     return Err(fielddata_disabled(&agg.field));

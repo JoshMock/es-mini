@@ -215,6 +215,8 @@ pub fn java_hash_order<K: AsRef<str>, T>(entries: &mut [(K, T)]) {
 
 type FieldStats = HashMap<String, (f64, f64)>;
 type DocFreqs = HashMap<String, HashMap<String, f64>>;
+/// Per document, the fields `_ignored` lists; per field, how many documents list it.
+type Ignored = (HashMap<String, Vec<String>>, HashMap<String, usize>);
 
 struct Searcher<'a> {
     index: &'a Index,
@@ -243,6 +245,8 @@ struct Searcher<'a> {
     shard_index: usize,
     /// The shard's [`Shard::seq_nos`], read for the first `_doc` or `_shard_doc` sort value.
     seq_nos: OnceCell<Vec<u64>>,
+    /// The shard's [`Shard::ignored`], read for the first `_ignored` query.
+    ignored: OnceCell<Ignored>,
 }
 
 const K1: f64 = 1.2;
@@ -277,7 +281,20 @@ impl<'a> Searcher<'a> {
             runtime_source: Vec::new(),
             shard_index: 0,
             seq_nos: OnceCell::new(),
+            ignored: OnceCell::new(),
         }
+    }
+
+    /// The fields each document lists in `_ignored`, and how many list each field.
+    fn ignored(&self) -> &Ignored {
+        self.ignored.get_or_init(|| {
+            let docs = self.shard.ignored(&self.index.mappings);
+            let mut df = HashMap::new();
+            for f in docs.values().flatten() {
+                *df.entry(f.clone()).or_default() += 1;
+            }
+            (docs, df)
+        })
     }
 
     fn kind<'f>(&self, field: &'f str) -> (Kind, &'f str) {
@@ -817,6 +834,15 @@ impl<'a> Searcher<'a> {
             }
             Query::Term { field, value } if field == "_id" => (text(value) == id).then_some(1.0),
             Query::Routing(r) => (d.routing.as_ref() == Some(r)).then_some(1.0),
+            Query::Ignored(f) => {
+                let (docs, df) = self.ignored();
+                docs.get(id)?.contains(f).then(|| {
+                    // `_ignored` has no norms and one term per field a document lists
+                    let n = docs.len() as f64;
+                    let avg_len = (df.values().sum::<usize>() as f64 / n) as f32;
+                    f64::from(dates::no_norms_score(n, df[f] as f64, avg_len))
+                })
+            }
             Query::Term { field, value } => self.score_terms(field, &[text(value)], true, id, d),
             Query::MatchPhrase { .. } | Query::MatchPhrasePrefix { .. } => {
                 let (field, terms, slop) = self.phrase(q)?;
@@ -881,6 +907,9 @@ impl<'a> Searcher<'a> {
                 vals.iter()
                     .any(|t| wildcard_match(&pat, &fold(t)))
                     .then_some(1.0)
+            }
+            Query::Exists { field } if field == "_ignored" => {
+                self.ignored().0.contains_key(id).then_some(1.0)
             }
             Query::Exists { field } => {
                 let (kind, path) = self.kind(field);
