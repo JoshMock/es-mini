@@ -80,31 +80,46 @@ async fn health(
         Some(Path(expr)) => match es_index::aliases::resolve_read(&*store, expr) {
             Ok(targets) => targets.into_iter().map(|t| t.index).collect(),
             Err(_) => {
-                let mut body = health_body(0);
+                let mut body = health_body(0, 0);
                 body["status"] = json!("red");
                 body["timed_out"] = json!(true);
                 return Ok((StatusCode::REQUEST_TIMEOUT, Json(body)));
             }
         },
     };
-    let shards: Vec<usize> = (names.iter())
-        .map(|n| store.read(n).map_or(1, |i| i.number_of_shards()))
+    let copies: Vec<(usize, usize)> = (names.iter())
+        .map(|n| {
+            store
+                .read(n)
+                .map_or((1, 0), |i| (i.number_of_shards(), i.number_of_replicas()))
+        })
         .collect();
     let level = params.get("level").map(String::as_str);
-    let mut body = health_body(shards.iter().sum());
+    let shards = copies.iter().map(|(n, _)| n).sum();
+    let mut body = health_body(shards, copies.iter().map(|(n, r)| n * r).sum());
     if matches!(level, Some("indices" | "shards")) {
-        let indices: serde_json::Map<String, Value> = (names.iter().zip(shards))
-            .map(|(name, n)| (name.clone(), index_health(n, level == Some("shards"))))
+        let indices: serde_json::Map<String, Value> = (names.iter().zip(copies))
+            .map(|(name, (n, r))| (name.clone(), index_health(n, r, level == Some("shards"))))
             .collect();
         body["indices"] = Value::Object(indices);
     }
     Ok((StatusCode::OK, Json(body)))
 }
 
-fn health_body(shards: usize) -> Value {
+/// `yellow` while replicas are unassigned (they always are, on one node), else `green`.
+fn status(unassigned: usize) -> &'static str {
+    if unassigned > 0 { "yellow" } else { "green" }
+}
+
+/// Cluster health over `shards` active primaries and `unassigned` replicas.
+fn health_body(shards: usize, unassigned: usize) -> Value {
+    let percent = match shards + unassigned {
+        0 => 100.0,
+        total => shards as f64 / total as f64 * 100.0,
+    };
     json!({
         "cluster_name": CLUSTER_NAME,
-        "status": "green",
+        "status": status(unassigned),
         "timed_out": false,
         "number_of_nodes": 1,
         "number_of_data_nodes": 1,
@@ -112,38 +127,38 @@ fn health_body(shards: usize) -> Value {
         "active_shards": shards,
         "relocating_shards": 0,
         "initializing_shards": 0,
-        "unassigned_shards": 0,
+        "unassigned_shards": unassigned,
         "unassigned_primary_shards": 0,
         "delayed_unassigned_shards": 0,
         "number_of_pending_tasks": 0,
         "number_of_in_flight_fetch": 0,
         "task_max_waiting_in_queue_millis": 0,
-        "active_shards_percent_as_number": 100.0
+        "active_shards_percent_as_number": percent
     })
 }
 
-/// The health of an index of `n` shards, listing each shard's with `shards`.
-// ponytail: every shard is a green primary, no replicas
-fn index_health(n: usize, shards: bool) -> Value {
+/// The health of an index of `n` shards with `replicas` unassigned replicas each, listing each
+/// shard's with `shards`.
+fn index_health(n: usize, replicas: usize, shards: bool) -> Value {
     let mut h = json!({
-        "status": "green",
+        "status": status(replicas),
         "number_of_shards": n,
-        "number_of_replicas": 0,
+        "number_of_replicas": replicas,
         "active_primary_shards": n,
         "active_shards": n,
         "relocating_shards": 0,
         "initializing_shards": 0,
-        "unassigned_shards": 0,
+        "unassigned_shards": n * replicas,
         "unassigned_primary_shards": 0
     });
     if shards {
         let shard = json!({
-            "status": "green",
+            "status": status(replicas),
             "primary_active": true,
             "active_shards": 1,
             "relocating_shards": 0,
             "initializing_shards": 0,
-            "unassigned_shards": 0,
+            "unassigned_shards": replicas,
             "unassigned_primary_shards": 0
         });
         h["shards"] = (0..n).map(|i| (i.to_string(), shard.clone())).collect();

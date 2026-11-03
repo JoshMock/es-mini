@@ -286,3 +286,54 @@ async fn replica_counts_broadcasts_total_unassigned_replicas() {
     let (_, r) = call(&app, "PUT", "/c/_doc/1", json!({})).await;
     assert_eq!(r["_shards"]["total"], 1, "{r}");
 }
+
+// Recorded from Elasticsearch 9.5.5 on one node with `a` (2 shards, 1 replica) and `b` (2
+// shards, no replicas): 4 of 6 copies active.
+#[tokio::test]
+async fn replica_counts_health_is_yellow_with_unassigned_replicas() {
+    let app = replicated().await;
+    call(&app, "DELETE", "/c", Value::Null).await;
+    let (_, r) = call(&app, "GET", "/_cluster/health?level=shards", Value::Null).await;
+    let counts = |h: &Value| {
+        json!([
+            h["status"],
+            h["active_shards"],
+            h["unassigned_shards"],
+            h["active_shards_percent_as_number"]
+        ])
+    };
+    assert_eq!(
+        counts(&r),
+        json!(["yellow", 4, 2, 66.66666666666666]),
+        "{r}"
+    );
+    assert_eq!(r["active_primary_shards"], 4);
+    let a = &r["indices"]["a"];
+    let index = json!({
+        "status": "yellow", "number_of_shards": 2, "number_of_replicas": 1,
+        "active_primary_shards": 2, "active_shards": 2, "relocating_shards": 0,
+        "initializing_shards": 0, "unassigned_shards": 2, "unassigned_primary_shards": 0,
+    });
+    let shard = json!({
+        "status": "yellow", "primary_active": true, "active_shards": 1, "relocating_shards": 0,
+        "initializing_shards": 0, "unassigned_shards": 1, "unassigned_primary_shards": 0,
+    });
+    let mut expected = index.clone();
+    expected["shards"] = json!({"0": shard, "1": shard});
+    assert_eq!(*a, expected);
+    let b = &r["indices"]["b"];
+    assert_eq!(
+        (&b["status"], &b["number_of_replicas"]),
+        (&json!("green"), &json!(0))
+    );
+    assert_eq!(b["shards"]["0"]["status"], "green");
+
+    let (_, r) = call(&app, "GET", "/_cluster/health/a", Value::Null).await;
+    assert_eq!(counts(&r), json!(["yellow", 2, 2, 50.0]), "{r}");
+    let (_, r) = call(&app, "GET", "/_cluster/health/b", Value::Null).await;
+    assert_eq!(counts(&r), json!(["green", 2, 0, 100.0]), "{r}");
+    let settings = json!({"index": {"number_of_replicas": 0}});
+    call(&app, "PUT", "/a/_settings", settings).await;
+    let (_, r) = call(&app, "GET", "/_cluster/health", Value::Null).await;
+    assert_eq!(counts(&r), json!(["green", 4, 0, 100.0]), "{r}");
+}
