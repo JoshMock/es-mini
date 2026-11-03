@@ -1747,7 +1747,7 @@ impl<'s, 'a> Collector<'s, 'a> {
                     }
                     Metric::Histogram(h) => {
                         let (format, locale) = date_format(m);
-                        let bounds = h.bounds(format, locale)?;
+                        let bounds = h.bounds(&agg.name, format, locale)?;
                         Some(histogram::buckets(Format::of(m), empty, bounds))
                     }
                     _ => None,

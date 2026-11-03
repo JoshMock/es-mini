@@ -353,6 +353,7 @@ impl Histogram {
     /// time zone.
     pub(super) fn bounds(
         &self,
+        name: &str,
         field_format: Option<&str>,
         locale: Option<&str>,
     ) -> Result<(Bounds, Option<Bounds>), QueryError> {
@@ -363,7 +364,9 @@ impl Histogram {
         let format = self.format.as_deref().or(field_format);
         let tz = self.time_zone.clone().unwrap_or(TimeZone::UTC);
         let now = crate::dates::now_millis();
-        for b in std::iter::once(&mut ext).chain(&mut hard) {
+        let named = std::iter::once(("extended_bounds", &mut ext));
+        for (kind, b) in named.chain(hard.as_mut().map(|h| ("hard_bounds", h))) {
+            // LongBounds.parseAndValidate: both ends parse rounding down
             for (end, s) in [&mut b.min, &mut b.max].into_iter().zip(&b.dates) {
                 if let Some(s) = s {
                     let t = es_index::date_math::parse(s, format, locale, &tz, false, now)
@@ -371,7 +374,14 @@ impl Histogram {
                     *end = Some(t as f64);
                 }
             }
-            b.check()?;
+            if let (Some(min), Some(max)) = (b.min, b.max)
+                && min > max
+            {
+                let (min, max) = (min as i64, max as i64);
+                return Err(QueryError::illegal(format!(
+                    "[{kind}.min][{min}] cannot be greater than [{kind}.max][{max}] for histogram aggregation [{name}]"
+                )));
+            }
         }
         self.check_bounds(&ext, hard.as_ref())?;
         Ok((ext, hard))

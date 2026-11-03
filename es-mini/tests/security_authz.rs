@@ -1387,3 +1387,45 @@ async fn must_exist_alias_removal_needs_the_alias_on_every_index() {
     let r = ok(&app, ELASTIC, "GET", "/a1/_alias/x", None).await;
     assert_eq!(r["a1"]["aliases"], json!({"x": {}}));
 }
+
+/// Recorded from Elasticsearch 9.5.5: date math rounding in histogram bounds rounds down at both
+/// ends (`max` is not rounded up to the end of the unit).
+#[tokio::test]
+async fn histogram_bound_date_math_rounds_down() {
+    let app = app().await;
+    let mapping = json!({"mappings": {"properties": {"d": {"type": "date"}}}});
+    ok(&app, ELASTIC, "PUT", "/h", Some(mapping)).await;
+    ok(
+        &app,
+        ELASTIC,
+        "PUT",
+        "/h/_doc/1?refresh=true",
+        Some(json!({"d": "2016-01-03T10:00:00Z"})),
+    )
+    .await;
+    let agg = |bounds: Value| {
+        let mut h = json!({"field": "d", "calendar_interval": "day"});
+        h.as_object_mut()
+            .unwrap()
+            .extend(bounds.as_object().unwrap().clone());
+        json!({"size": 0, "aggs": {"a": {"date_histogram": h}}})
+    };
+    let hard = json!({"hard_bounds": {"min": "2016-01-02||/d", "max": "2016-01-03||/d"}});
+    let r = ok(&app, ELASTIC, "POST", "/h/_search", Some(agg(hard))).await;
+    assert_eq!(r["aggregations"]["a"]["buckets"], json!([]), "{r}");
+    let reversed = json!({"hard_bounds": {"min": "2016-01-03||/d", "max": "2016-01-02||/d"}});
+    let (status, r) = call(&app, ELASTIC, "POST", "/h/_search", Some(agg(reversed))).await;
+    let reason = "[hard_bounds.min][1451779200000] cannot be greater than [hard_bounds.max][1451692800000] for histogram aggregation [a]";
+    assert_eq!(
+        (status, &r["error"]["root_cause"][0]["reason"]),
+        (400, &json!(reason)),
+        "{r}"
+    );
+    let extended = json!({"extended_bounds": {"min": "2016-01-01||/d", "max": "2016-01-05||/d"}});
+    let r = ok(&app, ELASTIC, "POST", "/h/_search", Some(agg(extended))).await;
+    assert_eq!(
+        r["aggregations"]["a"]["buckets"].as_array().unwrap().len(),
+        5,
+        "{r}"
+    );
+}
