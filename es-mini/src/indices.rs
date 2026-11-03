@@ -1,7 +1,7 @@
 use crate::aliases::{parse_alias, reject_bad_scalars, resolve_date_math};
 use crate::{AppState, error::AppError, params};
 use axum::{
-    Json,
+    Extension, Json,
     body::Bytes,
     extract::{Path, Query, State},
     http::{StatusCode, Uri},
@@ -192,11 +192,16 @@ pub async fn create(
 
 pub async fn delete(
     State(state): State<AppState>,
+    authn: Option<Extension<crate::security::Authn>>,
     Path(name): Path<String>,
     uri: Uri,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, AppError> {
     check(&uri, &params, &["timeout", "master_timeout"])?;
+    if authn.is_some() {
+        let privileges = "delete_index,manage,all";
+        crate::security::refuse_restricted(&name, "indices:admin/delete", privileges)?;
+    }
     let mut indices = state.write();
     let opts = aliases::IndicesOptions::DELETE.with_params(&params);
     let to_remove: Vec<String> = aliases::resolve(&indices, &name, &opts)?

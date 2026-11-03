@@ -113,6 +113,9 @@ async fn elastic_may_not_write_or_delete_the_security_index() {
             got,
             (403, restricted("indices:data/write/bulk[s]", index, bulk))
         );
+        let got = call(&app, ELASTIC, "DELETE", &format!("/{index}"), None).await;
+        let expected = restricted("indices:admin/delete", index, "delete_index,manage,all");
+        assert_eq!(got, (403, expected));
     }
     let got = call(
         &app,
