@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Crash recovery across engines. (1) Elasticsearch 9.5.5 writes documents and is killed (SIGKILL)
 # before any flush; es-mini opens a copy and must serve them by replaying Elasticsearch's translog.
-# (2) es-mini writes documents into its translog and is killed (SIGKILL); Elasticsearch opens a copy
-# and must serve them by replaying es-mini's translog. Docker: 1 CPU, 1 GB, requests via
-# docker exec, container always removed.
+# (2) es-mini flushes documents into segments, writes more into its translog and is killed
+# (SIGKILL); Elasticsearch opens a copy and must serve them by replaying es-mini's translog on top
+# of es-mini's segments, on 3 shards that each hold documents.
+# Docker: 1 CPU, 1 GB, requests via docker exec, container always removed.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$(mktemp -d)"; PORT=${ES_MINI_PORT:-9393}
@@ -14,7 +15,7 @@ trap cleanup EXIT
 cargo build -q -j 2 -p es-mini
 BIN="$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys;print(json.load(sys.stdin)["target_directory"])')/debug/es-mini"
 
-INDEX='{"settings":{"number_of_shards":1,"number_of_replicas":0},"mappings":{"properties":{"title":{"type":"text"},"tag":{"type":"keyword"},"n":{"type":"long"}}}}'
+index() { echo '{"settings":{"number_of_shards":'"$1"',"number_of_replicas":0},"mappings":{"properties":{"title":{"type":"text"},"tag":{"type":"keyword"},"n":{"type":"long"}}}}'; }
 # 30 docs (tag t<i%3>, n=i), then doc 1 updated to n=100, doc 2 deleted and doc 31 added (none of them flushed). Every doc's
 # title holds "crashmark", so the translog files can be checked for unflushed operations.
 BULK="$(for i in $(seq 1 30); do echo "{\"index\":{\"_id\":\"$i\"}}"; echo "{\"title\":\"crashmark doc $i\",\"tag\":\"t$((i % 3))\",\"n\":$i}"; done)
@@ -77,7 +78,7 @@ checks() { # engine
 echo "== (1) Elasticsearch writes, is killed; es-mini replays"
 mkdir "$WORK/es"
 start_es "$WORK/es"
-es PUT /crash "$INDEX" >/dev/null
+es PUT /crash "$(index 1)" >/dev/null
 es POST '/crash/_bulk?refresh=true' "$BULK" x-ndjson >/dev/null
 es POST /crash/_bulk "$EDITS" x-ndjson >/dev/null
 docker kill "$NAME" >/dev/null
@@ -91,8 +92,9 @@ kill -9 "$PID"; wait "$PID" 2>/dev/null || true; PID=
 echo "== (2) es-mini writes, is killed; Elasticsearch replays"
 mkdir "$WORK/mini"
 start_mini "$WORK/mini"
-mini PUT /crash "$INDEX" >/dev/null
+mini PUT /crash "$(index 3)" >/dev/null
 mini POST '/crash/_bulk?refresh=true' "$BULK" x-ndjson >/dev/null
+mini POST /crash/_flush >/dev/null
 mini POST /crash/_bulk "$EDITS" x-ndjson >/dev/null
 kill -9 "$PID"; wait "$PID" 2>/dev/null || true; PID=
 pending "$WORK/mini"
@@ -100,4 +102,5 @@ cp -r "$WORK/mini" "$WORK/mini-copy"
 rm -f "$WORK/mini-copy/node.lock"
 start_es "$WORK/mini-copy"
 checks es
+check es every-shard 'sorted(int(s["docs"]) > 0 for s in d) == [True] * 3' GET '/_cat/shards/crash?format=json'
 exit $fail
