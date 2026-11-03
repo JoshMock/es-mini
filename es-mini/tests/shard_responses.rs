@@ -395,3 +395,53 @@ async fn replica_counts_health_waits_time_out_short_of_green() {
         assert_eq!((s, &r["timed_out"]), (200, &json!(false)), "{uri}: {r}");
     }
 }
+
+// As Elasticsearch 9.5.5 lists them on one node: indices with unassigned replicas are yellow.
+#[tokio::test]
+async fn replica_counts_cat_indices_reports_health_and_replicas() {
+    let app = replicated().await;
+    call(&app, "PUT", "/a/_doc/1?refresh=true", json!({"x": 1})).await;
+    let (_, r) = call(&app, "GET", "/_cat/indices/a,b,c?format=json", Value::Null).await;
+    let rows: Vec<_> = (r.as_array().unwrap().iter())
+        .map(|r| {
+            let mut r = r.clone();
+            assert_eq!(r["uuid"].as_str().unwrap().len(), 22, "{r}");
+            r.as_object_mut().unwrap().remove("uuid");
+            r
+        })
+        .collect();
+    let row = |health, index, pri, rep, docs| {
+        json!({
+            "health": health, "status": "open", "index": index, "pri": pri, "rep": rep,
+            "docs.count": docs, "docs.deleted": "0", "store.size": "0b",
+            "pri.store.size": "0b", "dataset.size": "0b",
+        })
+    };
+    assert_eq!(
+        rows,
+        [
+            row("yellow", "a", "2", "1", "1"),
+            row("green", "b", "2", "0", "0"),
+            row("green", "c", "1", "0", "0"),
+        ]
+    );
+
+    let req = Request::get("/_cat/indices/a,b?v")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    let text = res.into_body().collect().await.unwrap().to_bytes();
+    let lines: Vec<&str> = std::str::from_utf8(&text).unwrap().lines().collect();
+    assert_eq!(
+        lines[0],
+        "health status index uuid                   pri rep docs.count docs.deleted store.size pri.store.size dataset.size"
+    );
+    assert!(lines[1].starts_with("yellow open   a     "), "{lines:?}");
+    assert!(
+        lines[1]
+            .ends_with("   2   1          1            0         0b             0b           0b"),
+        "{lines:?}"
+    );
+    assert!(lines[2].starts_with("green  open   b     "), "{lines:?}");
+    assert_eq!(lines.len(), 3);
+}

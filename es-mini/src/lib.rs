@@ -113,7 +113,7 @@ async fn health(
 }
 
 /// `yellow` while replicas are unassigned (they always are, on one node), else `green`.
-fn status(unassigned: usize) -> &'static str {
+pub(crate) fn status(unassigned: usize) -> &'static str {
     if unassigned > 0 { "yellow" } else { "green" }
 }
 
@@ -473,6 +473,8 @@ fn router(state: AppState, security: Option<Arc<security::Security>>) -> Router 
         .route("/_stats/{metric}", get(indices::stats))
         .route("/{index}/_stats", get(indices::stats))
         .route("/{index}/_stats/{metric}", get(indices::stats))
+        .route("/_cat/indices", get(indices::cat_indices))
+        .route("/_cat/indices/{index}", get(indices::cat_indices))
         .route("/_cat/shards", get(indices::cat_shards))
         .route("/_cat/shards/{index}", get(indices::cat_shards))
         .route("/_query", post(search::esql))

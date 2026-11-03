@@ -934,8 +934,7 @@ pub async fn stats(
     Ok(Json(out))
 }
 
-/// `GET /_cat/shards[/{index}]`: one row per shard, as JSON with `format=json`, else as an
-/// aligned text table (with a header row if `v`).
+/// `GET /_cat/shards[/{index}]`: one row per shard (see [`cat_table`]).
 // ponytail: only the default columns; no h, s, bytes or help. Store sizes are 0b like _stats.
 pub async fn cat_shards(
     State(state): State<AppState>,
@@ -943,7 +942,6 @@ pub async fn cat_shards(
     uri: Uri,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<axum::response::Response, AppError> {
-    use axum::response::IntoResponse;
     check(&uri, &params, &["format", "v"])?;
     const COLUMNS: [&str; 9] = [
         "index", "shard", "prirep", "state", "docs", "store", "dataset", "ip", "node",
@@ -978,37 +976,102 @@ pub async fn cat_shards(
                 .collect::<Vec<_>>()
         })
         .collect();
+    // docs, store and dataset align right, as RestShardsAction declares
+    Ok(cat_table(&COLUMNS, rows, |c| (4..=6).contains(&c), &params))
+}
+
+/// `GET /_cat/indices[/{index}]`: one row per index (see [`cat_table`]).
+// ponytail: only the default columns; no h, s, bytes, help or health/pri filters. Store sizes
+// are 0b like _stats, and closed indices still show their doc counts.
+pub async fn cat_indices(
+    State(state): State<AppState>,
+    path: Option<Path<String>>,
+    uri: Uri,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<axum::response::Response, AppError> {
+    check(&uri, &params, &["format", "v"])?;
+    const COLUMNS: [&str; 11] = [
+        "health",
+        "status",
+        "index",
+        "uuid",
+        "pri",
+        "rep",
+        "docs.count",
+        "docs.deleted",
+        "store.size",
+        "pri.store.size",
+        "dataset.size",
+    ];
+    let shared = state.read();
+    let expr = path.map_or("_all".to_string(), |Path(p)| p);
+    let names = read_indices(&*shared, &expr, &params)?;
+    let indices = shared.lock(&names);
+    let rows = (names.iter())
+        .map(|n| {
+            let ix = &indices[n];
+            let replicas = ix.number_of_replicas();
+            [
+                crate::status(ix.number_of_shards() * replicas),
+                if ix.closed { "close" } else { "open" },
+                n,
+                ix.settings.get(index_settings::UUID).unwrap_or(""),
+                &ix.number_of_shards().to_string(),
+                &replicas.to_string(),
+                &ix.docs().count().to_string(),
+                "0",
+                "0b",
+                "0b",
+                "0b",
+            ]
+            .map(str::to_string)
+            .to_vec()
+        })
+        .collect();
+    // pri through dataset.size align right, as RestIndicesAction declares
+    Ok(cat_table(&COLUMNS, rows, |c| c >= 4, &params))
+}
+
+/// A `_cat` response: `rows` as JSON objects (empty cells null) with `format=json`, else as an
+/// aligned text table (with a header row if `v`), its `right` columns aligned right.
+fn cat_table(
+    columns: &[&str],
+    rows: Vec<Vec<String>>,
+    right: impl Fn(usize) -> bool,
+    params: &HashMap<String, String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
     if params.get("format").map(String::as_str) == Some("json") {
         let rows: Vec<Map<String, Value>> = (rows.into_iter())
             .map(|r| {
-                COLUMNS
-                    .iter()
+                (columns.iter())
                     .map(|c| c.to_string())
                     .zip(r.into_iter().map(|c| (!c.is_empty()).then_some(c).into()))
                     .collect()
             })
             .collect();
-        return Ok(Json(rows).into_response());
+        return Json(rows).into_response();
     }
     let header = params.get("v").is_some_and(|v| v != "false");
     let table: Vec<Vec<String>> = (header
-        .then(|| COLUMNS.map(str::to_string).to_vec())
+        .then(|| columns.iter().map(|c| c.to_string()).collect())
         .into_iter())
     .chain(rows)
     .collect();
     let width = |c: usize| table.iter().map(|r| r[c].len()).max().unwrap_or(0);
+    let last = columns.len() - 1;
     let mut out = String::new();
     for row in &table {
         for (c, cell) in row.iter().enumerate() {
             let w = width(c);
-            // docs, store and dataset align right, as RestShardsAction declares
-            match c {
-                4..=6 => out += &format!("{cell:>w$} "),
-                8 => out += cell,
-                _ => out += &format!("{cell:<w$} "),
+            match (right(c), c == last) {
+                (true, true) => out += &format!("{cell:>w$}"),
+                (true, false) => out += &format!("{cell:>w$} "),
+                (false, true) => out += cell,
+                (false, false) => out += &format!("{cell:<w$} "),
             }
         }
         out.push('\n');
     }
-    Ok(([("content-type", "text/plain; charset=UTF-8")], out).into_response())
+    ([("content-type", "text/plain; charset=UTF-8")], out).into_response()
 }

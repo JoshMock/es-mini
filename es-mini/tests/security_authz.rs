@@ -395,7 +395,8 @@ async fn manage_privileges() {
     assert_denied(&app, &km, "PUT", "/a1/_alias/z", expected).await;
     let state = "cross_cluster_replication,read_ccr,transport_client,manage_ccr,monitor,manage,all";
     let expected = denied(&id, "cluster:monitor/state", "", state);
-    assert_denied(&app, &km, "GET", "/_cat/shards", expected).await;
+    assert_denied(&app, &km, "GET", "/_cat/shards", expected.clone()).await;
+    assert_denied(&app, &km, "GET", "/_cat/indices", expected).await;
     ok(&app, &km, "DELETE", "/a1", None).await;
 }
 

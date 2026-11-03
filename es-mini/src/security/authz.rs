@@ -263,7 +263,7 @@ fn steps<'a>(method: &Method, segs: &[&'a str], params: &HashMap<String, String>
         (_, ["_flush"]) => vec![every("indices:admin/flush")],
         (_, ["_mapping"]) => vec![every("indices:admin/mappings/get")],
         (_, ["_stats", ..]) => vec![every("indices:monitor/stats")],
-        (_, ["_cat", "shards"]) => vec![
+        (_, ["_cat", "shards" | "indices"]) => vec![
             Indices {
                 action: "indices:monitor/stats",
                 at: Place::Suffix,
@@ -271,7 +271,7 @@ fn steps<'a>(method: &Method, segs: &[&'a str], params: &HashMap<String, String>
             },
             Cluster("cluster:monitor/state"),
         ],
-        (_, ["_cat", "shards", _]) => {
+        (_, ["_cat", "shards" | "indices", _]) => {
             vec![
                 at("indices:monitor/stats", 2),
                 Cluster("cluster:monitor/state"),
