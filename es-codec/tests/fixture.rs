@@ -81,6 +81,45 @@ fn segments() -> Vec<SegmentReader> {
         .collect()
 }
 
+/// Lucene gives fields without vectors FLOAT32 vector encoding; a segment saying BYTE makes
+/// Elasticsearch refuse every later document ("cannot change field \"_id\" from ... BYTE").
+#[test]
+fn writes_vector_options_as_lucene_does() {
+    // Per field: name, vector dimension, encoding and similarity.
+    fn vectors(fnm: &[u8], id: &[u8; 16]) -> Vec<(String, i32, u8, u8)> {
+        let input = &mut DataInput::new(fnm);
+        es_codec::codec_util::check_index_header(input, "Lucene94FieldInfos", 2, 2, id, "1")
+            .unwrap();
+        (0..input.read_vint().unwrap())
+            .map(|_| {
+                let name = input.read_string().unwrap();
+                input.read_vint().unwrap(); // number
+                input.read_bytes(4).unwrap(); // bits, index options, doc values, skip index
+                input.read_long().unwrap(); // doc values generation
+                input.read_map_of_strings().unwrap();
+                if input.read_vint().unwrap() != 0 {
+                    input.read_vint().unwrap();
+                    input.read_vint().unwrap();
+                }
+                let dim = input.read_vint().unwrap();
+                (
+                    name,
+                    dim,
+                    input.read_byte().unwrap(),
+                    input.read_byte().unwrap(),
+                )
+            })
+            .collect()
+    }
+    let dir = shard_index_dir();
+    let fnm = std::fs::read(dir.join("_0_1.fnm")).unwrap();
+    let fields = segments().remove(0).fields;
+    let id = SegmentInfos::read_latest(&dir).unwrap().segments[0].info.id;
+    let written = es_codec::field_infos::write_field_infos(&fields, &id, "1");
+    // Attributes may come in another order, so the files themselves can differ.
+    assert_eq!(vectors(&written, &id), vectors(&fnm, &id));
+}
+
 #[test]
 fn reads_field_infos_including_updated_generation() {
     use es_codec::field_infos::{DocValuesType, IndexOptions};

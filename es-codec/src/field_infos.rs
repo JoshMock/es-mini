@@ -223,8 +223,8 @@ pub fn write_field_infos(fields: &[FieldInfo], id: &[u8; 16], suffix: &str) -> V
             o.vint(f.point_num_bytes);
         }
         o.vint(f.vector_dimension);
-        o.byte(0); // vector encoding
-        o.byte(0); // vector similarity
+        o.byte(1); // vector encoding: FLOAT32, FieldType's default
+        o.byte(0); // vector similarity: EUCLIDEAN, FieldType's default
     }
     o.finish()
 }
