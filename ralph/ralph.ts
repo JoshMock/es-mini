@@ -59,6 +59,16 @@ const ALL_FROZEN = ["z_old", ...Object.values(SUITES).flatMap((s) => s.frozen)];
 const LISTS = Object.values(SUITES).map((s) => s.list);
 /** Rejections in a row (across targets) that end a suite: something systemic is wrong. */
 const MAX_CONSECUTIVE_REJECTIONS = 6;
+/**
+ * An iteration that errors, or ends without a commit in under this, stalled: usage limits and
+ * outages end sessions this way (6 such "rejections" ended a run in 6 minutes). Stalls back off
+ * and retry the same target instead of counting as rejections.
+ */
+const STALL_MS = 2 * 60_000;
+/** Stalls in a row after which the run stops: 5 hours of back-off, a usage limit's reset window. */
+const MAX_STALLS = 14;
+/** Back-off before retrying after the `n`th stall in a row: 2, 4, 8, 16, then 30 minutes. */
+const stallDelay = (n: number) => Math.min(2 ** n, 30) * 60_000;
 /** Rejected attempts after which a goal is set aside for the rest of the run. */
 const MAX_GOAL_ATTEMPTS = 3;
 /** Stop when the temp filesystem (build cache, test scratch) has less free space than this. */
@@ -334,15 +344,15 @@ function trimBuildCache() {
   rmSync(join(dir, "debug"), { recursive: true, force: true });
 }
 
-/** Runs one iteration and rolls it back if verification fails or the agent errors; returns
- * whether it was accepted. */
+/** Runs one iteration and rolls it back if verification fails or the agent errors. */
 async function iterate(label: string, makePrompt: (m: string) => string, opts: Parameters<typeof verify>[2], spec: string) {
   const start = git("rev-parse", "HEAD");
   if (dryRun) {
     console.log(makePrompt("<model from the session>"));
-    return false;
+    return "rejected";
   }
   writeFileSync(join(repo, IN_PROGRESS), start);
+  const began = Date.now();
   let failure: string | undefined;
   let model = "";
   try {
@@ -354,16 +364,19 @@ async function iterate(label: string, makePrompt: (m: string) => string, opts: P
   if (failure) {
     rollBack(start);
     rmSync(join(repo, IN_PROGRESS), { force: true });
+    const quick = failure === "no commit made" && Date.now() - began < STALL_MS;
+    if (failure.startsWith("agent error") || quick) {
+      report(`stalled ${label}: ${failure}`);
+      return "stalled";
+    }
     report(`rejected ${label}: ${failure}`);
-    // Back off on agent errors (rate limits, outages) instead of burning through targets.
-    if (failure.startsWith("agent error")) await sleep(2 * 60_000);
-    return false;
+    return "rejected";
   }
   rmSync(join(repo, IN_PROGRESS), { force: true });
   cleanEnvironment();
   const made = git("log", "--oneline", `${start}..HEAD`);
   report(`accepted ${label}${made ? `: ${made.split("\n").join("; ")}` : " (no changes)"}`);
-  return true;
+  return "accepted";
 }
 
 if (!dryRun && existsSync(join(repo, IN_PROGRESS))) {
@@ -381,6 +394,7 @@ if (!dryRun && unattended && capped("scripts/check.sh").status !== 0) {
 report(`started: suites ${suiteNames.join(",")}, max ${max}, until ${until?.toLocaleString() ?? "-"}`);
 
 let done = 0;
+let stalls = 0;
 let accepted = 0;
 let lastReview = git("rev-parse", "HEAD");
 let stopReason = "all suites finished";
@@ -400,13 +414,24 @@ outer: for (const name of suiteNames) {
     const id = flag("target") ?? lines(suite.list).find((t) => !skipped.has(t));
     if (!id) { report(`${name}: no targets left`); break; }
     done++;
-    const ok = await iterate(`${name}: ${id}`, (m) => prompt(suite, id, m), {
+    const outcome = await iterate(`${name}: ${id}`, (m) => prompt(suite, id, m), {
       requireCommit: true,
       mustRemove: suite.kind === "xfail" ? [suite.list, id] : undefined,
       goal: suite.kind === "goal" ? [suite.list, id] : undefined,
     }, modelFor(name, id));
     if (dryRun) break outer;
-    if (ok) {
+    if (outcome === "stalled") {
+      done--; // a stall does not count toward --max
+      if (++stalls >= MAX_STALLS) {
+        stopReason = `${stalls} stalls in a row (usage limit or outage?)`;
+        break outer;
+      }
+      report(`backing off ${stallDelay(stalls) / 60_000} min after ${stalls} stall(s) in a row`);
+      await sleep(stallDelay(stalls));
+      continue;
+    }
+    stalls = 0;
+    if (outcome === "accepted") {
       rejections = 0;
       accepted++;
       if (suite.kind === "xfail") skipped.add(id); // a still-listed id would be a verification failure
