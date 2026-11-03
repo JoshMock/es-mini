@@ -8,7 +8,8 @@ cd "$(dirname "$0")/.."
 goal=$1 prefix=${1//-/_}_ fail=0 n=0
 while IFS= read -r text; do
   n=$((n + 1))
-  if rg -qF --type rust "ponytail: ${text:0:40}" .; then echo "still marked: ${text:0:80}"; fail=1; fi
+  # The whole first line: a 40-character prefix let goals with similar markers block each other.
+  if rg -qF --type rust "ponytail: $text" .; then echo "still marked: ${text:0:80}"; fail=1; fi
 done < <(sed -n "s/^- \`[^\`]*\` \*\*$goal\*\*: //p" ralph/ponytail-ledger.md)
 [ "$n" -gt 0 ] || { echo "no markers for goal $goal"; exit 2; }
 tests=$(rg -c --type rust "fn ${prefix}" . | awk -F: '{s+=$2} END {print s+0}')
