@@ -170,3 +170,31 @@ async fn top_hits_show_routing() {
         ])
     );
 }
+
+#[tokio::test]
+async fn term_query_on_routing_matches_routed_documents() {
+    let app = setup().await;
+    // the id, routing and score (as ES prints the f32) of each hit
+    let hits = |r: &Value| -> Vec<(String, String, String)> {
+        let hits = r["hits"]["hits"].as_array().expect("hits").iter();
+        let s = |v: &Value| v.as_str().unwrap().to_owned();
+        let hit = |h: &Value| {
+            (
+                s(&h["_id"]),
+                s(&h["_routing"]),
+                (h["_score"].as_f64().unwrap() as f32).to_string(),
+            )
+        };
+        hits.map(hit).collect()
+    };
+    let term = |r: &str| json!({"query": {"term": {"_routing": r}}});
+    let r = call(&app, "GET", "/r/_search", term("a")).await;
+    assert_eq!(hits(&r), [("1".into(), "a".into(), "0.6931471".into())]);
+    let r = call(&app, "GET", "/r/_search", term("c")).await;
+    assert_eq!(hits(&r), [("3".into(), "c".into(), "0.2876821".into())]);
+    let filtered = json!({"query": {"bool": {"filter": term("a")["query"]}}});
+    let r = call(&app, "GET", "/r/_search", filtered).await;
+    assert_eq!(hits(&r), [("1".into(), "a".into(), "0".into())]);
+    let r = call(&app, "GET", "/r/_count?routing=a", term("a")).await;
+    assert_eq!(r["count"], 1);
+}

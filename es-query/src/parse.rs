@@ -99,6 +99,9 @@ pub enum Query {
         query: Box<Query>,
         tie_breaker: f64,
     },
+    /// The documents written with this `_routing`, scoring 1: what `resolve_dates` makes of a
+    /// `term` query on `_routing`, boosted by the shard's BM25 score for it.
+    Routing(String),
 }
 
 /// RangeQueryBuilder's allowed ShapeRelations: how a document's range relates to the query's.

@@ -808,6 +808,7 @@ impl<'a> Searcher<'a> {
                 self.score_terms(field, &wanted, *and, id, d)
             }
             Query::Term { field, value } if field == "_id" => (text(value) == id).then_some(1.0),
+            Query::Routing(r) => (d.routing.as_ref() == Some(r)).then_some(1.0),
             Query::Term { field, value } => self.score_terms(field, &[text(value)], true, id, d),
             Query::MatchPhrase { .. } | Query::MatchPhrasePrefix { .. } => {
                 let (field, terms, slop) = self.phrase(q)?;
