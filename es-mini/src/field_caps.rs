@@ -98,6 +98,7 @@ pub async fn field_caps(
             let one = [es_index::aliases::Target {
                 index: n.clone(),
                 filter: None,
+                routing: None,
             }];
             let split = crate::search::split(&indices, &one);
             let shards = crate::search::targets(&indices, &one, &split);

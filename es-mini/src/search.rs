@@ -39,8 +39,17 @@ pub(crate) fn split(
         .collect()
 }
 
-/// A search target per shard of `resolved`, from `split` where it has them, in Elasticsearch's
-/// shard order (shard number, then index name), which breaks ties between hits.
+/// Whether a search of `t` reads shard `n` of its index's `of`: every shard without routing,
+/// else those its routing values route to.
+pub(crate) fn routed(t: &aliases::Target, n: usize, of: usize) -> bool {
+    let shard = |r: &String| es_index::routing::shard_id("", Some(r), of as u32) as usize;
+    (t.routing.as_ref()).is_none_or(|rs| rs.iter().any(|r| shard(r) == n))
+}
+
+/// A search target per routed shard of `resolved`, from `split` where it has them, in
+/// Elasticsearch's shard order (shard number, then index name), which breaks ties between hits.
+/// ponytail: shard numbers in failures and profiles count the shards searched, so a routed
+/// search reports its shards from 0; pass shard numbers in es_query::Target if that matters.
 pub(crate) fn targets<'a>(
     indices: &'a aliases::Map<impl Borrow<es_index::Index>>,
     resolved: &'a [aliases::Target],
@@ -52,6 +61,7 @@ pub(crate) fn targets<'a>(
             match &shards[..] {
                 [] => vec![(0, (name, indices[&t.index].borrow(), filter))],
                 _ => (shards.iter().enumerate())
+                    .filter(|&(n, _)| routed(t, n, shards.len()))
                     .map(|(n, s)| (n, (name, s, filter)))
                     .collect(),
             }
@@ -278,6 +288,8 @@ pub async fn search(
     // counts and invalidation are per shard but a miss on any shard recomputes the search
     let mut cache: Vec<(&es_index::Index, &es_index::Shard)> = vec![];
     let mut uncached = false;
+    // the routing of each index searched, which picks its shards
+    let mut routing = String::new();
     let flag = params.get("request_cache").map(String::as_str);
     let cacheable = |index: &es_index::Index| match flag {
         _ if scroll.is_some() || snapshot.is_some() || req.profile => false,
@@ -294,10 +306,18 @@ pub async fn search(
             resolved = crate::indices::data_targets(&*shared, &name, &params)?;
             indices = shared.lock(resolved.iter().map(|t| &t.index));
             split = self::split(&indices, &resolved);
+            routing = format!(
+                "{:?}",
+                resolved.iter().map(|t| &t.routing).collect::<Vec<_>>()
+            );
             for t in &resolved {
                 let index: &es_index::Index = &indices[&t.index];
+                let of = index.number_of_shards();
+                let shards = (index.shards().iter().enumerate())
+                    .filter(|&(n, _)| routed(t, n, of))
+                    .map(|(_, s)| (index, s));
                 match cacheable(index) {
-                    true => cache.extend(index.shards().iter().map(|s| (index, s))),
+                    true => cache.extend(shards),
                     false => uncached = true,
                 }
             }
@@ -397,7 +417,7 @@ pub async fn search(
             .collect();
         key.sort();
         let searched: Vec<_> = targets.iter().map(|(name, _, f)| (name, f)).collect();
-        let key = format!("{body}{key:?}{searched:?}");
+        let key = format!("{body}{key:?}{searched:?}{routing}");
         let found: Vec<_> = (cache.iter())
             .map(|(index, s)| s.cache_get(&index.settings, &index.mappings, &key))
             .collect();

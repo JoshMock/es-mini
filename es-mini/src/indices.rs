@@ -223,17 +223,20 @@ fn read_indices(
         .collect())
 }
 
-/// Search/count targets for `expr`, honoring the request's indices options.
+/// Search/count targets for `expr`, honoring the request's indices options and `routing`.
 pub fn data_targets(
     indices: &aliases::Map<impl aliases::IndexMeta>,
     expr: &str,
     params: &HashMap<String, String>,
 ) -> Result<Vec<aliases::Target>, AppError> {
-    Ok(aliases::resolve(
+    let mut targets = aliases::resolve(
         indices,
         expr,
         &aliases::IndicesOptions::DATA.with_params(params),
-    )?)
+    )?;
+    let routing = params.get("routing").map(String::as_str);
+    targets.iter_mut().for_each(|t| t.route(routing));
+    Ok(targets)
 }
 
 const GET_PARAMS: [&str; 5] = [

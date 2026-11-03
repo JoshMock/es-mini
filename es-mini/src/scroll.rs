@@ -117,10 +117,13 @@ pub(crate) fn snapshot(
     let shared = state.read();
     let resolved = crate::indices::data_targets(&*shared, name, params)?;
     let indices = shared.lock(resolved.iter().map(|t| &t.index));
-    let mut shards: Vec<_> = (resolved.into_iter())
+    let mut shards: Vec<_> = (resolved.iter())
         .flat_map(|t| {
-            let shards = indices[&t.index].shard_snapshots().into_iter().enumerate();
-            shards.map(move |(n, s)| (n, (t.index.clone(), s, t.filter.clone())))
+            let shards = indices[&t.index].shard_snapshots();
+            let of = shards.len();
+            (shards.into_iter().enumerate())
+                .filter(move |&(n, _)| crate::search::routed(t, n, of))
+                .map(move |(n, s)| (n, (t.index.clone(), s, t.filter.clone())))
         })
         .collect();
     // in shard order, as crate::search::targets

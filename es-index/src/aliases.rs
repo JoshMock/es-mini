@@ -3,7 +3,7 @@
 use crate::Index;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Alias metadata as ES returns it. `index_routing` routes the document requests sent through
 /// the alias ([`Alias::index_routing`]).
@@ -82,6 +82,22 @@ pub enum ResolveError {
 pub struct Target {
     pub index: String,
     pub filter: Option<Value>,
+    /// The routing values whose shards a search reads; `None` for every shard. [`resolve`] sets
+    /// the aliases' `search_routing`, and [`Target::route`] adds the request's.
+    pub routing: Option<BTreeSet<String>>,
+}
+
+impl Target {
+    /// Applies a search's `routing` parameter, as ES's `resolveSearchRouting`: an index reached
+    /// through routing aliases only keeps the values both name (every shard if none), and one
+    /// reached otherwise takes the parameter's.
+    pub fn route(&mut self, routing: Option<&str>) {
+        let param = routing.map(|r| r.split(',').map(str::to_owned).collect::<BTreeSet<_>>());
+        self.routing = match (self.routing.take(), param) {
+            (Some(own), Some(p)) => Some(&own & &p).filter(|r| !r.is_empty()),
+            (own, p) => own.or(p),
+        };
+    }
 }
 
 pub fn glob(pattern: &str, name: &str) -> bool {
@@ -183,17 +199,25 @@ pub fn resolve(
     expr: &str,
     o: &IndicesOptions,
 ) -> Result<Vec<Target>, ResolveError> {
-    // Per index: None once reached unfiltered, else the filters of the aliases that reached it.
-    let mut hits: BTreeMap<&str, Option<Vec<Value>>> = BTreeMap::new();
-    fn add<'a>(
-        hits: &mut BTreeMap<&'a str, Option<Vec<Value>>>,
-        index: &'a str,
-        filter: Option<&Value>,
-    ) {
-        let entry = hits.entry(index).or_insert_with(|| Some(vec![]));
-        match (entry.as_mut(), filter) {
+    // Per index: None once reached unfiltered, else the filters of the aliases that reached
+    // it; and None once reached without search routing, else the aliases' routing values.
+    type Hit = (Option<Vec<Value>>, Option<BTreeSet<String>>);
+    let mut hits: BTreeMap<&str, Hit> = BTreeMap::new();
+    fn add<'a>(hits: &mut BTreeMap<&'a str, Hit>, index: &'a str, alias: Option<&Alias>) {
+        let (filters, routing) = hits
+            .entry(index)
+            .or_insert_with(|| (Some(vec![]), Some(BTreeSet::new())));
+        match (filters.as_mut(), alias.and_then(|a| a.filter.as_ref())) {
             (Some(fs), Some(f)) => fs.push(f.clone()),
-            (_, None) => *entry = None,
+            (_, None) => *filters = None,
+            (None, Some(_)) => {}
+        }
+        match (
+            routing.as_mut(),
+            alias.and_then(|a| a.search_routing.as_deref()),
+        ) {
+            (Some(rs), Some(r)) => rs.extend(r.split(',').map(str::to_owned)),
+            (_, None) => *routing = None,
             (None, Some(_)) => {}
         }
     }
@@ -226,7 +250,7 @@ pub fn resolve(
                     .iter()
                     .filter(|(a, _)| o.aliases && glob(pattern, a))
                 {
-                    add(&mut hits, name, meta.filter.as_ref());
+                    add(&mut hits, name, Some(meta));
                     found = true;
                 }
             }
@@ -236,13 +260,11 @@ pub fn resolve(
             continue;
         }
         // A literal name: an index, or an alias over its indices.
-        let mut named: Vec<(&str, Option<&Value>)> = match indices.get_key_value(part) {
+        let mut named: Vec<(&str, Option<&Alias>)> = match indices.get_key_value(part) {
             Some((name, _)) => vec![(name.as_str(), None)],
             None => indices
                 .iter()
-                .filter_map(|(name, i)| {
-                    Some((name.as_str(), i.aliases().get(part)?.filter.as_ref()))
-                })
+                .filter_map(|(name, i)| Some((name.as_str(), Some(i.aliases().get(part)?))))
                 .collect(),
         };
         let missing = match () {
@@ -263,8 +285,8 @@ pub fn resolve(
             Some(e) => return Err(e),
             None => {}
         }
-        for (name, filter) in named {
-            add(&mut hits, name, filter);
+        for (name, alias) in named {
+            add(&mut hits, name, alias);
         }
     }
     if hits.is_empty() && !o.allow_no_indices {
@@ -272,8 +294,9 @@ pub fn resolve(
     }
     Ok(hits
         .into_iter()
-        .map(|(index, filters)| Target {
+        .map(|(index, (filters, routing))| Target {
             index: index.to_owned(),
+            routing,
             filter: filters.and_then(|mut fs| match fs.len() {
                 0 => None,
                 1 => fs.pop(),
