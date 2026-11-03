@@ -952,12 +952,14 @@ pub async fn cat_shards(
     let expr = path.map_or("_all".to_string(), |Path(p)| p);
     let names = read_indices(&*shared, &expr, &params)?;
     let indices = shared.lock(&names);
+    // Each primary is followed by its replicas, unassigned on this one node; their empty cells
+    // are null in JSON.
     let rows: Vec<Vec<String>> = (names.iter())
         .flat_map(|n| (0..indices[n].number_of_shards()).map(move |i| (n, i)))
-        .map(|(n, i)| {
+        .flat_map(|(n, i)| {
             let docs = indices[n].shards().get(i).map_or(0, |s| s.docs().count());
             let (i, docs) = (i.to_string(), docs.to_string());
-            [
+            let primary = [
                 n,
                 &i,
                 "p",
@@ -967,9 +969,13 @@ pub async fn cat_shards(
                 "0b",
                 "127.0.0.1",
                 crate::CLUSTER_NAME,
-            ]
-            .map(str::to_string)
-            .to_vec()
+            ];
+            let replica = [n, &i, "r", "UNASSIGNED", "", "", "", "", ""];
+            let replicas = indices[n].number_of_replicas();
+            std::iter::once(primary)
+                .chain(std::iter::repeat_n(replica, replicas))
+                .map(|r| r.map(str::to_string).to_vec())
+                .collect::<Vec<_>>()
         })
         .collect();
     if params.get("format").map(String::as_str) == Some("json") {
@@ -978,7 +984,7 @@ pub async fn cat_shards(
                 COLUMNS
                     .iter()
                     .map(|c| c.to_string())
-                    .zip(r.into_iter().map(Value::from))
+                    .zip(r.into_iter().map(|c| (!c.is_empty()).then_some(c).into()))
                     .collect()
             })
             .collect();

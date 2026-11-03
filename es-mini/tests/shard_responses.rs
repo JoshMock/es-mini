@@ -159,6 +159,9 @@ async fn level_must_be_known() {
 #[tokio::test]
 async fn cat_shards_lists_every_shard() {
     let app = setup("keyword", "keyword").await;
+    // without replicas: replica_counts_cat_shards_lists_unassigned_replicas covers them
+    let settings = json!({"index": {"number_of_replicas": 0}});
+    call(&app, "PUT", "/a,b/_settings", settings).await;
     let (s, r) = call(&app, "GET", "/_cat/shards/a,b?format=json", Value::Null).await;
     assert_eq!(s, 200, "{r}");
     let rows = r.as_array().unwrap();
@@ -336,4 +339,34 @@ async fn replica_counts_health_is_yellow_with_unassigned_replicas() {
     call(&app, "PUT", "/a/_settings", settings).await;
     let (_, r) = call(&app, "GET", "/_cluster/health", Value::Null).await;
     assert_eq!(counts(&r), json!(["green", 4, 0, 100.0]), "{r}");
+}
+
+// As Elasticsearch 9.5.5 lists them on one node: each replica UNASSIGNED after its primary.
+#[tokio::test]
+async fn replica_counts_cat_shards_lists_unassigned_replicas() {
+    let app = replicated().await;
+    let (_, r) = call(&app, "GET", "/_cat/shards/a?format=json", Value::Null).await;
+    let rows: Vec<_> = (r.as_array().unwrap().iter())
+        .map(|r| (r["shard"].as_str().unwrap(), r["prirep"].as_str().unwrap()))
+        .collect();
+    assert_eq!(rows, [("0", "p"), ("0", "r"), ("1", "p"), ("1", "r")]);
+    let unassigned = json!({
+        "index": "a", "shard": "0", "prirep": "r", "state": "UNASSIGNED",
+        "docs": null, "store": null, "dataset": null, "ip": null, "node": null,
+    });
+    assert_eq!(r[1], unassigned);
+    let (_, r) = call(&app, "GET", "/_cat/shards/b,c?format=json", Value::Null).await;
+    assert_eq!(r.as_array().unwrap().len(), 3, "{r}");
+
+    let req = Request::get("/_cat/shards/c,a")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    let text = res.into_body().collect().await.unwrap().to_bytes();
+    let expected = "a 0 p STARTED    0 0b 0b 127.0.0.1 es-mini\n\
+                    a 0 r UNASSIGNED                   \n\
+                    a 1 p STARTED    0 0b 0b 127.0.0.1 es-mini\n\
+                    a 1 r UNASSIGNED                   \n\
+                    c 0 p STARTED    0 0b 0b 127.0.0.1 es-mini\n";
+    assert_eq!(std::str::from_utf8(&text).unwrap(), expected);
 }
