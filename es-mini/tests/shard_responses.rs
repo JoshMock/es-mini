@@ -111,7 +111,8 @@ async fn health_counts_every_shard() {
 #[tokio::test]
 async fn broadcasts_count_every_shard() {
     let app = setup("keyword", "keyword").await;
-    let all = json!({"total": 4, "successful": 4, "failed": 0});
+    // each shard's default replica is unassigned
+    let all = json!({"total": 8, "successful": 4, "failed": 0});
     for (method, uri) in [
         ("POST", "/a,b/_refresh"),
         ("POST", "/a,b/_flush"),
@@ -245,4 +246,43 @@ async fn shard_reads_searches_cache_each_shard_of_every_index() {
     }
     let b = &r["indices"]["b"]["total"]["request_cache"];
     assert_eq!(counts(b), (Some(1), Some(2)), "{r}");
+}
+
+/// `a`: 2 shards with the default 1 replica; `b`: 2 shards and no replicas; `c`: 1 shard whose
+/// `auto_expand_replicas` leaves it no replica on one node.
+async fn replicated() -> axum::Router {
+    let app = es_mini::app();
+    for (index, settings) in [
+        ("a", json!({"number_of_shards": 2})),
+        ("b", json!({"number_of_shards": 2, "number_of_replicas": 0})),
+        ("c", json!({"auto_expand_replicas": "0-1"})),
+    ] {
+        call(
+            &app,
+            "PUT",
+            &format!("/{index}"),
+            json!({"settings": settings}),
+        )
+        .await;
+    }
+    app
+}
+
+// Elasticsearch 9.5.5 on one node: `POST /a/_refresh` gives {"total":4,"successful":2}, and the
+// unassigned replicas also count in `_flush` and `_stats` but not in searches.
+#[tokio::test]
+async fn replica_counts_broadcasts_total_unassigned_replicas() {
+    let app = replicated().await;
+    for (method, path) in [("POST", "_refresh"), ("POST", "_flush"), ("GET", "_stats")] {
+        for (target, total, successful) in [("a", 4, 2), ("b", 2, 2), ("c", 1, 1), ("a,b", 6, 4)] {
+            let uri = format!("/{target}/{path}");
+            let (_, r) = call(&app, method, &uri, Value::Null).await;
+            let expected = json!({"total": total, "successful": successful, "failed": 0});
+            assert_eq!(r["_shards"], expected, "{uri}");
+        }
+    }
+    let (_, r) = call(&app, "POST", "/a/_search", json!({})).await;
+    assert_eq!(r["_shards"]["total"], 2, "{r}");
+    let (_, r) = call(&app, "PUT", "/c/_doc/1", json!({})).await;
+    assert_eq!(r["_shards"]["total"], 1, "{r}");
 }

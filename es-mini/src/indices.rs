@@ -312,15 +312,23 @@ pub async fn refresh(
     check(&uri, &params, &[])?;
     let mut indices = state.write();
     let names = read_indices(&indices, &name, &params)?;
-    let mut total = 0;
     for n in &names {
-        let index = indices.get_mut(n).expect("resolved index exists");
-        index.refresh();
-        total += index.number_of_shards();
+        indices.get_mut(n).expect("resolved index exists").refresh();
     }
     Ok(Json(
-        json!({"_shards": {"total": total, "successful": total, "failed": 0}}),
+        json!({"_shards": broadcast_shards(names.iter().map(|n| &indices[n]))}),
     ))
+}
+
+/// The `_shards` header of a broadcast to every shard copy of `indices`: their unassigned
+/// replicas count in the total, as Elasticsearch counts them on one node.
+fn broadcast_shards<'a>(indices: impl Iterator<Item = &'a Index>) -> Value {
+    let (mut total, mut successful) = (0, 0);
+    for index in indices {
+        successful += index.number_of_shards();
+        total += index.number_of_shards() * (1 + index.number_of_replicas());
+    }
+    json!({"total": total, "successful": successful, "failed": 0})
 }
 
 pub async fn flush_all(
@@ -342,14 +350,14 @@ pub async fn flush(
     check(&uri, &params, &["force", "wait_if_ongoing"])?;
     let mut indices = state.write();
     let names = read_indices(&indices, &name, &params)?;
-    let mut total = 0;
     for n in &names {
-        let index = indices.get_mut(n).expect("resolved index exists");
-        index.flush_requested = true;
-        total += index.number_of_shards();
+        indices
+            .get_mut(n)
+            .expect("resolved index exists")
+            .flush_requested = true;
     }
     Ok(Json(
-        json!({"_shards": {"total": total, "successful": total, "failed": 0}}),
+        json!({"_shards": broadcast_shards(names.iter().map(|n| &indices[n]))}),
     ))
 }
 
@@ -916,9 +924,8 @@ pub async fn stats(
         per_index.insert(n.clone(), stats);
     }
     let all = section(total, cache_total);
-    let shards: usize = names.iter().map(|n| indices[n].number_of_shards()).sum();
     let mut out = json!({
-        "_shards": {"total": shards, "successful": shards, "failed": 0},
+        "_shards": broadcast_shards(names.iter().map(|n| &*indices[n])),
         "_all": {"primaries": all, "total": all},
     });
     if level != "cluster" {

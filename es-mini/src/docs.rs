@@ -201,11 +201,7 @@ fn routing_missing(index: String, id: &str) -> AppError {
 
 /// `f`'s result on `index`, with its shard total and name.
 fn apply<T>(index: &mut Index, name: String, f: impl FnOnce(&mut Index) -> T) -> (T, u64, String) {
-    let replicas = index
-        .settings
-        .get(es_index::index_settings::NUMBER_OF_REPLICAS)
-        .and_then(|r| r.parse().ok())
-        .unwrap_or(0);
+    let replicas = index.number_of_replicas() as u64;
     (f(index), 1 + replicas, name)
 }
 

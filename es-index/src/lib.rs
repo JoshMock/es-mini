@@ -1011,6 +1011,17 @@ impl Index {
             .unwrap_or(1)
     }
 
+    /// The replicas of each shard on this one node: the lower bound of `auto_expand_replicas`
+    /// (as Elasticsearch's AutoExpandReplicas picks with no other data node), else
+    /// `index.number_of_replicas`. None are ever assigned.
+    pub fn number_of_replicas(&self) -> usize {
+        let auto = self.settings.get("index.auto_expand_replicas");
+        let min = auto.and_then(|a| a.split_once('-')).map(|(min, _)| min);
+        (min.or_else(|| self.settings.get(index_settings::NUMBER_OF_REPLICAS)))
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(1)
+    }
+
     /// Shard `n` with the settings to write to it, created empty if it was not written yet.
     pub(crate) fn shard_mut(&mut self, n: usize) -> (&Settings, &mut Shard) {
         if self.shards.len() <= n {
