@@ -1308,7 +1308,13 @@ pub fn iso_date(millis: i64) -> String {
     let (days, ms) = (millis.div_euclid(86_400_000), millis.rem_euclid(86_400_000));
     let (year, month, day) = civil_from_days(days);
     let (h, m, sec, milli) = (ms / 3_600_000, ms / 60_000 % 60, ms / 1000 % 60, ms % 1000);
-    format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{sec:02}.{milli:03}Z")
+    // DateFormatters prints YEAR with 4 to 9 digits and SignStyle.EXCEEDS_PAD: `-0005`, `+10000`
+    let year = match year {
+        y if y > 9999 => format!("+{y}"),
+        y if y < 0 => format!("-{:04}", -y),
+        y => format!("{y:04}"),
+    };
+    format!("{year}-{month:02}-{day:02}T{h:02}:{m:02}:{sec:02}.{milli:03}Z")
 }
 
 /// Epoch milliseconds (UTC) of `s` in a Java DateTimeFormatter pattern or named format (see
@@ -2394,6 +2400,10 @@ mod tests {
         assert_eq!(iso_date(1_792_182_985_033), "2026-10-16T20:36:25.033Z");
         assert_eq!(iso_date(951_782_400_000), "2000-02-29T00:00:00.000Z");
         assert_eq!(iso_date(-1), "1969-12-31T23:59:59.999Z");
+        // DateFormatters' printer: YEAR at 4..9 digits, SignStyle.EXCEEDS_PAD
+        assert_eq!(iso_date(-62_324_985_600_000), "-0005-01-01T00:00:00.000Z");
+        assert_eq!(iso_date(253_402_300_800_000), "+10000-01-01T00:00:00.000Z");
+        assert_eq!(iso_date(-62_167_219_200_000), "0000-01-01T00:00:00.000Z");
     }
 
     #[test]
