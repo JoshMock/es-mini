@@ -123,9 +123,6 @@ pub fn read_field_infos(
     cfs: &CompoundFile,
 ) -> Result<Vec<FieldInfo>> {
     let (file, suffix) = if seg.field_infos_gen == -1 {
-        if !seg.info.is_compound {
-            return err("non-compound segments are not supported yet");
-        }
         let file = cfs
             .file(".fnm")?
             .ok_or_else(|| crate::Error(format!("{} has no .fnm", seg.name)))?;

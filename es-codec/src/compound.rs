@@ -1,4 +1,5 @@
-//! Compound files (`.cfs` data + `.cfe` entries, Lucene90CompoundFormat).
+//! Compound files (`.cfs` data + `.cfe` entries, Lucene90CompoundFormat), and the separate files
+//! of a non-compound segment behind the same interface.
 
 use crate::{
     Result,
@@ -6,13 +7,26 @@ use crate::{
     err,
     input::DataInput,
 };
-use std::{collections::BTreeMap, fs::File, os::unix::fs::FileExt, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs::File,
+    os::unix::fs::FileExt,
+    path::Path,
+};
 
-/// The `.cfs` stays on disk; sub-files are read from it when asked for.
+/// A segment's files stay on disk; sub-files are read from them when asked for.
 pub struct CompoundFile {
-    data: File,
-    /// File extension (e.g. `.fnm`) -> (offset, length) in `data`.
-    entries: BTreeMap<String, (u64, u64)>,
+    /// The `.cfs`, or each file of a non-compound segment.
+    files: Vec<File>,
+    /// File name without the segment prefix (e.g. `.fnm`) -> (index in `files`, offset, length).
+    entries: BTreeMap<String, (usize, u64, u64)>,
+}
+
+fn open_file(path: &Path) -> Result<(File, u64)> {
+    let io = |e: std::io::Error| crate::Error(format!("{}: {e}", path.display()));
+    let file = File::open(path).map_err(io)?;
+    let len = file.metadata().map_err(io)?.len();
+    Ok((file, len))
 }
 
 impl CompoundFile {
@@ -25,16 +39,16 @@ impl CompoundFile {
         for _ in 0..input.read_len()? {
             let name = input.read_string()?;
             let (offset, len) = (input.read_long()?, input.read_long()?);
-            entries.insert(name, (offset as u64, len as u64));
+            entries.insert(name, (0, offset as u64, len as u64));
         }
-        let path = dir.join(format!("{segment}.cfs"));
-        let io = |e: std::io::Error| crate::Error(format!("{}: {e}", path.display()));
-        let data = File::open(&path).map_err(io)?;
-        let len = data.metadata().map_err(io)?.len();
-        let cfs = Self { data, entries };
+        let (data, len) = open_file(&dir.join(format!("{segment}.cfs")))?;
+        let cfs = Self {
+            files: vec![data],
+            entries,
+        };
         // Like Lucene's `CodecUtil.retrieveChecksum`, only the footer's structure is checked on
         // open; checksumming the whole file would read every sub-file.
-        let header = cfs.read_at(0, len.min(64))?;
+        let header = cfs.read_at(0, 0, len.min(64))?;
         codec_util::check_index_header(
             &mut DataInput::new(&header),
             "Lucene90CompoundData",
@@ -46,13 +60,15 @@ impl CompoundFile {
         let Some(footer_at) = len.checked_sub(codec_util::FOOTER_LEN as u64) else {
             return err(format!("{segment}.cfs is too short for a footer"));
         };
-        codec_util::check_footer_structure(
-            &cfs.read_at(footer_at, codec_util::FOOTER_LEN as u64)?,
-        )?;
+        codec_util::check_footer_structure(&cfs.read_at(
+            0,
+            footer_at,
+            codec_util::FOOTER_LEN as u64,
+        )?)?;
         if let Some((name, _)) = cfs
             .entries
             .iter()
-            .find(|(_, (o, l))| o.checked_add(*l).is_none_or(|end| end > len))
+            .find(|(_, (_, o, l))| o.checked_add(*l).is_none_or(|end| end > len))
         {
             return err(format!(
                 "compound entry {name} extends past the end of {segment}.cfs"
@@ -61,34 +77,57 @@ impl CompoundFile {
         Ok(cfs)
     }
 
-    /// Checks the CRC32 of the whole `.cfs` against its footer (Lucene's
+    /// The `files` of a non-compound segment (its `SegmentInfo.files`), each its own sub-file.
+    pub fn open_files(dir: &Path, segment: &str, files: &BTreeSet<String>) -> Result<Self> {
+        let mut cfs = Self {
+            files: vec![],
+            entries: BTreeMap::new(),
+        };
+        for name in files {
+            let Some(ext) = name.strip_prefix(segment) else {
+                return err(format!("{name} is not a file of segment {segment}"));
+            };
+            let (file, len) = open_file(&dir.join(name))?;
+            cfs.entries.insert(ext.into(), (cfs.files.len(), 0, len));
+            cfs.files.push(file);
+        }
+        Ok(cfs)
+    }
+
+    /// Checks the CRC32 of each whole file against its footer (Lucene's
     /// `CodecUtil.checksumEntireFile`), reading it a chunk at a time.
     pub fn verify(&self) -> Result<()> {
-        let io = |e: std::io::Error| crate::Error(format!("reading compound file: {e}"));
-        let len = self.data.metadata().map_err(io)?.len();
-        let footer = codec_util::check_footer_structure(&self.read_at(
-            len - codec_util::FOOTER_LEN as u64,
-            codec_util::FOOTER_LEN as u64,
-        )?)?;
-        let (mut crc, mut at, end) = (0, 0, len - 8);
-        while at < end {
-            let n = (end - at).min(1 << 20);
-            crc = codec_util::crc32_update(crc, &self.read_at(at, n)?);
-            at += n;
-        }
-        if i64::from(crc) != footer {
-            return err(format!(
-                "compound file checksum mismatch: expected {footer:#x}, got {crc:#x}"
-            ));
+        for (at, file) in self.files.iter().enumerate() {
+            let io = |e: std::io::Error| crate::Error(format!("reading segment file: {e}"));
+            let len = file.metadata().map_err(io)?.len();
+            let Some(footer_at) = len.checked_sub(codec_util::FOOTER_LEN as u64) else {
+                return err("segment file is too short for a footer");
+            };
+            let footer = codec_util::check_footer_structure(&self.read_at(
+                at,
+                footer_at,
+                codec_util::FOOTER_LEN as u64,
+            )?)?;
+            let (mut crc, mut from, end) = (0, 0, len - 8);
+            while from < end {
+                let n = (end - from).min(1 << 20);
+                crc = codec_util::crc32_update(crc, &self.read_at(at, from, n)?);
+                from += n;
+            }
+            if i64::from(crc) != footer {
+                return err(format!(
+                    "segment file checksum mismatch: expected {footer:#x}, got {crc:#x}"
+                ));
+            }
         }
         Ok(())
     }
 
-    fn read_at(&self, offset: u64, len: u64) -> Result<Vec<u8>> {
+    fn read_at(&self, file: usize, offset: u64, len: u64) -> Result<Vec<u8>> {
         let mut buf = vec![0; len as usize];
-        self.data
+        self.files[file]
             .read_exact_at(&mut buf, offset)
-            .map_err(|e| crate::Error(format!("reading compound file: {e}")))?;
+            .map_err(|e| crate::Error(format!("reading segment file: {e}")))?;
         Ok(buf)
     }
 
@@ -96,19 +135,19 @@ impl CompoundFile {
     pub fn file(&self, ext: &str) -> Result<Option<Vec<u8>>> {
         self.entries
             .get(ext)
-            .map(|&(o, l)| self.read_at(o, l))
+            .map(|&(f, o, l)| self.read_at(f, o, l))
             .transpose()
     }
 
     /// `len` bytes at `offset` of a sub-file, or `None` if there is no such sub-file.
     pub fn slice(&self, ext: &str, offset: u64, len: u64) -> Result<Option<Vec<u8>>> {
-        let Some(&(o, l)) = self.entries.get(ext) else {
+        let Some(&(f, o, l)) = self.entries.get(ext) else {
             return Ok(None);
         };
         if offset.checked_add(len).is_none_or(|end| end > l) {
             return err(format!("read past the end of compound entry {ext}"));
         }
-        self.read_at(o + offset, len).map(Some)
+        self.read_at(f, o + offset, len).map(Some)
     }
 
     pub fn names(&self) -> impl Iterator<Item = &str> {

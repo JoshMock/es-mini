@@ -32,3 +32,8 @@ in `shard_routing.json`; `es-index/tests/shard_routing.rs` checks `es_index::rou
 in `shard_search.json` the setup requests and the responses to searches across shards (hit
 order and tie-breaks, scoring, from/size, search_after, aggregation reduction, and every page of
 a scroll and a point in time); `es-mini/tests/shard_parity.rs` replays and compares them.
+
+`generate_non_compound.sh` boots a fresh Elasticsearch on `es-9.5.5-non-compound/data` and writes
+the `nocfs` index with `index.compound_format: false`: a force merge leaves one non-compound
+segment (separate `.fdt`, `.tim`, ... files and no `.cfs`), followed by a compound one. Its index
+UUID is in `es-9.5.5-non-compound/index_uuid`; `es-codec/tests/non_compound_segments.rs` reads it.

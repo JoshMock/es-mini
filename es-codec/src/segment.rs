@@ -1,4 +1,4 @@
-//! One segment opened for reading: its compound file and field infos, and everything they unlock.
+//! One segment opened for reading: its (compound or separate) files and field infos, and everything they unlock.
 
 use crate::{
     CompoundFile, Result, SegmentCommitInfo, doc_values, err,
@@ -18,7 +18,11 @@ pub struct SegmentReader {
 
 impl SegmentReader {
     pub fn open(dir: &Path, seg: SegmentCommitInfo) -> Result<Self> {
-        let cfs = CompoundFile::open(dir, &seg.name, &seg.info.id)?;
+        let cfs = if seg.info.is_compound {
+            CompoundFile::open(dir, &seg.name, &seg.info.id)?
+        } else {
+            CompoundFile::open_files(dir, &seg.name, &seg.info.files)?
+        };
         let fields = field_infos::read_field_infos(dir, &seg, &cfs)?;
         let by_number = fields
             .iter()
