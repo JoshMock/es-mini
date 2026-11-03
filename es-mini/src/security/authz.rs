@@ -1766,16 +1766,45 @@ fn covers(e: &Value, action: &str, name: &str) -> bool {
 /// `Automatons.pattern` does: `/.../` is a Lucene regular expression (one that does not compile
 /// matches nothing), and otherwise `*` is any string, `?` any character and `\` escapes.
 fn role_name(pattern: &str, name: &str) -> bool {
+    /// The pattern's states reachable after each character of `s`: linear in both, where
+    /// backtracking at each `*` is exponential in role names users supply.
     fn wildcard(p: &[char], s: &[char]) -> bool {
-        match (p, s) {
-            ([], _) => s.is_empty(),
-            (['*', rest @ ..], _) => (0..=s.len()).any(|i| wildcard(rest, &s[i..])),
-            (['?', rest @ ..], [_, tail @ ..]) => wildcard(rest, tail),
-            (['\\', c, rest @ ..] | [c, rest @ ..], [d, tail @ ..]) => {
-                c == d && wildcard(rest, tail)
-            }
-            _ => false,
+        // Tokens: None is `*`, Some(None) is `?`, Some(Some(c)) is `c` (escapes resolved).
+        let mut toks: Vec<Option<Option<char>>> = vec![];
+        let mut chars = p.iter();
+        while let Some(&c) = chars.next() {
+            toks.push(match c {
+                '*' => None,
+                '?' => Some(None),
+                '\\' => Some(Some(*chars.next().unwrap_or(&'\\'))),
+                c => Some(Some(c)),
+            });
         }
+        // at[i]: the first i tokens can match the input read so far.
+        let close = |at: &mut Vec<bool>| {
+            for i in 0..toks.len() {
+                if at[i] && toks[i].is_none() {
+                    at[i + 1] = true;
+                }
+            }
+        };
+        let mut at = vec![false; toks.len() + 1];
+        at[0] = true;
+        close(&mut at);
+        for &ch in s {
+            let mut next = vec![false; toks.len() + 1];
+            for i in 0..toks.len() {
+                match toks[i] {
+                    _ if !at[i] => {}
+                    None => next[i] = true,
+                    Some(t) if t.is_none_or(|t| t == ch) => next[i + 1] = true,
+                    Some(_) => {}
+                }
+            }
+            close(&mut next);
+            at = next;
+        }
+        at[toks.len()]
     }
     match pattern.strip_prefix('/').and_then(|p| p.strip_suffix('/')) {
         Some(re) => es_query::regexp_matches(re, name).unwrap_or(false),
@@ -1853,6 +1882,22 @@ mod tests {
             "a,b,é%zz%+1%"
         );
         assert_eq!(super::encoded("50%"), "50%25");
+    }
+
+    #[test]
+    fn role_name_wildcards_take_linear_time() {
+        let pattern = format!("{}b", "*a".repeat(30));
+        let start = std::time::Instant::now();
+        assert!(!super::role_name(&pattern, &"a".repeat(80)));
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "{:?}",
+            start.elapsed()
+        );
+        assert!(super::role_name(r"lo?s-\*-*", "logs-*-1"));
+        assert!(!super::role_name(r"lo?s-\*-*", "logs-x-1"));
+        assert!(super::role_name("*", ""));
+        assert!(!super::role_name("?", ""));
     }
 
     #[test]
