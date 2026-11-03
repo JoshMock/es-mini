@@ -1546,9 +1546,7 @@ fn doc_value(s: &Searcher, field: &str, mapping: &FieldMapping, v: &Value) -> Op
         },
         M::Keyword { ignore_above, .. } => {
             let t = es_index::postings::text(v);
-            ignore_above
-                .is_none_or(|n| t.chars().count() <= n as usize)
-                .then(|| t.into())
+            (!es_index::postings::ignored(*ignore_above, &t)).then(|| t.into())
         }
         M::Ip => es_index::ip_bytes(v).map(|ip| es_index::ip_string(ip).into()),
         // ponytail: ip ranges are not aggregated

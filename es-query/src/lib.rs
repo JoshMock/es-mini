@@ -126,6 +126,15 @@ fn terms(kind: Kind, vals: &[&Value]) -> Vec<String> {
     es_index::postings::terms(kind.indexed(), vals)
 }
 
+/// The values of a field in one document that it indexes: keyword values over `ignore_above`
+/// have neither terms nor doc values.
+fn indexed(kind: Kind, mut vals: Vec<&Value>) -> Vec<&Value> {
+    if let Kind::Keyword(limit) = kind {
+        vals.retain(|v| !es_index::postings::ignored(limit, &text(v)));
+    }
+    vals
+}
+
 /// Whether a value of a date field with `format` surely cannot be read: es-mini knows every
 /// format and none reads it.
 pub fn bad_date(format: Option<&str>, locale: Option<&str>, v: &Value) -> bool {
@@ -913,12 +922,7 @@ impl<'a> Searcher<'a> {
             }
             Query::Exists { field } => {
                 let (kind, path) = self.kind(field);
-                // keyword values over `ignore_above` have no doc values
-                let indexed = |v: &&Value| match kind {
-                    Kind::Keyword(limit) => !es_index::postings::ignored(limit, &text(v)),
-                    _ => true,
-                };
-                values(&d.source, path).iter().any(indexed).then_some(1.0)
+                (!indexed(kind, values(&d.source, path)).is_empty()).then_some(1.0)
             }
             Query::Range {
                 field,
@@ -945,7 +949,7 @@ impl<'a> Searcher<'a> {
                         _ => Ordering::Less,
                     },
                 };
-                (values(&d.source, path).into_iter())
+                (indexed(kind, values(&d.source, path)).into_iter())
                     .any(|v| in_range(bounds, |b| cmp(v, b)))
                     .then_some(1.0)
             }
@@ -1342,7 +1346,8 @@ impl<'a> Searcher<'a> {
                     }
                 }
                 field => {
-                    let vals = values(&doc.source, self.kind(field).1);
+                    let (kind, path) = self.kind(field);
+                    let vals = indexed(kind, values(&doc.source, path));
                     // dates sort by epoch millis, date_nanos by epoch nanos
                     let instant: fn(Option<&str>, Option<&str>, &Value) -> Option<i64>;
                     let (format, locale) = match self.index.mappings.field(field) {

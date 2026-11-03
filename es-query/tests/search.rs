@@ -1822,6 +1822,7 @@ fn ignore_above_values_are_not_indexed_in_memory_or_on_disk() {
         (json!({"match": {"s.keyword": "abcde"}}), h(&[])),
         (json!({"prefix": {"k": "abcd"}}), h(&[])),
         (json!({"wildcard": {"k": "abcd*"}}), h(&[])),
+        (json!({"range": {"k": {"gte": "abcd"}}}), h(&[])),
         (
             json!({"exists": {"field": "k"}}),
             h(&[("1", 1.0), ("2", 1.0), ("4", 1.0)]),
@@ -1853,4 +1854,60 @@ fn ignore_above_values_are_not_indexed_in_memory_or_on_disk() {
         "buckets": [{"key": "k", "doc_count": 2}, {"key": "s.keyword", "doc_count": 2}]}});
     assert_eq!(search(&idx, &req).aggregations, Some(want.clone()));
     assert_eq!(search(&opened, &req).aggregations, Some(want));
+}
+
+/// Sorts and aggregations read doc values, which leave keyword values over `ignore_above`
+/// (counted in UTF-16 units, as Java's `String.length`) out, before and after a reopen.
+#[test]
+fn ignore_above_values_have_no_doc_values_in_memory_or_on_disk() {
+    let build = || {
+        let mut idx = Index::default();
+        let keyword = FieldMapping::Keyword {
+            ignore_above: Some(3),
+            split_queries_on_whitespace: false,
+        };
+        idx.mappings.properties.insert("k".into(), keyword);
+        idx.put("1", json!({"k": ["abc", "abcd"]}));
+        idx.put("2", json!({"k": "ab"}));
+        idx.put("3", json!({"k": "abcde"}));
+        // two chars, four UTF-16 units
+        idx.put("4", json!({"k": "😀😀"}));
+        idx
+    };
+    let dir = std::env::temp_dir().join(format!("esq-ignore-above-dv-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    es_index::disk::save(&dir, &es_index::Indices::from([("idx".into(), build())])).unwrap();
+    let opened = es_index::disk::open(&dir).unwrap().remove("idx").unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    let sorted = |idx: &Index, order: &str| {
+        let req = SearchRequest::parse(&json!({"sort": [{"k": order}]})).unwrap();
+        (search(idx, &req).hits.iter())
+            .map(|h| (h.id.to_owned(), h.sort.clone()))
+            .collect::<Vec<_>>()
+    };
+    let hits = |hits: [(&str, Value); 4]| hits.map(|(id, v)| (id.to_owned(), vec![v]));
+    // as Elasticsearch 9.5.5 answers (checked live)
+    let (ab, abc) = (json!("ab"), json!("abc"));
+    for idx in [&build(), &opened] {
+        let asc = [
+            ("2", ab.clone()),
+            ("1", abc.clone()),
+            ("3", Value::Null),
+            ("4", Value::Null),
+        ];
+        assert_eq!(sorted(idx, "asc"), hits(asc));
+        let desc = [
+            ("1", abc.clone()),
+            ("2", ab.clone()),
+            ("3", Value::Null),
+            ("4", Value::Null),
+        ];
+        assert_eq!(sorted(idx, "desc"), hits(desc));
+        let req =
+            SearchRequest::parse(&json!({"size": 0, "aggs": {"a": {"terms": {"field": "k"}}}}))
+                .unwrap();
+        let want = json!({"a": {"doc_count_error_upper_bound": 0, "sum_other_doc_count": 0,
+            "buckets": [{"key": "ab", "doc_count": 1}, {"key": "abc", "doc_count": 1}]}});
+        assert_eq!(search(idx, &req).aggregations, Some(want));
+    }
 }
