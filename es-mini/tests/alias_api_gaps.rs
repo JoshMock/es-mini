@@ -86,4 +86,18 @@ async fn delete_alias_responses() {
     call(&app, "PUT", "/i/_alias/ok", json!({})).await;
     let ok = (200, json!({"acknowledged": true, "errors": false}));
     assert_eq!(call(&app, "DELETE", "/i/_alias/ok", json!({})).await, ok);
+
+    let missing = |reason: &str, id: Value| {
+        let extra = json!({"resource.type": "aliases", "resource.id": id});
+        let e = error("aliases_not_found_exception", reason, extra);
+        (404, json!({"error": e, "status": 404}))
+    };
+    let one = missing("aliases [x] missing", json!("x"));
+    assert_eq!(call(&app, "DELETE", "/i/_alias/x", json!({})).await, one);
+    let two = missing("aliases [x, y] missing", json!(["x", "y"]));
+    assert_eq!(call(&app, "DELETE", "/i/_alias/x,y", json!({})).await, two);
+    let remove = json!({"actions": [{"remove": {"index": "i", "alias": "x"}}]});
+    assert_eq!(call(&app, "POST", "/_aliases", remove).await, one);
+    let remove = json!({"actions": [{"remove": {"index": "i", "alias": "x", "must_exist": true}}]});
+    assert_eq!(call(&app, "POST", "/_aliases", remove).await, one);
 }

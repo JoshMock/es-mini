@@ -180,12 +180,17 @@ impl AppError {
                 format!("index [{i}] blocked by: [FORBIDDEN/4/index closed];"),
                 None,
             ),
-            Self::AliasesNotFound(a) => (
-                StatusCode::NOT_FOUND,
-                "aliases_not_found_exception",
-                format!("aliases [{}] missing", a.join(",")),
-                None,
-            ),
+            Self::AliasesNotFound(a) => {
+                let cause = json!({
+                    "type": "aliases_not_found_exception",
+                    "reason": format!("aliases [{}] missing", a.join(", ")),
+                    "resource.type": "aliases",
+                    "resource.id": if a.len() == 1 { json!(a[0]) } else { json!(a) },
+                });
+                let mut error = cause.clone();
+                error["root_cause"] = json!([cause]);
+                return (StatusCode::NOT_FOUND, error);
+            }
             Self::InvalidAliasName { alias, reason } => (
                 StatusCode::BAD_REQUEST,
                 "invalid_alias_name_exception",
