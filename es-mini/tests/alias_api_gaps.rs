@@ -70,11 +70,20 @@ async fn invalid_alias_names_are_refused() {
     assert_eq!(out, (400, invalid("c*", CHARS)));
 
     // Upper case and date math (resolved before the check) are allowed.
-    let ok = (200, json!({"acknowledged": true}));
+    let ok = (200, json!({"acknowledged": true, "errors": false}));
     assert_eq!(call(&app, "PUT", "/i/_alias/Upper", json!({})).await, ok);
     let math = "/i/_alias/%3Cfoo%7Bnow%2Fd%7D%3E";
     assert_eq!(call(&app, "PUT", math, json!({})).await, ok);
     let (_, all) = call(&app, "GET", "/i/_alias", json!({})).await;
     let names: Vec<&String> = all["i"]["aliases"].as_object().unwrap().keys().collect();
     assert!(names.iter().any(|n| n.starts_with("foo2")), "{all}");
+}
+
+#[tokio::test]
+async fn delete_alias_responses() {
+    let app = es_mini::app();
+    call(&app, "PUT", "/i", json!({})).await;
+    call(&app, "PUT", "/i/_alias/ok", json!({})).await;
+    let ok = (200, json!({"acknowledged": true, "errors": false}));
+    assert_eq!(call(&app, "DELETE", "/i/_alias/ok", json!({})).await, ok);
 }

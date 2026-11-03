@@ -22,7 +22,13 @@ async fn setup() -> Router {
         Some(json!({"is_write_index": true})),
     )
     .await;
-    assert_eq!((s, r), (StatusCode::OK, json!({"acknowledged": true})));
+    assert_eq!(
+        (s, r),
+        (
+            StatusCode::OK,
+            json!({"acknowledged": true, "errors": false})
+        )
+    );
     call(&app, Method::PUT, "/a/_doc/1", Some(json!({"n": 1}))).await;
     call(&app, Method::PUT, "/a/_doc/2", Some(json!({"n": 2}))).await;
     call(&app, Method::PUT, "/b/_doc/3", Some(json!({"n": 3}))).await;
@@ -161,7 +167,13 @@ async fn writes_go_to_the_write_index() {
 async fn delete_alias() {
     let app = setup().await;
     let (s, r) = call(&app, Method::DELETE, "/a/_alias/fa", None).await;
-    assert_eq!((s, r), (StatusCode::OK, json!({"acknowledged": true})));
+    assert_eq!(
+        (s, r),
+        (
+            StatusCode::OK,
+            json!({"acknowledged": true, "errors": false})
+        )
+    );
     let (s, r) = call(&app, Method::DELETE, "/a/_alias/fa", None).await;
     assert_eq!(
         (s, &r["error"]["type"]),

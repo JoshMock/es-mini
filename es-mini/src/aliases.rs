@@ -183,7 +183,7 @@ pub async fn put(
             i.aliases.insert(alias.clone(), meta.clone());
         }
     }
-    Ok(Json(json!({"acknowledged": true})))
+    Ok(Json(json!({"acknowledged": true, "errors": false})))
 }
 
 pub async fn delete(
@@ -209,7 +209,7 @@ pub async fn delete(
         }
     }
     match removed {
-        true => Ok(Json(json!({"acknowledged": true}))),
+        true => Ok(Json(json!({"acknowledged": true, "errors": false}))),
         false => Err(AppError::AliasesNotFound(
             split(&names).into_iter().map(str::to_owned).collect(),
         )),
