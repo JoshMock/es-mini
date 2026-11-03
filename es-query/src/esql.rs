@@ -564,7 +564,16 @@ impl Parser<'_> {
         if !self.keyword("from") {
             return self.unsupported(SOURCE_COMMANDS);
         }
-        let sources = self.ident_list(INDEX_PATTERN)?;
+        let mut sources = Vec::new();
+        loop {
+            // A leading `-` excludes the sources that follow it, as in an index expression.
+            let exclude = self.sym("-");
+            let (name, at) = self.ident(INDEX_PATTERN)?;
+            sources.push((if exclude { format!("-{name}") } else { name }, at));
+            if !self.sym(",") {
+                break;
+            }
+        }
         self.follow = AFTER_SOURCES;
         let mut metadata = Vec::new();
         if self.keyword("metadata") {
@@ -3566,6 +3575,13 @@ fn table_from(
         }
     };
     let targets = aliases::resolve_data(indices, &expr).map_err(unknown_index)?;
+    // An exclusion that leaves nothing is an unknown index, unlike a wildcard matching nothing.
+    if targets.is_empty() && sources.iter().any(|s| s.starts_with('-')) {
+        return Err(EsqlError::Verification(format!(
+            "Unknown index [{}]",
+            sources.join(",")
+        )));
+    }
     let filters = (targets.iter())
         .map(|t| t.filter.as_ref().map(crate::parse_query).transpose())
         .collect::<Result<Vec<_>, _>>()
