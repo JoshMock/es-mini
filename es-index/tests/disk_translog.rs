@@ -231,7 +231,12 @@ fn flushed_statistics_match_the_committed_segments() {
     let mut indices = Indices::from([("idx".to_owned(), ix)]);
     let stats = |ix: &Index| {
         let s = ix.shards()[0]
-            .field_stats("t", "t", true, &["fox".into()])
+            .field_stats(
+                "t",
+                "t",
+                es_index::postings::Indexed::Analyzed,
+                &["fox".into()],
+            )
             .unwrap();
         (s.docs, s.total_terms, s.doc_freq["fox"])
     };
@@ -276,7 +281,12 @@ fn replacing_a_committed_document_counts_it_once() {
     let ix = indices.get_mut("idx").unwrap();
     ix.put("a", json!({"t": "cat"}));
     let s = ix.shards()[0]
-        .field_stats("t", "t", true, &["fox".into()])
+        .field_stats(
+            "t",
+            "t",
+            es_index::postings::Indexed::Analyzed,
+            &["fox".into()],
+        )
         .unwrap();
     // The deleted "fox" in the segment, and "cat" in memory.
     assert_eq!((s.docs, s.total_terms, s.doc_freq["fox"]), (2.0, 2.0, 1.0));

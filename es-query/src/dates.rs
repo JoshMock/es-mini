@@ -281,7 +281,7 @@ pub(crate) fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, 
                         | FieldMapping::TextKeyword { .. }
                         | FieldMapping::Keyword { .. }
                 ),
-                None => matches!(kind, Kind::Text | Kind::Keyword),
+                None => matches!(kind, Kind::Text | Kind::Keyword(_)),
             };
             if !ok {
                 let what = match q {

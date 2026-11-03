@@ -29,7 +29,7 @@ pub use parse::{Query, Relation, parse_query};
 pub use query_string::parse_query_string;
 pub use request::{ErrorKind, MAX_BUCKETS, QueryError, SearchRequest, SortField};
 
-use es_index::postings::{TermFreqs, text, values};
+use es_index::postings::{Indexed, TermFreqs, text, values};
 use es_index::{Document, FieldMapping, Index, Shard, analysis::Analyzer, disk::DiskPos};
 use serde_json::{Map, Value};
 use std::{
@@ -64,9 +64,20 @@ pub(crate) fn wildcard_match(p: &[char], t: &[char]) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Kind {
     Text,
-    Keyword,
+    /// With its `ignore_above`.
+    Keyword(Option<u32>),
     Number,
     Bool,
+}
+
+impl Kind {
+    fn indexed(self) -> Indexed {
+        match self {
+            Kind::Text => Indexed::Analyzed,
+            Kind::Keyword(limit) => Indexed::Exact(limit),
+            Kind::Number | Kind::Bool => Indexed::Exact(None),
+        }
+    }
 }
 
 /// The source path a field reads: a multi-field `x.y`, or unmapped `x.keyword`, reads `x`.
@@ -87,20 +98,20 @@ fn source_path<'f>(index: &Index, field: &'f str) -> &'f str {
 
 fn resolve(index: &Index, field: &str, sample: impl Fn(&str) -> Option<Value>) -> Kind {
     // Object paths hold no values of their own, so they read like unmapped fields.
-    match (index.mappings.properties.get(field)).filter(|m| !m.is_object()) {
+    match (index.mappings.field(field)).filter(|m| !m.is_object()) {
         Some(FieldMapping::Text { .. } | FieldMapping::TextKeyword { .. }) => Kind::Text,
-        Some(FieldMapping::Keyword { .. }) => Kind::Keyword,
+        Some(FieldMapping::Keyword { ignore_above, .. }) => Kind::Keyword(*ignore_above),
         Some(FieldMapping::Boolean) => Kind::Bool,
         // terms, ranges and sorts read dates as instants, and prefix and wildcard queries refuse
         // them (see `resolve_dates`, `sort_values`)
-        Some(FieldMapping::Date { .. } | FieldMapping::DateNanos { .. }) => Kind::Keyword,
+        Some(FieldMapping::Date { .. } | FieldMapping::DateNanos { .. }) => Kind::Keyword(None),
         // terms and ranges read them as intervals (see `ranges`)
-        Some(m) if m.is_range() || matches!(m, FieldMapping::Ip) => Kind::Keyword,
+        Some(m) if m.is_range() || matches!(m, FieldMapping::Ip) => Kind::Keyword(None),
         Some(m) if m.is_numeric() => Kind::Number,
         Some(_) => {
             unreachable!("every FieldMapping is text, keyword, boolean, date, ip, range or numeric")
         }
-        None if field.ends_with(".keyword") => Kind::Keyword,
+        None if field.ends_with(".keyword") => Kind::Keyword(None),
         // ponytail: unmapped fields are typed from their first value, mimicking ES dynamic mapping
         None => match sample(field) {
             Some(Value::Number(_)) => Kind::Number,
@@ -112,7 +123,7 @@ fn resolve(index: &Index, field: &str, sample: impl Fn(&str) -> Option<Value>) -
 
 /// Indexed terms of a field in one document (see [`es_index::postings::terms`]).
 fn terms(kind: Kind, vals: &[&Value]) -> Vec<String> {
-    es_index::postings::terms(kind == Kind::Text, vals)
+    es_index::postings::terms(kind.indexed(), vals)
 }
 
 /// Whether a value of a date field with `format` surely cannot be read: es-mini knows every
@@ -334,15 +345,12 @@ impl<'a> Searcher<'a> {
             return;
         }
         for w in &wanted {
-            if let Some(f) = self.shard.term_freqs(field, path, kind == Kind::Text, w) {
+            if let Some(f) = self.shard.term_freqs(field, path, kind.indexed(), w) {
                 let freqs = self.freqs.entry(field.clone()).or_default();
                 freqs.insert(w.clone(), f);
             }
         }
-        if let Some(m) = self
-            .shard
-            .field_stats(field, path, kind == Kind::Text, &wanted)
-        {
+        if let Some(m) = self.shard.field_stats(field, path, kind.indexed(), &wanted) {
             self.field_stats
                 .insert(field.clone(), (m.docs, m.total_terms));
             self.doc_freq
@@ -464,10 +472,10 @@ impl<'a> Searcher<'a> {
                 (_, Some(w)) => {
                     Some(
                         self.shard
-                            .memory_docs_in(path, kind == Kind::Text, terms, all, w),
+                            .memory_docs_in(path, kind.indexed(), terms, all, w),
                     )
                 }
-                _ => self.shard.memory_docs(path, kind == Kind::Text, terms, all),
+                _ => self.shard.memory_docs(path, kind.indexed(), terms, all),
             }
         };
         let numbers = |field: &str, bounds| {
@@ -553,9 +561,9 @@ impl<'a> Searcher<'a> {
     ) -> Option<MemoryPage<'a>> {
         if let (Query::Term { field, value }, []) = (q, sort) {
             let score = self.memory_score(q)?;
+            let (kind, path) = self.kind(field);
             let (count, page) =
-                self.shard
-                    .memory_term_first(self.kind(field).1, &text(value), n, visible);
+                (self.shard).memory_term_first(path, kind.indexed(), &text(value), n, visible);
             return Some((score, count, page));
         }
         let (
@@ -875,8 +883,13 @@ impl<'a> Searcher<'a> {
                     .then_some(1.0)
             }
             Query::Exists { field } => {
-                let (_, path) = self.kind(field);
-                (!values(&d.source, path).is_empty()).then_some(1.0)
+                let (kind, path) = self.kind(field);
+                // keyword values over `ignore_above` have no doc values
+                let indexed = |v: &&Value| match kind {
+                    Kind::Keyword(limit) => !es_index::postings::ignored(limit, &text(v)),
+                    _ => true,
+                };
+                values(&d.source, path).iter().any(indexed).then_some(1.0)
             }
             Query::Range {
                 field,
@@ -1344,7 +1357,7 @@ impl<'a> Searcher<'a> {
             return None;
         };
         let term = text(value);
-        if field == "_id" || self.kind(field).0 != Kind::Keyword {
+        if field == "_id" || !matches!(self.kind(field).0, Kind::Keyword(_)) {
             return None;
         }
         // the postings `score_terms` reads (see `gather`)
@@ -1374,7 +1387,7 @@ impl<'a> Searcher<'a> {
             on_disk
                 + self
                     .shard
-                    .memory_term_count(path, kind == Kind::Text, &text(value)),
+                    .memory_term_count(path, kind.indexed(), &text(value)),
         )
     }
 

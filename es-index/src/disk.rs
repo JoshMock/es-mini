@@ -837,9 +837,7 @@ fn user_fields(
                 )
             }
             M::Keyword { ignore_above, .. } => {
-                // Like ES, values longer than ignore_above UTF-16 units are not indexed.
-                let fits =
-                    |s: &str| ignore_above.is_none_or(|n| s.encode_utf16().count() <= n as usize);
+                let fits = |s: &str| !crate::postings::ignored(*ignore_above, s);
                 for (doc, vs) in values.iter().enumerate() {
                     if vs.iter().any(|v| scalar_text(v).is_some_and(|s| !fits(&s))) {
                         ignored[doc].push(Value::from(name.as_str()));

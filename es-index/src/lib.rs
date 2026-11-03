@@ -2633,14 +2633,18 @@ mod tests {
         ix.put("4", json!({"t": "dog"}));
         // per document: (freq, field length as its norm stands for it)
         let fox = |ix: &Index, id: &str| {
-            let f = ix.shards[0].term_freqs("t", "t", true, "fox").unwrap();
+            let f = ix.shards[0]
+                .term_freqs("t", "t", postings::Indexed::Analyzed, "fox")
+                .unwrap();
             f.memory
                 .get(id)
                 .map(|p| p.at)
                 .or_else(|| f.disk.get(&ix.shards[0].disk_pos(id)?).copied())
         };
         let a = |ix: &Index, id: &str| {
-            let f = ix.shards[0].term_freqs("k", "k", false, "a").unwrap();
+            let f = ix.shards[0]
+                .term_freqs("k", "k", postings::Indexed::Exact(None), "a")
+                .unwrap();
             f.memory
                 .get(id)
                 .map(|p| p.at)

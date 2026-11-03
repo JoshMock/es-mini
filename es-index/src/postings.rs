@@ -1,8 +1,8 @@
 //! In-memory postings over an index's in-memory documents, so term, match and bool queries
 //! read only the documents that can match, and BM25 statistics come without a scan.
 //!
-//! Postings are keyed by source path and whether values are analyzed (standard analyzer) or
-//! taken as exact strings, and built the first time a query needs them; writes then keep the
+//! Postings are keyed by source path and how values are [`Indexed`] (analyzed by the standard
+//! analyzer, or taken as exact strings), and built the first time a query needs them; writes then keep the
 //! built ones current. Terms come from [`field_terms`], which scoring uses too, so a document
 //! the postings leave out can never match.
 //!
@@ -51,14 +51,31 @@ fn collect<'a>(v: &'a Value, path: &str, out: &mut Vec<&'a Value>) {
     }
 }
 
+/// How a field's source values become its terms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Indexed {
+    /// Standard-analyzed tokens.
+    Analyzed,
+    /// Each value as one term, but none longer than `ignore_above`.
+    Exact(Option<u32>),
+}
+
+/// Whether a keyword value is longer than `ignore_above` UTF-16 units, so that, as in
+/// Elasticsearch, it is not indexed and its field is listed in `_ignored`.
+pub fn ignored(ignore_above: Option<u32>, s: &str) -> bool {
+    ignore_above.is_some_and(|n| s.encode_utf16().count() > n as usize)
+}
+
 /// Indexed terms of `vals`: analyzed tokens, or each value as one exact term.
-pub fn terms(analyzed: bool, vals: &[&Value]) -> Vec<String> {
-    match analyzed {
-        true => vals
+pub fn terms(indexed: Indexed, vals: &[&Value]) -> Vec<String> {
+    match indexed {
+        Indexed::Analyzed => vals
             .iter()
             .flat_map(|v| Analyzer::Standard.analyze(&text(v)))
             .collect(),
-        false => vals.iter().map(|v| text(v)).collect(),
+        Indexed::Exact(limit) => (vals.iter().map(|v| text(v)))
+            .filter(|t| !ignored(limit, t))
+            .collect(),
     }
 }
 
@@ -79,8 +96,8 @@ pub fn positions<S: AsRef<str>>(vals: &[S]) -> Vec<(String, u32)> {
 }
 
 /// The terms a document indexes at `path`.
-pub fn field_terms(source: &Value, path: &str, analyzed: bool) -> Vec<String> {
-    terms(analyzed, &values(source, path))
+pub fn field_terms(source: &Value, path: &str, indexed: Indexed) -> Vec<String> {
+    terms(indexed, &values(source, path))
 }
 
 /// BM25 statistics of one field, counting superseded documents like Elasticsearch's soft deletes.
@@ -129,7 +146,7 @@ struct Field {
 
 impl Field {
     /// Links a document, and adds it to the statistics if `counted`.
-    fn add(&mut self, id: &str, seq_no: u64, analyzed: bool, terms: Vec<String>, counted: bool) {
+    fn add(&mut self, id: &str, seq_no: u64, indexed: Indexed, terms: Vec<String>, counted: bool) {
         if terms.is_empty() {
             return;
         }
@@ -141,7 +158,10 @@ impl Field {
         let counted = if counted { 1.0 } else { 0.0 };
         let len = crate::disk::norm_len(crate::disk::norm_byte(count as u32));
         for (t, freq) in &freqs {
-            let at = if analyzed { (*freq, len) } else { (1, 1) };
+            let at = match indexed {
+                Indexed::Analyzed => (*freq, len),
+                Indexed::Exact(_) => (1, 1),
+            };
             let docs = Arc::make_mut(self.docs.entry(t.clone()).or_default());
             docs.insert(id.to_owned(), Posting { at, seq_no });
             *self.doc_freq.entry(t.clone()).or_default() += counted;
@@ -253,10 +273,10 @@ fn plain(v: &Value) -> bool {
     }
 }
 
-/// Built postings per (source path, analyzed), and numeric indices per (source path, key).
+/// Built postings per (source path, how it is indexed), and numeric indices per (source path, key).
 #[derive(Debug, Default)]
 pub struct Postings(
-    HashMap<(String, bool), Field>,
+    HashMap<(String, Indexed), Field>,
     HashMap<(String, Key), Numbers>,
 );
 
@@ -266,35 +286,33 @@ impl Postings {
     fn field<'d>(
         &mut self,
         path: &str,
-        analyzed: bool,
+        indexed: Indexed,
         live: impl Iterator<Item = (&'d str, &'d crate::Document)>,
         superseded: &[std::sync::Arc<crate::Document>],
         persisted: u64,
     ) -> &Field {
-        self.0
-            .entry((path.to_owned(), analyzed))
-            .or_insert_with(|| {
-                let mut f = Field::default();
-                for (id, d) in live {
-                    let counted = d.seq_no >= persisted;
-                    let terms = field_terms(&d.source, path, analyzed);
-                    f.add(id, d.seq_no, analyzed, terms, counted);
-                }
-                for (n, d) in superseded.iter().enumerate() {
-                    // Counted in the statistics, then unlinked like any superseded document.
-                    let id = format!("\0superseded{n}");
-                    let terms = field_terms(&d.source, path, analyzed);
-                    f.add(&id, d.seq_no, analyzed, terms, true);
-                    f.remove(&id);
-                }
-                f
-            })
+        self.0.entry((path.to_owned(), indexed)).or_insert_with(|| {
+            let mut f = Field::default();
+            for (id, d) in live {
+                let counted = d.seq_no >= persisted;
+                let terms = field_terms(&d.source, path, indexed);
+                f.add(id, d.seq_no, indexed, terms, counted);
+            }
+            for (n, d) in superseded.iter().enumerate() {
+                // Counted in the statistics, then unlinked like any superseded document.
+                let id = format!("\0superseded{n}");
+                let terms = field_terms(&d.source, path, indexed);
+                f.add(&id, d.seq_no, indexed, terms, true);
+                f.remove(&id);
+            }
+            f
+        })
     }
 
     pub(crate) fn add(&mut self, id: &str, seq_no: u64, source: &Value) {
-        for ((path, analyzed), f) in &mut self.0 {
-            let terms = field_terms(source, path, *analyzed);
-            f.add(id, seq_no, *analyzed, terms, true);
+        for ((path, indexed), f) in &mut self.0 {
+            let terms = field_terms(source, path, *indexed);
+            f.add(id, seq_no, *indexed, terms, true);
         }
         for ((path, key), n) in &mut self.1 {
             n.add(id, keys(key, source, path));
@@ -308,13 +326,13 @@ impl Postings {
 }
 
 impl crate::Shard {
-    fn postings_for<R>(&self, path: &str, analyzed: bool, read: impl FnOnce(&Field) -> R) -> R {
+    fn postings_for<R>(&self, path: &str, indexed: Indexed, read: impl FnOnce(&Field) -> R) -> R {
         let mut postings = self
             .postings
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let live = self.docs.iter().map(|(id, d)| (id.as_str(), &**d));
-        read(postings.field(path, analyzed, live, &self.superseded, self.persisted))
+        read(postings.field(path, indexed, live, &self.superseded, self.persisted))
     }
 
     /// The in-memory documents indexing all (or any) of `terms` at `path`. Documents on disk
@@ -322,11 +340,11 @@ impl crate::Shard {
     pub fn memory_docs(
         &self,
         path: &str,
-        analyzed: bool,
+        indexed: Indexed,
         terms: &[String],
         all: bool,
     ) -> Option<HashSet<String>> {
-        self.postings_for(path, analyzed, |f| {
+        self.postings_for(path, indexed, |f| {
             let set =
                 |t: &String| (f.docs.get(t).into_iter().flat_map(|d| d.keys().cloned())).collect();
             let mut sets = terms.iter().map(set);
@@ -340,7 +358,7 @@ impl crate::Shard {
     pub fn memory_docs_in(
         &self,
         path: &str,
-        analyzed: bool,
+        indexed: Indexed,
         terms: &[String],
         all: bool,
         within: &HashSet<String>,
@@ -348,7 +366,7 @@ impl crate::Shard {
         if terms.is_empty() {
             return HashSet::new();
         }
-        self.postings_for(path, analyzed, |f| {
+        self.postings_for(path, indexed, |f| {
             let has = |id: &String, t: &String| f.docs.get(t).is_some_and(|d| d.contains_key(id));
             (within.iter())
                 .filter(|id| match all {
@@ -362,21 +380,22 @@ impl crate::Shard {
 
     /// How many in-memory documents index `term` at `path`: the size of
     /// [`memory_docs`](Self::memory_docs) for one term, without collecting them.
-    pub fn memory_term_count(&self, path: &str, analyzed: bool, term: &str) -> usize {
+    pub fn memory_term_count(&self, path: &str, indexed: Indexed, term: &str) -> usize {
         // writes unlink replaced and deleted documents, so postings list live ones only
-        self.postings_for(path, analyzed, |f| f.docs.get(term).map_or(0, |d| d.len()))
+        self.postings_for(path, indexed, |f| f.docs.get(term).map_or(0, |d| d.len()))
     }
 
-    /// How many in-memory documents below `visible` index the not-analyzed `term` at `path`,
-    /// and the first `n` of them in write order (in no order).
+    /// How many in-memory documents below `visible` index `term` at `path`, and the first `n`
+    /// of them in write order (in no order).
     pub fn memory_term_first(
         &self,
         path: &str,
+        indexed: Indexed,
         term: &str,
         n: usize,
         visible: u64,
     ) -> (usize, Vec<(&str, &crate::Document)>) {
-        let mut seq_nos: Vec<u64> = self.postings_for(path, false, |f| {
+        let mut seq_nos: Vec<u64> = self.postings_for(path, indexed, |f| {
             let docs = f.docs.get(term).into_iter().flat_map(|d| d.values());
             docs.map(|p| p.seq_no).filter(|s| *s < visible).collect()
         });
@@ -398,14 +417,14 @@ impl crate::Shard {
         &self,
         field: &str,
         path: &str,
-        analyzed: bool,
+        indexed: Indexed,
         term: &str,
     ) -> Option<TermFreqs> {
         let disk = match &self.disk {
             Some(d) => d.term_freqs(field, term)?,
             None => HashMap::new(),
         };
-        let memory = self.postings_for(path, analyzed, |f| f.docs.get(term).cloned());
+        let memory = self.postings_for(path, indexed, |f| f.docs.get(term).cloned());
         let memory = memory.unwrap_or_default();
         Some(TermFreqs { disk, memory })
     }
@@ -534,7 +553,7 @@ impl crate::Shard {
         let disk = (self.stats.iter().flat_map(|s| s.doc_freq.keys()))
             .filter(|(f, t)| f == field && t.starts_with(prefix))
             .map(|(_, t)| t.clone());
-        let mut all: Vec<String> = self.postings_for(path, true, |f| {
+        let mut all: Vec<String> = self.postings_for(path, Indexed::Analyzed, |f| {
             let memory = f.doc_freq.keys().filter(|t| t.starts_with(prefix));
             disk.chain(memory.cloned()).collect()
         });
@@ -551,7 +570,7 @@ impl crate::Shard {
         &self,
         field: &str,
         path: &str,
-        analyzed: bool,
+        indexed: Indexed,
         wanted: &[String],
     ) -> Option<FieldStats> {
         let disk = match &self.stats {
@@ -563,7 +582,7 @@ impl crate::Shard {
             let df = disk.and_then(|d| d.1.doc_freq.get(&(field.to_owned(), w.clone())));
             df.copied().unwrap_or(0.0)
         };
-        self.postings_for(path, analyzed, |f| {
+        self.postings_for(path, indexed, |f| {
             Some(FieldStats {
                 docs: docs + f.doc_count,
                 total_terms: total_terms + f.total_terms,
@@ -581,6 +600,7 @@ impl crate::Shard {
 
 #[cfg(test)]
 mod tests {
+    use super::Indexed::{Analyzed, Exact};
     use crate::Index;
     use serde_json::json;
     use std::collections::HashSet;
@@ -603,24 +623,24 @@ mod tests {
     fn analyzed_and_exact_terms_by_source_path() {
         let i = index();
         assert_eq!(
-            ids(i.shards[0].memory_docs("t", true, &["quick".into()], false)),
+            ids(i.shards[0].memory_docs("t", Analyzed, &["quick".into()], false)),
             ["1", "2"]
         );
         assert_eq!(
-            ids(i.shards[0].memory_docs("t", true, &["quick".into(), "fox".into()], true)),
+            ids(i.shards[0].memory_docs("t", Analyzed, &["quick".into(), "fox".into()], true)),
             ["1"]
         );
         assert_eq!(
-            ids(i.shards[0].memory_docs("k", false, &["b".into()], false)),
+            ids(i.shards[0].memory_docs("k", Exact(None), &["b".into()], false)),
             ["2"]
         );
         assert_eq!(
-            ids(i.shards[0].memory_docs("o.x", true, &["deep".into()], false)),
+            ids(i.shards[0].memory_docs("o.x", Analyzed, &["deep".into()], false)),
             ["1"]
         );
         // Exact terms are whole values: "Quick fox" is not "quick", but the array value is.
         assert_eq!(
-            ids(i.shards[0].memory_docs("t", false, &["quick".into()], false)),
+            ids(i.shards[0].memory_docs("t", Exact(None), &["quick".into()], false)),
             ["2"]
         );
     }
@@ -632,39 +652,41 @@ mod tests {
         let quick = ["quick".into()];
         let ids = |v| ids(Some(v));
         assert_eq!(
-            ids(i.shards[0].memory_docs_in("t", true, &quick, false, &within)),
+            ids(i.shards[0].memory_docs_in("t", Analyzed, &quick, false, &within)),
             ["2"]
         );
         let quick_dog = ["quick".into(), "dog".into()];
         assert_eq!(
-            ids(i.shards[0].memory_docs_in("t", true, &quick_dog, true, &within)),
+            ids(i.shards[0].memory_docs_in("t", Analyzed, &quick_dog, true, &within)),
             ["2"]
         );
         let quick_fox = ["quick".into(), "fox".into()];
-        assert!(ids(i.shards[0].memory_docs_in("t", true, &quick_fox, true, &within)).is_empty());
-        assert!(ids(i.shards[0].memory_docs_in("t", true, &[], false, &within)).is_empty());
-        assert!(ids(i.shards[0].memory_docs_in("t", true, &[], true, &within)).is_empty());
+        assert!(
+            ids(i.shards[0].memory_docs_in("t", Analyzed, &quick_fox, true, &within)).is_empty()
+        );
+        assert!(ids(i.shards[0].memory_docs_in("t", Analyzed, &[], false, &within)).is_empty());
+        assert!(ids(i.shards[0].memory_docs_in("t", Analyzed, &[], true, &within)).is_empty());
     }
 
     #[test]
     fn writes_keep_built_postings_current() {
         let mut i = index();
         assert_eq!(
-            ids(i.shards[0].memory_docs("t", true, &["fox".into()], false)),
+            ids(i.shards[0].memory_docs("t", Analyzed, &["fox".into()], false)),
             ["1"]
         );
         i.put("1", json!({"t": "slow cat"}));
         i.put("4", json!({"t": "red fox"}));
         i.delete("2");
         assert_eq!(
-            ids(i.shards[0].memory_docs("t", true, &["fox".into()], false)),
+            ids(i.shards[0].memory_docs("t", Analyzed, &["fox".into()], false)),
             ["4"]
         );
         assert_eq!(
-            ids(i.shards[0].memory_docs("t", true, &["cat".into()], false)),
+            ids(i.shards[0].memory_docs("t", Analyzed, &["cat".into()], false)),
             ["1"]
         );
-        assert!(ids(i.shards[0].memory_docs("t", true, &["lazy".into()], false)).is_empty());
+        assert!(ids(i.shards[0].memory_docs("t", Analyzed, &["lazy".into()], false)).is_empty());
     }
 
     #[test]
@@ -786,7 +808,7 @@ mod tests {
     fn stats_count_superseded_docs_like_soft_deletes() {
         let stats = |i: &Index| {
             let s = i.shards[0]
-                .field_stats("t", "t", true, &["fox".into()])
+                .field_stats("t", "t", Analyzed, &["fox".into()])
                 .unwrap();
             (s.docs, s.total_terms, s.doc_freq["fox"])
         };

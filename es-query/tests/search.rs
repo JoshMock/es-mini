@@ -1769,3 +1769,65 @@ fn an_aggregation_without_a_field_is_an_illegal_argument() {
         (es_query::ErrorKind::IllegalArgument, reason)
     );
 }
+
+/// Keyword values over `ignore_above` are not indexed, so queries answer the same before and
+/// after a save and reopen, as Elasticsearch 9.5.5 answers them (recorded by hand).
+#[test]
+fn ignore_above_values_are_not_indexed_in_memory_or_on_disk() {
+    let keyword = || FieldMapping::Keyword {
+        ignore_above: Some(3),
+        split_queries_on_whitespace: false,
+    };
+    let build = || {
+        let mut idx = Index::default();
+        let props = &mut idx.mappings.properties;
+        props.insert("k".into(), keyword());
+        let fields = [("keyword".to_owned(), keyword())].into();
+        props.insert("s".into(), FieldMapping::TextKeyword { fields });
+        idx.put("1", json!({"k": ["abc", "abcd"], "s": "long text"}));
+        idx.put("2", json!({"k": "ab", "s": "ab"}));
+        idx.put("3", json!({"k": "abcde", "s": "abcde"}));
+        idx.put("4", json!({"k": "abc"}));
+        idx
+    };
+    let idx = build();
+    let dir = std::env::temp_dir().join(format!("esq-ignore-above-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    es_index::disk::save(&dir, &es_index::Indices::from([("idx".into(), build())])).unwrap();
+    let opened = es_index::disk::open(&dir).unwrap().remove("idx").unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    let hits = |idx: &Index, q: Value| {
+        let req = SearchRequest::parse(&json!({"query": q})).unwrap();
+        let mut hits: Vec<_> = (search(idx, &req).hits.iter())
+            .map(|h| (h.id.to_owned(), (h.score.unwrap() * 1e5).round() / 1e5))
+            .collect();
+        hits.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        hits
+    };
+    let h = |hits: &[(&str, f32)]| -> Vec<_> {
+        hits.iter().map(|(id, s)| (id.to_string(), *s)).collect()
+    };
+    for (q, want) in [
+        (json!({"term": {"k": "abcd"}}), h(&[])),
+        (json!({"match": {"k": "abcde"}}), h(&[])),
+        (
+            json!({"term": {"k": "abc"}}),
+            h(&[("1", 0.47), ("4", 0.47)]),
+        ),
+        (
+            json!({"bool": {"should": [{"term": {"k": "abc"}}, {"term": {"k": "ab"}}]}}),
+            h(&[("1", 0.47), ("2", 0.98083), ("4", 0.47)]),
+        ),
+        (json!({"match": {"s.keyword": "ab"}}), h(&[("2", 0.28768)])),
+        (json!({"match": {"s.keyword": "abcde"}}), h(&[])),
+        (json!({"prefix": {"k": "abcd"}}), h(&[])),
+        (json!({"wildcard": {"k": "abcd*"}}), h(&[])),
+        (
+            json!({"exists": {"field": "k"}}),
+            h(&[("1", 1.0), ("2", 1.0), ("4", 1.0)]),
+        ),
+    ] {
+        assert_eq!(hits(&idx, q.clone()), want, "in memory: {q}");
+        assert_eq!(hits(&opened, q.clone()), want, "reopened: {q}");
+    }
+}
