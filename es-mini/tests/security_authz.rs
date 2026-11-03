@@ -1283,3 +1283,46 @@ async fn security_authz_gaps_named_privileges_implied_by_action_patterns() {
         assert_eq!(out.to_string(), expected.to_string(), "{role} {request}");
     }
 }
+
+/// Patterns that can name the security index (`?`, `/regex/`) still cannot reach it: it is
+/// outside the indices any request but the security APIs resolves.
+#[tokio::test]
+async fn patterns_cannot_reach_the_security_index() {
+    let app = app().await;
+    for names in [
+        json!(["/.*/"]),
+        json!(["?security*", ".security*"]),
+        json!(["*"]),
+    ] {
+        let roles = json!({"r": {"indices": [{"names": names, "privileges": ["all"]}]}});
+        let (k, _) = key(&app, ELASTIC, roles).await;
+        for (m, uri, body) in [
+            ("GET", "/.security-7/_search", None),
+            ("GET", "/.security/_search", None),
+            ("GET", "/.security*/_search", None),
+            ("GET", "/.security-7/_doc/x", None),
+            ("PUT", "/.security-7/_doc/x", Some(json!({"a": 1}))),
+            ("DELETE", "/.security-7", None),
+            (
+                "POST",
+                "/_query",
+                Some(json!({"query": "FROM .security* | LIMIT 1"})),
+            ),
+        ] {
+            let (status, r) = call(&app, &k, m, uri, body).await;
+            assert!(
+                status >= 400 || r["hits"]["total"]["value"] == 0,
+                "{names} {m} {uri}: {status} {r}"
+            );
+            assert!(
+                !r.to_string().contains("api_key_hash"),
+                "{names} {m} {uri}: {r}"
+            );
+        }
+        let hits = hit_indices(&app, &k, "/_all/_search?size=100").await;
+        assert!(
+            hits.iter().all(|i| !i.starts_with(".security")),
+            "{names}: {hits:?}"
+        );
+    }
+}

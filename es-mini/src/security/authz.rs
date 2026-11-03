@@ -1757,7 +1757,8 @@ fn entries(set: &Value) -> impl Iterator<Item = &Value> {
 }
 
 /// Whether the index privilege entry `e` grants `action` on `name`.
-// ponytail: restricted indices are left to the handlers' own refusal
+// Restricted indices need no check here: .security-7 is kept outside the indices any request
+// but the security APIs resolves (tests: patterns_cannot_reach_the_security_index).
 fn covers(e: &Value, action: &str, name: &str) -> bool {
     strs(&e["names"]).any(|n| role_name(n, name)) && grants(&e["privileges"], action)
 }
