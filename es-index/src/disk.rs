@@ -1378,12 +1378,12 @@ fn commit(data_dir: &Path, indices: &Indices) -> es_codec::Result<()> {
     remove_dir_if_exists(&old)
 }
 
-/// Marks the segments es-mini writes, the only ones a later save reuses: Elasticsearch indexes
-/// some fields differently (`_seq_no` points) and Lucene rejects a field with two schemas, so an
-/// Elasticsearch-written index is rewritten whole on its first save. Version 2 added text
-/// positions, version 3 read dates with their mapping's format, version 4 wrote nested
-/// documents and version 5 lists [`EMPTY`] fields, so older segments are rewritten too.
-const WRITER: (&str, &str) = ("es-mini.writer", "5");
+/// Marks the segments es-mini writes, the only ones a later save reuses: an Elasticsearch-written
+/// index is rewritten whole on its first save. Version 2 added text positions, version 3 read
+/// dates with their mapping's format, version 4 wrote nested documents, version 5 lists
+/// [`EMPTY`] fields and version 6 indexes `_seq_no` points (Lucene rejects a field with two
+/// schemas), so older segments are rewritten too.
+const WRITER: (&str, &str) = ("es-mini.writer", "6");
 
 /// The diagnostic listing (as a JSON array) the mapped fields a segment has no values of, unlike
 /// those it leaves out (mapped later, or holding values it cannot encode), which a merge must
@@ -1639,6 +1639,15 @@ fn write_docs(
             false => vec![],
         })
         .collect();
+    // SeqNoFieldMapper's default: a long point on every doc, nested ones too
+    let mut points = user.points;
+    let seq_nos = (lucene.iter().zip(0..)).map(|(l, doc)| {
+        (
+            doc,
+            es_codec::points::sortable_bytes(docs[l.doc].1.seq_no as i64, 8),
+        )
+    });
+    points.push((3, seq_nos.collect()));
     let numeric = [
         (2, col(|d| d.version)),
         (3, col(|d| d.seq_no)),
@@ -1695,7 +1704,7 @@ fn write_docs(
             binary: &user.binary,
             norms: &user.norms,
             terms: &terms,
-            points: &user.points,
+            points: &points,
         },
         stored,
     )?;
@@ -1775,7 +1784,7 @@ fn merge(dir: &Path, infos: &mut SegmentInfos) -> es_codec::Result<()> {
             || (readers.iter().zip(&empties))
                 .all(|(r, e)| r.field(name).is_ok() || e.contains(name))
     };
-    let meta = meta_fields();
+    let meta = es_codec::segment_writer::es_meta_fields();
     let (name, id) = segment_name(infos.counter);
     let mut segment = SegmentWriter::new(&name, id);
     let (mut fields, mut empty) = (Vec::<&str>::new(), Vec::<String>::new());
@@ -2006,15 +2015,6 @@ fn shards(ix: &Index) -> impl Iterator<Item = (usize, &Shard)> {
     (0..ix.number_of_shards()).map(|n| (n, ix.shards().get(n).unwrap_or(&EMPTY)))
 }
 
-/// Field infos of the metadata fields es-mini writes.
-fn meta_fields() -> Vec<es_codec::field_infos::FieldInfo> {
-    let mut fields = es_codec::segment_writer::es_meta_fields();
-    fields[3].point_dimensions = 0;
-    fields[3].point_index_dimensions = 0;
-    fields[3].point_num_bytes = 0;
-    fields
-}
-
 /// Commits `shard` of `ix` into the shard directory `dir`, reusing the commit in `prev` (the same
 /// directory for an in-place commit). An in-place commit of an unchanged index writes nothing.
 /// A commit afterwards deletes the files in `dir` no longer referenced. Returns whether it
@@ -2067,7 +2067,7 @@ fn write_shard(prev: &Path, dir: &Path, ix: &Index, shard: &Shard) -> es_codec::
             infos.counter,
             &docs,
             &ix.mappings,
-            &meta_fields(),
+            &es_codec::segment_writer::es_meta_fields(),
         )?);
         infos.counter += 1;
     }
