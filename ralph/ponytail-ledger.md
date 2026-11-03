@@ -176,8 +176,9 @@ Every `ponytail:` marker as of 2026-10-27 (its first comment line), with what ha
 ## Added 2026-11-02
 
 Markers added since 2026-10-27 (shard, security and later goals), plus `needs-scope`: the fix needs a feature
-es-mini deliberately lacks (a human decides), and `keep` proposed for behavior that matches Elasticsearch or
-a single node. The 16 `after-bench` markers above are retagged to the perf goals that now hold them.
+es-mini deliberately lacks, and `keep`: behavior that matches Elasticsearch or a single node. Both confirmed by a
+human on 2026-11-03 (needs-scope markers wait until their feature is in scope). The 16 `after-bench` markers
+above are retagged to the perf goals that now hold them.
 
 - `es-codec/src/points.rs:473` **points-fidelity**: more dimensions recompute their bounds every few splits; port that with them
 - `es-codec/src/points.rs:555` **points-fidelity**: Lucene's selector and sorter order points equal in the split (or leaf sort)
@@ -209,7 +210,7 @@ a single node. The 16 `after-bench` markers above are retagged to the perf goals
 - `es-mini/src/indices.rs:688` **stats-and-cat**: only docs and request_cache are counted; the other sections report zeros (es-mini keeps no such counters)
 - `es-mini/src/indices.rs:892` **shard-reads**: the request cache is counted per index, so shards report it empty; no
 - `es-mini/src/indices.rs:925` **stats-and-cat**: only the default columns; no h, s, bytes or help. Store sizes are 0b like _stats.
-- `es-mini/src/lib.rs:126` **keep**: every shard is a green primary, no replicas
+- `es-mini/src/lib.rs:126` **replica-counts**: every shard is a green primary, no replicas
 - `es-mini/src/scroll.rs:158` **api-fidelity**: ES reads a base64 id on and fails on what it holds; es-mini, whose ids are
 - `es-mini/src/scroll.rs:17` **search-speed**: a page reruns the query, costing a search of the hits before it, and reads `now`
 - `es-mini/src/search.rs:136` **search-profile**: only

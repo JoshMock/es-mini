@@ -92,6 +92,7 @@ const GOAL_MODELS: Record<string, string> = Object.fromEntries(
       "esql-es-semantics", "regexp-automaton", "esql-perf-100k", "esql-cold-after-write", "search-memory-walk", "term-query-speed", "range-sort-speed",
       "memory-bounds-2", "disk-fidelity", "points-fidelity", "date-week-fields", "esql-semantics-2",
       "shard-search-speed", "search-speed", "esql-speed", "disk-speed",
+      "translog-es-replay", "ignore-above-memory", "non-compound-segments", "docvalues-golden-fixture",
     ],
     [`${OPUS}:medium`]: [
       "api-field-caps", "api-by-query", "api-scroll-pit", "api-search-template", "aggs-terms",
@@ -104,11 +105,13 @@ const GOAL_MODELS: Record<string, string> = Object.fromEntries(
       "shard-reads", "date-locales-zones", "date-field-formats", "security-authz-gaps",
       "security-validation", "error-positions", "query-gaps-2", "api-fidelity", "aggs-gaps-2",
       "aggs-profile", "search-profile", "mapping-and-settings", "security-yaml",
+      "search-routing", "replica-counts", "security-index-reads", "alias-api-gaps",
     ],
     [`${SONNET}:medium`]: [
       "api-node-stubs", "constant-score-boost", "auto-id-format", "alias-date-math",
       "tidy-review-refactors", "perf-small-ceilings", "settings-validation-2", "api-gaps",
       "bench-demo", "readme-current", "stats-and-cat",
+      "esql-from-exclusions",
     ],
     [`${SONNET}:low`]: ["docs-translog-agents", "test-scratch-cleanup"],
   }).flatMap(([spec, ids]) => ids.map((id) => [id, spec])),
