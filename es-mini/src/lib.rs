@@ -103,6 +103,12 @@ async fn health(
             .collect();
         body["indices"] = Value::Object(indices);
     }
+    // ponytail: answers at once rather than after `timeout`; replicas never get assigned, so
+    // only a concurrent settings change could turn the status green in the meantime
+    if params.get("wait_for_status").is_some_and(|s| s == "green") && body["status"] != "green" {
+        body["timed_out"] = json!(true);
+        return Ok((StatusCode::REQUEST_TIMEOUT, Json(body)));
+    }
     Ok((StatusCode::OK, Json(body)))
 }
 

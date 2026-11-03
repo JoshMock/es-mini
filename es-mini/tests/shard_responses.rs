@@ -370,3 +370,28 @@ async fn replica_counts_cat_shards_lists_unassigned_replicas() {
                     c 0 p STARTED    0 0b 0b 127.0.0.1 es-mini\n";
     assert_eq!(std::str::from_utf8(&text).unwrap(), expected);
 }
+
+// Elasticsearch times out (408, `timed_out: true`) waiting for a status replicas keep it from.
+#[tokio::test]
+async fn replica_counts_health_waits_time_out_short_of_green() {
+    let app = replicated().await;
+    let (s, r) = call(
+        &app,
+        "GET",
+        "/_cluster/health?wait_for_status=green&timeout=1ms",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        (s, &r["status"], &r["timed_out"]),
+        (408, &json!("yellow"), &json!(true)),
+        "{r}"
+    );
+    for uri in [
+        "/_cluster/health?wait_for_status=yellow",
+        "/_cluster/health/b?wait_for_status=green",
+    ] {
+        let (s, r) = call(&app, "GET", uri, Value::Null).await;
+        assert_eq!((s, &r["timed_out"]), (200, &json!(false)), "{uri}: {r}");
+    }
+}
