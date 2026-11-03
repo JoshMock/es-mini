@@ -312,15 +312,20 @@ pub struct Mappings {
 impl Mappings {
     /// The names of the mapped leaf fields, each followed by its multi-fields.
     pub fn names(&self) -> Vec<String> {
-        (self.properties.iter())
-            .filter(|(_, m)| !m.is_object())
-            .flat_map(|(f, m)| {
-                let subs = m.fields().into_iter().flatten();
-                [f.clone()]
-                    .into_iter()
-                    .chain(subs.map(move |(s, _)| format!("{f}.{s}")))
-            })
+        (self.with_multi_fields())
+            .filter(|(_, _, m)| !m.is_object())
+            .map(|(name, ..)| name)
             .collect()
+    }
+
+    /// Each mapped field followed by its multi-fields, as (name, source path, mapping): a
+    /// multi-field `path.sub` indexes the values at its parent's `path`.
+    pub fn with_multi_fields(&self) -> impl Iterator<Item = (String, &String, &FieldMapping)> {
+        self.properties.iter().flat_map(|(path, m)| {
+            let subs = (m.fields().into_iter().flatten())
+                .map(move |(sub, sm)| (format!("{path}.{sub}"), path, sm));
+            std::iter::once((path.clone(), path, m)).chain(subs)
+        })
     }
 
     /// The mapping of `field`, including a multi-field such as `title.keyword`.
@@ -335,12 +340,7 @@ impl Mappings {
     /// `ignore_above`, sorted: what Elasticsearch lists in a document's `_ignored`.
     pub fn ignored(&self, source: &Value) -> Vec<String> {
         use crate::postings::{ignored, text, values};
-        let fields = self.properties.iter().flat_map(|(path, m)| {
-            let subs = (m.fields().into_iter().flatten())
-                .map(move |(sub, sm)| (format!("{path}.{sub}"), path, sm));
-            std::iter::once((path.clone(), path, m)).chain(subs)
-        });
-        let mut out: Vec<String> = fields
+        let mut out: Vec<String> = (self.with_multi_fields())
             .filter(|(_, path, m)| match m {
                 FieldMapping::Keyword { ignore_above, .. } => (values(source, path).iter())
                     .any(|v| !v.is_object() && ignored(*ignore_above, &text(v))),

@@ -712,12 +712,7 @@ fn user_fields(
     use es_codec::{field_infos::DocValuesType, terms::TermPostings};
     use std::collections::BTreeMap;
     let mut out = UserFields::default();
-    // Multi-fields (`path.sub`) index the values at their parent's path.
-    let fields = mappings.properties.iter().flat_map(|(path, m)| {
-        let subs = (m.fields().into_iter().flatten())
-            .map(move |(sub, sm)| (format!("{path}.{sub}"), path, sm));
-        std::iter::once((path.clone(), path, m)).chain(subs)
-    });
+    let fields = mappings.with_multi_fields();
     // Last, `_ignored` lists the fields that left a value out per doc, like IgnoredFieldMapper
     // (unless a source field took the name, which Elasticsearch refuses).
     let ignored_mapping = M::Keyword {
