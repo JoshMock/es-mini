@@ -24,6 +24,13 @@ type Params = Query<HashMap<String, String>>;
 
 const WRITE_PARAMS: [&str; 2] = ["timeout", "master_timeout"];
 
+/// Refuses `elastic` changing the aliases of the system indices among the comma-separated
+/// `indices` (see [`crate::security::refuse_restricted`]).
+fn refuse_restricted(state: &AppState, indices: &str) -> Result<(), AppError> {
+    let action = "indices:admin/aliases";
+    crate::security::refuse_restricted(state, indices, action, "manage,all")
+}
+
 /// Resolves `<static{math{format|zone}}>` date math names like ES's DateMathExpressionResolver;
 /// other names pass through.
 pub fn resolve_date_math(name: &str) -> Result<String, AppError> {
@@ -174,6 +181,7 @@ pub async fn put(
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
     check(&uri, &params, &WRITE_PARAMS)?;
+    refuse_restricted(&state, &index)?;
     let meta = parse_alias(&parse_body(&body)?)?;
     let alias = resolve_date_math(&alias)?;
     let mut indices = state.write();
@@ -194,6 +202,7 @@ pub async fn delete(
     authn: Option<Extension<Authn>>,
 ) -> Result<Json<Value>, AppError> {
     check(&uri, &params, &WRITE_PARAMS)?;
+    refuse_restricted(&state, &index)?;
     // Narrowed as a `POST /_aliases` removal is; the indices were by the security layer.
     let mut action = [json!({"remove": {"aliases": split(&names)}})];
     alias_actions(authn.as_deref(), &state.read(), &mut action)?;
@@ -476,6 +485,11 @@ pub async fn update(
             body.map_or(vec![], |b| names_of(b, "alias", "aliases"))
         })
         .collect();
+    let targets: Vec<String> = (actions.iter())
+        .filter_map(|a| a.as_object()?.values().next())
+        .flat_map(|a| names_of(a, "index", "indices"))
+        .collect();
+    refuse_restricted(&state, &targets.join(","))?;
     alias_actions(authn.as_deref(), &state.read(), actions)?;
     let mut indices = state.write();
     let mut tables: BTreeMap<String, BTreeMap<String, Alias>> = indices

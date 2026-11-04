@@ -402,3 +402,22 @@ async fn security_off_refuses_writes_to_system_data_streams() {
     let (status, _) = call(&app, "", "GET", "/.fleet-actions-results", None).await;
     assert_eq!(status, 404);
 }
+
+#[tokio::test]
+async fn elastic_may_not_alias_system_indices() {
+    let (app, _) = secured("aliases").await;
+    for index in [".tasks", "logs,.tasks"] {
+        let action = json!({"add": {"index": index, "alias": "a"}});
+        let body = json!({"actions": [action]});
+        let got = call(&app, ELASTIC, "POST", "/_aliases", Some(body)).await;
+        let expected = elastic_restricted("indices:admin/aliases", ".tasks", "manage,all");
+        assert_eq!(got, (403, expected), "{index}");
+    }
+    for method in ["PUT", "DELETE"] {
+        let got = call(&app, ELASTIC, method, "/.tasks/_alias/a", None).await;
+        let expected = elastic_restricted("indices:admin/aliases", ".tasks", "manage,all");
+        assert_eq!(got, (403, expected), "{method}");
+    }
+    let (status, body) = call(&app, ELASTIC, "GET", "/_alias/a", None).await;
+    assert_eq!(status, 404, "{body}");
+}
