@@ -155,13 +155,30 @@ fn by_query(
             .collect(),
         false => vec![],
     };
-    for (index, id, routing, source) in &hits {
-        let index = indices.get_mut(index).expect("searched index exists");
-        let routing = routing.as_deref();
-        match delete {
-            true => index.delete_routed(id, routing),
-            false => index.put_auto(id, routing, source.clone(), -1),
-        };
+    // Like ES, a document that fails to index ends the request after its batch.
+    let (mut written, mut batches) = (0, 0);
+    for chunk in hits.chunks(batch) {
+        batches += 1;
+        for (name, id, routing, source) in chunk {
+            let index = indices.get_mut(name).expect("searched index exists");
+            let routing = routing.as_deref();
+            if delete {
+                index.delete_routed(id, routing);
+            } else if let Err(e) = index.map_dynamic(id, source) {
+                let (s, error) = AppError::from(e).parts();
+                status = status.max(s);
+                let cause = json!({"type": error["type"], "reason": error["reason"]});
+                let code = s.as_u16();
+                failures.push(json!({"index": name, "id": id, "cause": cause, "status": code}));
+                continue;
+            } else {
+                index.put_auto(id, routing, source.clone(), -1);
+            }
+            written += 1;
+        }
+        if !failures.is_empty() {
+            break;
+        }
     }
     if params
         .get("refresh")
@@ -175,13 +192,12 @@ fn by_query(
         }
     }
 
-    let total = hits.len();
     let mut resp = json!({
         "took": start.elapsed().as_millis() as u64,
         "timed_out": false,
-        "total": total,
-        "deleted": if delete { total } else { 0 },
-        "batches": total.div_ceil(batch),
+        "total": hits.len(),
+        "deleted": if delete { written } else { 0 },
+        "batches": batches,
         "version_conflicts": 0,
         "noops": 0,
         "retries": {"bulk": 0, "search": 0},
@@ -191,7 +207,7 @@ fn by_query(
         "failures": failures
     });
     if !delete {
-        resp["updated"] = total.into();
+        resp["updated"] = written.into();
     }
     Ok((status, Json(resp)))
 }

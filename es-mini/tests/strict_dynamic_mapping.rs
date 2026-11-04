@@ -213,6 +213,18 @@ async fn dynamic_false_keeps_new_fields_in_source_only() {
     let app = es_mini::app_persisted(&dir).unwrap();
     check(&app, "after reopening").await;
     assert_eq!(call(&app, "GET", "/s/_mapping", "").await, want);
+
+    // Reindexing in place under `strict` refuses the document holding unmapped fields.
+    call(&app, "PUT", "/s/_mapping", r#"{"dynamic":"strict"}"#).await;
+    let mut r = call(&app, "POST", "/s/_update_by_query?refresh=true", "{}").await;
+    r.as_object_mut().unwrap().remove("took");
+    let cause = &strict("1:6", "b", "_doc")["error"];
+    let cause = json!({"type": cause["type"], "reason": cause["reason"]});
+    let want = json!({"timed_out": false, "total": 2, "updated": 1, "deleted": 0,
+        "batches": 1, "version_conflicts": 0, "noops": 0, "retries": {"bulk": 0, "search": 0},
+        "throttled_millis": 0, "requests_per_second": -1.0, "throttled_until_millis": 0,
+        "failures": [{"index": "s", "id": "4", "cause": cause, "status": 400}]});
+    assert_eq!(r, want);
 }
 
 #[tokio::test]
