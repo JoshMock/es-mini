@@ -81,6 +81,8 @@ const MIN_FREE_TMP_BYTES = 1.5e9;
 const MAX_TARGET_BYTES = 9.5e9;
 /** Marks an iteration in progress, so a restart after a crash can roll it back. */
 const IN_PROGRESS = "ralph/.iteration-start";
+/** Where agents record decisions they leave to a human (see AGENTS.md "Unattended runs"). */
+const NEEDS_HUMAN = "ralph/NEEDS_HUMAN.md";
 const SONNET = "anthropic/claude-sonnet-5-5", OPUS = "anthropic/claude-opus-5-5";
 const REVIEW_MODEL = `${OPUS}:high`;
 /**
@@ -323,6 +325,9 @@ function rollBack(start: string) {
   cleanEnvironment();
 }
 
+/** NEEDS_HUMAN.md's contents (git-ignored, so rollBack keeps what an agent appended). */
+const humanNotes = () => (existsSync(join(repo, NEEDS_HUMAN)) ? readFileSync(join(repo, NEEDS_HUMAN), "utf8") : "");
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** Bytes free on the filesystem holding /tmp. */
@@ -353,6 +358,7 @@ async function iterate(label: string, makePrompt: (m: string) => string, opts: P
   }
   writeFileSync(join(repo, IN_PROGRESS), start);
   const began = Date.now();
+  const escalations = humanNotes();
   let failure: string | undefined;
   let model = "";
   try {
@@ -364,7 +370,10 @@ async function iterate(label: string, makePrompt: (m: string) => string, opts: P
   if (failure) {
     rollBack(start);
     rmSync(join(repo, IN_PROGRESS), { force: true });
-    const quick = failure === "no commit made" && Date.now() - began < STALL_MS;
+    // An agent that wrote to NEEDS_HUMAN.md ran and found a blocker: a rejection, so a blocked
+    // goal is set aside after MAX_GOAL_ATTEMPTS instead of retried as a stall.
+    const escalated = humanNotes() !== escalations;
+    const quick = failure === "no commit made" && Date.now() - began < STALL_MS && !escalated;
     if (failure.startsWith("agent error") || quick) {
       report(`stalled ${label}: ${failure}`);
       return "stalled";
