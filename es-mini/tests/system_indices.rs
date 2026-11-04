@@ -421,3 +421,98 @@ async fn elastic_may_not_alias_system_indices() {
     let (status, body) = call(&app, ELASTIC, "GET", "/_alias/a", None).await;
     assert_eq!(status, 404, "{body}");
 }
+
+/// The `Warning` header of `method uri` with `body`, authenticated by `auth`, after asserting
+/// the request succeeds.
+async fn warning(
+    app: &axum::Router,
+    auth: &str,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+) -> Option<String> {
+    let json = ("content-type", "application/json");
+    let mut req = (Request::builder().method(method).uri(uri)).header(json.0, json.1);
+    if !auth.is_empty() {
+        req = req.header("authorization", auth);
+    }
+    let body = body.map_or(Body::empty(), |b| Body::from(b.to_string()));
+    let res = app.clone().oneshot(req.body(body).unwrap()).await.unwrap();
+    let warnings = res.headers().get_all("warning").iter();
+    let warnings: Vec<_> = warnings.map(|w| w.to_str().unwrap().to_owned()).collect();
+    let status = res.status();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    assert!(status.as_u16() < 300, "{method} {uri}: {bytes:?}");
+    assert!(warnings.len() < 2, "{method} {uri}: {warnings:?}");
+    warnings.into_iter().next()
+}
+
+/// Elasticsearch's deprecation warning for a request accessing the system indices `names`.
+fn accesses(names: &str) -> Option<String> {
+    Some(format!(
+        "299 Elasticsearch-9.5.5-48acba663b09e70b115dd879329141506c377890 \"this request accesses system indices: [{names}], but in a future major version, direct access to system indices will be prevented by default\""
+    ))
+}
+
+#[tokio::test]
+async fn accessing_system_indices_warns_of_deprecation() {
+    let app = es_mini::app();
+    let doc = || Some(json!({"a": 1}));
+    // Creating one does not warn; auto-creating one by a write does.
+    assert_eq!(warning(&app, "", "PUT", "/.tasks", None).await, None);
+    let kibana = warning(&app, "", "PUT", "/.kibana_1/_doc/1?refresh=true", doc()).await;
+    assert_eq!(kibana, accesses(".kibana_1"));
+    let mget = json!({"docs": [{"_index": ".tasks", "_id": "1"}]});
+    let alias = json!({"actions": [{"add": {"index": ".kibana_1", "alias": "kalias"}}]});
+    let all = json!({"query": {"match_all": {}}});
+    for (method, uri, body) in [
+        ("PUT", "/.tasks/_doc/1?refresh=true", doc()),
+        ("GET", "/.tasks/_doc/1", None),
+        ("GET", "/.tasks/_search", None),
+        ("GET", "/.tasks/_count", None),
+        ("GET", "/.t*/_search", None),
+        ("GET", "/.tasks/_mapping", None),
+        ("GET", "/.tasks/_settings", None),
+        ("POST", "/.tasks/_refresh", None),
+        ("POST", "/_mget", Some(mget)),
+        ("DELETE", "/.tasks/_doc/1", None),
+        ("POST", "/.tasks/_delete_by_query", Some(all)),
+    ] {
+        let got = warning(&app, "", method, uri, body).await;
+        assert_eq!(got, accesses(".tasks"), "{method} {uri}");
+    }
+    let both = warning(&app, "", "GET", "/.kibana_1,.tasks/_search", None).await;
+    assert_eq!(both, accesses(".kibana_1, .tasks"));
+    let all = warning(&app, "", "GET", "/_search?expand_wildcards=all", None).await;
+    assert_eq!(all, accesses(".kibana_1, .tasks"));
+    let aliased = warning(&app, "", "POST", "/_aliases", Some(alias)).await;
+    assert_eq!(aliased, accesses(".kibana_1"));
+    let via_alias = warning(&app, "", "GET", "/kalias/_search", None).await;
+    assert_eq!(via_alias, accesses(".kibana_1"));
+    // System data streams' backing indices and `_cat/indices` do not warn.
+    let backing = "/.ds-.fleet-actions-results-2025.01.01-000001";
+    for (method, uri, body) in [
+        ("GET", "/_cat/indices/.tasks".to_owned(), None),
+        ("PUT", format!("{backing}/_doc/1"), doc()),
+        ("GET", format!("{backing}/_search"), None),
+    ] {
+        assert_eq!(warning(&app, "", method, &uri, body).await, None, "{uri}");
+    }
+    for index in [".kibana_1", ".tasks"] {
+        let got = warning(&app, "", "DELETE", &format!("/{index}"), None).await;
+        assert_eq!(got, accesses(index));
+    }
+}
+
+#[tokio::test]
+async fn elastic_reading_system_indices_is_warned_of_deprecation() {
+    let (app, _) = secured("warning").await;
+    for uri in ["/.tasks/_search", "/.t*/_search", "/.tasks/_doc/1"] {
+        let got = warning(&app, ELASTIC, "GET", uri, None).await;
+        assert_eq!(got, accesses(".tasks"), "{uri}");
+    }
+    for uri in ["/.security-7/_search", "/.security/_search"] {
+        let got = warning(&app, ELASTIC, "GET", uri, None).await;
+        assert_eq!(got, accesses(".security-7"), "{uri}");
+    }
+}

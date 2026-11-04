@@ -398,6 +398,7 @@ async fn filter_response(
 }
 
 fn router(state: AppState, security: Option<Arc<security::Security>>) -> Router {
+    _ = es_index::aliases::ON_RESOLVED.set(system::note);
     let routes = match security {
         Some(s) => security::routes(s),
         None => Router::new(),
@@ -562,6 +563,7 @@ fn router(state: AppState, security: Option<Arc<security::Security>>) -> Router 
         .layer(axum::extract::DefaultBodyLimit::max(100 << 20))
         .layer(axum::Extension(scroll::Contexts::default()))
         .layer(axum::middleware::from_fn(filter_response))
+        .layer(axum::middleware::from_fn(system::warn))
 }
 
 /// Wraps finished routes (route layers included) so 405s get Elasticsearch's body: axum adds

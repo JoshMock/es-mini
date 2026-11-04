@@ -201,6 +201,15 @@ impl IndicesOptions {
     }
 }
 
+/// Called with each index a resolution yields, once set (es-mini warns of system indices).
+pub static ON_RESOLVED: std::sync::OnceLock<fn(&str)> = std::sync::OnceLock::new();
+
+fn resolved(index: &str) {
+    if let Some(f) = ON_RESOLVED.get() {
+        f(index);
+    }
+}
+
 /// Resolves an index expression (comma list of names, `*` wildcards, `_all`, aliases, and
 /// `-exclusions` after the first part) to concrete indices in name order, each with the filter
 /// of the alias it was reached through (none if it was also reached directly).
@@ -302,6 +311,7 @@ pub fn resolve(
     if hits.is_empty() && !o.allow_no_indices {
         return Err(ResolveError::IndexNotFound(expr.to_owned()));
     }
+    hits.keys().for_each(|i| resolved(i));
     Ok(hits
         .into_iter()
         .map(|(index, (filters, routing))| Target {
@@ -335,6 +345,7 @@ pub fn resolve_data(
 /// Resolves a write target: an index (existing or to be auto-created) or an alias's write index.
 pub fn resolve_write(indices: &Map<impl IndexMeta>, name: &str) -> Result<String, ResolveError> {
     let target = resolve_write_target(indices, name)?;
+    resolved(&target);
     match indices.get(&target) {
         Some(i) if i.closed() => Err(ResolveError::IndexClosed(target)),
         _ => Ok(target),

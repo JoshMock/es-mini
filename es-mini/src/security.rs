@@ -198,13 +198,14 @@ pub(crate) fn reads_restricted(authn: Option<&Authn>) -> bool {
 }
 
 /// A snapshot of [`INDEX`], if `authn` [`reads_restricted`] and names it or [`ALIAS`] by `name`.
-// ponytail: exact names only, without the deprecation Warning header; Elasticsearch also
-// resolves it from wildcards (`.security*`, `expand_wildcards=all`)
+// ponytail: exact names only; Elasticsearch also resolves it from wildcards (`.security*`,
+// `expand_wildcards=all`)
 pub(crate) fn restricted_read(store: &Store, authn: Option<&Authn>, name: &str) -> Option<Index> {
     let named = name == INDEX || name == ALIAS;
-    (reads_restricted(authn) && named)
+    let index = (reads_restricted(authn) && named)
         .then(|| store.system().get(INDEX).map(Index::snapshot))
-        .flatten()
+        .flatten();
+    index.inspect(|_| crate::system::note(INDEX))
 }
 
 /// Refuses `action` on the system names (see [`crate::system`]) among the comma-separated

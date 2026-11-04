@@ -111,3 +111,43 @@ pub(crate) fn refuse_data_stream(name: &str) -> Result<(), crate::error::AppErro
         "Data stream(s) [{name}] use and access is reserved for system operations"
     )))
 }
+
+tokio::task_local! {
+    /// The system indices the current request resolved.
+    static ACCESSED: std::cell::RefCell<std::collections::BTreeSet<String>>;
+}
+
+/// Notes `index` if a request resolves it and it is a system index.
+pub(crate) fn note(index: &str) {
+    if INDICES.matches(index) {
+        // Outside a request (no scope), there is no one to warn.
+        let _ = ACCESSED.try_with(|a| a.borrow_mut().insert(index.to_owned()));
+    }
+}
+
+/// Adds Elasticsearch's deprecation `Warning` to the response of a request that resolved
+/// system indices (`IndexNameExpressionResolver`'s system index access check).
+pub(crate) async fn warn(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    // Elasticsearch's `_cat/indices` resolves without the check.
+    let cat = req.uri().path().starts_with("/_cat/indices");
+    ACCESSED
+        .scope(Default::default(), async {
+            let mut res = next.run(req).await;
+            let names = ACCESSED.with(|a| a.take());
+            if !cat && !names.is_empty() {
+                let names = names.into_iter().collect::<Vec<_>>().join(", ");
+                let warning = format!(
+                    "299 Elasticsearch-9.5.5-48acba663b09e70b115dd879329141506c377890 \"this request accesses system indices: [{names}], but in a future major version, direct access to system indices will be prevented by default\""
+                );
+                // ponytail: a non-ASCII name (`.kibana_é`) drops the warning
+                if let Ok(value) = warning.parse() {
+                    res.headers_mut().append("warning", value);
+                }
+            }
+            res
+        })
+        .await
+}
