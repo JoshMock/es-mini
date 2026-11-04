@@ -388,3 +388,17 @@ async fn security_off_creates_system_indices_hidden() {
     let got = call(&app, "", "PUT", "/.kibana_2", Some(body)).await;
     assert_eq!(got, (500, json!({"error": error, "status": 500})));
 }
+
+#[tokio::test]
+async fn security_off_refuses_writes_to_system_data_streams() {
+    let app = es_mini::app();
+    let reason =
+        "Data stream(s) [.fleet-actions-results] use and access is reserved for system operations";
+    let e = json!({"type": "illegal_argument_exception", "reason": reason});
+    let error = json!({"root_cause": [e], "type": "illegal_argument_exception", "reason": reason});
+    let doc = json!({"@timestamp": "2026-01-01T00:00:00Z", "a": 1});
+    let got = call(&app, "", "POST", "/.fleet-actions-results/_doc", Some(doc)).await;
+    assert_eq!(got, (400, json!({"error": error, "status": 400})));
+    let (status, _) = call(&app, "", "GET", "/.fleet-actions-results", None).await;
+    assert_eq!(status, 404);
+}

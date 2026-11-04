@@ -100,3 +100,14 @@ pub(crate) fn hide(index: &mut es_index::Index, name: &str) -> Result<(), crate:
     index.settings.merge(&serde_json::json!({"hidden": "true"}));
     Ok(())
 }
+
+/// Refuses auto-creating the system data stream `name`, as Elasticsearch refuses any request
+/// but its own system operations.
+pub(crate) fn refuse_data_stream(name: &str) -> Result<(), crate::error::AppError> {
+    if !SYSTEM_DATA_STREAMS.contains(&name) {
+        return Ok(());
+    }
+    Err(crate::error::AppError::IllegalArgument(format!(
+        "Data stream(s) [{name}] use and access is reserved for system operations"
+    )))
+}

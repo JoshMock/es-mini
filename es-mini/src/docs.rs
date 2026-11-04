@@ -84,6 +84,7 @@ fn write<T>(
     let mut target = aliases::resolve_write(&*indices, name)?;
     if !indices.contains_key(&target) {
         crate::indices::validate_index_name(&target)?;
+        crate::system::refuse_data_stream(&target)?;
         if let Some(index) = crate::security::managed_index(&target) {
             target = crate::security::INDEX.to_owned();
             indices.entry(target.clone()).or_insert(index);
