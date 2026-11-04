@@ -396,6 +396,7 @@ impl Parser {
                 fields: vec![("*".into(), 1.0)],
                 query: Box::new(q),
                 tie_breaker: 0.0,
+                lenient: false,
             },
             false => q,
         }))

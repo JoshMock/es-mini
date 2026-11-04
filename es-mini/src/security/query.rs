@@ -289,11 +289,10 @@ fn simple_query_string(mut body: Value) -> Result<Value, AppError> {
     if fields.is_empty() {
         fields.push("*".into());
     }
-    // ponytail: ES turns on `lenient` for `*`, so values a field cannot hold match nothing
-    // there; es-mini's simple_query_string has no `lenient`, so `*` leaves out the date and
-    // boolean fields instead (a query for a creation time's millis does not find the key)
-    let lenient = fields.iter().any(|f| f == "*");
-    let text = |index: &str| !index.ends_with("_time") && index != "api_key_invalidated";
+    // ES turns on `lenient` for `*`: values a field cannot hold match nothing there.
+    if fields.iter().any(|f| f == "*") {
+        body["lenient"] = true.into();
+    }
     let mut out: Vec<(String, f64)> = vec![];
     for f in fields {
         let (pattern, boost) = match f.split_once('^') {
@@ -305,7 +304,6 @@ fn simple_query_string(mut body: Value) -> Result<Value, AppError> {
                 Some(sub) if q == "metadata" && !pattern.contains('*') => {
                     format!("metadata_flattened.{sub}.keyword")
                 }
-                _ if lenient && !text(index) => continue,
                 _ if es_index::aliases::glob(&pattern, q) => index.to_owned(),
                 _ => continue,
             };

@@ -147,6 +147,7 @@ pub(crate) fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, 
             fields,
             query,
             tie_breaker,
+            lenient,
         } => {
             // ES's resolveMappingFields: a field two entries name takes both boosts
             let mapped = index.mappings.names();
@@ -166,7 +167,7 @@ pub(crate) fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, 
                     }
                 }
             }
-            let lenient = fields.iter().any(|(f, _)| f == "*");
+            let lenient = lenient || fields.iter().any(|(f, _)| f == "*");
             let mut queries = vec![];
             for (field, boost) in boosts {
                 match resolve_dates(index, query.as_ref().clone().on_field(&field), now) {

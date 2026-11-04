@@ -1497,3 +1497,44 @@ async fn query_with_manage_own_api_key_finds_only_the_key_itself() {
     let (_, r) = call(&app, &admin, "GET", "/_security/_query/api_key", None).await;
     assert_eq!(r["total"], 3, "{r}");
 }
+
+/// simple_query_string over all fields is lenient, as ES turns it on for `*`: date and boolean
+/// fields match the values they can hold and skip the others; `lenient` is also taken as given.
+/// Results recorded from Elasticsearch 9.5.5 with keys `k1` and `true`.
+#[tokio::test]
+async fn security_validation_query_all_fields_is_lenient() {
+    let app = secured();
+    create(&app, ELASTIC, json!({"name": "k1"})).await;
+    create(&app, ELASTIC, json!({"name": "true"})).await;
+    let (_, all) = call(&app, ELASTIC, "GET", "/_security/api_key?name=k1", None).await;
+    let creation = all["api_keys"][0]["creation"].as_i64().unwrap();
+    let names = |v: &Value| -> Vec<String> {
+        let keys = v["api_keys"].as_array().unwrap();
+        keys.iter()
+            .map(|k| k["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let sqs = |q: Value| json!({"query": {"simple_query_string": q}});
+    let cases = [
+        (sqs(json!({"query": creation.to_string()})), vec!["k1"]),
+        (sqs(json!({"query": "true"})), vec!["true"]),
+        (sqs(json!({"query": "false"})), vec!["k1", "true"]),
+        (
+            sqs(json!({"query": format!("k1 {creation}"), "default_operator": "and"})),
+            vec!["k1"],
+        ),
+        (
+            sqs(json!({"query": "k1", "fields": ["name", "creation"], "lenient": true})),
+            vec!["k1"],
+        ),
+    ];
+    for (body, expected) in cases {
+        let (status, out) = query(&app, ELASTIC, "", Some(body.clone())).await;
+        assert_eq!(status, 200, "{body}: {out}");
+        let mut got = names(&out);
+        got.sort();
+        assert_eq!(got, expected, "{body}");
+    }
+    let strict = sqs(json!({"query": "k1", "fields": ["name", "creation"]}));
+    assert_eq!(query(&app, ELASTIC, "", Some(strict)).await.0, 400);
+}

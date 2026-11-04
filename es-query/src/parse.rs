@@ -92,12 +92,13 @@ pub enum Query {
     Normalized(Box<Query>),
     /// `query` on each field `fields` names, a `*` pattern standing for every mapped field it
     /// matches, with the entry's boost, as a dis_max with `tie_breaker`; `resolve_dates`
-    /// expands it per index. With a `*` field it is lenient: fields `query` fails on are left
+    /// expands it per index. With a `*` field, or `lenient`, fields `query` fails on are left
     /// out, as in ES.
     Fields {
         fields: Vec<(String, f64)>,
         query: Box<Query>,
         tie_breaker: f64,
+        lenient: bool,
     },
     /// The documents written with this `_routing`, scoring 1: what `resolve_dates` makes of a
     /// `term` query on `_routing`, boosted by the shard's BM25 score for it.
@@ -676,6 +677,7 @@ fn parse_kind(kind: &str, body: &Value) -> Result<Query, QueryError> {
                 fields,
                 query: Box::new(parse_kind(field_kind, &serde_json::json!({ "*": p }))?),
                 tie_breaker,
+                lenient: false,
             })
         }
         "simple_query_string" => {
@@ -690,10 +692,12 @@ fn parse_kind(kind: &str, body: &Value) -> Result<Query, QueryError> {
                     "fields",
                     "default_operator",
                     "minimum_should_match",
+                    "lenient",
                     "boost",
                     "_name",
                 ],
             )?;
+            let lenient = o.get("lenient").and_then(Value::as_bool).unwrap_or(false);
             let query = text(
                 o.get("query")
                     .ok_or("[simple_query_string] requires query")?,
@@ -721,22 +725,15 @@ fn parse_kind(kind: &str, body: &Value) -> Result<Query, QueryError> {
             // Each term matches in any field (ES: dis_max with tie_breaker 1.0, a sum).
             let terms: Vec<Query> = query
                 .split_whitespace()
-                .map(|t| Query::Bool {
-                    must: vec![],
-                    should: fields
-                        .iter()
-                        .map(|&(f, boost)| {
-                            let q = Query::Match {
-                                field: f.to_owned(),
-                                query: t.to_owned(),
-                                and: false,
-                            };
-                            q.boosted(boost)
-                        })
-                        .collect(),
-                    must_not: vec![],
-                    filter: vec![],
-                    min_should: 1,
+                .map(|t| Query::Fields {
+                    fields: (fields.iter()).map(|&(f, b)| (f.to_owned(), b)).collect(),
+                    query: Box::new(Query::Match {
+                        field: String::new(),
+                        query: t.to_owned(),
+                        and: false,
+                    }),
+                    tie_breaker: 1.0,
+                    lenient,
                 })
                 .collect();
             if and {
