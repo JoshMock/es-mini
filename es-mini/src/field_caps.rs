@@ -184,7 +184,7 @@ fn fields(
     }
     // Like Elasticsearch, objects without subfields are not reported.
     for (name, m) in &index.mappings.properties {
-        if *m == FieldMapping::Object {
+        if matches!(m, FieldMapping::Object { .. }) {
             continue;
         }
         out.push(mapped(name.clone(), m));

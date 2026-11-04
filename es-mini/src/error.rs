@@ -364,6 +364,19 @@ impl From<es_index::aliases::ResolveError> for AppError {
     }
 }
 
+impl From<es_index::mapping::MapError> for AppError {
+    fn from(e: es_index::mapping::MapError) -> Self {
+        match e {
+            es_index::mapping::MapError::Parsing(r) => Self::DocumentParsing(r),
+            es_index::mapping::MapError::Strict(r) => Self::Other(
+                axum::http::StatusCode::BAD_REQUEST,
+                "strict_dynamic_mapping_exception",
+                r,
+            ),
+        }
+    }
+}
+
 impl From<es_query::QueryError> for AppError {
     fn from(e: es_query::QueryError) -> Self {
         if !e.shards.is_empty() {

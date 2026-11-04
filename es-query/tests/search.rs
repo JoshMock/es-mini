@@ -1366,7 +1366,10 @@ fn mapping_validation_queries_on_an_empty_object_match_nothing() {
     let mut i = Index::default();
     i.put("1", json!({"e": {}}));
     i.map_dynamic("1", &json!({"e": {}})).unwrap();
-    assert_eq!(i.mappings.properties["e"], FieldMapping::Object);
+    assert_eq!(
+        i.mappings.properties["e"],
+        FieldMapping::Object { dynamic: None }
+    );
     for q in [json!({"term": {"e": "x"}}), json!({"match": {"e": "x"}})] {
         let req = SearchRequest::parse(&json!({"query": q})).unwrap();
         assert!(search(&i, &req).hits.is_empty(), "{q}");

@@ -48,6 +48,19 @@ fn check_field_type(field: &str, spec: &Value) -> Result<(), AppError> {
     Ok(())
 }
 
+/// A mapping body that does not parse, as Elasticsearch reports it.
+fn mapping_error(e: serde_json::Error) -> AppError {
+    let e = e.to_string();
+    if !e.starts_with(es_index::mapping::BAD_DYNAMIC) {
+        return AppError::MapperParsing(e);
+    }
+    let convert = "Could not convert [dynamic.dynamic] to boolean";
+    let cause = json!({"type": "illegal_argument_exception", "reason": convert,
+        "caused_by": {"type": "illegal_argument_exception", "reason": e}});
+    let error = AppError::MapperParsing(format!("Failed to parse mapping: {convert}"));
+    AppError::Caused(Box::new(error), cause)
+}
+
 /// Port of `MetadataCreateIndexService.validateIndexOrAliasName`: why `name` is refused.
 pub(crate) fn index_or_alias_name_error(name: &str) -> Option<String> {
     if name.contains([' ', '"', '*', ',', '/', '<', '>', '?', '\\', '|']) {
@@ -160,8 +173,7 @@ pub async fn create(
                 )));
             }
         }
-        index.mappings = Mappings::deserialize(&body["mappings"])
-            .map_err(|e| AppError::MapperParsing(e.to_string()))?;
+        index.mappings = Mappings::deserialize(&body["mappings"]).map_err(mapping_error)?;
     }
     for (alias, meta) in body["aliases"].as_object().into_iter().flatten() {
         reject_bad_scalars(alias, meta)?;
@@ -683,7 +695,7 @@ pub async fn put_mapping(
     for (field, spec) in body["properties"].as_object().into_iter().flatten() {
         check_field_type(field, spec)?;
     }
-    let new = Mappings::deserialize(&body).map_err(|e| AppError::MapperParsing(e.to_string()))?;
+    let new = Mappings::deserialize(&body).map_err(mapping_error)?;
     let mut indices = state.write();
     let names = read_indices(&indices, &name, &params)?;
     let merged = (names.iter())

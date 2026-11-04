@@ -71,9 +71,78 @@ pub enum FieldMapping {
     // ponytail: es-mini searches nested objects as part of their root document (only segments
     // on disk hold them as separate documents, for Elasticsearch), so nested queries and
     // aggregations are unsupported; the mapping only round-trips and keeps nested objects out of hit counts
-    Nested,
-    /// An object with no subfields; one with subfields is only the entries under `path.`.
-    Object,
+    Nested {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dynamic: Option<Dynamic>,
+    },
+    /// An object with no subfields or with `dynamic` set; otherwise an object with subfields is
+    /// only the entries under `path.`.
+    Object {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dynamic: Option<Dynamic>,
+    },
+}
+
+/// What a document may do with fields its mapping lacks (ES's `ObjectMapper.Dynamic`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dynamic {
+    /// Map them.
+    True,
+    /// Keep them in `_source` only.
+    False,
+    /// Refuse the document.
+    Strict,
+    /// Map them as runtime fields.
+    // ponytail: kept in `_source` only, like `false`; ES maps leaves under `runtime`
+    Runtime,
+}
+
+impl Serialize for Dynamic {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(match self {
+            Self::True => "true",
+            Self::False => "false",
+            Self::Strict => "strict",
+            Self::Runtime => "runtime",
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for Dynamic {
+    /// As ES's `parseObjectOrDocumentTypeProperties`: `strict` and `runtime` in any case, or a
+    /// boolean (`true`/`false` strings too); any other value fails with the reason of
+    /// `XContentMapValues.nodeBooleanValue`'s innermost cause.
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        match Value::deserialize(d)? {
+            Value::Bool(b) => Ok(if b { Self::True } else { Self::False }),
+            Value::String(s) if s.eq_ignore_ascii_case("strict") => Ok(Self::Strict),
+            Value::String(s) if s.eq_ignore_ascii_case("runtime") => Ok(Self::Runtime),
+            Value::String(s) if s == "true" => Ok(Self::True),
+            Value::String(s) if s == "false" => Ok(Self::False),
+            v => Err(D::Error::custom(format!(
+                "{BAD_DYNAMIC}{}] as only [true] or [false] are allowed.",
+                crate::setting_string(&v)
+            ))),
+        }
+    }
+}
+
+/// How the reason of an unparseable `dynamic` starts.
+pub const BAD_DYNAMIC: &str = "Failed to parse value [";
+
+/// Why a document's fields cannot be mapped.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MapError {
+    /// Elasticsearch's `document_parsing_exception` reason, without its `[line:column]` prefix.
+    Parsing(String),
+    /// Elasticsearch's `strict_dynamic_mapping_exception` reason.
+    Strict(String),
+}
+
+impl From<&str> for MapError {
+    fn from(reason: &str) -> Self {
+        Self::Parsing(reason.to_owned())
+    }
 }
 
 impl FieldMapping {
@@ -96,8 +165,8 @@ impl FieldMapping {
             | Self::DoubleRange
             | Self::IpRange
             | Self::DateRange { .. } => "unsupported",
-            Self::Nested => "nested",
-            Self::Object => "object",
+            Self::Nested { .. } => "nested",
+            Self::Object { .. } => "object",
         }
     }
 
@@ -119,7 +188,15 @@ impl FieldMapping {
 
     /// Whether this maps an object (`object` or `nested`) rather than a leaf.
     pub fn is_object(&self) -> bool {
-        matches!(self, Self::Nested | Self::Object)
+        matches!(self, Self::Nested { .. } | Self::Object { .. })
+    }
+
+    /// The `dynamic` an object sets.
+    pub fn dynamic(&self) -> Option<Dynamic> {
+        match self {
+            Self::Nested { dynamic } | Self::Object { dynamic } => *dynamic,
+            _ => None,
+        }
     }
 
     pub fn is_numeric(&self) -> bool {
@@ -287,6 +364,9 @@ pub fn cidr(t: &str) -> Result<(u128, u128), String> {
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Mappings {
+    /// What documents may do with unmapped fields outside objects that set their own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamic: Option<Dynamic>,
     /// The `_routing` mapping section, e.g. `{"required": true}`.
     #[serde(default, rename = "_routing", skip_serializing_if = "Option::is_none")]
     pub routing: Option<Value>,
@@ -342,7 +422,7 @@ impl Mappings {
         self.properties.extend(new);
         let props = &self.properties;
         let filled: Vec<String> = (props.iter())
-            .filter(|(p, m)| **m == FieldMapping::Object && maps_under(props, p))
+            .filter(|(p, m)| **m == FieldMapping::Object { dynamic: None } && maps_under(props, p))
             .map(|(p, _)| p.clone())
             .collect();
         for p in filled {
@@ -364,8 +444,8 @@ impl Mappings {
             Nested,
         }
         let kind = |props: &BTreeMap<String, FieldMapping>, p: &str| match props.get(p) {
-            Some(FieldMapping::Nested) => Some(Kind::Nested),
-            Some(FieldMapping::Object) => Some(Kind::Object),
+            Some(FieldMapping::Nested { .. }) => Some(Kind::Nested),
+            Some(FieldMapping::Object { .. }) => Some(Kind::Object),
             Some(_) => Some(Kind::Leaf),
             None => maps_under(props, p).then_some(Kind::Object),
         };
@@ -393,7 +473,15 @@ impl Mappings {
                 }
                 (_, _) => {
                     if let Some(m) = new.properties.get(p) {
-                        merged.insert(p.to_owned(), m.clone());
+                        let mut m = m.clone();
+                        // an object restated without `dynamic` keeps its own
+                        if let FieldMapping::Object { dynamic } | FieldMapping::Nested { dynamic } =
+                            &mut m
+                        {
+                            *dynamic =
+                                dynamic.or(self.properties.get(p).and_then(FieldMapping::dynamic));
+                        }
+                        merged.insert(p.to_owned(), m);
                     }
                 }
             }
@@ -406,6 +494,7 @@ impl Mappings {
         if new.routing.is_some() {
             out.routing.clone_from(&new.routing);
         }
+        out.dynamic = new.dynamic.or(self.dynamic);
         out.date_detection = new.date_detection.or(self.date_detection);
         out.numeric_detection = new.numeric_detection.or(self.numeric_detection);
         Ok(out)
@@ -424,16 +513,79 @@ impl Mappings {
 
 impl Index {
     /// Adds dynamic mappings for fields of `source` not yet mapped, object fields under their
-    /// dotted paths. A document giving an object to a leaf field, or a value to an object field,
-    /// maps nothing and fails with Elasticsearch's `document_parsing_exception` reason (without
-    /// its `[line:column]` prefix).
-    pub fn map_dynamic(&mut self, id: &str, source: &Value) -> Result<(), String> {
+    /// dotted paths, as the `dynamic` of their enclosing objects allows. A document giving an
+    /// object to a leaf field, or a value to an object field, maps nothing and fails with
+    /// Elasticsearch's `document_parsing_exception` reason (without its `[line:column]` prefix);
+    /// a new field under `dynamic: strict` fails with its `strict_dynamic_mapping_exception`
+    /// reason, located in `source` serialized.
+    pub fn map_dynamic(&mut self, id: &str, source: &Value) -> Result<(), MapError> {
+        self.map_dynamic_in(id, source, None)
+    }
+
+    /// [`Index::map_dynamic`] locating a refused field in `raw`, the document's JSON, if given.
+    pub fn map_dynamic_in(
+        &mut self,
+        id: &str,
+        source: &Value,
+        raw: Option<&[u8]>,
+    ) -> Result<(), MapError> {
         let mut added = BTreeMap::new();
         for (k, v) in source.as_object().into_iter().flatten() {
-            self.map_value(id, k, k, v, &mut added)?;
+            self.map_value(id, k, k, v, &mut added)
+                .map_err(|refused| match refused {
+                    Refused::Parsing(r) => MapError::Parsing(r),
+                    Refused::Strict { field, key, value, at_name } => {
+                        let raw = raw.map_or_else(|| source.to_string().into_bytes(), <[u8]>::to_vec);
+                        let at = locate(&raw, &key, &value, at_name)
+                            .map_or(String::new(), |(l, c)| format!("[{l}:{c}] "));
+                        let (parent, name) = field.rsplit_once('.').unwrap_or(("_doc", &field));
+                        MapError::Strict(format!(
+                            "{at}mapping set to strict, dynamic introduction of [{name}] within [{parent}] is not allowed"
+                        ))
+                    }
+                })?;
         }
         self.mappings.extend(added);
         Ok(())
+    }
+
+    /// The `dynamic` for new fields of the object at `parent` (`""` for the root): the one it
+    /// or its nearest enclosing object sets, else the root's.
+    fn dynamic_in(&self, mut parent: &str) -> Dynamic {
+        while !parent.is_empty() {
+            if let Some(d) = self
+                .mappings
+                .properties
+                .get(parent)
+                .and_then(FieldMapping::dynamic)
+            {
+                return d;
+            }
+            parent = parent.rsplit_once('.').map_or("", |(p, _)| p);
+        }
+        self.mappings.dynamic.unwrap_or(Dynamic::True)
+    }
+
+    /// Whether the new field `field` may be mapped: refused under `dynamic: strict`, where the
+    /// error is located at `value` under the document key path `key` (or at that key's name).
+    fn admits(
+        &self,
+        field: &str,
+        key: &str,
+        value: &Value,
+        at_name: bool,
+    ) -> Result<bool, Refused> {
+        let parent = field.rsplit_once('.').map_or("", |(p, _)| p);
+        match self.dynamic_in(parent) {
+            Dynamic::True => Ok(true),
+            Dynamic::False | Dynamic::Runtime => Ok(false),
+            Dynamic::Strict => Err(Refused::Strict {
+                field: field.to_owned(),
+                key: key.to_owned(),
+                value: value.clone(),
+                at_name,
+            }),
+        }
     }
 
     /// Maps `v` at `path` into `added`; `name` is the JSON key it came from (`null` in arrays).
@@ -444,16 +596,17 @@ impl Index {
         name: &str,
         v: &Value,
         added: &mut BTreeMap<String, FieldMapping>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Refused> {
         let props = &self.mappings.properties;
         let get = |p: &str| added.get(p).or_else(|| props.get(p));
+        let new = |p: &str| get(p).is_none() && !self.has_subfields(p, added);
         let leaf_error = |field: &str, preview: &Value| {
-            Err(format!(
+            Err(Refused::Parsing(format!(
                 "failed to parse field [{field}] of type [{}] in document with id '{id}'. \
                  Preview of field's value: '{}'",
                 get(field).map_or_else(String::new, FieldMapping::mapping_type),
                 crate::setting_string(preview)
-            ))
+            )))
         };
         // A dotted key (`a.b`) whose prefix is a leaf gives that leaf an object.
         for (i, _) in path.match_indices('.') {
@@ -461,6 +614,12 @@ impl Index {
                 let preview = (path[i + 1..].rsplit('.')).fold(v.clone(), |v, k| json!({ k: v }));
                 return leaf_error(&path[..i], &preview);
             }
+            if new(&path[..i]) && !self.admits(&path[..i], path, v, true)? {
+                return Ok(());
+            }
+        }
+        if new(path) && !self.admits(path, path, v, false)? {
+            return Ok(());
         }
         let mapping = match v {
             Value::Object(o) => {
@@ -468,7 +627,7 @@ impl Index {
                     Some(m) if m.is_range() => return Ok(()),
                     Some(m) if !m.is_object() => return leaf_error(path, v),
                     None if o.is_empty() && !self.has_subfields(path, added) => {
-                        added.insert(path.to_owned(), FieldMapping::Object);
+                        added.insert(path.to_owned(), FieldMapping::Object { dynamic: None });
                     }
                     _ => {}
                 }
@@ -488,10 +647,10 @@ impl Index {
             _ if get(path).is_some_and(FieldMapping::is_object)
                 || self.has_subfields(path, added) =>
             {
-                return Err(format!(
+                return Err(Refused::Parsing(format!(
                     "object mapping for [{path}] tried to parse field [{}] as object, but found a concrete value",
                     name.rsplit('.').next().unwrap_or(name)
-                ));
+                )));
             }
             _ if get(path).is_some() => return Ok(()),
             // Like Elasticsearch's DynamicFieldsBuilder: numeric strings are never dates.
@@ -547,6 +706,111 @@ impl Index {
     fn has_subfields(&self, path: &str, added: &BTreeMap<String, FieldMapping>) -> bool {
         maps_under(&self.mappings.properties, path) || maps_under(added, path)
     }
+}
+
+/// Why [`Index::map_value`] cannot map a value; [`Index::map_dynamic`] turns it into a
+/// [`MapError`].
+enum Refused {
+    Parsing(String),
+    Strict {
+        field: String,
+        key: String,
+        value: Value,
+        at_name: bool,
+    },
+}
+
+/// Where (1-based line, and column in bytes, as Jackson counts) the first value equal to `v`
+/// under the dotted key `path` starts in the JSON document `raw`, or with `at_name` the key
+/// naming that value.
+pub fn locate(raw: &[u8], path: &str, v: &Value, at_name: bool) -> Option<(usize, usize)> {
+    fn skip_ws(raw: &[u8], at: &mut usize) {
+        while raw.get(*at).is_some_and(u8::is_ascii_whitespace) {
+            *at += 1;
+        }
+    }
+    /// One past the string starting at `start`.
+    fn string_end(raw: &[u8], start: usize) -> usize {
+        let mut at = start + 1;
+        while at < raw.len() && raw[at] != b'"' {
+            at += if raw[at] == b'\\' { 2 } else { 1 };
+        }
+        at + 1
+    }
+    /// Walks the value at `at`, found under `here`, to the end of it.
+    fn walk(raw: &[u8], at: &mut usize, here: &str, path: &str, v: &Value) -> Option<usize> {
+        skip_ws(raw, at);
+        let start = *at;
+        match *raw.get(start)? {
+            open @ (b'{' | b'[') => {
+                *at += 1;
+                while *at < raw.len() {
+                    skip_ws(raw, at);
+                    if matches!(raw.get(*at), Some(b'}' | b']')) {
+                        *at += 1;
+                        break;
+                    }
+                    let child = match open {
+                        b'{' => {
+                            let end = string_end(raw, *at);
+                            let key: String = serde_json::from_slice(raw.get(*at..end)?).ok()?;
+                            *at = end;
+                            skip_ws(raw, at);
+                            *at += 1; // the colon
+                            match here {
+                                "" => key,
+                                _ => format!("{here}.{key}"),
+                            }
+                        }
+                        _ => here.to_owned(),
+                    };
+                    if let Some(found) = walk(raw, at, &child, path, v) {
+                        return Some(found);
+                    }
+                    skip_ws(raw, at);
+                    if raw.get(*at) == Some(&b',') {
+                        *at += 1;
+                    }
+                }
+            }
+            b'"' => *at = string_end(raw, start),
+            _ => {
+                while raw.get(*at).is_some_and(|b| !b",]} \t\r\n".contains(b)) {
+                    *at += 1;
+                }
+            }
+        }
+        let value =
+            (here == path).then(|| serde_json::from_slice::<Value>(raw.get(start..*at)?).ok());
+        (value.flatten().as_ref() == Some(v)).then_some(start)
+    }
+    let mut start = walk(raw, &mut 0, "", path, v)?;
+    if at_name {
+        // back over `"key" :` to the key's opening quote
+        let before = |at: usize| raw[..at].iter().rposition(|b| !b.is_ascii_whitespace());
+        let colon = before(start)?;
+        start = before(colon)?;
+        while start > 0 {
+            start -= 1;
+            if raw[start] == b'"'
+                && raw[..start]
+                    .iter()
+                    .rev()
+                    .take_while(|b| **b == b'\\')
+                    .count()
+                    % 2
+                    == 0
+            {
+                break;
+            }
+        }
+    }
+    let line_start = raw[..start]
+        .iter()
+        .rposition(|b| *b == b'\n')
+        .map_or(0, |i| i + 1);
+    let line = 1 + raw[..start].iter().filter(|b| **b == b'\n').count();
+    Some((line, start - line_start + 1))
 }
 
 /// Whether `props` holds a field under `path.`.
@@ -677,9 +941,12 @@ fn nest<S: Serializer>(props: &BTreeMap<String, FieldMapping>, s: S) -> Result<S
         let mut node = &mut root;
         for part in parents.into_iter().flat_map(|p| p.split('.')) {
             let obj = node.entry(part).or_insert_with(|| json!({}));
+            let obj = obj.as_object_mut().ok_or_else(|| S::Error::custom(path))?;
+            // like ES, only an object without subfields names its type
+            if obj.get("type").is_some_and(|t| t == "object") {
+                obj.shift_remove("type");
+            }
             node = obj
-                .as_object_mut()
-                .ok_or_else(|| S::Error::custom(path))?
                 .entry("properties")
                 .or_insert_with(|| json!({}))
                 .as_object_mut()
@@ -703,19 +970,21 @@ fn flatten<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeMap<String, FieldMapp
         for (k, mut v) in props {
             let path = format!("{prefix}{k}");
             let nested = v.get("type").is_some_and(|t| t == "nested");
-            if nested {
-                out.insert(path.clone(), FieldMapping::Nested);
-            }
             if v.is_object() && (nested || v.get("type").is_none_or(|t| t == "object")) {
+                let dynamic = match v.get_mut("dynamic").map(Value::take) {
+                    Some(d) => Some(serde_json::from_value(d)?),
+                    None => None,
+                };
                 let sub: Map<String, Value> = match v["properties"].take() {
                     Value::Null => Map::new(),
                     p => serde_json::from_value(p)?,
                 };
-                if sub.is_empty() && !nested {
-                    out.insert(path, FieldMapping::Object);
-                } else {
-                    walk(&format!("{path}."), sub, out)?;
+                if nested {
+                    out.insert(path.clone(), FieldMapping::Nested { dynamic });
+                } else if sub.is_empty() || dynamic.is_some() {
+                    out.insert(path.clone(), FieldMapping::Object { dynamic });
                 }
+                walk(&format!("{path}."), sub, out)?;
             } else {
                 out.insert(path, serde_json::from_value(v)?);
             }

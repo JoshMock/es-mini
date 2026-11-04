@@ -1243,7 +1243,7 @@ impl Index {
         partial: &Value,
         upsert: Option<Value>,
         detect_noop: bool,
-    ) -> Result<Option<WriteResult>, String> {
+    ) -> Result<Option<WriteResult>, mapping::MapError> {
         let Some(doc) = self.shard_of(id, routing).and_then(|s| s.get(id)) else {
             let Some(source) = upsert else {
                 return Ok(None);
@@ -2122,7 +2122,7 @@ mod tests {
             (json!({"n": "s"}), object("n", "n")),
             (json!({"o": {"b": {"c": 1}}}), leaf("o.b", "{c=1}")),
         ] {
-            assert_eq!(i.map_dynamic("1", &doc), Err(err), "{doc}");
+            assert_eq!(i.map_dynamic("1", &doc), Err(err.as_str().into()), "{doc}");
             assert_eq!(i.mappings, before, "{doc} maps nothing");
         }
         i.map_dynamic("2", &json!({"o": null, "o2": {}, "a": null}))

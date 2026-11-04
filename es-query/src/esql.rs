@@ -1023,7 +1023,7 @@ fn columns<'a>(
         .map(|(c, t)| (c, (t.clone(), t)))
         .collect();
     for (name, m) in &index.mappings.properties {
-        if *m == FieldMapping::Object {
+        if matches!(m, FieldMapping::Object { .. }) {
             continue;
         }
         cols.insert(name.clone(), types_of(m));

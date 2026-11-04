@@ -278,9 +278,9 @@ fn nested_index() -> Index {
         split_queries_on_whitespace: false,
     };
     props.insert("t".into(), keyword());
-    props.insert("c".into(), FieldMapping::Nested);
+    props.insert("c".into(), FieldMapping::Nested { dynamic: None });
     props.insert("c.a".into(), keyword());
-    props.insert("c.r".into(), FieldMapping::Nested);
+    props.insert("c.r".into(), FieldMapping::Nested { dynamic: None });
     props.insert("c.r.n".into(), FieldMapping::Long);
     idx.put(
         "1",

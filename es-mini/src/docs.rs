@@ -32,78 +32,6 @@ fn parse_source(body: &[u8]) -> Result<Value, AppError> {
     }
 }
 
-/// Where (1-based line, and column in bytes, as Jackson counts) the first value equal to `v`
-/// under the dotted key `path` starts in the JSON document `raw`.
-pub(crate) fn locate(raw: &[u8], path: &str, v: &Value) -> Option<(usize, usize)> {
-    fn skip_ws(raw: &[u8], at: &mut usize) {
-        while raw.get(*at).is_some_and(u8::is_ascii_whitespace) {
-            *at += 1;
-        }
-    }
-    /// One past the string starting at `start`.
-    fn string_end(raw: &[u8], start: usize) -> usize {
-        let mut at = start + 1;
-        while at < raw.len() && raw[at] != b'"' {
-            at += if raw[at] == b'\\' { 2 } else { 1 };
-        }
-        at + 1
-    }
-    /// Walks the value at `at`, found under `here`, to the end of it.
-    fn walk(raw: &[u8], at: &mut usize, here: &str, path: &str, v: &Value) -> Option<usize> {
-        skip_ws(raw, at);
-        let start = *at;
-        match *raw.get(start)? {
-            open @ (b'{' | b'[') => {
-                *at += 1;
-                while *at < raw.len() {
-                    skip_ws(raw, at);
-                    if matches!(raw.get(*at), Some(b'}' | b']')) {
-                        *at += 1;
-                        return None;
-                    }
-                    let child = match open {
-                        b'{' => {
-                            let end = string_end(raw, *at);
-                            let key: String = serde_json::from_slice(raw.get(*at..end)?).ok()?;
-                            *at = end;
-                            skip_ws(raw, at);
-                            *at += 1; // the colon
-                            match here {
-                                "" => key,
-                                _ => format!("{here}.{key}"),
-                            }
-                        }
-                        _ => here.to_owned(),
-                    };
-                    if let Some(found) = walk(raw, at, &child, path, v) {
-                        return Some(found);
-                    }
-                    skip_ws(raw, at);
-                    if raw.get(*at) == Some(&b',') {
-                        *at += 1;
-                    }
-                }
-                return None;
-            }
-            b'"' => *at = string_end(raw, start),
-            _ => {
-                while raw.get(*at).is_some_and(|b| !b",]} \t\r\n".contains(b)) {
-                    *at += 1;
-                }
-            }
-        }
-        let value = serde_json::from_slice::<Value>(raw.get(start..*at)?).ok();
-        (here == path && value.as_ref() == Some(v)).then_some(start)
-    }
-    let start = walk(raw, &mut 0, "", path, v)?;
-    let line_start = raw[..start]
-        .iter()
-        .rposition(|b| *b == b'\n')
-        .map_or(0, |i| i + 1);
-    let line = 1 + raw[..start].iter().filter(|b| **b == b'\n').count();
-    Some((line, start - line_start + 1))
-}
-
 fn check_source(v: Value) -> Result<Value, AppError> {
     if !v.is_object() {
         return Err(AppError::MapperParsing(
@@ -285,7 +213,8 @@ pub fn put_or_create(
                 .find(|v| es_query::bad_date(Some(format), locale, v))
             {
                 let text = es_index::postings::text(v);
-                let at = locate(raw, name, v).map_or(String::new(), |(l, c)| format!("[{l}:{c}] "));
+                let at = es_index::mapping::locate(raw, name, v, false)
+                    .map_or(String::new(), |(l, c)| format!("[{l}:{c}] "));
                 let error = AppError::DocumentParsing(format!(
                     "{at}failed to parse field [{name}] of type [{}] in document with id '{id}'. \
                      Preview of field's value: '{text}'",
@@ -307,8 +236,7 @@ pub fn put_or_create(
             }
         }
         // only once the document is accepted; dynamic dates never fail the check above
-        i.map_dynamic(id, &source)
-            .map_err(AppError::DocumentParsing)?;
+        i.map_dynamic_in(id, &source, Some(raw))?;
         Ok(match create {
             true => i.create_auto(id, routing, source, auto_id_timestamp),
             false => Ok(i.put_auto(id, routing, source, auto_id_timestamp)),
@@ -733,7 +661,7 @@ pub fn update_doc(
     let detect_noop = body["detect_noop"].as_bool() != Some(false);
     let (w, total, index) = write_doc(state, index, (id, routing), |i, routing| {
         i.update(id, routing, &partial, upsert, detect_noop)
-            .map_err(AppError::DocumentParsing)
+            .map_err(AppError::from)
     })?;
     let w = w?.ok_or_else(|| AppError::DocumentMissing {
         index: index.clone(),

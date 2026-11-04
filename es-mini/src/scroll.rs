@@ -228,7 +228,7 @@ pub(crate) fn pit(contexts: &Contexts, pit: &Value, raw: &[u8]) -> Result<Snapsh
     let n = decode_pit(id).map_err(|e| {
         let (_, mut cause) = e.parts();
         cause.as_object_mut().map(|c| c.remove("root_cause"));
-        let at = crate::docs::locate(raw, "pit.id", &pit["id"]);
+        let at = es_index::mapping::locate(raw, "pit.id", &pit["id"], false);
         let at = at.map_or(String::new(), |(l, c)| format!("[{l}:{c}] "));
         let error = AppError::XContentParse(format!("{at}[pit] failed to parse field [id]"));
         AppError::Caused(Box::new(error), cause)

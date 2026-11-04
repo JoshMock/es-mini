@@ -1578,7 +1578,7 @@ fn doc_value(s: &Searcher, field: &str, mapping: &FieldMapping, v: &Value) -> Op
             let n = |k| mapping.range_number(k).clamp(f64::MIN, f64::MAX);
             Some(Value::from(vec![n(from), n(to)]))
         }
-        M::Text { .. } | M::TextKeyword { .. } | M::Nested | M::Object => None,
+        M::Text { .. } | M::TextKeyword { .. } | M::Nested { .. } | M::Object { .. } => None,
     }
 }
 
@@ -3365,7 +3365,7 @@ mod tests {
     fn nested_buckets_documents_with_objects_at_the_path() {
         let mut ix = Index::default();
         let props = &mut ix.mappings.properties;
-        props.insert("n".into(), FieldMapping::Nested);
+        props.insert("n".into(), FieldMapping::Nested { dynamic: None });
         props.insert("n.i".into(), FieldMapping::Integer);
         ix.put("1", json!({"n": {"i": 2}}));
         ix.put("2", json!({"n": [{"i": 3}]}));

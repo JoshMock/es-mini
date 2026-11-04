@@ -691,7 +691,7 @@ fn lucene_docs<'a>(mappings: &Mappings, docs: &[(&str, &'a Document)]) -> Vec<Lu
 
 fn nested_paths(mappings: &Mappings) -> Vec<&str> {
     (mappings.properties.iter())
-        .filter(|(_, m)| **m == crate::FieldMapping::Nested)
+        .filter(|(_, m)| matches!(m, crate::FieldMapping::Nested { .. }))
         .map(|(p, _)| p.as_str())
         .collect()
 }
@@ -761,7 +761,7 @@ fn user_fields(
                 })
                 .collect()
         };
-        if values.iter().all(Vec::is_empty) && !matches!(mapping, M::Nested | M::Object) {
+        if values.iter().all(Vec::is_empty) && !mapping.is_object() {
             out.empty.push(name);
             continue;
         }
@@ -911,7 +911,7 @@ fn user_fields(
                 (IndexOptions::None, DocValuesType::Binary, false)
             }
             // The path of nested documents (see `lucene_docs`), not a field
-            M::Nested | M::Object => continue,
+            M::Nested { .. } | M::Object { .. } => continue,
             M::Ip => {
                 // Like ES: points and sorted-set doc values of the 16-byte encoding, no postings.
                 let Some(ips) = typed(&values, &|v| Some(crate::ip_bytes(v))) else {
