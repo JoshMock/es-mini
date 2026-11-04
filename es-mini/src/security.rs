@@ -207,16 +207,19 @@ pub(crate) fn restricted_read(store: &Store, authn: Option<&Authn>, name: &str) 
         .flatten()
 }
 
-/// Refuses `action` on [`INDEX`] or [`ALIAS`] (`name`) to any request but the security APIs
-/// when security is on, with the error Elasticsearch gives `elastic`; `privileges` are those it
-/// says grant `action`.
+/// Refuses `action` on the system names (see [`crate::system`]) among the comma-separated
+/// `names` to any request but the security APIs when security is on, with the error
+/// Elasticsearch gives `elastic`; `privileges` are those it says grant `action`.
 pub(crate) fn refuse_restricted(
     store: &Store,
-    name: &str,
+    names: &str,
     action: &str,
     privileges: &str,
 ) -> Result<(), AppError> {
-    if !store.secured() || (name != INDEX && name != ALIAS) {
+    let restricted = (names.split(',').map(str::trim))
+        .filter(|n| !n.contains('*') && crate::system::RESTRICTED.matches(n));
+    let name = restricted.collect::<Vec<_>>().join(",");
+    if !store.secured() || name.is_empty() {
         return Ok(());
     }
     Err(AppError::Other(

@@ -230,3 +230,124 @@ async fn restricted_api_keys_are_limited_by_elastic() {
         )
     );
 }
+
+/// Elasticsearch's 403 for `elastic` doing `action` on the restricted index `index`.
+fn elastic_restricted(action: &str, index: &str, privileges: &str) -> Value {
+    let reason = format!(
+        "action [{action}] is unauthorized for user [elastic] with effective roles [superuser] on restricted indices [{index}], this action is granted by the index privileges [{privileges}]"
+    );
+    let e = json!({"type": "security_exception", "reason": reason});
+    json!({"error": {"root_cause": [e], "type": "security_exception", "reason": reason}, "status": 403})
+}
+
+#[tokio::test]
+async fn elastic_may_not_create_write_or_delete_system_names() {
+    let (app, _) = secured("elastic").await;
+    let create = "create_index,manage,all";
+    let write = "create_doc,create,delete,index,write,all";
+    let auto = "auto_configure,create_index,manage,all";
+    let delete = "delete_index,manage,all";
+    let backing = ".ds-.fleet-actions-results-2026.01.01-000001";
+    let cases = [
+        ("PUT", "/.tasks", "indices:admin/create", ".tasks", create),
+        (
+            "PUT",
+            "/.kibana_1",
+            "indices:admin/create",
+            ".kibana_1",
+            create,
+        ),
+        (
+            "PUT",
+            "/.ml-config",
+            "indices:admin/create",
+            ".ml-config",
+            create,
+        ),
+        (
+            "POST",
+            "/.tasks/_doc",
+            "indices:data/write/bulk[s]",
+            ".tasks",
+            write,
+        ),
+        (
+            "PUT",
+            "/.tasks/_create/1",
+            "indices:data/write/bulk[s]",
+            ".tasks",
+            write,
+        ),
+        (
+            "DELETE",
+            "/.tasks/_doc/1",
+            "indices:data/write/bulk[s]",
+            ".tasks",
+            write,
+        ),
+        (
+            "POST",
+            "/.async-search/_doc",
+            "indices:admin/auto_create",
+            ".async-search",
+            auto,
+        ),
+        (
+            "PUT",
+            "/.kibana_1/_doc/1",
+            "indices:admin/auto_create",
+            ".kibana_1",
+            auto,
+        ),
+        (
+            "POST",
+            "/.fleet-actions-results/_doc",
+            "indices:admin/auto_create",
+            ".fleet-actions-results",
+            auto,
+        ),
+        (
+            "POST",
+            &format!("/{backing}/_doc"),
+            "indices:admin/auto_create",
+            backing,
+            auto,
+        ),
+        (
+            "DELETE",
+            "/.tasks",
+            "indices:admin/delete",
+            ".tasks",
+            delete,
+        ),
+        (
+            "DELETE",
+            "/.tasks,logs",
+            "indices:admin/delete",
+            ".tasks",
+            delete,
+        ),
+    ];
+    for (method, uri, action, index, privileges) in cases {
+        let body = (method != "DELETE").then(|| json!({"a": 1}));
+        let got = call(&app, ELASTIC, method, uri, body).await;
+        assert_eq!(
+            got,
+            (403, elastic_restricted(action, index, privileges)),
+            "{method} {uri}"
+        );
+    }
+    // Nothing was created, written or deleted.
+    let uri = "/_cat/indices?expand_wildcards=all&format=json";
+    let (status, body) = call(&app, ELASTIC, "GET", uri, None).await;
+    let mut names: Vec<&str> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["index"].as_str().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!((status, names), (200, vec![".tasks", "logs"]));
+    let (status, doc) = call(&app, ELASTIC, "GET", "/.tasks/_doc/1", None).await;
+    assert_eq!((status, &doc["_source"]), (200, &json!({"a": 1})));
+}
