@@ -408,6 +408,27 @@ impl Mappings {
         })
     }
 
+    /// The `dynamic` for new fields of the object at `parent` (`""` for the root): the one it
+    /// or its nearest enclosing object sets, else the root's.
+    fn dynamic_in(&self, mut parent: &str) -> Dynamic {
+        while !parent.is_empty() {
+            if let Some(d) = self.properties.get(parent).and_then(FieldMapping::dynamic) {
+                return d;
+            }
+            parent = parent.rsplit_once('.').map_or("", |(p, _)| p);
+        }
+        self.dynamic.unwrap_or(Dynamic::True)
+    }
+
+    /// Whether `field` is neither mapped nor an object, under a `dynamic` that does not map
+    /// new fields: its values stay in `_source` only, so queries find nothing in it.
+    pub fn unindexed(&self, field: &str) -> bool {
+        let parent = field.rsplit_once('.').map_or("", |(p, _)| p);
+        self.field(field).is_none()
+            && !maps_under(&self.properties, field)
+            && self.dynamic_in(parent) != Dynamic::True
+    }
+
     /// The mapping of `field`, including a multi-field such as `title.keyword`.
     pub fn field(&self, field: &str) -> Option<&FieldMapping> {
         self.properties.get(field).or_else(|| {
@@ -549,23 +570,6 @@ impl Index {
         Ok(())
     }
 
-    /// The `dynamic` for new fields of the object at `parent` (`""` for the root): the one it
-    /// or its nearest enclosing object sets, else the root's.
-    fn dynamic_in(&self, mut parent: &str) -> Dynamic {
-        while !parent.is_empty() {
-            if let Some(d) = self
-                .mappings
-                .properties
-                .get(parent)
-                .and_then(FieldMapping::dynamic)
-            {
-                return d;
-            }
-            parent = parent.rsplit_once('.').map_or("", |(p, _)| p);
-        }
-        self.mappings.dynamic.unwrap_or(Dynamic::True)
-    }
-
     /// Whether the new field `field` may be mapped: refused under `dynamic: strict`, where the
     /// error is located at `value` under the document key path `key` (or at that key's name).
     fn admits(
@@ -576,7 +580,7 @@ impl Index {
         at_name: bool,
     ) -> Result<bool, Refused> {
         let parent = field.rsplit_once('.').map_or("", |(p, _)| p);
-        match self.dynamic_in(parent) {
+        match self.mappings.dynamic_in(parent) {
             Dynamic::True => Ok(true),
             Dynamic::False | Dynamic::Runtime => Ok(false),
             Dynamic::Strict => Err(Refused::Strict {

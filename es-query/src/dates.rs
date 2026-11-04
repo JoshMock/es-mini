@@ -55,6 +55,21 @@ pub(crate) fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, 
         Query::Term { field, value } if field == "_routing" => routing_term(index, text(&value)),
         Query::Term { field, value } if field == "_ignored" => Query::Ignored(text(&value)),
         Query::Match { field, query, .. } if field == "_ignored" => Query::Ignored(query),
+        // as ES's unmapped fields, which query as MatchNoDocsQuery
+        // ponytail: `_`-prefixed names are taken as metadata fields, so unmapped `_x` still
+        // reads `_source`; list ES's metadata fields if one needs it
+        Query::Match { field, .. }
+        | Query::MatchPhrase { field, .. }
+        | Query::MatchPhrasePrefix { field, .. }
+        | Query::Term { field, .. }
+        | Query::Prefix { field, .. }
+        | Query::Wildcard { field, .. }
+        | Query::Exists { field }
+        | Query::Range { field, .. }
+            if !field.starts_with('_') && index.mappings.unindexed(&field) =>
+        {
+            query_string::match_none()
+        }
         Query::Term { field, value } if ip(&field) => ranges::ip_term(field, &value)?,
         Query::Term { field, value } if ranged(&field) => term(field, value)?,
         // non-text fields read a match query as a term query

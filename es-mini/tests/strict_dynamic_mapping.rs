@@ -259,3 +259,33 @@ async fn object_dynamic_is_set_by_put_mapping_and_inherited() {
     let r = call(&app, "PUT", "/n/_doc/1", r#"{"ns":[{"x":1,"y":2}]}"#).await;
     assert_eq!(r, strict("1:19", "y", "ns"));
 }
+
+#[tokio::test]
+async fn searches_find_nothing_in_fields_dynamic_false_left_unmapped() {
+    let app = es_mini::app();
+    let body = r#"{"mappings":{"dynamic":false,"properties":{"a":{"type":"keyword"},
+      "o":{"properties":{"x":{"type":"long"}}}}}}"#;
+    call(&app, "PUT", "/f", body).await;
+    let doc = r#"{"a":"x","b":1,"c":"hello world","o":{"x":1,"p":"z"}}"#;
+    call(&app, "PUT", "/f/_doc/1?refresh=true", doc).await;
+    // Elasticsearch 9.5.5's hit counts for the same queries.
+    let queries = [
+        (r#"{"match":{"b":1}}"#, 0),
+        (r#"{"term":{"c":"hello"}}"#, 0),
+        (r#"{"exists":{"field":"b"}}"#, 0),
+        (r#"{"exists":{"field":"o"}}"#, 1),
+        (r#"{"match":{"o.p":"z"}}"#, 0),
+        (r#"{"range":{"b":{"gte":0}}}"#, 0),
+        (r#"{"prefix":{"c":"he"}}"#, 0),
+        (r#"{"wildcard":{"c.keyword":"he*"}}"#, 0),
+        (r#"{"match_phrase":{"c":"hello world"}}"#, 0),
+        (r#"{"match_phrase_prefix":{"c":"hello wo"}}"#, 0),
+        (r#"{"multi_match":{"query":"hello","fields":["c","a"]}}"#, 0),
+        (r#"{"match":{"o.x":1}}"#, 1),
+        (r#"{"bool":{"must_not":[{"term":{"b":1}}]}}"#, 1),
+    ];
+    for (q, want) in queries {
+        let r = call(&app, "POST", "/f/_count", &format!(r#"{{"query":{q}}}"#)).await;
+        assert_eq!(r["count"], want, "{q}: {r}");
+    }
+}

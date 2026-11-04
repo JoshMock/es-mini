@@ -210,7 +210,7 @@ struct Parser {
 }
 
 /// No documents.
-fn match_none() -> Query {
+pub(crate) fn match_none() -> Query {
     Query::Bool {
         must: vec![],
         should: vec![],
