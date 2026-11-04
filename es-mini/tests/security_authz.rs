@@ -1453,3 +1453,25 @@ async fn cat_aliases_lists_what_get_aliases_would() {
     );
     assert_denied(&app, &kr, "GET", "/_cat/aliases", expected).await;
 }
+
+/// An added alias may not let the key do any action on it that it may not do on the index,
+/// compared over every action name the privileges' patterns match, as Elasticsearch compares
+/// their automata (`Operations.subsetOf`), not just the actions es-mini knows.
+#[tokio::test]
+async fn security_authz_gaps_alias_permissions_compare_all_actions() {
+    let app = app().await;
+    let roles = json!({"r": {"indices": [
+        {"names": ["a*"], "privileges": ["manage"]},
+        {"names": ["ax*"], "privileges": ["indices:custom/action"]},
+        {"names": ["am*"], "privileges": ["monitor", "indices:admin/ilm/explain"]},
+    ]}});
+    let (k, _) = key(&app, ELASTIC, roles).await;
+    let post = |alias: &str| Some(json!({"actions": [{"add": {"index": "a1", "alias": alias}}]}));
+    let (status, out) = call(&app, &k, "POST", "/_aliases", post("ax1")).await;
+    assert_eq!(status, 403, "{out}");
+    assert_eq!(
+        out["error"]["reason"],
+        "Adding an alias is not allowed when the alias has more permissions than any of the indices"
+    );
+    ok(&app, &k, "POST", "/_aliases", post("am1")).await;
+}

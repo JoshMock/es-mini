@@ -774,19 +774,15 @@ fn bodies(actions: &mut [Value]) -> impl Iterator<Item = (&String, &mut Value)> 
 }
 
 /// Refuses adding `aliases` to the indices `index`/`indices` if the key may do an index action
-/// on an alias that it may not on an index.
-// ponytail: compares the actions es-mini knows, not Elasticsearch's action automata
+/// on an alias that it may not on an index, as Elasticsearch's `validateIndexPermissionsAreSubset`.
 fn more_than_indices(
     key: &Key,
     aliases: &[String],
     index: &Value,
     indices: &Value,
 ) -> Result<(), AppError> {
-    let mut actions = (GRANTED_BY.iter()).filter(|(a, _)| a.starts_with("indices:"));
     let names: Vec<&str> = strs_or_str(index).chain(strs_or_str(indices)).collect();
-    let more = actions.any(|(a, _)| {
-        (aliases.iter()).any(|alias| key.index(a, alias) && names.iter().any(|n| !key.index(a, n)))
-    });
+    let more = (aliases.iter()).any(|alias| names.iter().any(|n| more_actions(key, alias, n)));
     match more {
         true => Err(AppError::Other(
             StatusCode::FORBIDDEN,
@@ -795,6 +791,72 @@ fn more_than_indices(
         )),
         false => Ok(()),
     }
+}
+
+/// Whether some action name the key may do on `alias` it may not on `index`: Elasticsearch's
+/// `Operations.subsetOf` of their allowed-action automata, here a search over the states of
+/// every action pattern at once, reading each literal character or one that none names.
+fn more_actions(key: &Key, alias: &str, index: &str) -> bool {
+    // Per role descriptor set, the (included, excluded) action patterns of each privilege the
+    // set grants on the name; the key may do an action if every set may.
+    let allowed = |name: &str| -> Vec<Vec<(Vec<String>, &[&str])>> {
+        (key.roles.iter())
+            .map(|set| {
+                entries(set)
+                    .filter(|e| strs(&e["names"]).any(|n| role_name(n, name)))
+                    .flat_map(|e| strs(&e["privileges"]).filter_map(|p| INDEX.actions(p)))
+                    .collect()
+            })
+            .collect()
+    };
+    let (on_alias, on_index) = (allowed(alias), allowed(index));
+    let mut patterns: Vec<String> = vec![];
+    for (inc, exc) in on_alias.iter().chain(&on_index).flatten() {
+        patterns.extend(inc.iter().cloned().chain(exc.iter().map(|e| e.to_string())));
+    }
+    patterns.sort();
+    patterns.dedup();
+    let globs: Vec<Wildcard> = patterns.iter().map(|p| Wildcard::new(p)).collect();
+    let mut alphabet: Vec<char> = globs.iter().flat_map(Wildcard::literals).collect();
+    alphabet.sort();
+    alphabet.dedup();
+    // A character no pattern names stands for all of them.
+    alphabet.push(
+        (0..)
+            .filter_map(char::from_u32)
+            .find(|c| !alphabet.contains(c))
+            .unwrap(),
+    );
+    // A state: each pattern that can still match, with its states.
+    type State = Vec<(usize, Vec<usize>)>;
+    let may = |sets: &[Vec<(Vec<String>, &[&str])>], at: &State| {
+        let accepts = |p: &str| {
+            let i = patterns.binary_search_by(|q| q.as_str().cmp(p)).unwrap();
+            (at.binary_search_by_key(&i, |(g, _)| *g)).is_ok_and(|j| globs[i].accepts(&at[j].1))
+        };
+        (sets.iter()).all(|privs| {
+            (privs.iter())
+                .any(|(inc, exc)| inc.iter().any(|i| accepts(i)) && !exc.iter().any(|e| accepts(e)))
+        })
+    };
+    let start: State = globs.iter().map(Wildcard::start).enumerate().collect();
+    let mut seen = std::collections::HashSet::from([start.clone()]);
+    let mut todo = vec![start];
+    while let Some(at) = todo.pop() {
+        if may(&on_alias, &at) && !may(&on_index, &at) {
+            return true;
+        }
+        for &c in &alphabet {
+            let next: State = (at.iter())
+                .map(|(g, a)| (*g, globs[*g].step(a, c)))
+                .filter(|(_, a)| !a.is_empty())
+                .collect();
+            if seen.insert(next.clone()) {
+                todo.push(next);
+            }
+        }
+    }
+    false
 }
 
 /// The names of a string-or-array parameter.
@@ -1782,52 +1844,73 @@ fn covers(e: &Value, action: &str, name: &str) -> bool {
 /// `Automatons.pattern` does: `/.../` is a Lucene regular expression (one that does not compile
 /// matches nothing), and otherwise `*` is any string, `?` any character and `\` escapes.
 fn role_name(pattern: &str, name: &str) -> bool {
-    /// The pattern's states reachable after each character of `s`: linear in both, where
-    /// backtracking at each `*` is exponential in role names users supply.
-    fn wildcard(p: &[char], s: &[char]) -> bool {
-        // Tokens: None is `*`, Some(None) is `?`, Some(Some(c)) is `c` (escapes resolved).
-        let mut toks: Vec<Option<Option<char>>> = vec![];
-        let mut chars = p.iter();
-        while let Some(&c) = chars.next() {
+    match pattern.strip_prefix('/').and_then(|p| p.strip_suffix('/')) {
+        Some(re) => es_query::regexp_matches(re, name).unwrap_or(false),
+        None => {
+            let w = Wildcard::new(pattern);
+            w.accepts(&name.chars().fold(w.start(), |at, c| w.step(&at, c)))
+        }
+    }
+}
+
+/// An `Automatons.pattern` wildcard: `*` is any string, `?` any character and `\` escapes. It
+/// runs over the set of its states reachable after each character, linear in the pattern and
+/// the input, where backtracking at each `*` is exponential in role names users supply.
+struct Wildcard {
+    /// None is `*`, Some(None) is `?`, Some(Some(c)) is `c` (escapes resolved).
+    toks: Vec<Option<Option<char>>>,
+}
+
+impl Wildcard {
+    fn new(pattern: &str) -> Self {
+        let mut toks = vec![];
+        let mut chars = pattern.chars();
+        while let Some(c) = chars.next() {
             toks.push(match c {
                 '*' => None,
                 '?' => Some(None),
-                '\\' => Some(Some(*chars.next().unwrap_or(&'\\'))),
+                '\\' => Some(Some(chars.next().unwrap_or('\\'))),
                 c => Some(Some(c)),
             });
         }
-        // at[i]: the first i tokens can match the input read so far.
-        let close = |at: &mut Vec<bool>| {
-            for i in 0..toks.len() {
-                if at[i] && toks[i].is_none() {
-                    at[i + 1] = true;
-                }
-            }
-        };
-        let mut at = vec![false; toks.len() + 1];
-        at[0] = true;
-        close(&mut at);
-        for &ch in s {
-            let mut next = vec![false; toks.len() + 1];
-            for i in 0..toks.len() {
-                match toks[i] {
-                    _ if !at[i] => {}
-                    None => next[i] = true,
-                    Some(t) if t.is_none_or(|t| t == ch) => next[i + 1] = true,
-                    Some(_) => {}
-                }
-            }
-            close(&mut next);
-            at = next;
-        }
-        at[toks.len()]
+        Wildcard { toks }
     }
-    match pattern.strip_prefix('/').and_then(|p| p.strip_suffix('/')) {
-        Some(re) => es_query::regexp_matches(re, name).unwrap_or(false),
-        None => wildcard(
-            &pattern.chars().collect::<Vec<_>>(),
-            &name.chars().collect::<Vec<_>>(),
-        ),
+
+    /// The states before any input: `i` if the first i tokens match it, ascending.
+    fn start(&self) -> Vec<usize> {
+        self.close(vec![0])
+    }
+
+    /// `at` with the states each `*` lets skip past it, ascending and without repeats.
+    fn close(&self, mut at: Vec<usize>) -> Vec<usize> {
+        let mut i = 0;
+        while i < at.len() {
+            if self.toks.get(at[i]).is_some_and(Option::is_none) {
+                at.push(at[i] + 1);
+            }
+            i += 1;
+        }
+        at.sort_unstable();
+        at.dedup();
+        at
+    }
+
+    fn step(&self, at: &[usize], ch: char) -> Vec<usize> {
+        let next = (at.iter()).filter_map(|&i| match self.toks.get(i)? {
+            None => Some(i),
+            Some(t) if t.is_none_or(|t| t == ch) => Some(i + 1),
+            Some(_) => None,
+        });
+        self.close(next.collect())
+    }
+
+    fn accepts(&self, at: &[usize]) -> bool {
+        at.last() == Some(&self.toks.len())
+    }
+
+    /// The characters the pattern names literally.
+    fn literals(&self) -> impl Iterator<Item = char> + '_ {
+        self.toks.iter().filter_map(|t| t.flatten())
     }
 }
 
