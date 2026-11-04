@@ -1763,6 +1763,48 @@ impl Key<'_> {
     }
 }
 
+/// Why `name` is not a valid application name, as Elasticsearch's
+/// `ApplicationPrivilege.validateApplicationName` (no wildcards) says.
+fn application_name_error(name: &str) -> Option<String> {
+    if name.is_empty() {
+        return Some("Application names cannot be blank".into());
+    }
+    if name.contains('*') {
+        return Some(format!(
+            "Application names may not contain '*' (found '{name}')"
+        ));
+    }
+    // Java's [\v\h]: Unicode White_Space plus U+180E.
+    if name.chars().any(|c| c.is_whitespace() || c == '\u{180e}') {
+        return Some(format!(
+            "Application names may not contain whitespace (found '{name}')"
+        ));
+    }
+    let (prefix, suffix) = match name.split_once(['_', '-']) {
+        Some((p, s)) => (p, Some(s)),
+        None => (name, None),
+    };
+    let mut chars = prefix.chars();
+    if !(chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && chars.all(|c| c.is_ascii_alphanumeric()))
+    {
+        return Some(format!(
+            "An application name prefix must match the pattern ^[a-z][A-Za-z0-9]*$ (found '{prefix}')"
+        ));
+    }
+    if prefix.len() < 3 {
+        return Some(format!(
+            "An application name prefix must be at least 3 characters long (found '{prefix}')"
+        ));
+    }
+    let invalid = ['\\', '/', '*', '?', '"', '<', '>', '|', ' ', ','];
+    suffix.filter(|s| s.contains(invalid)).map(|s| {
+        format!(
+            r#"An application name suffix may not contain any of the characters '[' ','"','*',',','/','<','>','?','\','|']' (found '{s}')"#
+        )
+    })
+}
+
 /// `GET|POST /_security/user/_has_privileges`: which of the privileges the request names the
 /// user (`elastic`, or an API key, limited by its creator) has.
 pub(super) async fn has_privileges(
@@ -1836,17 +1878,12 @@ pub(super) async fn has_privileges(
         let reason = "must specify at least one privilege";
         return Err(AppError::ActionRequestValidation(reason.into()));
     }
+    let names = application
+        .iter()
+        .map(|a| a["application"].as_str().unwrap_or(""));
+    super::validate(names.filter_map(application_name_error).collect())?;
     if let Some(e) = super::privilege_errors(&role).into_iter().next() {
         return Err(AppError::IllegalArgument(e));
-    }
-    // ponytail: of the validations of application privileges, only the name's length
-    for a in application {
-        let name = a["application"].as_str().unwrap_or("");
-        if name.chars().count() < 3 {
-            return Err(AppError::ActionRequestValidation(format!(
-                "An application name prefix must be at least 3 characters long (found '{name}')"
-            )));
-        }
     }
     let elastic;
     let (id, roles) = match &authn {

@@ -1552,3 +1552,37 @@ async fn security_authz_gaps_alias_permissions_compare_all_actions() {
     );
     ok(&app, &k, "POST", "/_aliases", post("am1")).await;
 }
+
+/// `_has_privileges` validates each application name as Elasticsearch 9.5.5's
+/// `ApplicationPrivilege.validateApplicationName` does, numbering every failure.
+#[tokio::test]
+async fn security_validation_has_privileges_application_names() {
+    let app = app().await;
+    let names = [
+        "",
+        "app*",
+        "my app",
+        "1app",
+        "ab-x",
+        "app-a/b",
+        "app_ok-fine",
+    ];
+    let application: Vec<Value> = (names.iter())
+        .map(|n| json!({"application": n, "privileges": ["read"], "resources": ["*"]}))
+        .collect();
+    let uri = "/_security/user/_has_privileges";
+    let body = Some(json!({ "application": application }));
+    let (status, out) = call(&app, ELASTIC, "POST", uri, body).await;
+    assert_eq!(status, 400, "{out}");
+    let reason = concat!(
+        "Validation Failed: 1: Application names cannot be blank;",
+        "2: Application names may not contain '*' (found 'app*');",
+        "3: Application names may not contain whitespace (found 'my app');",
+        "4: An application name prefix must match the pattern ^[a-z][A-Za-z0-9]*$ (found '1app');",
+        "5: An application name prefix must be at least 3 characters long (found 'ab');",
+        "6: An application name suffix may not contain any of the characters ",
+        r#"'[' ','"','*',',','/','<','>','?','\','|']' (found 'a/b');"#,
+    );
+    assert_eq!(out["error"]["type"], "action_request_validation_exception");
+    assert_eq!(out["error"]["reason"], reason);
+}
