@@ -29,7 +29,7 @@ pub(crate) use authz::{
 
 /// The system index keys are stored in, as Elasticsearch names it, behind the [`ALIAS`] alias.
 pub(crate) const INDEX: &str = ".security-7";
-const ALIAS: &str = ".security";
+pub(crate) const ALIAS: &str = ".security";
 
 /// The challenges a 401 sends, in Elasticsearch's order.
 const CHALLENGES: [&str; 2] = ["Basic realm=\"security\", charset=\"UTF-8\"", "ApiKey"];

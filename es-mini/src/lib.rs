@@ -13,6 +13,7 @@ mod scroll;
 mod search;
 mod security;
 mod store;
+mod system;
 mod template;
 
 use axum::{
