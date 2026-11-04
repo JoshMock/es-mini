@@ -120,6 +120,7 @@ const GOAL_MODELS: Record<string, string> = Object.fromEntries(
       "aggs-profile", "search-profile", "mapping-and-settings", "security-yaml",
       "search-routing", "replica-counts", "security-index-reads", "alias-api-gaps",
       "strict-dynamic-mapping",
+      "system-indices",
     ],
     [`${SONNET}:medium`]: [
       "api-node-stubs", "constant-score-boost", "auto-id-format", "alias-date-math",
