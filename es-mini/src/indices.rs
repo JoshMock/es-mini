@@ -691,7 +691,10 @@ pub async fn put_mapping(
         .collect::<Result<Vec<_>, _>>()
         .map_err(AppError::IllegalArgument)?;
     for (n, m) in names.into_iter().zip(merged) {
-        indices.get_mut(&n).expect("resolved index exists").mappings = m;
+        indices
+            .get_mut(&n)
+            .expect("resolved index exists")
+            .set_mappings(m);
     }
     Ok(Json(json!({"acknowledged": true})))
 }

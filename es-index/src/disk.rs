@@ -377,6 +377,10 @@ fn load_shard(index: &mut Shard, dir: &Path) -> es_codec::Result<()> {
     {
         index.next_seq_no = index.next_seq_no.max(max + 1);
     }
+    if let Some(changes) = infos.user_data.get(IGNORE_ABOVE) {
+        index.ignore_above =
+            serde_json::from_str(changes).map_err(|e| es_codec::Error(e.to_string()))?;
+    }
     index.commit = infos.user_data;
     let (mut segments, mut shard) = (
         vec![],
@@ -703,9 +707,13 @@ fn nested_scope<'a>(nested: &[&'a str], path: &str) -> &'a str {
     holds.max_by_key(|n| n.len()).unwrap_or(&"")
 }
 
+/// The mapped fields of Lucene `docs`, of saved documents with sequence numbers `seq_nos`, whose
+/// keyword fields' `ignore_above` went through `changes`.
 fn user_fields(
     mappings: &Mappings,
     docs: &[LuceneDoc],
+    seq_nos: &[u64],
+    changes: &[crate::postings::LimitChange],
     meta: &[es_codec::field_infos::FieldInfo],
 ) -> UserFields {
     use crate::FieldMapping as M;
@@ -832,15 +840,21 @@ fn user_fields(
                 )
             }
             M::Keyword { ignore_above, .. } => {
-                let fits = |s: &str| !crate::postings::ignored(*ignore_above, s);
-                for (doc, vs) in values.iter().enumerate() {
-                    if vs.iter().any(|v| scalar_text(v).is_some_and(|s| !fits(&s))) {
+                // Each with the limit its document was indexed with.
+                let mut values = values;
+                for (doc, vs) in values.iter_mut().enumerate() {
+                    let seq_no = seq_nos[docs[doc].doc];
+                    let limit = crate::postings::limit_at(changes, path, *ignore_above, seq_no);
+                    let fits = |v: &&Value| {
+                        scalar_text(v).is_none_or(|s| !crate::postings::ignored(limit, &s))
+                    };
+                    if !vs.iter().all(fits) {
                         ignored[doc].push(Value::from(name.as_str()));
                     }
+                    vs.retain(fits);
                 }
-                let Some(keys) = typed(&values, &|v| {
-                    scalar_text(v).map(|s| fits(&s).then(|| s.into_bytes()))
-                }) else {
+                let Some(keys) = typed(&values, &|v| scalar_text(v).map(|s| Some(s.into_bytes())))
+                else {
                     continue;
                 };
                 let keys = dedup(keys);
@@ -1378,6 +1392,10 @@ fn commit(data_dir: &Path, indices: &Indices) -> es_codec::Result<()> {
 /// schemas), so older segments are rewritten too.
 const WRITER: (&str, &str) = ("es-mini.writer", "6");
 
+/// The commit user data listing (as a JSON array) the shard's keyword `ignore_above` changes,
+/// which its documents' terms depend on (see [`crate::Shard::ignore_above`]).
+const IGNORE_ABOVE: &str = "es-mini.ignore_above";
+
 /// The diagnostic listing (as a JSON array) the mapped fields a segment has no values of, unlike
 /// those it leaves out (mapped later, or holding values it cannot encode), which a merge must
 /// not index for its docs.
@@ -1588,12 +1606,14 @@ fn reuse_segments(
 }
 
 /// Writes segment number `counter` of `dir` holding `docs`' `_id`, `_source`, `_version`,
-/// `_seq_no` and mapped fields.
+/// `_seq_no` and mapped fields, keyword ones with the `ignore_above` of their document (see
+/// [`crate::postings::limit_at`]).
 fn write_docs(
     dir: &Path,
     counter: i64,
     docs: &[(&str, &Document)],
     mappings: &Mappings,
+    changes: &[crate::postings::LimitChange],
     fields: &[es_codec::field_infos::FieldInfo],
 ) -> es_codec::Result<es_codec::SegmentCommitInfo> {
     use es_codec::{
@@ -1602,7 +1622,8 @@ fn write_docs(
         uid::encode_id,
     };
     let lucene = lucene_docs(mappings, docs);
-    let user = user_fields(mappings, &lucene, fields);
+    let seq_nos: Vec<u64> = docs.iter().map(|(_, d)| d.seq_no).collect();
+    let user = user_fields(mappings, &lucene, &seq_nos, changes, fields);
     let nested_path = (fields.len() + user.fields.len()) as i32;
     let routing_number = nested_path + i32::from(lucene.iter().any(|l| !l.path.is_empty()));
     // Built a doc at a time as the stored fields writer asks for them.
@@ -2093,6 +2114,7 @@ fn write_shard(prev: &Path, dir: &Path, ix: &Index, shard: &Shard) -> es_codec::
             infos.counter,
             &docs,
             &ix.mappings,
+            &shard.ignore_above,
             &es_codec::segment_writer::es_meta_fields(),
         )?);
         infos.counter += 1;
@@ -2115,6 +2137,11 @@ fn write_shard(prev: &Path, dir: &Path, ix: &Index, shard: &Shard) -> es_codec::
         if let Some(v) = shard.commit.get(key) {
             infos.user_data.insert(key.into(), v.clone());
         }
+    }
+    if !shard.ignore_above.is_empty() {
+        let changes = serde_json::to_string(&shard.ignore_above)
+            .map_err(|e| es_codec::Error(e.to_string()))?;
+        infos.user_data.insert(IGNORE_ABOVE.into(), changes);
     }
     infos.write(dir)?;
     // The commit holds every operation, so the translog starts a new, empty generation.

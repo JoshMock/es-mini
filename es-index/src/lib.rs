@@ -300,6 +300,9 @@ pub struct Shard {
     by_seq_no: BTreeMap<u64, (String, Arc<Document>)>,
     /// Postings over `docs`, built per field as queries need them (see [`postings`]).
     postings: std::sync::Mutex<postings::Postings>,
+    /// The `ignore_above` changes of its keyword fields, oldest first (see
+    /// [`Shard::ignore_above`]); kept in the shard's commit user data.
+    ignore_above: Vec<postings::LimitChange>,
     /// Documents in memory with lower sequence numbers are in the segments, which `stats`
     /// already counts: a snapshot's copies of those on disk, or those of the last commit.
     persisted: u64,
@@ -569,6 +572,7 @@ impl Shard {
             by_seq_no: self.by_seq_no.clone(),
             disk: self.disk.clone(),
             superseded: self.superseded.clone(),
+            ignore_above: self.ignore_above.clone(),
             persisted: self.persisted,
             next_seq_no: self.next_seq_no,
             refreshed_seq_no: self.visible_seq_no(settings),
@@ -930,8 +934,34 @@ impl Shard {
         }
     }
 
-    /// The `_ignored` fields of each live document listing any (see [`Mappings::ignored`]):
-    /// those its segment indexed for a document on disk, those of `mappings` for one in memory.
+    /// The `ignore_above` the document `seq_no` was indexed with at source `path`, by a keyword
+    /// field whose mapping now sets `limit`: as in Elasticsearch, a change applies only to
+    /// documents indexed afterwards (see [`Index::set_mappings`]).
+    pub fn ignore_above(&self, path: &str, limit: Option<u32>, seq_no: u64) -> Option<u32> {
+        postings::limit_at(&self.ignore_above, path, limit, seq_no)
+    }
+
+    /// The keyword fields, multi-fields included, holding a value of `d` longer than the
+    /// `ignore_above` it was indexed with, sorted: what Elasticsearch lists in its `_ignored`.
+    pub fn ignored_fields(&self, mappings: &Mappings, d: &Document) -> Vec<String> {
+        use postings::{ignored, text, values};
+        let mut out: Vec<String> = (mappings.with_multi_fields())
+            .filter(|(_, path, m)| match m {
+                FieldMapping::Keyword { ignore_above, .. } => {
+                    let limit = self.ignore_above(path, *ignore_above, d.seq_no);
+                    (values(&d.source, path).iter())
+                        .any(|v| !v.is_object() && ignored(limit, &text(v)))
+                }
+                _ => false,
+            })
+            .map(|(name, ..)| name)
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// The `_ignored` fields of each live document listing any: those its segment indexed for
+    /// a document on disk, [`ignored_fields`](Self::ignored_fields) for one in memory.
     pub fn ignored(&self, mappings: &Mappings) -> HashMap<String, Vec<String>> {
         let mut disk = self.disk_values(mappings, "_ignored");
         let on_disk = (self.disk_live()).filter_map(|(_, (id, _))| {
@@ -940,7 +970,8 @@ impl Shard {
                 disk(id)?.iter().map(postings::text).collect(),
             ))
         });
-        let in_memory = (self.docs.iter()).map(|(id, d)| (id.clone(), mappings.ignored(&d.source)));
+        let in_memory =
+            (self.docs.iter()).map(|(id, d)| (id.clone(), self.ignored_fields(mappings, d)));
         (on_disk.chain(in_memory))
             .filter(|(_, fields)| !fields.is_empty())
             .collect()
@@ -1111,6 +1142,38 @@ impl Index {
     /// Makes all writes so far visible to search.
     pub fn refresh(&mut self) {
         self.shards.iter_mut().for_each(Shard::refresh);
+    }
+
+    /// Replaces the mappings, as PUT _mapping does. Like Elasticsearch, a keyword field whose
+    /// `ignore_above` changes keeps the old limit for the documents indexed so far.
+    pub fn set_mappings(&mut self, mappings: Mappings) {
+        let limits = |m: &Mappings| -> BTreeMap<String, (String, Option<u32>)> {
+            (m.with_multi_fields())
+                .filter_map(|(name, path, m)| match m {
+                    FieldMapping::Keyword { ignore_above, .. } => {
+                        Some((name, (path.clone(), *ignore_above)))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let new = limits(&mappings);
+        for (name, (path, old)) in limits(&self.mappings) {
+            let Some(&(_, new)) = new.get(&name).filter(|(_, l)| *l != old) else {
+                continue;
+            };
+            for shard in &mut self.shards {
+                let seq_no = shard.next_seq_no;
+                let path = path.clone();
+                (shard.ignore_above).push(postings::LimitChange {
+                    seq_no,
+                    path,
+                    old,
+                    new,
+                });
+            }
+        }
+        self.mappings = mappings;
     }
 
     /// See [`Shard::memo`].

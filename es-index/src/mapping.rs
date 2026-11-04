@@ -336,22 +336,6 @@ impl Mappings {
         })
     }
 
-    /// The keyword fields, multi-fields included, holding a value of `source` longer than their
-    /// `ignore_above`, sorted: what Elasticsearch lists in a document's `_ignored`.
-    pub fn ignored(&self, source: &Value) -> Vec<String> {
-        use crate::postings::{ignored, text, values};
-        let mut out: Vec<String> = (self.with_multi_fields())
-            .filter(|(_, path, m)| match m {
-                FieldMapping::Keyword { ignore_above, .. } => (values(source, path).iter())
-                    .any(|v| !v.is_object() && ignored(*ignore_above, &text(v))),
-                _ => false,
-            })
-            .map(|(name, ..)| name)
-            .collect();
-        out.sort();
-        out
-    }
-
     /// Adds `new` fields, replacing those at the same paths; an empty object that gains
     /// subfields stops being an entry of its own.
     pub fn extend(&mut self, new: BTreeMap<String, FieldMapping>) {

@@ -325,6 +325,21 @@ impl<'a> Searcher<'a> {
         })
     }
 
+    /// `kind` for document `d`: a keyword at source `path` has the `ignore_above` it was
+    /// indexed with (see [`Shard::ignore_above`]).
+    fn at(&self, kind: Kind, path: &str, d: &Document) -> Kind {
+        match kind {
+            Kind::Keyword(limit) => Kind::Keyword(self.shard.ignore_above(path, limit, d.seq_no)),
+            k => k,
+        }
+    }
+
+    /// [`kind`](Self::kind) for document `d` (see [`at`](Self::at)).
+    fn doc_kind<'f>(&self, field: &'f str, d: &Document) -> (Kind, &'f str) {
+        let (kind, path) = self.kind(field);
+        (self.at(kind, path, d), path)
+    }
+
     fn kind<'f>(&self, field: &'f str) -> (Kind, &'f str) {
         let path = |literal| match literal {
             true => field,
@@ -406,17 +421,9 @@ impl<'a> Searcher<'a> {
         }
         let (mut docs, mut len) = (0.0, 0.0);
         let mut df: HashMap<&str, f64> = HashMap::new();
-        let live = self.index.docs().map(|(_, d)| match d {
-            Cow::Borrowed(d) => Cow::Borrowed(&d.source),
-            Cow::Owned(d) => Cow::Owned(d.source),
-        });
-        for source in live.chain(
-            self.shard
-                .superseded()
-                .iter()
-                .map(|d| Cow::Borrowed(&d.source)),
-        ) {
-            let t = terms(kind, &values(&source, path));
+        let live = self.index.docs().map(|(_, d)| d);
+        for d in live.chain(self.shard.superseded().iter().map(|d| Cow::Borrowed(&**d))) {
+            let t = terms(self.at(kind, path, &d), &values(&d.source, path));
             if t.is_empty() {
                 continue;
             }
@@ -798,7 +805,7 @@ impl<'a> Searcher<'a> {
         id: &str,
         d: &Document,
     ) -> Vec<Value> {
-        let (kind, path) = self.kind(field);
+        let (kind, path) = self.doc_kind(field, d);
         if matches!(kind, Kind::Number | Kind::Bool) {
             return vec![];
         }
@@ -908,7 +915,7 @@ impl<'a> Searcher<'a> {
                 Some(idf * (1.0 + K1) * tf)
             }
             Query::Prefix { field, prefix } => {
-                let (kind, path) = self.kind(field);
+                let (kind, path) = self.doc_kind(field, d);
                 terms(kind, &values(&d.source, path))
                     .iter()
                     .any(|t| t.starts_with(prefix.as_str()))
@@ -928,7 +935,7 @@ impl<'a> Searcher<'a> {
                 let vals = match field.as_str() {
                     "_id" => vec![id.to_owned()],
                     _ => {
-                        let (kind, path) = self.kind(field);
+                        let (kind, path) = self.doc_kind(field, d);
                         terms(kind, &values(&d.source, path))
                     }
                 };
@@ -940,7 +947,7 @@ impl<'a> Searcher<'a> {
                 self.ignored().0.contains_key(id).then_some(1.0)
             }
             Query::Exists { field } => {
-                let (kind, path) = self.kind(field);
+                let (kind, path) = self.doc_kind(field, d);
                 (!indexed(kind, values(&d.source, path)).is_empty()).then_some(1.0)
             }
             Query::Range {
@@ -951,7 +958,7 @@ impl<'a> Searcher<'a> {
                 lte,
                 ..
             } => {
-                let (kind, path) = self.kind(field);
+                let (kind, path) = self.doc_kind(field, d);
                 let bounds = [gt, gte, lt, lte].map(Option::as_deref);
                 if kind == Kind::Text {
                     // a text field's indexed terms, compared as Lucene's TermRangeQuery does
@@ -1244,7 +1251,7 @@ impl<'a> Searcher<'a> {
             let n = wanted.iter().filter(|w| matched(w)).count();
             return (n > 0 && (!all || n == wanted.len())).then_some(1.0);
         }
-        let doc_terms = terms(kind, &vals);
+        let doc_terms = terms(self.at(kind, path, d), &vals);
         let mut score = 0.0;
         let mut n = 0;
         for w in wanted {
@@ -1365,7 +1372,7 @@ impl<'a> Searcher<'a> {
                     }
                 }
                 field => {
-                    let (kind, path) = self.kind(field);
+                    let (kind, path) = self.doc_kind(field, doc);
                     let vals = indexed(kind, values(&doc.source, path));
                     // dates sort by epoch millis, date_nanos by epoch nanos
                     let instant: fn(Option<&str>, Option<&str>, &Value) -> Option<i64>;

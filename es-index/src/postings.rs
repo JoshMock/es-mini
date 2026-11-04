@@ -60,6 +60,45 @@ pub enum Indexed {
     Exact(Option<u32>),
 }
 
+impl Indexed {
+    /// How the document `seq_no` was indexed at `path` (see [`limit_at`]).
+    pub fn at(self, changes: &[LimitChange], path: &str, seq_no: u64) -> Indexed {
+        match self {
+            Indexed::Exact(limit) => Indexed::Exact(limit_at(changes, path, limit, seq_no)),
+            Indexed::Analyzed => self,
+        }
+    }
+}
+
+/// A keyword field at source `path` changing its `ignore_above` from `old` to `new` when the
+/// shard's next sequence number was `seq_no`. As in Elasticsearch, documents indexed before
+/// keep `old`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct LimitChange {
+    pub seq_no: u64,
+    pub path: String,
+    pub old: Option<u32>,
+    pub new: Option<u32>,
+}
+
+/// The `ignore_above` the document `seq_no` was indexed with at `path`, by a keyword field whose
+/// limit is now `limit`: `changes` (oldest first) followed back to before the document.
+// ponytail: changes are told apart by source path and limit, so two keyword multi-fields of one
+// path that changed to the same limit share their history; key them by field name if that matters
+pub fn limit_at(
+    changes: &[LimitChange],
+    path: &str,
+    mut limit: Option<u32>,
+    seq_no: u64,
+) -> Option<u32> {
+    for c in changes.iter().rev().take_while(|c| c.seq_no > seq_no) {
+        if c.path == path && c.new == limit {
+            limit = c.old;
+        }
+    }
+    limit
+}
+
 /// Whether a keyword value is longer than `ignore_above` UTF-16 units, so that, as in
 /// Elasticsearch, it is not indexed and its field is listed in `_ignored`.
 pub fn ignored(ignore_above: Option<u32>, s: &str) -> bool {
@@ -290,18 +329,22 @@ impl Postings {
         live: impl Iterator<Item = (&'d str, &'d crate::Document)>,
         superseded: &[std::sync::Arc<crate::Document>],
         persisted: u64,
+        changes: &[LimitChange],
     ) -> &Field {
         self.0.entry((path.to_owned(), indexed)).or_insert_with(|| {
             let mut f = Field::default();
+            let terms = |d: &crate::Document| {
+                field_terms(&d.source, path, indexed.at(changes, path, d.seq_no))
+            };
             for (id, d) in live {
                 let counted = d.seq_no >= persisted;
-                let terms = field_terms(&d.source, path, indexed);
+                let terms = terms(d);
                 f.add(id, d.seq_no, indexed, terms, counted);
             }
             for (n, d) in superseded.iter().enumerate() {
                 // Counted in the statistics, then unlinked like any superseded document.
                 let id = format!("\0superseded{n}");
-                let terms = field_terms(&d.source, path, indexed);
+                let terms = terms(d);
                 f.add(&id, d.seq_no, indexed, terms, true);
                 f.remove(&id);
             }
@@ -309,6 +352,7 @@ impl Postings {
         })
     }
 
+    /// Links a new document, which every [`LimitChange`] precedes.
     pub(crate) fn add(&mut self, id: &str, seq_no: u64, source: &Value) {
         for ((path, indexed), f) in &mut self.0 {
             let terms = field_terms(source, path, *indexed);
@@ -332,7 +376,14 @@ impl crate::Shard {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let live = self.docs.iter().map(|(id, d)| (id.as_str(), &**d));
-        read(postings.field(path, indexed, live, &self.superseded, self.persisted))
+        read(postings.field(
+            path,
+            indexed,
+            live,
+            &self.superseded,
+            self.persisted,
+            &self.ignore_above,
+        ))
     }
 
     /// The in-memory documents indexing all (or any) of `terms` at `path`. Documents on disk

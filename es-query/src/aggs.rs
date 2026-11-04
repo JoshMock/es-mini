@@ -1363,11 +1363,27 @@ impl Stats {
 /// A document's doc values of `field`, read from its source.
 fn doc_values(s: &Searcher, field: &str, mapping: &FieldMapping, doc: &Document) -> Vec<Value> {
     if field == "_ignored" {
-        return (s.index.mappings.ignored(&doc.source).into_iter())
+        return (s.shard.ignored_fields(&s.index.mappings, doc).into_iter())
             .map(Value::from)
             .collect();
     }
-    let mut v: Vec<Value> = values(&doc.source, source_path(s.index, field))
+    let path = source_path(s.index, field);
+    // a keyword's with the `ignore_above` the document was indexed with
+    let at;
+    let mapping = match mapping {
+        FieldMapping::Keyword {
+            ignore_above,
+            split_queries_on_whitespace,
+        } => {
+            at = FieldMapping::Keyword {
+                ignore_above: s.shard.ignore_above(path, *ignore_above, doc.seq_no),
+                split_queries_on_whitespace: *split_queries_on_whitespace,
+            };
+            &at
+        }
+        m => m,
+    };
+    let mut v: Vec<Value> = values(&doc.source, path)
         .into_iter()
         .filter_map(|v| doc_value(s, field, mapping, v))
         .collect();
