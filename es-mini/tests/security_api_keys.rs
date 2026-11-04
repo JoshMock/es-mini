@@ -1505,6 +1505,8 @@ async fn query_with_manage_own_api_key_finds_only_the_key_itself() {
 async fn security_validation_query_all_fields_is_lenient() {
     let app = secured();
     create(&app, ELASTIC, json!({"name": "k1"})).await;
+    // Distinct creation times: the first case queries k1's alone.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     create(&app, ELASTIC, json!({"name": "true"})).await;
     let (_, all) = call(&app, ELASTIC, "GET", "/_security/api_key?name=k1", None).await;
     let creation = all["api_keys"][0]["creation"].as_i64().unwrap();
