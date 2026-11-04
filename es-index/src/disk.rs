@@ -1731,7 +1731,11 @@ fn ours(mut seg: es_codec::SegmentCommitInfo, empty: &[String]) -> es_codec::Seg
 // ponytail: holds one field's merged postings, doc values, norms and points at a time, plus the
 // new segment's encoded index files until it is written. Lucene streams both (term by term, to
 // its outputs); do that if one field or a segment's index outgrows memory.
-fn merge(dir: &Path, infos: &mut SegmentInfos) -> es_codec::Result<()> {
+fn merge(
+    dir: &Path,
+    infos: &mut SegmentInfos,
+    compound_format: Option<&str>,
+) -> es_codec::Result<()> {
     use es_codec::{
         field_infos::DocValuesType as Dv,
         segment_writer::{DocValuesData, FieldData, SegmentWriter},
@@ -1742,7 +1746,8 @@ fn merge(dir: &Path, infos: &mut SegmentInfos) -> es_codec::Result<()> {
         let bytes = files.filter_map(|f| std::fs::metadata(dir.join(f)).ok());
         (bytes.map(|m| m.len()).sum(), s.info.max_doc, s.del_count)
     };
-    let picked = find_merge(&infos.segments.iter().map(size).collect::<Vec<_>>());
+    let sizes: Vec<_> = infos.segments.iter().map(size).collect();
+    let picked = find_merge(&sizes);
     let Some(&first) = picked.iter().min() else {
         return Ok(());
     };
@@ -1918,7 +1923,15 @@ fn merge(dir: &Path, infos: &mut SegmentInfos) -> es_codec::Result<()> {
             Ok(out)
         })
     });
-    let seg = segment.finish(dir, max_doc as i32, stored)?;
+    // `MergePolicy.size`: bytes prorated by the share of live docs.
+    let live_bytes = |&(bytes, max_doc, del): &(u64, i32, i32)| match max_doc {
+        ..=0 => bytes,
+        _ => (bytes as f64 * (1.0 - f64::from(del) / f64::from(max_doc))) as u64,
+    };
+    let total = sizes.iter().map(live_bytes).sum();
+    let seg = segment.finish(dir, max_doc as i32, stored, |bytes| {
+        use_compound_file(compound_format, bytes, total)
+    })?;
     infos.counter += 1;
     let mut at = 0..;
     infos
@@ -1926,6 +1939,26 @@ fn merge(dir: &Path, infos: &mut SegmentInfos) -> es_codec::Result<()> {
         .retain(|_| !picked.contains(&at.next().unwrap()));
     infos.segments.insert(first, ours(seg, &empty));
     Ok(())
+}
+
+/// Lucene 10.5.1's `MergePolicy.useCompoundFile` as Elasticsearch 9.5.5's `MergePolicyConfig`
+/// configures it from `index.compound_format` (default `1gb`): whether a merged segment of
+/// `merged` bytes goes into a compound file, `total` being the (live) bytes of the index's
+/// segments. `true`/`false` always/never, a ratio for at most that share of `total`, a byte
+/// size for at most that many bytes. Flushed segments are always compound.
+fn use_compound_file(compound_format: Option<&str>, merged: u64, total: u64) -> bool {
+    let setting = compound_format.unwrap_or("1gb").trim();
+    let (ratio, max) = if setting.eq_ignore_ascii_case("true") {
+        (1.0, u64::MAX)
+    } else if setting.eq_ignore_ascii_case("false") {
+        (0.0, u64::MAX)
+    } else if let Some(bytes) = setting.ends_with('b').then(|| crate::parse_bytes(setting)) {
+        // Elasticsearch refuses invalid values when the setting is made; fall back to the default.
+        (1.0, bytes.unwrap_or(1 << 30))
+    } else {
+        (setting.parse().unwrap_or(1.0), u64::MAX)
+    };
+    ratio > 0.0 && merged <= max && (ratio >= 1.0 || merged as f64 <= ratio * total as f64)
 }
 
 /// Per live doc of `readers` in turn (where `maps` gives it a merged id), what `read` gives for
@@ -2064,7 +2097,7 @@ fn write_shard(prev: &Path, dir: &Path, ix: &Index, shard: &Shard) -> es_codec::
         )?);
         infos.counter += 1;
     }
-    merge(dir, &mut infos)?;
+    merge(dir, &mut infos, ix.settings.get("index.compound_format"))?;
     infos.generation += 1;
     infos.version += 1;
     infos.user_data = shard_user_data(
@@ -2214,6 +2247,22 @@ mod tests {
         // Twelve 1.1gb segments exceed the 9 allowed; only four fit under 5gb.
         let picked = find_merge(&[(gb * 11 / 10, 100, 0); 12]);
         assert_eq!(picked, [0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn merged_segments_are_compound_as_index_compound_format_says() {
+        let (gb, mb) = (1u64 << 30, 1u64 << 20);
+        // The default, 1gb: compound up to 1gb, whatever the index's size.
+        assert!(use_compound_file(None, gb, gb));
+        assert!(!use_compound_file(None, gb + 1, 100 * gb));
+        assert!(use_compound_file(Some("true"), 100 * gb, gb));
+        assert!(!use_compound_file(Some("FALSE"), 1, gb));
+        assert!(use_compound_file(Some("10mb"), 10 * mb, gb));
+        assert!(!use_compound_file(Some("10mb"), 10 * mb + 1, gb));
+        // A ratio: compound while at most that share of the index's bytes.
+        assert!(use_compound_file(Some("0.1"), 100, 1000));
+        assert!(!use_compound_file(Some("0.1"), 101, 1000));
+        assert!(!use_compound_file(Some("0"), 1, 1000));
     }
 
     /// Per live document id, every value the segments of the commit in shard directory `dir`

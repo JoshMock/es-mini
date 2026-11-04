@@ -1,4 +1,4 @@
-//! Writes one compound segment from in-memory data (inverse of [`crate::SegmentReader`]).
+//! Writes one segment from in-memory data (inverse of [`crate::SegmentReader`]).
 
 use crate::{
     Result, SegmentCommitInfo, SegmentInfo,
@@ -78,7 +78,7 @@ pub fn write_segment(
         };
         w.add(f.clone(), data)?;
     }
-    w.finish(dir, s.max_doc, stored)
+    w.finish(dir, s.max_doc, stored, |_| true)
 }
 
 /// One field's doc values, by type, per doc of the segment.
@@ -155,12 +155,16 @@ impl<'a> SegmentWriter<'a> {
         Ok(())
     }
 
-    /// Writes the segment's compound file of `max_doc` docs into `dir`, as [`write_segment`].
+    /// Writes the segment of `max_doc` docs into `dir`, as [`write_segment`]. Like Lucene's
+    /// `IndexWriter`, it writes each format's files, then puts them in a compound file if
+    /// `compound` says so given their total bytes (`MergePolicy.useCompoundFile`); otherwise
+    /// they stay, fsynced, as the segment's files.
     pub fn finish(
         self,
         dir: &Path,
         max_doc: i32,
         stored: impl IntoIterator<Item = Result<Doc>>,
+        compound: impl FnOnce(u64) -> bool,
     ) -> Result<SegmentCommitInfo> {
         let Self {
             name,
@@ -220,7 +224,23 @@ impl<'a> SegmentWriter<'a> {
             put(".kdi", i)?;
             put(".kdd", d)?;
         }
-        write_compound(dir, name, &id, &names)?;
+        let path = |ext: &str| dir.join(format!("{name}{ext}"));
+        let io = |ext: &str, e: std::io::Error| crate::Error(format!("{name}{ext}: {e}"));
+        let mut bytes = 0;
+        for ext in &names {
+            bytes += std::fs::metadata(path(ext)).map_err(|e| io(ext, e))?.len();
+        }
+        let is_compound = compound(bytes);
+        let files = if is_compound {
+            write_compound(dir, name, &id, &names)?;
+            vec![".cfs".to_string(), ".cfe".to_string()]
+        } else {
+            for ext in &names {
+                (std::fs::File::open(path(ext)).and_then(|f| f.sync_all()))
+                    .map_err(|e| io(ext, e))?;
+            }
+            names
+        };
         Ok(SegmentCommitInfo {
             name: name.into(),
             codec: "Lucene104".into(),
@@ -229,13 +249,15 @@ impl<'a> SegmentWriter<'a> {
                 version: crate::segment_infos::LUCENE_VERSION,
                 min_version: Some(crate::segment_infos::LUCENE_VERSION),
                 max_doc,
-                is_compound: true,
+                is_compound,
                 has_blocks: false,
                 diagnostics: BTreeMap::from([
                     ("source".into(), "flush".into()),
                     ("lucene.version".into(), "10.5.1".into()),
                 ]),
-                files: ["cfs", "cfe", "si"].map(|e| format!("{name}.{e}")).into(),
+                files: (files.iter().chain([&".si".to_string()]))
+                    .map(|ext| format!("{name}{ext}"))
+                    .collect(),
                 attributes: BTreeMap::from([(
                     "Lucene90StoredFieldsFormat.mode".into(),
                     "BEST_SPEED".into(),
@@ -491,7 +513,9 @@ mod tests {
             };
             w.add(f, data).unwrap();
         }
-        let seg = w.finish(&dir, 2, [Ok(vec![]), Ok(vec![])]).unwrap();
+        let seg = w
+            .finish(&dir, 2, [Ok(vec![]), Ok(vec![])], |_| true)
+            .unwrap();
         let r = SegmentReader::open(&dir, seg).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         let DocValues::Ordinals { ords, terms } = r.doc_values("k").unwrap() else {
