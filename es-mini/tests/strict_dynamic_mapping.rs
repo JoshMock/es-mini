@@ -289,3 +289,88 @@ async fn searches_find_nothing_in_fields_dynamic_false_left_unmapped() {
         assert_eq!(r["count"], want, "{q}: {r}");
     }
 }
+
+#[tokio::test]
+async fn dynamic_runtime_maps_new_leaves_as_runtime_fields() {
+    let dir = std::env::temp_dir().join(format!("esm-runtime-dynamic-{}", std::process::id()));
+    let _cleanup = Cleanup(dir.clone());
+    let _ = std::fs::remove_dir_all(&dir);
+    let app = es_mini::app_persisted(&dir).unwrap();
+    let body = r#"{"mappings":{"dynamic":"runtime","properties":{"a":{"type":"keyword"},
+      "t":{"dynamic":true,"properties":{"y":{"type":"long"}}}},"runtime":{"x":{"type":"long"}}}}"#;
+    call(&app, "PUT", "/r", body).await;
+    let doc = r#"{"a":"x","s":"hello world","n":5,"d":1.5,"b":true,"dt":"2020-01-01",
+      "o":{"p":"q","e":{}},"e":{},"nul":null,"arr":["z","w"],"o2.k":3,"t":{"z":1},"x":7}"#;
+    for (id, doc) in [
+        ("1", doc),
+        ("2", r#"{"x":"notanumber","o":{"p":{"deep":1}}}"#),
+    ] {
+        let r = call(&app, "PUT", &format!("/r/_doc/{id}"), doc).await;
+        assert_eq!(r["result"], "created", "{r}");
+    }
+    // Elasticsearch 9.5.5's mapping after the same writes.
+    let t = |t: &str| json!({"type": t});
+    let want = json!({"r": {"mappings": {"dynamic": "runtime",
+        "runtime": {"arr": t("keyword"), "b": t("boolean"), "d": t("double"), "dt": t("date"),
+            "n": t("long"), "o.p": t("keyword"), "o.p.deep": t("long"), "o2.k": t("long"),
+            "s": t("keyword"), "x": t("long")},
+        "properties": {"a": t("keyword"), "t": {"dynamic": "true",
+            "properties": {"y": t("long"), "z": t("long")}}}}}});
+    assert_eq!(call(&app, "GET", "/r/_mapping", "").await, want);
+    // Searches read runtime fields from `_source`, as keyword, long, ... (ES 9.5.5's counts).
+    call(&app, "POST", "/r/_refresh", "").await;
+    let queries = [
+        (r#"{"term":{"s":"hello world"}}"#, 1),
+        (r#"{"match":{"s":"hello"}}"#, 0),
+        (r#"{"term":{"o.p":"q"}}"#, 1),
+        (r#"{"range":{"n":{"gte":1}}}"#, 1),
+        (r#"{"exists":{"field":"o"}}"#, 2),
+        (r#"{"exists":{"field":"n"}}"#, 1),
+    ];
+    for (q, n) in queries {
+        let r = call(&app, "POST", "/r/_count", &format!(r#"{{"query":{q}}}"#)).await;
+        assert_eq!(r["count"], n, "{q}: {r}");
+    }
+
+    call(
+        &app,
+        "PUT",
+        "/r2",
+        r#"{"mappings":{"dynamic":"runtime","numeric_detection":true,"date_detection":false}}"#,
+    )
+    .await;
+    call(
+        &app,
+        "PUT",
+        "/r2/_doc/1",
+        r#"{"a":"5","b":"1.5","c":"2020-01-01"}"#,
+    )
+    .await;
+    let want2 = json!({"r2": {"mappings": {"dynamic": "runtime", "date_detection": false,
+        "numeric_detection": true,
+        "runtime": {"a": t("long"), "b": t("double"), "c": t("keyword")}}}});
+    assert_eq!(call(&app, "GET", "/r2/_mapping", "").await, want2);
+
+    // `runtime` on an object is inherited; PUT _mapping adds and (with null) removes fields.
+    let body = r#"{"mappings":{"properties":{"o":{"dynamic":"runtime","properties":{"k":{"type":"keyword"}}}}}}"#;
+    call(&app, "PUT", "/r3", body).await;
+    let doc = r#"{"o":{"k":"a","m":"b","sub":{"z":1}},"top":"x"}"#;
+    call(&app, "PUT", "/r3/_doc/1", doc).await;
+    let body = r#"{"runtime":{"o.m":null,"extra":{"type":"keyword"}}}"#;
+    let r = call(&app, "PUT", "/r3/_mapping", body).await;
+    assert_eq!(r, json!({"acknowledged": true}));
+    let want3 = json!({"r3": {"mappings": {
+        "runtime": {"extra": t("keyword"), "o.sub.z": t("long")},
+        "properties": {"o": {"dynamic": "runtime", "properties": {"k": t("keyword")}},
+            "top": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}}}}}});
+    assert_eq!(call(&app, "GET", "/r3/_mapping", "").await, want3);
+
+    drop(app);
+    let app = es_mini::app_persisted(&dir).unwrap();
+    assert_eq!(call(&app, "GET", "/r/_mapping", "").await, want);
+    let r = call(&app, "GET", "/r3/_mapping", "").await;
+    assert_eq!(
+        r["r3"]["mappings"]["runtime"],
+        want3["r3"]["mappings"]["runtime"]
+    );
+}

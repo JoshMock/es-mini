@@ -92,8 +92,7 @@ pub enum Dynamic {
     False,
     /// Refuse the document.
     Strict,
-    /// Map them as runtime fields.
-    // ponytail: kept in `_source` only, like `false`; ES maps leaves under `runtime`
+    /// Map their leaves as runtime fields, by dotted path.
     Runtime,
 }
 
@@ -387,6 +386,9 @@ pub struct Mappings {
         deserialize_with = "flatten"
     )]
     pub properties: BTreeMap<String, FieldMapping>,
+    /// The `runtime` section: runtime field definitions by name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub runtime: BTreeMap<String, Value>,
 }
 
 impl Mappings {
@@ -420,11 +422,12 @@ impl Mappings {
         self.dynamic.unwrap_or(Dynamic::True)
     }
 
-    /// Whether `field` is neither mapped nor an object, under a `dynamic` that does not map
+    /// Whether `field` is neither mapped nor an object (runtime fields included), under a `dynamic` that does not map
     /// new fields: its values stay in `_source` only, so queries find nothing in it.
     pub fn unindexed(&self, field: &str) -> bool {
         let parent = field.rsplit_once('.').map_or("", |(p, _)| p);
         self.field(field).is_none()
+            && !(self.runtime.keys()).any(|r| r == field || r.starts_with(&format!("{field}.")))
             && !maps_under(&self.properties, field)
             && self.dynamic_in(parent) != Dynamic::True
     }
@@ -509,6 +512,13 @@ impl Mappings {
         }
         let mut out = self.clone();
         out.extend(merged);
+        // a runtime field set to null is removed
+        for (name, def) in &new.runtime {
+            match def {
+                Value::Null => out.runtime.remove(name),
+                _ => out.runtime.insert(name.clone(), def.clone()),
+            };
+        }
         if new.source.is_some() {
             out.source.clone_from(&new.source);
         }
@@ -550,9 +560,9 @@ impl Index {
         source: &Value,
         raw: Option<&[u8]>,
     ) -> Result<(), MapError> {
-        let mut added = BTreeMap::new();
+        let (mut added, mut runtime) = (BTreeMap::new(), BTreeMap::new());
         for (k, v) in source.as_object().into_iter().flatten() {
-            self.map_value(id, k, k, v, &mut added)
+            self.map_value(id, k, k, v, &mut added, &mut runtime)
                 .map_err(|refused| match refused {
                     Refused::Parsing(r) => MapError::Parsing(r),
                     Refused::Strict { field, key, value, at_name } => {
@@ -567,10 +577,11 @@ impl Index {
                 })?;
         }
         self.mappings.extend(added);
+        self.mappings.runtime.extend(runtime);
         Ok(())
     }
 
-    /// Whether the new field `field` may be mapped: refused under `dynamic: strict`, where the
+    /// The `dynamic` that applies to the new field `field`: refused under `strict`, where the
     /// error is located at `value` under the document key path `key` (or at that key's name).
     fn admits(
         &self,
@@ -578,21 +589,21 @@ impl Index {
         key: &str,
         value: &Value,
         at_name: bool,
-    ) -> Result<bool, Refused> {
+    ) -> Result<Dynamic, Refused> {
         let parent = field.rsplit_once('.').map_or("", |(p, _)| p);
         match self.mappings.dynamic_in(parent) {
-            Dynamic::True => Ok(true),
-            Dynamic::False | Dynamic::Runtime => Ok(false),
             Dynamic::Strict => Err(Refused::Strict {
                 field: field.to_owned(),
                 key: key.to_owned(),
                 value: value.clone(),
                 at_name,
             }),
+            d => Ok(d),
         }
     }
 
-    /// Maps `v` at `path` into `added`; `name` is the JSON key it came from (`null` in arrays).
+    /// Maps `v` at `path` into `added`, or its leaves into `runtime` under `dynamic: runtime`
+    /// (which maps no objects); `name` is the JSON key it came from (`null` in arrays).
     fn map_value(
         &self,
         id: &str,
@@ -600,6 +611,7 @@ impl Index {
         name: &str,
         v: &Value,
         added: &mut BTreeMap<String, FieldMapping>,
+        runtime: &mut BTreeMap<String, Value>,
     ) -> Result<(), Refused> {
         let props = &self.mappings.properties;
         let get = |p: &str| added.get(p).or_else(|| props.get(p));
@@ -618,32 +630,34 @@ impl Index {
                 let preview = (path[i + 1..].rsplit('.')).fold(v.clone(), |v, k| json!({ k: v }));
                 return leaf_error(&path[..i], &preview);
             }
-            if new(&path[..i]) && !self.admits(&path[..i], path, v, true)? {
+            if new(&path[..i]) && self.admits(&path[..i], path, v, true)? == Dynamic::False {
                 return Ok(());
             }
         }
-        if new(path) && !self.admits(path, path, v, false)? {
-            return Ok(());
-        }
+        let as_runtime = new(path)
+            && match self.admits(path, path, v, false)? {
+                Dynamic::False => return Ok(()),
+                d => d == Dynamic::Runtime,
+            };
         let mapping = match v {
             Value::Object(o) => {
                 match get(path) {
                     Some(m) if m.is_range() => return Ok(()),
                     Some(m) if !m.is_object() => return leaf_error(path, v),
-                    None if o.is_empty() && !self.has_subfields(path, added) => {
+                    None if o.is_empty() && !as_runtime && !self.has_subfields(path, added) => {
                         added.insert(path.to_owned(), FieldMapping::Object { dynamic: None });
                     }
                     _ => {}
                 }
                 for (k, x) in o {
-                    self.map_value(id, &format!("{path}.{k}"), k, x, added)?;
+                    self.map_value(id, &format!("{path}.{k}"), k, x, added, runtime)?;
                 }
                 return Ok(());
             }
             // Array elements map in order; the first scalar wins.
             Value::Array(a) => {
                 for x in a {
-                    self.map_value(id, path, "null", x, added)?;
+                    self.map_value(id, path, "null", x, added, runtime)?;
                 }
                 return Ok(());
             }
@@ -702,6 +716,18 @@ impl Index {
             Value::Number(n) if n.is_f64() => FieldMapping::Float,
             Value::Number(_) => FieldMapping::Long,
         };
+        if as_runtime {
+            if !self.mappings.runtime.contains_key(path) {
+                let t = match mapping.type_name() {
+                    "text" => "keyword",
+                    t => t,
+                };
+                runtime
+                    .entry(path.to_owned())
+                    .or_insert(json!({ "type": t }));
+            }
+            return Ok(());
+        }
         added.insert(path.to_owned(), mapping);
         Ok(())
     }

@@ -130,12 +130,19 @@ fn resolve(index: &Index, field: &str, sample: impl Fn(&str) -> Option<Value>) -
         Some(_) => {
             unreachable!("every FieldMapping is text, keyword, boolean, date, ip, range or numeric")
         }
-        None if field.ends_with(".keyword") => Kind::Keyword(None),
-        // ponytail: unmapped fields are typed from their first value, mimicking ES dynamic mapping
-        None => match sample(field) {
-            Some(Value::Number(_)) => Kind::Number,
-            Some(Value::Bool(_)) => Kind::Bool,
-            _ => Kind::Text,
+        // runtime fields read `_source` as their type
+        // ponytail: scripts do not run, and date, ip and geo_point runtime fields read like unmapped ones
+        None => match index.mappings.runtime.get(field).map(|r| &r["type"]) {
+            Some(t) if t == "keyword" => Kind::Keyword(None),
+            Some(t) if t == "long" || t == "double" => Kind::Number,
+            Some(t) if t == "boolean" => Kind::Bool,
+            _ if field.ends_with(".keyword") => Kind::Keyword(None),
+            // ponytail: unmapped fields are typed from their first value, mimicking ES dynamic mapping
+            _ => match sample(field) {
+                Some(Value::Number(_)) => Kind::Number,
+                Some(Value::Bool(_)) => Kind::Bool,
+                _ => Kind::Text,
+            },
         },
     }
 }
