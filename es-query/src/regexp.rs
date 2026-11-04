@@ -332,6 +332,11 @@ impl Automaton {
         a
     }
 
+    /// Whether some string matches both.
+    pub(crate) fn intersects(&self, o: &Automaton) -> bool {
+        self.intersect(o).accept.contains(&true)
+    }
+
     /// Whether the whole of `s` matches; `self` is deterministic.
     pub(crate) fn matches(&self, s: &str) -> bool {
         let mut q = 0;
@@ -595,6 +600,13 @@ mod tests {
         ] {
             assert!(parse(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn regexp_automaton_intersects() {
+        let a = |p| compile(p).unwrap();
+        assert!(a("x.*").intersects(&a(".*y")) && !a("x.*").intersects(&a("y.*")));
+        assert!(!a("a~(b.*)").intersects(&a("ab.*")) && a("a~(b.*)").intersects(&a("a.*")));
     }
 
     #[test]

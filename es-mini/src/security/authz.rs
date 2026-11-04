@@ -1637,17 +1637,93 @@ fn strs(v: &Value) -> impl Iterator<Item = &str> + Clone {
     v.as_array().into_iter().flatten().filter_map(Value::as_str)
 }
 
-/// Whether the index privilege entry `e` covers the index name or pattern `name`; restricted
-/// indices (es-mini's `.security-7` and `.security`) only if the entry allows them, and a
-/// pattern checked with `allow_restricted` only if it cannot match them or the entry allows them.
-// ponytail: Elasticsearch restricts every system index; es-mini has only these
+/// Whether the index privilege entry `e` covers the index name or pattern `name`: a restricted
+/// name only if the entry allows restricted indices, and a pattern checked with
+/// `allow_restricted` only if it matches no restricted name or the entry allows them, as
+/// `IndicesPermission.checkResourcePrivileges` subtracts the restricted names.
 fn names_cover(e: &Value, name: &str, allow_restricted: bool) -> bool {
-    let restricted = [super::INDEX, super::ALIAS];
-    let reaches_restricted = restricted.contains(&name)
-        || (allow_restricted && name.contains('*') && restricted.iter().any(|r| glob(name, r)));
+    let regex = name.len() > 1 && name.starts_with('/') && name.ends_with('/');
+    let reaches_restricted = (!name.contains('*') && !regex && RESTRICTED.matches(name))
+        || (allow_restricted && {
+            let pattern = match regex {
+                true => es_query::Regexp::new(&name[1..name.len() - 1]),
+                false => es_query::Regexp::new(&Wildcard::new(name).regexp()),
+            };
+            pattern.is_ok_and(|p| p.intersects(&RESTRICTED))
+        });
     strs(&e["names"]).any(|n| role_name(n, name))
         && (e["allow_restricted_indices"] == true || !reaches_restricted)
 }
+
+/// The system index patterns (with their aliases) and system data streams of Elasticsearch
+/// 9.5.5's default distribution, in `SystemIndexDescriptor`'s pattern syntax (a Lucene regular
+/// expression, with `.` literal and `*` any string).
+const SYSTEM_INDICES: [(&str, Option<&str>); 37] = [
+    (".tasks*", None),
+    (".synonyms-*", Some(".synonyms")),
+    (".security-[0-9]+*", Some(super::ALIAS)),
+    (".security-tokens-[0-9]+*", Some(".security-tokens")),
+    (".security-profile-[0-9]+*", Some(".security-profile")),
+    (".async-search*", None),
+    (".kibana_~(change_history*)", Some(".kibana")),
+    (".reporting-*", None),
+    (".chat-*", None),
+    (".workflows~(-events*|-execution-data-stream-logs*)", None),
+    (".apm-agent-configuration*", None),
+    (".apm-custom-link*", None),
+    (".fleet-actions~(-results*)", Some(".fleet-actions")),
+    (".fleet-agents*", Some(".fleet-agents")),
+    (
+        ".fleet-enrollment-api-keys*",
+        Some(".fleet-enrollment-api-keys"),
+    ),
+    (".fleet-secrets*", Some(".fleet-secrets")),
+    (".fleet-policies-[0-9]+*", Some(".fleet-policies")),
+    (".fleet-policies-leader*", Some(".fleet-policies-leader")),
+    (".fleet-servers*", Some(".fleet-servers")),
+    (".fleet-artifacts*", Some(".fleet-artifacts")),
+    (".integration_knowledge*", Some(".integration_knowledge")),
+    (".geoip_databases*", None),
+    (".enrich-*", None),
+    (".search-app-*", Some(".search-app")),
+    (".query-rules-*", Some(".query-rules")),
+    (".connector-secrets*", Some(".connector-secrets")),
+    (".inference*", Some(".inference-alias")),
+    (".secrets-inference*", None),
+    (".ccm-inference*", None),
+    (".logstash*", None),
+    (".ml-meta*", None),
+    (".ml-config*", None),
+    (".ml-inference-*", None),
+    (".snapshot-blob-cache*", None),
+    (".transform-internal-*", None),
+    (".watches*", None),
+    (".triggered_watches*", None),
+];
+const SYSTEM_DATA_STREAMS: [&str; 4] = [
+    ".kibana_change_history",
+    ".workflows-events",
+    ".workflows-execution-data-stream-logs",
+    ".fleet-actions-results",
+];
+
+/// `SystemIndices.getSystemNameAutomaton`: the names `SYSTEM_INDICES` and
+/// `SYSTEM_DATA_STREAMS` match, with the data streams' backing indices.
+static RESTRICTED: std::sync::LazyLock<es_query::Regexp> = std::sync::LazyLock::new(|| {
+    // `SystemIndexDescriptor.patternToRegex`
+    let regex = |p: &str| format!("({})", p.replace('.', "\\.").replace('*', ".*"));
+    let indices = SYSTEM_INDICES
+        .iter()
+        .flat_map(|(p, alias)| [Some(*p), *alias])
+        .flatten();
+    // `SystemDataStreamDescriptor.getBackingIndexPattern`
+    let backing = SYSTEM_DATA_STREAMS.map(|d| format!(".(migrated-){{0,}}[fd]s-{d}-*"));
+    let names: Vec<String> = (indices.chain(SYSTEM_DATA_STREAMS))
+        .map(regex)
+        .chain(backing.iter().map(|b| regex(b)))
+        .collect();
+    es_query::Regexp::new(&names.join("|")).expect("valid system index patterns")
+});
 
 impl Key<'_> {
     fn has_cluster(&self, privilege: &str) -> bool {
@@ -1874,6 +1950,18 @@ impl Wildcard {
             });
         }
         Wildcard { toks }
+    }
+
+    /// The pattern as a Lucene regular expression.
+    fn regexp(&self) -> String {
+        (self.toks.iter())
+            .map(|t| match t {
+                None => ".*".to_owned(),
+                Some(None) => ".".to_owned(),
+                Some(Some(c)) if c.is_alphanumeric() => c.to_string(),
+                Some(Some(c)) => format!("\\{c}"),
+            })
+            .collect()
     }
 
     /// The states before any input: `i` if the first i tokens match it, ascending.

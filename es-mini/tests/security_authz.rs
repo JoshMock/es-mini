@@ -1454,6 +1454,83 @@ async fn cat_aliases_lists_what_get_aliases_would() {
     assert_denied(&app, &kr, "GET", "/_cat/aliases", expected).await;
 }
 
+/// Every name Elasticsearch's system indices, their aliases and system data streams (with their
+/// backing indices) match is restricted: a role reaches it only with `allow_restricted_indices`,
+/// and a pattern checked with `allow_restricted_indices` is covered only if it matches none
+/// (recorded from Elasticsearch 9.5.5).
+#[tokio::test]
+async fn security_authz_gaps_every_system_index_is_restricted() {
+    let app = app().await;
+    let roles = json!({"r": {"indices": [{"names": ["*"], "privileges": ["read"]}]}});
+    let (k, _) = key(&app, ELASTIC, roles).await;
+    let check = |names: &[&str], allow: bool| {
+        let entry =
+            json!({"names": names, "privileges": ["read"], "allow_restricted_indices": allow});
+        json!({ "index": [entry] })
+    };
+    let restricted: Vec<&str> =
+        ".tasks .synonyms .synonyms-x .security-7x .security-tokens .security-profile-8 \
+        .async-searchx .kibana .kibana_1 .kibana_change_history \
+        .ds-.kibana_change_history-2024.01.01-000001 \
+        .migrated-migrated-fs-.kibana_change_history-x .reporting-x .chat-x .apm-custom-link \
+        .workflows-x .workflows-events .fleet-actions-7 .fleet-actions-results \
+        .ds-.fleet-actions-results-x .fleet-policies-7 .fleet-policies-leader \
+        .integration_knowledge .geoip_databases .enrich-x .connector-secrets .query-rules-1 \
+        .search-app .inference-alias .secrets-inference .ccm-inference .logstash .ml-meta \
+        .ml-config .ml-inference-000005 .snapshot-blob-cache .transform-internal-008 \
+        .watches .triggered_watches"
+            .split_whitespace()
+            .collect();
+    let open = [
+        "tasks",
+        ".synonymsx",
+        ".security-x",
+        ".securityx",
+        ".kibanax",
+        ".kibana_change_historyx",
+        ".ds-.kibana_change_history",
+        ".reporting",
+        ".workflows-eventsx",
+        ".fleet-actions-resultsx",
+        ".fleet-policies-x",
+        ".enrich",
+        ".query-rulesx",
+        ".ml-inference",
+        ".transform-internal",
+        ".data-frame-internal-1",
+        ".triggered-watches",
+    ];
+    let uri = "/_security/user/_has_privileges";
+    let all = [&restricted[..], &open[..]].concat();
+    let out = ok(&app, &k, "POST", uri, Some(check(&all, false))).await;
+    for name in all {
+        let expected = !restricted.contains(&name);
+        assert_eq!(out["index"][name]["read"], expected, "{name}");
+    }
+    let patterns = [
+        (".kib*", false),
+        (".kibana_change_history*", false),
+        (".kibana_change_historyx*", true),
+        (".fleet-actions-resultsx*", true),
+        (".workflows-eventsx*", true),
+        (".securi?y", false),
+        (".security-x*", true),
+        ("/\\.tas.*/", false),
+        ("/\\.tasx.*/", true),
+        ("a*", true),
+        ("*", false),
+    ];
+    let names: Vec<&str> = patterns.iter().map(|p| p.0).collect();
+    let out = ok(&app, &k, "POST", uri, Some(check(&names, true))).await;
+    for (name, expected) in patterns {
+        assert_eq!(out["index"][name]["read"], expected, "{name}");
+    }
+    let out = ok(&app, &k, "POST", uri, Some(check(&names, false))).await;
+    for name in names {
+        assert_eq!(out["index"][name]["read"], true, "{name}");
+    }
+}
+
 /// An added alias may not let the key do any action on it that it may not do on the index,
 /// compared over every action name the privileges' patterns match, as Elasticsearch compares
 /// their automata (`Operations.subsetOf`), not just the actions es-mini knows.

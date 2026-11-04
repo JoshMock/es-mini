@@ -45,6 +45,25 @@ pub fn regexp_matches(pattern: &str, s: &str) -> Result<bool, String> {
     Ok(regexp::compile(pattern)?.matches(s))
 }
 
+/// A Lucene regular expression compiled as [`regexp_matches`] compiles it.
+pub struct Regexp(regexp::Automaton);
+
+impl Regexp {
+    pub fn new(pattern: &str) -> Result<Regexp, String> {
+        regexp::compile(pattern).map(Regexp)
+    }
+
+    /// Whether the whole of `s` matches.
+    pub fn matches(&self, s: &str) -> bool {
+        self.0.matches(s)
+    }
+
+    /// Whether some string matches both, as Lucene's `Operations.isEmpty` of their intersection.
+    pub fn intersects(&self, o: &Regexp) -> bool {
+        self.0.intersects(&o.0)
+    }
+}
+
 /// One node of Lucene's Explanation, with its value as the float Lucene computes.
 fn explanation(value: f64, description: String, details: Vec<Value>) -> Value {
     serde_json::json!({"value": value as f32, "description": description, "details": details})
