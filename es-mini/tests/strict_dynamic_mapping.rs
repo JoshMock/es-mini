@@ -374,3 +374,67 @@ async fn dynamic_runtime_maps_new_leaves_as_runtime_fields() {
         want3["r3"]["mappings"]["runtime"]
     );
 }
+
+#[tokio::test]
+async fn esql_lists_runtime_fields_but_not_fields_left_unmapped() {
+    let app = es_mini::app();
+    let body = r#"{"mappings":{"dynamic":false,"properties":{"a":{"type":"keyword"},
+      "o":{"properties":{"x":{"type":"long"}}}}}}"#;
+    call(&app, "PUT", "/f", body).await;
+    let doc = r#"{"a":"x","b":1,"c":"hello world","o":{"x":1,"p":"z"}}"#;
+    call(&app, "PUT", "/f/_doc/1?refresh=true", doc).await;
+    let body = r#"{"mappings":{"properties":{"a":{"type":"keyword"},
+      "f":{"dynamic":false,"properties":{"k":{"type":"long"}}}}}}"#;
+    call(&app, "PUT", "/t", body).await;
+    call(
+        &app,
+        "PUT",
+        "/t/_doc/1?refresh=true",
+        r#"{"a":"x","f":{"k":1,"u":"v"},"z":2}"#,
+    )
+    .await;
+    let body = r#"{"mappings":{"dynamic":"runtime","properties":{"a":{"type":"keyword"}}}}"#;
+    call(&app, "PUT", "/r", body).await;
+    let doc = r#"{"a":"x","s":"hello","n":5,"d":1.5,"b":true,"dt":"2020-01-01","o":{"p":"q"}}"#;
+    call(&app, "PUT", "/r/_doc/1?refresh=true", doc).await;
+
+    // Elasticsearch 9.5.5's columns and values.
+    let col = |n: &str, t: &str| json!({"name": n, "type": t});
+    let cases = [
+        (
+            "f",
+            json!([col("a", "keyword"), col("o.x", "long")]),
+            json!([["x", 1]]),
+        ),
+        (
+            "t",
+            json!([col("a", "keyword"), col("f.k", "long"), col("z", "long")]),
+            json!([["x", 1, 2]]),
+        ),
+        (
+            "r",
+            json!([
+                col("a", "keyword"),
+                col("b", "boolean"),
+                col("d", "double"),
+                col("dt", "date"),
+                col("n", "long"),
+                col("o.p", "keyword"),
+                col("s", "keyword")
+            ]),
+            json!([["x", true, 1.5, "2020-01-01T00:00:00.000Z", 5, "q", "hello"]]),
+        ),
+    ];
+    for (index, columns, values) in cases {
+        let q = format!(r#"{{"query":"FROM {index}"}}"#);
+        let r = call(&app, "POST", "/_query", &q).await;
+        assert_eq!(
+            (&r["columns"], &r["values"]),
+            (&columns, &values),
+            "{index}: {r}"
+        );
+    }
+    let r = call(&app, "POST", "/_query", r#"{"query":"FROM f | KEEP b"}"#).await;
+    let reason = "Found 1 problem\nline 1:15: Unknown column [b]";
+    assert_eq!(r["error"]["reason"], reason, "{r}");
+}

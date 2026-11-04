@@ -1008,7 +1008,8 @@ impl Parser<'_> {
     }
 }
 
-/// Columns of an index: mapped fields plus unmapped source fields, typed like ES dynamic mapping.
+/// Columns of an index: mapped and runtime fields plus unmapped source fields (outside objects
+/// whose `dynamic` keeps them in `_source` only), typed like ES dynamic mapping.
 /// Values are `(mapping type, ES|QL type)`, e.g. `("float", "double")`.
 fn columns<'a>(
     index: &Index,
@@ -1020,8 +1021,13 @@ fn columns<'a>(
     }
     let mut cols: BTreeMap<_, _> = dynamic
         .into_iter()
+        .filter(|(c, _)| !index.mappings.unindexed(c))
         .map(|(c, t)| (c, (t.clone(), t)))
         .collect();
+    for (name, r) in &index.mappings.runtime {
+        let t = r["type"].as_str().unwrap_or_default();
+        cols.insert(name.clone(), (t.to_owned(), t.to_owned()));
+    }
     for (name, m) in &index.mappings.properties {
         if matches!(m, FieldMapping::Object { .. }) {
             continue;
@@ -1126,7 +1132,13 @@ fn doc_value(v: Value, ty: &str, m: Option<&FieldMapping>) -> Value {
         Value::Null => return v,
         v => vec![v],
     };
-    if let Some(FieldMapping::Date { format, locale, .. }) = m {
+    // an unmapped `date` column is a runtime field, read with the default format
+    let date = match m {
+        Some(FieldMapping::Date { format, locale, .. }) => Some((format, locale)),
+        None if ty == "date" => Some((&None, &None)),
+        _ => None,
+    };
+    if let Some((format, locale)) = date {
         vals = vals
             .iter()
             .filter_map(|v| es_index::date_millis(format.as_deref(), locale.as_deref(), v))
