@@ -1586,3 +1586,29 @@ async fn security_validation_has_privileges_application_names() {
     assert_eq!(out["error"]["type"], "action_request_validation_exception");
     assert_eq!(out["error"]["reason"], reason);
 }
+
+/// `names_cover` treats a pattern it cannot compile as clear of the restricted names, which is
+/// safe only because `_has_privileges` refuses such a pattern first: pin that refusal.
+#[tokio::test]
+async fn has_privileges_fails_closed_on_patterns_too_complex_to_check() {
+    let app = app().await;
+    let roles = json!({"r": {"indices": [{"names": ["*"], "privileges": ["read"]}]}});
+    let (k, _) = key(&app, ELASTIC, roles).await;
+    // Reaches .security-7, and its second branch needs 2^20 states to determinize.
+    let pattern = "/\\.security.*|(a|b)*a(a|b){20}/";
+    let body = json!({"index": [{"names": [pattern], "privileges": ["read"], "allow_restricted_indices": true}]});
+    let (status, r) = call(
+        &app,
+        &k,
+        "POST",
+        "/_security/user/_has_privileges",
+        Some(body),
+    )
+    .await;
+    let reason = format!("invalid regular expression pattern [{pattern}]");
+    assert_eq!(
+        (status, &r["error"]["reason"]),
+        (400, &json!(reason)),
+        "{r}"
+    );
+}
