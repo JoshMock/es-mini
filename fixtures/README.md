@@ -37,3 +37,8 @@ a scroll and a point in time); `es-mini/tests/shard_parity.rs` replays and compa
 the `nocfs` index with `index.compound_format: false`: a force merge leaves one non-compound
 segment (separate `.fdt`, `.tim`, ... files and no `.cfs`), followed by a compound one. Its index
 UUID is in `es-9.5.5-non-compound/index_uuid`; `es-codec/tests/non_compound_segments.rs` reads it.
+
+`generate_doc_values.sh` boots a fresh Elasticsearch on `es-9.5.5-doc-values/data` and flushes
+the `dv` index as one segment of 3000 docs with multi-valued and sparse keyword and long fields,
+two of them with more than 1024 distinct terms. `es-codec/tests/docvalues_golden.rs` checks that
+es-codec writes the same `.dvm`/`.dvd` bytes for the same documents.
