@@ -1538,3 +1538,41 @@ async fn security_validation_query_all_fields_is_lenient() {
     let strict = sqs(json!({"query": "k1", "fields": ["name", "creation"]}));
     assert_eq!(query(&app, ELASTIC, "", Some(strict)).await.0, 400);
 }
+
+/// The query is parsed before it is translated, as ES parses the request body first: an
+/// unknown query type is a parsing_exception, while a type ES knows but the API refuses is
+/// still refused. Recorded from Elasticsearch 9.5.5.
+#[tokio::test]
+async fn security_validation_query_is_parsed_before_translation() {
+    let app = secured();
+    let outer = "[query_api_key_request_payload] failed to parse field [query]";
+    let cases = [
+        (json!({"bogus": {}}), "unknown query [bogus]"),
+        (
+            json!({"bool": {"must": [{"term": {"bogusfield": "x"}}, {"bogus": {}}]}}),
+            "unknown query [bogus]",
+        ),
+    ];
+    for (q, reason) in cases {
+        let (status, out) = query(&app, ELASTIC, "", Some(json!({"query": q}))).await;
+        assert_eq!(status, 400, "{q}: {out}");
+        assert_eq!(
+            out["error"]["type"], "x_content_parse_exception",
+            "{q}: {out}"
+        );
+        assert_eq!(out["error"]["reason"], outer, "{q}: {out}");
+        assert_eq!(
+            out["error"]["root_cause"][0]["type"], "parsing_exception",
+            "{q}: {out}"
+        );
+        assert_eq!(
+            out["error"]["root_cause"][0]["reason"], reason,
+            "{q}: {out}"
+        );
+    }
+    let fuzzy = json!({"query": {"bool": {"must": [{"fuzzy": {"name": "k1"}}]}}});
+    let (status, out) = query(&app, ELASTIC, "", Some(fuzzy)).await;
+    assert_eq!(status, 400, "{out}");
+    let reason = "Query type [fuzzy] is not currently supported in this context";
+    assert_eq!(out["error"]["reason"], reason, "{out}");
+}

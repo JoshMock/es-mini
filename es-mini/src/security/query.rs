@@ -53,9 +53,15 @@ pub(super) async fn query_keys(
             ))
         };
         match k.as_str() {
-            // ponytail: translated before it is parsed, so an unknown query type gets the
-            // error of an unsupported one where ES gives a parsing_exception
+            // ES parses the query before translating it, so a type it does not know is a
+            // parsing_exception, not an unsupported one.
+            // ponytail: other parse errors still follow translate_query's, as es-query cannot
+            // tell its own gaps (options, types) from ES's errors
             "query" => {
+                match es_query::parse_query(v) {
+                    Err(e) if unknown_to_es(&e.msg) => return Err(failed_parse(k, e)),
+                    _ => {}
+                }
                 let q = translate_query(v)?;
                 es_query::parse_query(&q).map_err(|e| failed_parse(k, e))?;
                 search[k] = q;
@@ -163,6 +169,22 @@ fn failed_parse(k: &str, e: es_query::QueryError) -> AppError {
         _ => "x_content_parse_exception",
     };
     failed_field(k, (kind, e.msg))
+}
+
+/// Whether `msg` is es-query's error for a query type Elasticsearch 9.5.5 does not know either:
+/// one es-query lacks that is not in ES's SearchModule or default plugins (as probed on 9.5.5).
+fn unknown_to_es(msg: &str) -> bool {
+    const KNOWN: &str = "boosting combined_fields dis_max distance_feature exact_knn field_masking_span \
+        function_score fuzzy geo_bounding_box geo_distance geo_grid geo_polygon \
+        geo_shape has_child has_parent intervals knn knn_score_doc kql match_bool_prefix \
+        match_none more_like_this nested parent_id percolate pinned random_sampling \
+        rank_feature regexp rule rule_query script script_score semantic shape \
+        span_containing span_field_masking span_first span_gap span_multi span_near \
+        span_not span_or span_term span_within sparse_vector terms_set text_expansion \
+        to_child_block_join weighted_tokens wrapper";
+    (msg.strip_prefix("unknown query ["))
+        .and_then(|m| m.strip_suffix(']'))
+        .is_some_and(|name| !KNOWN.split_whitespace().any(|k| k == name))
 }
 
 /// Checks that `s` is a sort the request parser reads: a field name, or `{field: {options}}`.
