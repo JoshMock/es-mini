@@ -265,3 +265,4 @@ above are retagged to the perf goals that now hold them.
 - `es-query/src/parse.rs:629` **query-gaps-2**: no cross_fields or bool_prefix types
 - `es-query/src/parse.rs:695` **query-gaps-2**: no `+ | - " * ( ) ~` operators or default `*` fields
 - `es-query/src/regexp.rs:231` **query-gaps-2**: effort counts this module's NFA states, not Lucene's, so a pattern near the
+- `es-mini/src/search.rs:51` **routed-shard-ids**: shard numbers in failures and profiles count the shards searched, so a routed
