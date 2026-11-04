@@ -198,12 +198,15 @@ fn fields(
             );
         }
     }
-    // Runtime fields replace mapped fields of the same name.
-    out.retain(|(n, ..)| !runtime.iter().any(|(r, _)| r == n));
+    // Runtime fields, the request's over the mapping's, replace mapped fields of the same name.
+    let mut all: BTreeMap<&str, &str> = (index.mappings.runtime.iter())
+        .filter_map(|(n, r)| Some((n.as_str(), r["type"].as_str()?)))
+        .collect();
+    all.extend(runtime.iter().map(|(n, t)| (n.as_str(), t.as_str())));
+    out.retain(|(n, ..)| !all.contains_key(n.as_str()));
     out.extend(
-        runtime
-            .iter()
-            .map(|(n, t)| (n.clone(), t.clone(), false, true, true)),
+        all.into_iter()
+            .map(|(n, t)| (n.to_owned(), t.to_owned(), false, true, true)),
     );
     out
 }

@@ -224,3 +224,26 @@ async fn api_gaps_field_caps_runtime_mappings_add_fields() {
     );
     assert!(r["fields"].get("n").is_some());
 }
+
+#[tokio::test]
+async fn field_caps_reports_the_mapping_runtime_fields() {
+    // Elasticsearch 9.5.5 reports the leaves `dynamic: runtime` maps as runtime fields.
+    let app = app();
+    let body =
+        json!({"mappings": {"dynamic": "runtime", "properties": {"k": {"type": "keyword"}}}});
+    call(&app, Method::PUT, "/r", Some(body)).await;
+    let doc = json!({"a": "x", "n": 1, "f": 1.5, "b": true});
+    call(&app, Method::PUT, "/r/_doc/1?refresh=true", Some(doc)).await;
+    let (s, r) = call(&app, Method::GET, "/r/_field_caps?fields=a,n,f,b,k", None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(
+        r,
+        json!({"indices": ["r"], "fields": {
+            "a": {"keyword": cap("keyword", true, true)},
+            "b": {"boolean": cap("boolean", true, true)},
+            "f": {"double": cap("double", true, true)},
+            "k": {"keyword": cap("keyword", true, true)},
+            "n": {"long": cap("long", true, true)},
+        }})
+    );
+}
