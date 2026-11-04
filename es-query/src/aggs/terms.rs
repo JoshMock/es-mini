@@ -741,7 +741,11 @@ mod tests {
 
     fn run(targets: &[&Index], body: Value) -> Result<Value, String> {
         let req = SearchRequest::parse(&body).map_err(|e| e.msg)?;
-        let targets: Vec<_> = targets.iter().map(|ix| ("i", *ix, None)).collect();
+        let targets: Vec<_> = targets
+            .iter()
+            .enumerate()
+            .map(|(n, ix)| ("i", n, *ix, None))
+            .collect();
         let res = search_many(&targets, &req).map_err(|e| e.msg)?;
         Ok(res.aggregations.unwrap())
     }
@@ -1046,7 +1050,7 @@ mod tests {
         let mut req = SearchRequest::parse(&body).unwrap();
         req.typed_keys = true;
         let ix = index();
-        let got = search_many(&[("i", &ix, None)], &req).unwrap();
+        let got = search_many(&[("i", 0, &ix, None)], &req).unwrap();
         let no_in =
             json!({"doc_count_error_upper_bound": 0, "sum_other_doc_count": 0, "buckets": []});
         assert_eq!(
@@ -1195,7 +1199,7 @@ mod tests {
         let mut req = SearchRequest::parse(&body).unwrap();
         req.typed_keys = true;
         let ix = index();
-        let got = search_many(&[("i", &ix, None)], &req).unwrap();
+        let got = search_many(&[("i", 0, &ix, None)], &req).unwrap();
         let mut names: Vec<_> = got
             .aggregations
             .unwrap()

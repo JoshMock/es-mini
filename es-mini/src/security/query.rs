@@ -138,7 +138,7 @@ pub(super) async fn query_keys(
     };
     let mut req = es_query::SearchRequest::parse(&search)?;
     req.typed_keys = flag("typed_keys");
-    let r = es_query::search_many(&[(INDEX, index, None)], &req)?;
+    let r = es_query::search_many(&[(INDEX, 0, index, None)], &req)?;
     let keys: Vec<Value> = (r.hits.iter())
         .map(|h| {
             let mut key = info(h.id, &h.doc.source, flag("with_limited_by"));

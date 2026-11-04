@@ -655,7 +655,11 @@ mod tests {
 
     fn run(targets: &[&Index], aggs: Value) -> Result<Value, String> {
         let req = SearchRequest::parse(&json!({"size": 0, "aggs": aggs})).map_err(|e| e.msg)?;
-        let targets: Vec<_> = targets.iter().map(|ix| ("i", *ix, None)).collect();
+        let targets: Vec<_> = targets
+            .iter()
+            .enumerate()
+            .map(|(n, ix)| ("i", n, *ix, None))
+            .collect();
         let res = search_many(&targets, &req).map_err(|e| e.msg)?;
         Ok(res.aggregations.unwrap())
     }
@@ -1226,7 +1230,7 @@ mod tests {
         let req = json!({"size": 0, "aggs": {"h": {"date_histogram": {"field": "at",
             "calendar_interval": "year", "keyed": true}}}});
         let req = SearchRequest::parse(&req).unwrap();
-        let res = search_many(&[("i", &ix, None)], &req).unwrap();
+        let res = search_many(&[("i", 0, &ix, None)], &req).unwrap();
         assert_eq!(
             res.aggregations.unwrap()["h"]["buckets"],
             json!({"2016-01-01T00:00:00.000Z": {"key_as_string": "2016-01-01T00:00:00.000Z",

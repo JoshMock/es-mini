@@ -48,8 +48,6 @@ pub(crate) fn routed(t: &aliases::Target, n: usize, of: usize) -> bool {
 
 /// A search target per routed shard of `resolved`, from `split` where it has them, in
 /// Elasticsearch's shard order (shard number, then index name), which breaks ties between hits.
-/// ponytail: shard numbers in failures and profiles count the shards searched, so a routed
-/// search reports its shards from 0; pass shard numbers in es_query::Target if that matters.
 pub(crate) fn targets<'a>(
     indices: &'a aliases::Map<impl Borrow<es_index::Index>>,
     resolved: &'a [aliases::Target],
@@ -59,16 +57,16 @@ pub(crate) fn targets<'a>(
         .flat_map(|(t, shards)| {
             let (name, filter) = (t.index.as_str(), t.filter.as_ref());
             match &shards[..] {
-                [] => vec![(0, (name, indices[&t.index].borrow(), filter))],
+                [] => vec![(name, 0, indices[&t.index].borrow(), filter)],
                 _ => (shards.iter().enumerate())
                     .filter(|&(n, _)| routed(t, n, shards.len()))
-                    .map(|(n, s)| (n, (name, s, filter)))
+                    .map(|(n, s)| (name, n, s, filter))
                     .collect(),
             }
         })
         .collect();
-    targets.sort_by_key(|&(n, (name, ..))| (n, name));
-    targets.into_iter().map(|(_, t)| t).collect()
+    targets.sort_by_key(|&(name, n, ..)| (n, name));
+    targets
 }
 
 const SEARCH_PARAMS: [&str; 46] = [
@@ -273,7 +271,7 @@ pub async fn search(
         ));
     }
     let system = crate::security::restricted_read(&state, authn.as_deref(), &name)
-        .map(|i| Arc::new(vec![(crate::security::INDEX.to_owned(), i, None)]));
+        .map(|i| Arc::new(vec![(crate::security::INDEX.to_owned(), 0, i, None)]));
     let snapshot = match pit {
         None if system.is_some() => system,
         Some(p) => {
@@ -302,7 +300,7 @@ pub async fn search(
     let targets = match &snapshot {
         Some(s) => s
             .iter()
-            .map(|(n, i, f)| (n.as_str(), i, f.as_ref()))
+            .map(|(n, shard, i, f)| (n.as_str(), *shard, i, f.as_ref()))
             .collect(),
         None => {
             shared = state.read();
@@ -327,7 +325,7 @@ pub async fn search(
             targets(&indices, &resolved, &split)
         }
     };
-    for (_, index, _) in &targets {
+    for (_, _, index, _) in &targets {
         let max = index
             .settings
             .get("index.max_result_window")
@@ -419,7 +417,7 @@ pub async fn search(
             .filter(|(k, _)| !matches!(k.as_str(), "request_cache" | "preference"))
             .collect();
         key.sort();
-        let searched: Vec<_> = targets.iter().map(|(name, _, f)| (name, f)).collect();
+        let searched: Vec<_> = targets.iter().map(|(name, _, _, f)| (name, f)).collect();
         let key = format!("{body}{key:?}{searched:?}{routing}");
         let found: Vec<_> = (cache.iter())
             .map(|(index, s)| s.cache_get(&index.settings, &index.mappings, &key))

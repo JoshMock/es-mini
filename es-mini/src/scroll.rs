@@ -27,8 +27,9 @@ struct Scroll {
     owner: Option<String>,
 }
 
-/// The indices a point in time was opened on: name, snapshot, and alias filter.
-pub(crate) type Snapshot = Arc<Vec<(String, es_index::Index, Option<Value>)>>;
+/// The shards a point in time was opened on: index name, shard number, snapshot, and alias
+/// filter.
+pub(crate) type Snapshot = Arc<Vec<(String, usize, es_index::Index, Option<Value>)>>;
 
 struct Pit {
     targets: Snapshot,
@@ -123,12 +124,12 @@ pub(crate) fn snapshot(
             let of = shards.len();
             (shards.into_iter().enumerate())
                 .filter(move |&(n, _)| crate::search::routed(t, n, of))
-                .map(move |(n, s)| (n, (t.index.clone(), s, t.filter.clone())))
+                .map(move |(n, s)| (t.index.clone(), n, s, t.filter.clone()))
         })
         .collect();
     // in shard order, as crate::search::targets
-    shards.sort_by(|(n, (a, ..)), (m, (b, ..))| (n, a).cmp(&(m, b)));
-    Ok(Arc::new(shards.into_iter().map(|(_, s)| s).collect()))
+    shards.sort_by(|(a, n, ..), (b, m, ..)| (n, a).cmp(&(m, b)));
+    Ok(Arc::new(shards))
 }
 
 // ponytail: ids are opaque to clients, so a prefixed counter stands in for ES's base64 encoding
@@ -348,7 +349,7 @@ fn page(
         (s.template.clone(), s.targets.clone(), req)
     };
     let targets: Vec<_> = (targets.iter())
-        .map(|(n, i, f)| (n.as_str(), i, f.as_ref()))
+        .map(|(n, shard, i, f)| (n.as_str(), *shard, i, f.as_ref()))
         .collect();
     let r = es_query::search_many(&targets, &req)?;
     resp["hits"]["hits"] = crate::search::render_hits(&r.hits).into();
@@ -410,7 +411,7 @@ mod tests {
         for n in 0..5 {
             ix.put(&n.to_string(), json!({"n": n}));
         }
-        let targets: Snapshot = Arc::new(vec![("i".into(), ix.snapshot(), None)]);
+        let targets: Snapshot = Arc::new(vec![("i".into(), 0, ix.snapshot(), None)]);
         let req = es_query::SearchRequest::parse(&json!({"size": 2, "sort": ["n"]})).unwrap();
         let contexts = Contexts::default();
         let first = json!({"hits": {"hits": ["first page"]}});

@@ -210,7 +210,7 @@ fn dates() -> Index {
 fn date_hits(q: Value) -> Result<Vec<String>, es_query::QueryError> {
     let idx = dates();
     let req = SearchRequest::parse(&json!({"query": q}))?;
-    let r = es_query::search_many(&[("d", &idx, None)], &req)?;
+    let r = es_query::search_many(&[("d", 0, &idx, None)], &req)?;
     Ok(sorted(r.hits.iter().map(|h| h.id.to_owned()).collect()))
 }
 
@@ -258,7 +258,7 @@ fn date_ranges_read_formats_time_zones_and_date_math() {
         &json!({"range": {"date": {"gte": "2021-12-31T19:00:00", "time_zone": "America/New_York"}}}),
     )
     .unwrap();
-    assert_eq!(es_query::count_many(&[("d", &dates(), None)], &q), Ok(4));
+    assert_eq!(es_query::count_many(&[("d", 0, &dates(), None)], &q), Ok(4));
 }
 
 #[test]
@@ -290,7 +290,7 @@ fn filter_aggregations_read_dates_as_queries_do() {
             "aggs": {"tz": {"filter": {"range": {"date": {"gte": "2022-01-01", "time_zone": "-01:00"}}}}}},
     });
     let req = SearchRequest::parse(&json!({"size": 0, "aggs": aggs})).unwrap();
-    let r = es_query::search_many(&[("d", &idx, None)], &req).unwrap();
+    let r = es_query::search_many(&[("d", 0, &idx, None)], &req).unwrap();
     let a = r.aggregations.unwrap();
     assert_eq!(a["day"]["doc_count"], 3);
     assert_eq!(a["by"]["buckets"]["past"]["doc_count"], 4);
@@ -372,7 +372,7 @@ mod many {
     fn merges_hits_across_indices_in_sort_order() {
         let (a, b) = two();
         let req = SearchRequest::parse(&json!({"sort": ["n"]})).unwrap();
-        let targets = [("a", &a, None), ("b", &b, None)];
+        let targets = [("a", 0, &a, None), ("b", 0, &b, None)];
         let r = search_many(&targets, &req).unwrap();
         let got: Vec<(&str, &str)> = r.hits.iter().map(|h| (h.index, h.id)).collect();
         assert_eq!(got, [("a", "2"), ("b", "1"), ("a", "1")]);
@@ -385,16 +385,16 @@ mod many {
         let req =
             SearchRequest::parse(&json!({"query": {"match": {"t": "fox"}}, "size": 1})).unwrap();
         let only_n3 = json!({"term": {"n": 3}});
-        let r = search_many(&[("a", &a, Some(&only_n3)), ("b", &b, None)], &req).unwrap();
+        let r = search_many(&[("a", 0, &a, Some(&only_n3)), ("b", 0, &b, None)], &req).unwrap();
         assert_eq!(r.total, 2);
         assert_eq!(r.hits.len(), 1);
         let q = parse_query(&json!({"match_all": {}})).unwrap();
         assert_eq!(
-            count_many(&[("a", &a, Some(&only_n3)), ("b", &b, None)], &q).unwrap(),
+            count_many(&[("a", 0, &a, Some(&only_n3)), ("b", 0, &b, None)], &q).unwrap(),
             2
         );
         let bad = json!({"bogus": {}});
-        assert!(search_many(&[("a", &a, Some(&bad))], &req).is_err());
+        assert!(search_many(&[("a", 0, &a, Some(&bad))], &req).is_err());
     }
 }
 
@@ -490,7 +490,7 @@ fn sorting_on_a_text_field_is_refused() {
         .properties
         .insert("t".into(), FieldMapping::Text { store: false });
     i.put("1", json!({"t": "a"}));
-    let targets = [("i", &i, None)];
+    let targets = [("i", 0, &i, None)];
     let req = SearchRequest::parse(&json!({"sort": ["t"]})).unwrap();
     let e = es_query::check_sortable(&targets, &req).unwrap_err();
     assert!(e.msg.starts_with("Text fields are not optimised"), "{e}");
@@ -501,7 +501,7 @@ fn sorting_on_a_text_field_is_refused() {
 #[test]
 fn sorting_on_an_unmapped_field_is_refused_unless_unmapped_type_is_set() {
     let idx = index();
-    let targets = [("i", &idx, None)];
+    let targets = [("i", 0, &idx, None)];
     let check = |sort: Value| {
         es_query::check_sortable(
             &targets,
@@ -520,7 +520,7 @@ fn sorting_on_an_unmapped_field_is_refused_unless_unmapped_type_is_set() {
 #[test]
 fn mapping_validation_sorting_on_a_source_path_the_mappings_lack_is_refused() {
     let idx = index();
-    let targets = [("i", &idx, None)];
+    let targets = [("i", 0, &idx, None)];
     let req = SearchRequest::parse(&json!({"sort": ["nested.x"]})).unwrap();
     let e = es_query::check_sortable(&targets, &req).unwrap_err();
     assert_eq!(e.msg, "No mapping found for [nested.x] in order to sort on");
@@ -950,7 +950,7 @@ fn match_phrase_prefix_expands_the_last_term_to_indexed_terms() {
     idx.put("5", json!({"title": "quick brawny bear"}));
     let run = |q: Value| {
         let req = SearchRequest::parse(&json!({"query": {"match_phrase_prefix": q}}))?;
-        es_query::search_many(&[("", &idx, None)], &req).map(|r| {
+        es_query::search_many(&[("", 0, &idx, None)], &req).map(|r| {
             (r.hits.iter())
                 .map(|h| (h.id.to_owned(), h.score.unwrap()))
                 .collect::<Vec<_>>()
@@ -1056,7 +1056,7 @@ fn multi_match_combines_per_field_queries_by_type() {
             q["fields"] = json!(["title", "body"]);
         }
         let req = SearchRequest::parse(&json!({"query": {"multi_match": q}}))?;
-        es_query::search_many(&[("", &idx, None)], &req).map(|r| {
+        es_query::search_many(&[("", 0, &idx, None)], &req).map(|r| {
             (r.hits.iter())
                 .map(|h| (h.id.to_owned(), h.score.unwrap()))
                 .collect::<Vec<_>>()
@@ -1179,7 +1179,7 @@ fn query_string_parses_lucene_syntax() {
         let body = json!({"query": {"query_string": {
             "query": q, "default_field": "title", "default_operator": op}}});
         let req = SearchRequest::parse(&body)?;
-        es_query::search_many(&[("", &idx, None)], &req).map(|r| {
+        es_query::search_many(&[("", 0, &idx, None)], &req).map(|r| {
             (r.hits.iter())
                 .map(|h| (h.id.to_owned(), h.score.unwrap()))
                 .collect::<Vec<_>>()
@@ -1436,7 +1436,7 @@ fn query_dsl_gaps_prefix_and_wildcard_need_keyword_or_text() {
     i.put("5", json!({"d": "2020-01-01"}));
     let run = |q: Value| {
         let req = SearchRequest::parse(&json!({ "query": q })).unwrap();
-        es_query::search_many(&[("", &i, None)], &req).map(|r| r.total)
+        es_query::search_many(&[("", 0, &i, None)], &req).map(|r| r.total)
     };
     let err = run(json!({"prefix": {"d": "2020"}})).unwrap_err();
     assert_eq!(
@@ -1674,11 +1674,11 @@ fn error_shapes_a_query_failing_on_some_indices_fails_only_their_shards() {
     let (d, plain) = (dates(), index());
     let req = SearchRequest::parse(&json!({"query": {"range": {"date": {"gte": "bogus"}}}}));
     let req = req.unwrap();
-    let r = es_query::search_many(&[("d", &d, None), ("p", &plain, None)], &req).unwrap();
+    let r = es_query::search_many(&[("d", 0, &d, None), ("p", 0, &plain, None)], &req).unwrap();
     let failed: Vec<_> = r.failures.iter().map(|(n, _, e)| (*n, e.kind)).collect();
     assert_eq!(failed, [("d", es_query::ErrorKind::Parse)]);
     // failing everywhere, the error lists each index's failure
-    let e = es_query::search_many(&[("d", &d, None), ("e", &d, None)], &req).unwrap_err();
+    let e = es_query::search_many(&[("d", 0, &d, None), ("e", 0, &d, None)], &req).unwrap_err();
     let shards: Vec<_> = e
         .shards
         .iter()

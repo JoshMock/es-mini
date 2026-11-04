@@ -594,3 +594,60 @@ async fn error_shapes_search_failing_on_every_index_is_a_search_phase_exception(
     assert_eq!(r["_shards"]["failed"], 1);
     assert_eq!(r["_shards"]["failures"][0], shard("t"));
 }
+
+/// A 3-shard index `t` (date `d`, long `n`) with a document routed by each of `a`, `b` and `c`,
+/// and a one-shard index `k` whose keyword `d` takes any range bound.
+async fn routed_shard_ids_indices() -> axum::Router {
+    let app = app();
+    let t = json!({"settings": {"number_of_shards": 3},
+        "mappings": {"properties": {"d": {"type": "date"}, "n": {"type": "long"}}}});
+    call(&app, Method::PUT, "/t", Some(t)).await;
+    let k = json!({"mappings": {"properties": {"d": {"type": "keyword"}}}});
+    call(&app, Method::PUT, "/k", Some(k)).await;
+    call(
+        &app,
+        Method::PUT,
+        "/k/_doc/1?refresh",
+        Some(json!({"d": "2024"})),
+    )
+    .await;
+    for (n, r) in ["a", "b", "c"].into_iter().enumerate() {
+        let doc = Some(json!({"d": "2024", "n": n}));
+        call(
+            &app,
+            Method::PUT,
+            &format!("/t/_doc/{r}?routing={r}&refresh"),
+            doc,
+        )
+        .await;
+    }
+    app
+}
+
+/// Elasticsearch 9.5.5 routes `b` to shard 2 of 3 and names that shard in the failure.
+#[tokio::test]
+async fn routed_shard_ids_name_the_failed_shard() {
+    let app = routed_shard_ids_indices().await;
+    let query = Some(json!({"query": {"range": {"d": {"gte": "foo"}}}}));
+    for path in ["/t,k/_search?routing=b", "/t,k/_search?routing=b&scroll=1m"] {
+        let (s, r) = call(&app, Method::POST, path, query.clone()).await;
+        assert_eq!(s, StatusCode::OK, "{r}");
+        assert_eq!(r["_shards"]["total"], 2, "{r}");
+        let f = &r["_shards"]["failures"][0];
+        assert_eq!((&f["index"], &f["shard"]), (&json!("t"), &json!(2)), "{r}");
+    }
+}
+
+/// Elasticsearch 9.5.5 profiles shard 2, where `b` routes, as `[node][t][2]`.
+#[tokio::test]
+async fn routed_shard_ids_name_the_profiled_shard() {
+    let app = routed_shard_ids_indices().await;
+    let body = json!({"size": 0, "profile": true, "aggs": {"m": {"max": {"field": "n"}}}});
+    let (s, r) = call(&app, Method::POST, "/t/_search?routing=b", Some(body)).await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    let shards = &r["profile"]["shards"];
+    assert_eq!(shards.as_array().map(Vec::len), Some(1), "{r}");
+    assert_eq!(shards[0]["shard_id"], 2);
+    let id = format!("[{}][t][2]", crate::nodes::NODE_ID);
+    assert_eq!(shards[0]["id"], id);
+}

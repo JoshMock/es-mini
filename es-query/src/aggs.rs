@@ -3631,8 +3631,8 @@ mod tests {
             }
         };
         let (p1, p2) = (index(0, 20), index(10_000, 10));
-        close(&values(&[("p1", &p1, None)]), &want_p1, 1e-4);
-        let both = values(&[("p1", &p1, None), ("p2", &p2, None)]);
+        close(&values(&[("p1", 0, &p1, None)]), &want_p1, 1e-4);
+        let both = values(&[("p1", 0, &p1, None), ("p2", 0, &p2, None)]);
         close(&both, &want_both, 1e-2);
         let dir = std::env::temp_dir().join(format!("esm-pct-{}", std::process::id()));
         disk::save(
@@ -3643,7 +3643,7 @@ mod tests {
         let opened = disk::open(&dir).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         let (p1, p2) = (&opened["p1"], &opened["p2"]);
-        assert_eq!(values(&[("p1", p1, None), ("p2", p2, None)]), both);
+        assert_eq!(values(&[("p1", 0, p1, None), ("p2", 0, p2, None)]), both);
     }
 
     #[test]
@@ -3655,7 +3655,7 @@ mod tests {
                 Err(e) => return e.msg,
             };
             let ix = index();
-            match crate::search_many(&[("i", &ix, None)], &req) {
+            match crate::search_many(&[("i", 0, &ix, None)], &req) {
                 Ok(_) => panic!("accepted {aggs}"),
                 Err(e) => e.msg,
             }

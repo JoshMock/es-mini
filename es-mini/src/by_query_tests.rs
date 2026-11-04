@@ -199,3 +199,18 @@ async fn by_query_writes_nothing_when_an_index_fails() {
     let (_, r) = call(&app, Method::GET, "/k/_doc/1", None).await;
     assert_eq!(r["found"], true, "{r}");
 }
+
+/// Elasticsearch 9.5.5 names shard 2 of 3, where routing `b` goes, as the failed shard.
+#[tokio::test]
+async fn routed_shard_ids_name_the_failed_shard_by_query() {
+    let app = app();
+    let t = json!({"settings": {"number_of_shards": 3},
+        "mappings": {"properties": {"d": {"type": "date"}}}});
+    call(&app, Method::PUT, "/t", Some(t)).await;
+    let doc = Some(json!({"d": "2024"}));
+    call(&app, Method::PUT, "/t/_doc/b?routing=b&refresh", doc).await;
+    let query = Some(json!({"query": {"range": {"d": {"gte": "foo"}}}}));
+    let (s, r) = call(&app, Method::POST, "/t/_delete_by_query?routing=b", query).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{r}");
+    assert_eq!(r["error"]["failed_shards"][0]["shard"], 2, "{r}");
+}

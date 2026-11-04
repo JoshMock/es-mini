@@ -1295,9 +1295,9 @@ pub struct SearchResult<'a> {
     pub failures: Vec<(&'a str, usize, QueryError)>,
 }
 
-/// One index (or shard of one) to search, with the filter of the alias it was reached
-/// through. An index's shards are its targets in shard-number order.
-pub type Target<'a> = (&'a str, &'a Index, Option<&'a Value>);
+/// One index (or shard of one) to search: its name, shard number, and the filter of the alias
+/// it was reached through. An index's shards are its targets in shard-number order.
+pub type Target<'a> = (&'a str, usize, &'a Index, Option<&'a Value>);
 
 /// The request query, narrowed by an alias filter.
 fn with_filter(
@@ -1323,7 +1323,7 @@ fn with_filter(
 /// (fielddata is off by default).
 pub fn check_sortable(targets: &[Target], req: &SearchRequest) -> Result<(), QueryError> {
     for f in &req.sort {
-        for (_, index, _) in targets {
+        for (_, _, index, _) in targets {
             let known = f.unmapped_ok
                 || f.field.starts_with('_')
                 || index.mappings.properties.contains_key(&f.field)
@@ -1620,7 +1620,7 @@ fn cmp_sorted(sort: &[SortField], (a, sa): (&[Value], f64), (b, sb): (&[Value], 
 
 /// [`search_many`] of one index; panics where it fails (e.g. on a date that does not parse).
 pub fn search<'a>(index: &'a Index, req: &SearchRequest) -> SearchResult<'a> {
-    search_many(&[("", index, None)], req).expect("search_many failed")
+    search_many(&[("", 0, index, None)], req).expect("search_many failed")
 }
 
 /// Searches several indices and merges the hits. Each index is scored with its own statistics,
@@ -1639,12 +1639,11 @@ pub fn search_many<'a>(
     // hits counted but not kept, past the page
     let mut total = 0;
     let global = req.dfs.then(|| global_stats(targets, &req.query));
-    for (pos, (name, index, filter)) in targets.iter().enumerate() {
-        let shard = targets[..pos].iter().filter(|t| t.0 == *name).count();
-        let query = match with_filter(index, &req.query, *filter, now) {
+    for (pos, &(name, shard, index, filter)) in targets.iter().enumerate() {
+        let query = match with_filter(index, &req.query, filter, now) {
             Ok(q) => q,
             Err(e) => {
-                failures.push((*name, shard, e));
+                failures.push((name, shard, e));
                 continue;
             }
         };
@@ -1679,14 +1678,14 @@ pub fn search_many<'a>(
         let index_aggs = match aggs::resolve_dates(&req.aggs, index, now) {
             Ok(a) => a,
             Err(e) => {
-                failures.push((*name, shard, e));
+                failures.push((name, shard, e));
                 continue;
             }
         };
         let mut collector = match aggs::Collector::new(&index_aggs, &s, name, req.profile) {
             Ok(c) => c,
             Err(e) => {
-                failures.push((*name, shard, e));
+                failures.push((name, shard, e));
                 continue;
             }
         };
@@ -1740,14 +1739,14 @@ pub fn search_many<'a>(
         }
         if let Some(e) = collector.failed() {
             hits.retain(|h| h.target != pos);
-            failures.push((*name, shard, e));
+            failures.push((name, shard, e));
             continue;
         }
         total += counted;
         let (stats, p) = collector.finish(matches!(query, Query::MatchAll));
         aggs::reduce(&mut aggs, stats);
         if let (Some(all), Some(p)) = (&mut profile, p) {
-            all.push((*name, shard, p));
+            all.push((name, shard, p));
         }
         searchers.insert(pos, s);
     }
@@ -1816,7 +1815,7 @@ pub fn search_many<'a>(
 /// AggregatedDfs gives each shard.
 fn global_stats(targets: &[Target], q: &Query) -> (FieldStats, DocFreqs) {
     let (mut stats, mut df) = (FieldStats::new(), DocFreqs::new());
-    for (_, index, _) in targets {
+    for (_, _, index, _) in targets {
         let mut s = Searcher::unscored(index, q);
         s.gather(q);
         for (field, (n, len)) in s.field_stats {
@@ -1835,7 +1834,7 @@ fn global_stats(targets: &[Target], q: &Query) -> (FieldStats, DocFreqs) {
 
 /// [`count_many`] of one index; panics where it fails (e.g. on a date that does not parse).
 pub fn count(index: &Index, q: &Query) -> usize {
-    count_many(&[("", index, None)], q).expect("count_many failed")
+    count_many(&[("", 0, index, None)], q).expect("count_many failed")
 }
 
 /// Counts from postings and doc values where they answer the query exactly, on disk and in
@@ -1843,7 +1842,7 @@ pub fn count(index: &Index, q: &Query) -> usize {
 pub fn count_many(targets: &[Target], q: &Query) -> Result<usize, QueryError> {
     let now = now_millis();
     let mut n = 0;
-    for (_, index, filter) in targets {
+    for (_, _, index, filter) in targets {
         // ponytail: an index the query fails on fails the whole count, unwrapped; ES counts the
         // others, like search_many
         let q = with_filter(index, q, *filter, now)?;
