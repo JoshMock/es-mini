@@ -351,3 +351,40 @@ async fn elastic_may_not_create_write_or_delete_system_names() {
     let (status, doc) = call(&app, ELASTIC, "GET", "/.tasks/_doc/1", None).await;
     assert_eq!((status, &doc["_source"]), (200, &json!({"a": 1})));
 }
+
+/// The value of setting `index.hidden` of `index`, as `elastic` sees it with security `off`.
+async fn hidden(app: &axum::Router, index: &str) -> Value {
+    let uri = format!("/{index}/_settings/index.hidden?expand_wildcards=all");
+    let (status, body) = call(app, "", "GET", &uri, None).await;
+    assert_eq!(status, 200, "{body}");
+    body[index]["settings"]["index"]["hidden"].clone()
+}
+
+#[tokio::test]
+async fn security_off_creates_system_indices_hidden() {
+    // ponytail: es-mini creates them without their descriptors' mappings and settings (as
+    // `.tasks`' `dynamic: strict`), so writes ES refuses as strict (`.async-search`) succeed
+    let app = es_mini::app();
+    for (method, uri, index) in [
+        ("PUT", "/.tasks", ".tasks"),
+        ("PUT", "/.ml-config", ".ml-config"),
+        ("PUT", "/.kibana_1", ".kibana_1"),
+        ("PUT", "/.kibana_3/_doc/1", ".kibana_3"),
+    ] {
+        let body = uri.contains("_doc").then(|| json!({"a": 1}));
+        let (status, res) = call(&app, "", method, uri, body).await;
+        assert!([200, 201].contains(&status), "{uri}: {res}");
+        assert_eq!(hidden(&app, index).await, json!("true"), "{uri}");
+    }
+    // A system data stream's name is an ordinary index's.
+    let (status, res) = call(&app, "", "PUT", "/.fleet-actions-results", None).await;
+    assert_eq!(status, 200, "{res}");
+    assert_eq!(hidden(&app, ".fleet-actions-results").await, Value::Null);
+    // A system index cannot be created visible.
+    let body = json!({"settings": {"index.hidden": false}});
+    let reason = "Cannot create system index [.kibana_2] with [index.hidden] set to 'false'";
+    let e = json!({"type": "illegal_state_exception", "reason": reason});
+    let error = json!({"root_cause": [e], "type": "illegal_state_exception", "reason": reason});
+    let got = call(&app, "", "PUT", "/.kibana_2", Some(body)).await;
+    assert_eq!(got, (500, json!({"error": error, "status": 500})));
+}

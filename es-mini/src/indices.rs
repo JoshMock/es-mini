@@ -185,6 +185,7 @@ pub async fn create(
     if name == crate::security::INDEX {
         index = crate::security::managed_index(&name).expect("a managed index");
     }
+    crate::system::hide(&mut index, &name)?;
     let mut indices = state.write();
     if indices.contains_key(&name) {
         return Err(AppError::IndexExists(name));

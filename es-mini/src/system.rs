@@ -57,17 +57,46 @@ const SYSTEM_DATA_STREAMS: [&str; 4] = [
 /// `SYSTEM_DATA_STREAMS` match, with the data streams' backing indices.
 pub(crate) static RESTRICTED: std::sync::LazyLock<es_query::Regexp> =
     std::sync::LazyLock::new(|| {
-        // `SystemIndexDescriptor.patternToRegex`
-        let regex = |p: &str| format!("({})", p.replace('.', "\\.").replace('*', ".*"));
         let indices = SYSTEM_INDICES
             .iter()
             .flat_map(|(p, alias)| [Some(*p), *alias])
             .flatten();
         // `SystemDataStreamDescriptor.getBackingIndexPattern`
         let backing = SYSTEM_DATA_STREAMS.map(|d| format!(".(migrated-){{0,}}[fd]s-{d}-*"));
-        let names: Vec<String> = (indices.chain(SYSTEM_DATA_STREAMS))
-            .map(regex)
-            .chain(backing.iter().map(|b| regex(b)))
-            .collect();
-        es_query::Regexp::new(&names.join("|")).expect("valid system index patterns")
+        automaton(
+            indices
+                .chain(SYSTEM_DATA_STREAMS)
+                .chain(backing.iter().map(|b| &**b)),
+        )
     });
+
+/// `SystemIndices.isSystemIndex`: the names the `SYSTEM_INDICES` patterns match.
+static INDICES: std::sync::LazyLock<es_query::Regexp> =
+    std::sync::LazyLock::new(|| automaton(SYSTEM_INDICES.iter().map(|(p, _)| *p)));
+
+/// The names any of `patterns` matches.
+fn automaton<'a>(patterns: impl Iterator<Item = &'a str>) -> es_query::Regexp {
+    // `SystemIndexDescriptor.patternToRegex`
+    let regex = |p: &str| format!("({})", p.replace('.', "\\.").replace('*', ".*"));
+    let names: Vec<String> = patterns.map(regex).collect();
+    es_query::Regexp::new(&names.join("|")).expect("valid system index patterns")
+}
+
+/// Marks `index`, being created as `name`, hidden if `name` is a system index, as
+/// Elasticsearch's `MetadataCreateIndexService` does; it refuses to create one visible.
+// ponytail: plain hidden indices; Elasticsearch builds them from their descriptors' mappings
+// and settings (only `.security-7`'s is ported, `crate::security::managed_index`)
+pub(crate) fn hide(index: &mut es_index::Index, name: &str) -> Result<(), crate::error::AppError> {
+    if !INDICES.matches(name) {
+        return Ok(());
+    }
+    if index.settings.get("index.hidden") == Some("false") {
+        return Err(crate::error::AppError::Other(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "illegal_state_exception",
+            format!("Cannot create system index [{name}] with [index.hidden] set to 'false'"),
+        ));
+    }
+    index.settings.merge(&serde_json::json!({"hidden": "true"}));
+    Ok(())
+}

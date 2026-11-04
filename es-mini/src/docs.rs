@@ -87,13 +87,14 @@ fn write<T>(
         if let Some(index) = crate::security::managed_index(&target) {
             target = crate::security::INDEX.to_owned();
             indices.entry(target.clone()).or_insert(index);
+        } else {
+            let mut created = Index::default();
+            created.settings.record_creation(&target);
+            crate::system::hide(&mut created, &target)?;
+            indices.insert(target.clone(), created);
         }
     }
-    let index = indices.entry(target.clone()).or_insert_with(|| {
-        let mut created = Index::default();
-        created.settings.record_creation(&target);
-        created
-    });
+    let index = indices.get_mut(&target).expect("created above");
     Ok(apply(index, target, f))
 }
 
