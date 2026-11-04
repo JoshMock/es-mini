@@ -82,6 +82,7 @@ pub fn from_settings(
         .map(|p| hash(p.as_bytes()))
         .transpose()
         .map_err(|e| format!("hashing bootstrap.password: {e}"))?;
+    store.secure();
     let store = store.clone();
     Ok(Some(Arc::new(Security { elastic, store })))
 }
@@ -206,15 +207,16 @@ pub(crate) fn restricted_read(store: &Store, authn: Option<&Authn>, name: &str) 
         .flatten()
 }
 
-/// Refuses `action` on [`INDEX`] or [`ALIAS`] (`name`) to any request but the security APIs,
-/// with the error Elasticsearch gives `elastic`; `privileges` are those it says grant `action`.
-// ponytail: refused with security off too, where ES has no .security-7 to protect
+/// Refuses `action` on [`INDEX`] or [`ALIAS`] (`name`) to any request but the security APIs
+/// when security is on, with the error Elasticsearch gives `elastic`; `privileges` are those it
+/// says grant `action`.
 pub(crate) fn refuse_restricted(
+    store: &Store,
     name: &str,
     action: &str,
     privileges: &str,
 ) -> Result<(), AppError> {
-    if name != INDEX && name != ALIAS {
+    if !store.secured() || (name != INDEX && name != ALIAS) {
         return Ok(());
     }
     Err(AppError::Other(
@@ -224,6 +226,57 @@ pub(crate) fn refuse_restricted(
             "action [{action}] is unauthorized for user [elastic] with effective roles [superuser] on restricted indices [{name}], this action is granted by the index privileges [{privileges}]"
         ),
     ))
+}
+
+/// [`INDEX`], if a request creating `name` creates it (security off): Elasticsearch creates
+/// that managed system index from its descriptor (`SecuritySystemIndices`), ignoring the
+/// request's settings, mappings and aliases, also when a document is written to [`ALIAS`].
+pub(crate) fn managed_index(name: &str) -> Option<Index> {
+    if name != INDEX && name != ALIAS {
+        return None;
+    }
+    let mut index = Index::default();
+    index.settings.merge(&json!({
+        "hidden": "true",
+        "number_of_shards": "1",
+        "auto_expand_replicas": "0-1",
+        "routing.allocation.include._tier_preference": "data_hot,data_content",
+        "priority": "1000",
+        "format": "6",
+        "analysis": {
+            "filter": {"email": {"type": "pattern_capture", "preserve_original": "true",
+                "patterns": ["([^@]+)", "(\\p{L}+)", "(\\d+)", "@(.+)"]}},
+            "analyzer": {"email": {"tokenizer": "uax_url_email",
+                "filter": ["email", "lowercase", "unique"]}},
+        },
+    }));
+    index.settings.record_creation(name);
+    let mut mappings =
+        serde_json::from_str(include_str!("security/main_mappings.json")).expect("valid JSON");
+    approximate(&mut mappings);
+    index.mappings = es_index::Mappings::deserialize(&mappings).expect("valid mappings");
+    let alias = json!({"is_hidden": true, "is_write_index": true});
+    let alias = es_index::aliases::Alias::parse(&alias).expect("a valid alias");
+    index.aliases.insert(ALIAS.to_owned(), alias);
+    Some(index)
+}
+
+/// The mappings `m` of Elasticsearch's descriptor in types es-mini has.
+// ponytail: es-mini has no custom analyzers, so the `email` fields analyze with `standard`
+// (goal custom-analyzers); nor `binary`, `flattened` or `enabled: false` mappings, which map as
+// `keyword` and as objects that keep their values in `_source` only (`dynamic: false`)
+fn approximate(m: &mut Value) {
+    let fields = m.get_mut("properties").and_then(Value::as_object_mut);
+    for f in fields.into_iter().flat_map(|p| p.values_mut()) {
+        match f["type"].clone().as_str() {
+            Some("binary") => f["type"] = "keyword".into(),
+            Some("flattened") => *f = json!({"type": "object", "dynamic": false}),
+            _ if f.get("enabled") == Some(&json!(false)) => {
+                *f = json!({"type": "object", "dynamic": false});
+            }
+            _ => approximate(f),
+        }
+    }
 }
 
 impl Security {

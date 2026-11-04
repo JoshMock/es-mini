@@ -1,0 +1,132 @@
+{
+  "_meta": {"security-version": "8.14.0", "managed_index_mappings_version": 5},
+  "dynamic": "strict",
+  "properties": {
+    "username": {"type": "keyword"},
+    "roles": {"type": "keyword"},
+    "role_templates": {"properties": {
+      "template": {"type": "text"},
+      "format": {"type": "keyword"}
+    }},
+    "password": {"type": "keyword", "index": false, "doc_values": false},
+    "full_name": {"type": "text"},
+    "email": {"type": "text", "analyzer": "email"},
+    "metadata": {"type": "object", "dynamic": false},
+    "metadata_flattened": {"type": "flattened"},
+    "enabled": {"type": "boolean"},
+    "cluster": {"type": "keyword"},
+    "indices": {"type": "object", "properties": {
+      "field_security": {"properties": {
+        "grant": {"type": "keyword"},
+        "except": {"type": "keyword"}
+      }},
+      "names": {"type": "keyword"},
+      "privileges": {"type": "keyword"},
+      "query": {"type": "keyword"},
+      "allow_restricted_indices": {"type": "boolean"}
+    }},
+    "remote_indices": {"type": "object", "properties": {
+      "field_security": {"properties": {
+        "grant": {"type": "keyword"},
+        "except": {"type": "keyword"}
+      }},
+      "names": {"type": "keyword"},
+      "privileges": {"type": "keyword"},
+      "query": {"type": "keyword"},
+      "allow_restricted_indices": {"type": "boolean"},
+      "clusters": {"type": "keyword"}
+    }},
+    "remote_cluster": {"type": "object", "properties": {
+      "clusters": {"type": "keyword"},
+      "privileges": {"type": "keyword"}
+    }},
+    "applications": {"type": "object", "properties": {
+      "application": {"type": "keyword"},
+      "privileges": {"type": "keyword"},
+      "resources": {"type": "keyword"}
+    }},
+    "application": {"type": "keyword"},
+    "global": {"type": "object", "properties": {
+      "application": {"type": "object", "properties": {
+        "manage": {"type": "object", "properties": {
+          "applications": {"type": "keyword"}
+        }}
+      }},
+      "profile": {"type": "object", "properties": {
+        "write": {"type": "object", "properties": {
+          "applications": {"type": "keyword"}
+        }}
+      }},
+      "role": {"type": "object", "properties": {
+        "manage": {"type": "object", "properties": {
+          "indices": {"properties": {
+            "names": {"type": "keyword"},
+            "privileges": {"type": "keyword"}
+          }}
+        }}
+      }},
+      "data_source": {"type": "nested", "properties": {
+        "names": {"type": "keyword"},
+        "privileges": {"type": "keyword"}
+      }}
+    }},
+    "name": {"type": "keyword"},
+    "description": {"type": "text"},
+    "run_as": {"type": "keyword"},
+    "doc_type": {"type": "keyword"},
+    "type": {"type": "keyword"},
+    "actions": {"type": "keyword"},
+    "expiration_time": {"type": "date", "format": "epoch_millis"},
+    "creation_time": {"type": "date", "format": "epoch_millis"},
+    "invalidation_time": {"type": "date", "format": "epoch_millis"},
+    "api_key_hash": {"type": "keyword", "index": false, "doc_values": false},
+    "api_key_invalidated": {"type": "boolean"},
+    "certificate_identity": {"type": "keyword"},
+    "role_descriptors": {"type": "object", "enabled": false},
+    "limited_by_role_descriptors": {"type": "object", "enabled": false},
+    "version": {"type": "integer"},
+    "creator": {"type": "object", "properties": {
+      "principal": {"type": "keyword"},
+      "full_name": {"type": "text"},
+      "email": {"type": "text", "analyzer": "email"},
+      "metadata": {"type": "object", "dynamic": false},
+      "realm": {"type": "keyword"},
+      "realm_type": {"type": "keyword"},
+      "realm_domain": {"type": "object", "properties": {
+        "name": {"type": "keyword"},
+        "realms": {"type": "nested", "properties": {
+          "name": {"type": "keyword"},
+          "type": {"type": "keyword"}
+        }}
+      }}
+    }},
+    "rules": {"type": "object", "dynamic": false},
+    "refresh_token": {"type": "object", "properties": {
+      "token": {"type": "keyword"},
+      "refreshed": {"type": "boolean"},
+      "refresh_time": {"type": "date", "format": "epoch_millis"},
+      "superseding": {"type": "object", "properties": {
+        "encrypted_tokens": {"type": "binary"},
+        "encryption_iv": {"type": "binary"},
+        "encryption_salt": {"type": "binary"}
+      }},
+      "invalidated": {"type": "boolean"},
+      "client": {"type": "object", "properties": {
+        "type": {"type": "keyword"},
+        "user": {"type": "keyword"},
+        "realm": {"type": "keyword"}
+      }}
+    }},
+    "access_token": {"type": "object", "properties": {
+      "user_token": {"type": "object", "properties": {
+        "id": {"type": "keyword"},
+        "expiration_time": {"type": "date", "format": "epoch_millis"},
+        "version": {"type": "integer"},
+        "metadata": {"type": "object", "dynamic": false},
+        "authentication": {"type": "binary"}
+      }},
+      "invalidated": {"type": "boolean"},
+      "realm": {"type": "keyword"}
+    }}
+  }
+}

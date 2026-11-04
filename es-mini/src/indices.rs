@@ -114,7 +114,7 @@ pub async fn create(
     )?;
     let name = resolve_date_math(&name)?;
     let privileges = "create_index,manage,all";
-    crate::security::refuse_restricted(&name, "indices:admin/create", privileges)?;
+    crate::security::refuse_restricted(&state, &name, "indices:admin/create", privileges)?;
     validate_index_name(&name)?;
     let body = parse_body(&body)?;
     let mut index = Index::default();
@@ -181,6 +181,10 @@ pub async fn create(
             .aliases
             .insert(resolve_date_math(alias)?, parse_alias(meta)?);
     }
+    // From its descriptor, as ES does; `PUT /.security` (the alias name) is an ordinary index.
+    if name == crate::security::INDEX {
+        index = crate::security::managed_index(&name).expect("a managed index");
+    }
     let mut indices = state.write();
     if indices.contains_key(&name) {
         return Err(AppError::IndexExists(name));
@@ -216,7 +220,7 @@ pub async fn delete(
     check(&uri, &params, &["timeout", "master_timeout"])?;
     if authn.is_some() {
         let privileges = "delete_index,manage,all";
-        crate::security::refuse_restricted(&name, "indices:admin/delete", privileges)?;
+        crate::security::refuse_restricted(&state, &name, "indices:admin/delete", privileges)?;
     }
     let mut indices = state.write();
     let opts = aliases::IndicesOptions::DELETE.with_params(&params);

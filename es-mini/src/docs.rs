@@ -63,16 +63,20 @@ fn write<T>(
     // A write to an existing index locks only that index; auto-creating one locks them all.
     let target = aliases::resolve_write(&*shared, name)?;
     let privileges = "create_doc,create,delete,index,write,all";
-    crate::security::refuse_restricted(&target, "indices:data/write/bulk[s]", privileges)?;
+    crate::security::refuse_restricted(state, &target, "indices:data/write/bulk[s]", privileges)?;
     if let Some(mut index) = shared.write(&target) {
         return Ok(apply(&mut index, target, f));
     }
     drop(shared);
     let mut indices = state.write();
     // Resolved again: another request may have created the index meanwhile.
-    let target = aliases::resolve_write(&*indices, name)?;
+    let mut target = aliases::resolve_write(&*indices, name)?;
     if !indices.contains_key(&target) {
         crate::indices::validate_index_name(&target)?;
+        if let Some(index) = crate::security::managed_index(&target) {
+            target = crate::security::INDEX.to_owned();
+            indices.entry(target.clone()).or_insert(index);
+        }
     }
     let index = indices.entry(target.clone()).or_insert_with(|| {
         let mut created = Index::default();

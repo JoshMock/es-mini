@@ -5,10 +5,11 @@
 use es_index::aliases::{Alias, IndexMeta};
 use es_index::{Index, Indices};
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-/// System indices: only the API that owns one reads or writes it, through [`Store::system`];
-/// index expressions, listings and document requests never see them.
+/// System indices: once [`Store::secure`]d, only the API that owns one reads or writes it,
+/// through [`Store::system`]; index expressions, listings and document requests never see them.
 pub(crate) const SYSTEM: [&str; 1] = [crate::security::INDEX];
 
 type Map = BTreeMap<String, Slot>;
@@ -30,12 +31,29 @@ impl IndexMeta for Slot {
     }
 }
 
-pub(crate) struct Store(RwLock<Map>, Mutex<Indices>);
+/// The indices, the system indices once [`Store::secure`]d, and whether it was.
+pub(crate) struct Store(RwLock<Map>, Mutex<Indices>, AtomicBool);
 
 impl Store {
-    pub fn new(mut indices: Indices) -> Self {
-        let system = take_system(&mut indices);
-        Self(RwLock::new(wrap(indices)), Mutex::new(system))
+    pub fn new(indices: Indices) -> Self {
+        Self(
+            RwLock::new(wrap(indices)),
+            Mutex::new(Indices::new()),
+            false.into(),
+        )
+    }
+
+    /// Moves the system indices out of the API's reach, as security on does; with it off,
+    /// Elasticsearch treats `.security-7` as any other index.
+    pub fn secure(&self) {
+        let mut all = self.write();
+        *self.system() = take_system(&mut all);
+        self.2.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether [`Store::secure`] was called.
+    pub fn secured(&self) -> bool {
+        self.2.load(Ordering::Relaxed)
     }
 
     /// The system indices, by name.
@@ -66,6 +84,9 @@ impl Store {
     /// [`Store::write`] with the system indices too, for saving everything to disk.
     pub fn write_all(&self) -> Exclusive<'_> {
         let mut all = self.write();
+        if !self.secured() {
+            return all;
+        }
         let mut system = self.system();
         all.indices.append(&mut system);
         all.system = Some(system);
