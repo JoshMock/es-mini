@@ -227,11 +227,13 @@ fn write_sorted_numeric_entry(
 fn write_terms_dict(dvm: &mut Output, dvd: &mut Output, terms: &[&[u8]]) {
     let start = dvd.0.len();
     let (mut addresses, mut max_len, mut max_block) = (vec![], 0, 0);
+    let mut ht = lz4::FastTable::default();
     for block in terms.chunks(TERMS_DICT_BLOCK_SIZE) {
         addresses.push((dvd.0.len() - start) as i64);
         dvd.vint(block[0].len() as i32);
         dvd.bytes(block[0]);
-        let mut rest = Output::default();
+        // The first term is the LZ4 dictionary of the rest.
+        let mut rest = Output(block[0].to_vec());
         for (prev, term) in block.iter().zip(&block[1..]) {
             let prefix = prev.iter().zip(*term).take_while(|(a, b)| a == b).count();
             let suffix = term.len() - prefix;
@@ -246,9 +248,10 @@ fn write_terms_dict(dvm: &mut Output, dvd: &mut Output, terms: &[&[u8]]) {
         }
         max_len = max_len.max(block.iter().map(|t| t.len()).max().unwrap_or(0));
         if block.len() > 1 {
-            max_block = max_block.max(rest.0.len());
-            dvd.vint(rest.0.len() as i32);
-            lz4::literals(dvd, &rest.0);
+            let len = rest.0.len() - block[0].len();
+            max_block = max_block.max(len);
+            dvd.vint(len as i32);
+            lz4::compress(&rest.0, block[0].len(), dvd, &mut ht);
         }
     }
     let length = dvd.0.len() - start;

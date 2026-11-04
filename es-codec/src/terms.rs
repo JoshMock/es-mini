@@ -489,7 +489,7 @@ impl BlockTree<'_> {
             if suffixes.len() > 6 * n {
                 let mut out = Output::default();
                 let ht = self.lz4.get_or_insert_with(Default::default);
-                lz4::compress(&suffixes, &mut out, ht);
+                lz4::compress(&suffixes, 0, &mut out, ht);
                 if out.0.len() < suffixes.len() - (suffixes.len() >> 2) {
                     compressed = Some((2, out.0));
                 }

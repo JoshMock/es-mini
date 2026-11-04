@@ -72,8 +72,58 @@ const MAX_DISTANCE: usize = 1 << 16;
 const MASK: usize = MAX_DISTANCE - 1;
 const MIN_MATCH: usize = 4;
 const LAST_LITERALS: usize = 5;
+const MEMORY_USAGE: u32 = 14;
 const HASH_LOG_HC: u32 = 15;
 const MAX_ATTEMPTS: usize = 256;
+
+/// Lucene `LZ4.HashTable`: finds earlier positions holding the same 4 bytes.
+pub(crate) trait HashTable {
+    /// Starts compressing `b`, whose first `dict_len` bytes are the dictionary.
+    fn reset(&mut self, b: &[u8], dict_len: usize);
+    /// An earlier position holding `b[off..off + 4]`; `off` only increases.
+    fn get(&mut self, b: &[u8], off: usize) -> Option<usize>;
+    /// A position before `off` holding the same 4 bytes.
+    fn previous(&mut self, b: &[u8], off: usize) -> Option<usize>;
+}
+
+/// Lucene `LZ4.FastCompressionHashTable`: the last position of each hash. Lucene never clears
+/// it between inputs (its doc values keep one per terms dictionary), and stale positions that
+/// still match the new input are used, so keep one as long as Lucene does.
+#[derive(Default)]
+pub(crate) struct FastTable {
+    /// Lucene's `Table16` or `Table32`, by `bits`; positions start at 0, a valid reference.
+    table: Vec<u32>,
+    bits: u32,
+    hash_log: u32,
+}
+
+impl HashTable for FastTable {
+    fn reset(&mut self, b: &[u8], dict_len: usize) {
+        let bits: u32 = if b.len() - LAST_LITERALS < 1 << 16 {
+            16
+        } else {
+            32
+        };
+        self.hash_log = MEMORY_USAGE + 3 - bits.ilog2();
+        if self.table.len() < 1 << self.hash_log || self.bits < bits {
+            (self.table, self.bits) = (vec![0; 1 << self.hash_log], bits);
+        }
+        // `initDictionary`
+        for i in 0..dict_len {
+            self.table[hash(read_int(b, i), self.hash_log)] = i as u32;
+        }
+    }
+
+    fn get(&mut self, b: &[u8], off: usize) -> Option<usize> {
+        let v = read_int(b, off);
+        let r = std::mem::replace(&mut self.table[hash(v, self.hash_log)], off as u32) as usize;
+        (r < off && off - r < MAX_DISTANCE && read_int(b, r) == v).then_some(r)
+    }
+
+    fn previous(&mut self, _: &[u8], _: usize) -> Option<usize> {
+        None
+    }
+}
 
 /// Lucene `LZ4.HighCompressionHashTable`. Lucene keeps one per terms field and does not clear
 /// its heads between short inputs, so stale heads can change which match is found: keep one as
@@ -104,23 +154,13 @@ fn read_int(b: &[u8], i: usize) -> u32 {
     u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]])
 }
 
-fn hash_hc(v: u32) -> usize {
-    (v.wrapping_mul(0x9E37_79B1) >> (32 - HASH_LOG_HC)) as usize
+fn hash(v: u32, bits: u32) -> usize {
+    (v.wrapping_mul(0x9E37_79B1) >> (32 - bits)) as usize
 }
 
 impl HcTable {
-    fn reset(&mut self) {
-        if self.end < MAX_DISTANCE {
-            self.chain[..self.end].fill(0xffff);
-        } else {
-            self.hash.fill(-1);
-            self.chain.fill(0xffff);
-        }
-        self.next = 0;
-    }
-
     fn add_hash(&mut self, b: &[u8], off: usize) {
-        let h = hash_hc(read_int(b, off));
+        let h = hash(read_int(b, off), HASH_LOG_HC);
         let delta = off as i64 - i64::from(self.hash[h]);
         let delta = if delta <= 0 || delta >= MAX_DISTANCE as i64 {
             MAX_DISTANCE - 1
@@ -142,6 +182,20 @@ impl HcTable {
         }
         None
     }
+}
+
+impl HashTable for HcTable {
+    /// `initDictionary` is left to the first `get`, which adds the same hashes.
+    fn reset(&mut self, b: &[u8], _: usize) {
+        if self.end < MAX_DISTANCE {
+            self.chain[..self.end].fill(0xffff);
+        } else {
+            self.hash.fill(-1);
+            self.chain.fill(0xffff);
+        }
+        self.next = 0;
+        self.end = b.len();
+    }
 
     fn get(&mut self, b: &[u8], off: usize) -> Option<usize> {
         while self.next < off {
@@ -150,7 +204,7 @@ impl HcTable {
         }
         let v = read_int(b, off);
         self.attempts = 0;
-        let r = i64::from(self.hash[hash_hc(v)]);
+        let r = i64::from(self.hash[hash(v, HASH_LOG_HC)]);
         if r >= off as i64 {
             return None; // left from a previous input
         }
@@ -163,15 +217,15 @@ impl HcTable {
     }
 }
 
-/// Lucene `LZ4.compress` with a `HighCompressionHashTable`.
-pub(crate) fn compress(b: &[u8], out: &mut Output, ht: &mut HcTable) {
+/// Lucene `LZ4.compressWithDictionary`: compresses `b[dict_len..]`, whose matches may reference
+/// the dictionary `b[..dict_len]`.
+pub(crate) fn compress(b: &[u8], dict_len: usize, out: &mut Output, ht: &mut impl HashTable) {
     let len = b.len();
-    let (mut off, mut anchor) = (0, 0);
-    if len > LAST_LITERALS + MIN_MATCH {
+    let (mut off, mut anchor) = (dict_len, dict_len);
+    if len - dict_len > LAST_LITERALS + MIN_MATCH {
         let limit = len - LAST_LITERALS;
         let match_limit = limit - MIN_MATCH;
-        ht.reset();
-        ht.end = len;
+        ht.reset(b, dict_len);
         // `Arrays.mismatch` over `[o1, limit)` and `[o2, limit)`.
         let common = |o1: usize, o2: usize| {
             (0..limit - o2)
@@ -241,13 +295,13 @@ mod tests {
             &long,
         ] {
             let mut c = Output::default();
-            compress(input, &mut c, &mut ht);
+            compress(input, 0, &mut c, &mut ht);
             let mut out = Vec::new();
             decompress(&mut DataInput::new(&c.0), input.len(), &mut out).unwrap();
             assert_eq!(out, input);
         }
         let mut c = Output::default();
-        compress(&[b'z'; 100], &mut c, &mut ht);
+        compress(&[b'z'; 100], 0, &mut c, &mut ht);
         // 1 literal, a 94-byte match at offset 1, then the last 5 bytes as literals.
         assert_eq!(
             c.0,
