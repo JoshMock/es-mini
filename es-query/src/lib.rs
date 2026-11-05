@@ -10,6 +10,7 @@
 //! answer its query.
 
 mod aggs;
+mod can_match;
 mod dates;
 pub mod esql;
 mod hll;
@@ -22,6 +23,7 @@ mod request;
 mod tdigest;
 
 pub use aggs::java_double;
+pub use can_match::can_match;
 use dates::{now_millis, resolve_dates};
 pub use es_index::date_millis;
 use es_index::json_num as num;

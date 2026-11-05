@@ -56,7 +56,6 @@ pub async fn field_caps_all(
     field_caps(state, Path("_all".into()), uri, params, body).await
 }
 
-// ponytail: `index_filter` keeps empty indices and those with a matching document; Elasticsearch only drops those it can prove empty of matches
 pub async fn field_caps(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -102,8 +101,7 @@ pub async fn field_caps(
             }];
             let split = crate::search::split(&indices, &one);
             let shards = crate::search::targets(&indices, &one, &split);
-            es_query::count_many(&shards, &q)
-                .map_or(true, |(c, _)| c > 0 || indices[n].docs().count() == 0)
+            shards.iter().any(|t| es_query::can_match(t, &q))
         });
     }
     let runtime: Vec<(String, String)> =

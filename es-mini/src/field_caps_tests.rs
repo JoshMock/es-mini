@@ -204,11 +204,91 @@ async fn api_gaps_field_caps_index_filter_drops_indices_without_matches() {
         Some(json!({"k": "y", "m": 1})),
     )
     .await;
-    let body = json!({"fields": ["*"], "index_filter": {"term": {"k.keyword": "y"}}});
+    let body = json!({"fields": ["*"], "index_filter": {"term": {"m": 1}}});
     let (s, r) = call(&app, Method::POST, "/_field_caps", Some(body)).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(r["indices"], json!(["q"]));
     assert!(r["fields"].get("m").is_some());
+}
+
+#[tokio::test]
+async fn api_fidelity_field_caps_index_filter_drops_what_rewrites_to_match_none() {
+    // Elasticsearch 9.5.5 drops an index only where the filter rewrites to match_none: unmapped
+    // fields, constant fields, date ranges outside the shard's values, and bools of those.
+    let app = app();
+    let date = json!({"mappings": {"properties": {"d": {"type": "date"}}}});
+    for i in ["d1", "d2", "d3"] {
+        call(&app, Method::PUT, &format!("/{i}"), Some(date.clone())).await;
+    }
+    call(&app, Method::PUT, "/e", None).await;
+    for (path, doc) in [
+        ("/p/_doc/1", json!({"k": "x"})),
+        ("/q/_doc/1", json!({"k": "y", "m": 1})),
+        ("/d1/_doc/1", json!({"d": "2020-01-01"})),
+        ("/d2/_doc/1", json!({"d": "2022-01-01"})),
+        ("/d2/_doc/2", json!({"d": "2024-01-01"})),
+    ] {
+        call(
+            &app,
+            Method::PUT,
+            &format!("{path}?refresh=true"),
+            Some(doc),
+        )
+        .await;
+    }
+    let all = json!(["d1", "d2", "d3", "e", "p", "q"]);
+    let mapped = json!(["d1", "d2", "d3", "p", "q"]);
+    for (filter, indices) in [
+        (json!({"term": {"k.keyword": "y"}}), json!(["p", "q"])),
+        (json!({"term": {"m": 1}}), json!(["q"])),
+        (json!({"match": {"m": 1}}), all.clone()),
+        (
+            json!({"range": {"d": {"gte": "2021-01-01"}}}),
+            json!(["d2"]),
+        ),
+        (
+            json!({"range": {"d": {"gte": "2022-06-01", "lt": "2023-01-01"}}}),
+            json!(["d2"]),
+        ),
+        (json!({"term": {"_index": "p"}}), json!(["p"])),
+        (json!({"term": {"_index": "D1"}}), json!([])),
+        (
+            json!({"prefix": {"_index": "d"}}),
+            json!(["d1", "d2", "d3"]),
+        ),
+        (
+            json!({"wildcard": {"_index": "d*"}}),
+            json!(["d1", "d2", "d3"]),
+        ),
+        (
+            json!({"bool": {"must_not": {"term": {"_index": "p"}}}}),
+            json!(["d1", "d2", "d3", "e", "q"]),
+        ),
+        (json!({"exists": {"field": "m"}}), json!(["q"])),
+        (json!({"terms": {"m": []}}), json!([])),
+        (json!({"ids": {"values": ["1"]}}), mapped.clone()),
+        (json!({"term": {"_tier": "data_content"}}), mapped.clone()),
+        (json!({"term": {"_tier": "nope"}}), json!([])),
+        (
+            json!({"bool": {"should": [{"term": {"zz": 1}}, {"exists": {"field": "d"}}]}}),
+            json!(["d1", "d2", "d3"]),
+        ),
+        (
+            json!({"constant_score": {"filter": {"term": {"m": 1}}}}),
+            json!(["q"]),
+        ),
+        (json!({"range": {"k": {"gte": "a"}}}), json!(["p", "q"])),
+        (json!({"bool": {}}), all.clone()),
+        (
+            json!({"bool": {"filter": [{"match_all": {}}], "must_not": [{"match_all": {}}]}}),
+            json!([]),
+        ),
+    ] {
+        let body = json!({"fields": ["zz"], "index_filter": filter});
+        let (s, r) = call(&app, Method::POST, "/_field_caps", Some(body)).await;
+        assert_eq!(s, StatusCode::OK, "{filter}: {r}");
+        assert_eq!(r["indices"], indices, "{filter}");
+    }
 }
 
 #[tokio::test]
