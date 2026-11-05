@@ -297,8 +297,9 @@ pub struct Shard {
     /// Documents written since the index was opened; they replace any on disk. Shared with
     /// snapshots.
     docs: memory::Docs,
-    /// Postings over `docs`, built per field as queries need them (see [`postings`]).
-    postings: std::sync::Mutex<postings::Postings>,
+    /// Postings over `docs`, built per field as queries need them (see [`postings`]). Shared
+    /// with snapshots until a write (see [`Shard::postings_mut`]).
+    postings: Arc<Mutex<postings::Postings>>,
     /// The `ignore_above` changes of its keyword fields, oldest first (see
     /// [`Shard::ignore_above`]); kept in the shard's commit user data.
     ignore_above: Vec<postings::LimitChange>,
@@ -461,15 +462,22 @@ impl Shard {
     fn take(&mut self, id: &str) -> Option<Option<Arc<Document>>> {
         if let Some(d) = self.docs.remove(id) {
             self.memo_log(|m| m.removed.push(d.seq_no));
-            self.postings
-                .get_mut()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .remove(id);
+            self.postings_mut().remove(id);
             return Some((d.seq_no >= self.persisted).then_some(d));
         }
         let d = self.disk.as_mut()?.remove(id)?;
         self.memo_log(|m| m.removed.push(d.seq_no));
         Some(None)
+    }
+
+    /// The postings to write to. Ones a snapshot shares are left to it, for this shard to
+    /// rebuild as queries need them.
+    fn postings_mut(&mut self) -> &mut postings::Postings {
+        if Arc::get_mut(&mut self.postings).is_none() {
+            self.postings = Default::default();
+        }
+        let p = Arc::get_mut(&mut self.postings).expect("unshared");
+        p.get_mut().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Notes a write for the memo to follow, or drops it past [`MEMO_WRITES`].
@@ -561,10 +569,7 @@ impl Shard {
     ) -> DocResult {
         self.deleted_versions.remove(id);
         let old = self.take(id);
-        self.postings
-            .get_mut()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .add(id, seq_no, &source);
+        self.postings_mut().add(id, seq_no, &source);
         let doc = Arc::new(Document {
             source,
             version,
@@ -630,6 +635,7 @@ impl Shard {
         Shard {
             stats: self.stats.clone(),
             docs: self.docs.clone(),
+            postings: self.postings.clone(),
             disk: self.disk.clone(),
             superseded: self.superseded.clone(),
             ignore_above: self.ignore_above.clone(),
@@ -1052,10 +1058,7 @@ impl Shard {
         self.superseded.clear();
         self.persisted = self.next_seq_no;
         // Rebuilt as queries need them, now counting no document committed.
-        *self
-            .postings
-            .get_mut()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Default::default();
+        self.postings = Default::default();
     }
 
     /// In-memory documents that were updated or deleted (see `superseded`).
@@ -1311,8 +1314,6 @@ impl Index {
 
     /// Each of its `index.number_of_shards` shards as a one-shard [`Index::snapshot`], so that a
     /// search reads each one.
-    // ponytail: copies each shard's document ids on every search of a multi-shard index, and
-    // their postings are rebuilt; search the shards in place if that gets slow
     pub fn shard_snapshots(&self) -> Vec<Index> {
         let empty = Shard::default();
         let shards = self.number_of_shards().max(self.shards.len());
@@ -1890,6 +1891,39 @@ mod tests {
         for (id, at) in &now {
             assert_eq!(held_on_disk[id], *at, "{id} is shared, not copied");
         }
+    }
+
+    #[test]
+    fn shard_search_speed_shard_snapshots_share_postings_until_a_write() {
+        let mut ix = Index::default();
+        (ix.settings).merge(&json!({index_settings::NUMBER_OF_SHARDS: "2"}));
+        for n in 0..2 {
+            ix.put_in(n, &format!("a{n}"), json!({"t": "quick fox"}));
+            ix.put_in(n, &format!("b{n}"), json!({"t": "lazy dog"}));
+        }
+        let fox = |s: &Shard| -> BTreeSet<String> {
+            let terms = ["fox".to_owned()];
+            let docs = s.memory_docs("t", postings::Indexed::Analyzed, &terms, false);
+            docs.unwrap().into_iter().collect()
+        };
+        let held = ix.shard_snapshots();
+        assert_eq!(fox(&held[1].shards[0]), BTreeSet::from(["a1".to_owned()]));
+        // built once, by whichever searched first
+        assert!(Arc::ptr_eq(
+            &held[1].shards[0].postings,
+            &ix.shards[1].postings
+        ));
+        assert_eq!(fox(&ix.shards[1]), BTreeSet::from(["a1".to_owned()]));
+        // writes leave a held snapshot's postings as they were
+        ix.put_in(1, "a1", json!({"t": "lazy dog"}));
+        ix.put_in(1, "c1", json!({"t": "red fox"}));
+        ix.delete_in(0, "a0");
+        assert_eq!(fox(&held[1].shards[0]), BTreeSet::from(["a1".to_owned()]));
+        assert_eq!(fox(&held[0].shards[0]), BTreeSet::from(["a0".to_owned()]));
+        let now = ix.shard_snapshots();
+        assert_eq!(fox(&now[1].shards[0]), BTreeSet::from(["c1".to_owned()]));
+        assert_eq!(fox(&now[0].shards[0]), BTreeSet::new());
+        assert_eq!(fox(&ix.shards[1]), BTreeSet::from(["c1".to_owned()]));
     }
 
     #[test]
