@@ -1398,6 +1398,88 @@ fn esql_speed_eval_before_limit_keeps_the_same_rows() {
     assert!(run(&all, "FROM o | EVAL x = ROUND(n, -1) | KEEP x").is_err());
 }
 
+/// Counts Elasticsearch 9.5.5 reported for the same documents and queries: a LIMIT pushed through
+/// EVAL and RENAME, a STATS reading every match (a lone COUNT answered from each index's count),
+/// and only the source fields an output uses loaded.
+#[test]
+fn esql_speed_counts_push_a_limit_through_eval_and_read_every_match_for_stats() {
+    let mut t = Index::default();
+    t.mappings.properties.insert("n".into(), FieldMapping::Long);
+    let keyword = FieldMapping::Keyword {
+        ignore_above: None,
+        split_queries_on_whitespace: false,
+    };
+    t.mappings.properties.insert("k".into(), keyword);
+    for i in 0..3000 {
+        t.put(&i.to_string(), json!({"n": i, "k": format!("k{}", i % 3)}));
+    }
+    let mut o = Index::default();
+    o.mappings.properties.insert("n".into(), FieldMapping::Long);
+    o.put("1", json!({"n": 1}));
+    let all = BTreeMap::from([("t".to_owned(), t), ("o".to_owned(), o)]);
+    for (query, docs, values) in [
+        ("FROM t | EVAL x = n * 2 | LIMIT 10", 10, 20),
+        ("FROM t | EVAL x = n * 2 | KEEP x | LIMIT 10", 10, 10),
+        ("FROM t | RENAME n AS m | KEEP m | LIMIT 10", 10, 10),
+        (
+            "FROM t | SORT n DESC | EVAL x = n * 2 | KEEP x | LIMIT 5",
+            5,
+            5,
+        ),
+        (
+            "FROM t | SORT n DESC | RENAME n AS m | KEEP m, k | LIMIT 5",
+            5,
+            10,
+        ),
+        (
+            "FROM t | EVAL x = n * 2 | RENAME k AS j | KEEP j | LIMIT 4",
+            4,
+            4,
+        ),
+        ("FROM t | EVAL x = 1 | LIMIT 4", 4, 8),
+        (
+            "FROM t | WHERE n > 5 | EVAL x = n * 2 | KEEP x | LIMIT 3",
+            3,
+            3,
+        ),
+        ("FROM t | EVAL x = n | KEEP x | LIMIT 3 | EVAL y = x", 3, 3),
+        ("FROM t | STATS c = COUNT(*) BY k | SORT k", 3000, 3000),
+        ("FROM t | STATS c = COUNT(*) BY k | WHERE c > 5", 3000, 3000),
+        ("FROM t | STATS s = SUM(n)", 3000, 3000),
+        ("FROM t | WHERE n > 5 | STATS s = SUM(n)", 2994, 2994),
+        ("FROM t | WHERE n + n > 100 | STATS s = SUM(n)", 3000, 3000),
+        ("FROM t | LIMIT 10 | STATS s = SUM(n)", 10, 10),
+        ("FROM t | SORT k | STATS s = SUM(n)", 3000, 3000),
+        ("FROM t | STATS m = MAX(n), c = COUNT(k) BY k", 3000, 6000),
+        ("FROM t | STATS s = SUM(n) BY k | LIMIT 1", 3000, 6000),
+        ("FROM t | EVAL x = n * 2 | STATS s = SUM(x)", 3000, 3000),
+        ("FROM t | RENAME n AS m | STATS s = SUM(m)", 3000, 3000),
+        ("FROM t | KEEP k | STATS c = COUNT(*) BY k", 3000, 3000),
+        (
+            "FROM t | RENAME k AS j | STATS c = COUNT(*) BY j",
+            3000,
+            3000,
+        ),
+        ("FROM t | STATS c = COUNT(*)", 1, 0),
+        ("FROM t | WHERE n > 5 | STATS c = COUNT(*)", 1, 0),
+        ("FROM t | STATS c = COUNT(k)", 1, 0),
+        ("FROM t | EVAL x = n | STATS c = COUNT(x)", 1, 0),
+        ("FROM t | STATS c = COUNT(*) | EVAL d = c + 1", 1, 0),
+        ("FROM t, o | STATS c = COUNT(*)", 2, 0),
+        ("FROM t | WHERE n + n > 5 | STATS c = COUNT(*)", 3000, 3000),
+        ("FROM t | STATS c = COUNT(*), d = COUNT(n)", 3000, 3000),
+        ("FROM t | EVAL x = n * 2 | STATS c = COUNT(x)", 3000, 3000),
+        ("FROM t | LIMIT 10 | STATS c = COUNT(*)", 10, 0),
+    ] {
+        let r = run(&all, query).unwrap();
+        assert_eq!(
+            (r.documents_found, r.values_loaded),
+            (docs, values),
+            "{query}"
+        );
+    }
+}
+
 #[test]
 fn stats_count_star_by_groups() {
     let r = q("FROM people METADATA _index | STATS c = COUNT(*) BY _index");

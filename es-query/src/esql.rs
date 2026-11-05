@@ -2936,8 +2936,10 @@ fn run_at(
         Some(&Command::Limit(n)) => Some(n.min(MAX_LIMIT)),
         _ => None,
     };
-    // The rows at the cut of `load_counts`' plan, which it may reuse.
+    // The rows at the cut of `load_counts`' plan, which it may reuse: all of them at a STATS
+    // (which reads every match), handed over once it is done with them.
     let cut = plan_cut(&cmds);
+    let stats_cut = matches!(cmds.get(cut), Some(Command::Stats(..)));
     let mut at_cut = Vec::new();
 
     for (i, cmd) in cmds.iter().enumerate() {
@@ -3413,15 +3415,19 @@ fn run_at(
                         r.insert(a.clone(), agg(a, e, n, std::mem::take(&mut all[b])));
                     }
                 }
-                rows = (out.into_iter().zip(buckets))
+                let out = (out.into_iter().zip(buckets))
                     .map(|(mut r, (key, _))| {
                         r.extend(by.iter().map(|(b, _)| b.clone()).zip(key));
                         Line::Own(r)
                     })
                     .collect();
+                let before = std::mem::replace(&mut rows, out);
+                if i == cut {
+                    at_cut = before;
+                }
             }
         }
-        if i + 1 == cut {
+        if i + 1 == cut && !stats_cut {
             at_cut = rows.iter().take(MAX_LIMIT).cloned().collect();
         }
     }
@@ -4107,10 +4113,12 @@ fn cmp_values(x: &Value, y: &Value, k: &SortKey) -> Ordering {
 }
 
 /// `documents_found` and `values_loaded` as Elasticsearch 9.5.5's plan counts them. Up to the
-/// first LIMIT (implicitly 1000) the plan runs per shard: Lucene runs the filters on a field and a
-/// literal and, with no other filter, the LIMIT or a non-`text` SORT (a top N per index); each
-/// field is loaded only for the rows still alive when the plan first needs it. Everything after the
-/// first LIMIT runs on its output, so the fields it uses load for those rows.
+/// first LIMIT (implicitly 1000) the plan runs per shard, the LIMIT pushed through EVAL and RENAME:
+/// Lucene runs the filters on a field and a literal and, with no other filter, the LIMIT or a
+/// non-`text` SORT (a top N per index); each field is loaded only for the rows still alive when
+/// the plan first needs it. A STATS there reads every match, or only each index's count for a lone
+/// COUNT. Everything after the first LIMIT or STATS runs on its output, so the fields it uses load
+/// for those rows.
 fn load_counts(
     groups: &[Group],
     cmds: &[Command],
@@ -4118,11 +4126,13 @@ fn load_counts(
     types: &BTreeMap<String, String>,
     at_cut: &[Line],
 ) -> (usize, usize) {
-    // ponytail: the plan is cut at an EVAL, RENAME or STATS as if at a LIMIT, though ES pushes a
-    // LIMIT through an EVAL or RENAME and a STATS reads every match rather than the first 1000
+    // ponytail: a WHERE or SORT after an EVAL or RENAME cuts the plan there as if at a LIMIT,
+    // where ES pushes it below them or runs it on every match
     let (head, tail) = cmds.split_at(plan_cut(cmds));
+    let stats = matches!(tail.first(), Some(Command::Stats(..)));
     let limit = match tail.first() {
         Some(&Command::Limit(n)) => n.min(MAX_LIMIT),
+        _ if stats => usize::MAX,
         _ => DEFAULT_LIMIT,
     };
     let mut filters = Vec::new();
@@ -4130,16 +4140,22 @@ fn load_counts(
     for c in head {
         match c {
             Command::Where(e) => conjuncts(e, &mut filters),
-            // ES drops a SORT that a later SORT overrides.
-            Command::Sort(keys) => sort = keys,
+            // ES drops a SORT that a later SORT overrides, or a STATS.
+            Command::Sort(keys) if !stats => sort = keys,
             _ => {}
         }
     }
     let (pushed, residual): (Vec<&Expr>, Vec<&Expr>) =
         filters.into_iter().partition(|e| pushable(e));
-    // The fields the tail uses, named as before it: walked backwards through renames.
+    // The fields the output uses, named as in the documents: walked backwards through the tail,
+    // then through the head's renames and evals.
     let mut later: BTreeSet<String> = out.iter().cloned().collect();
-    for c in tail.iter().rev() {
+    let walked = (tail.iter().rev()).chain(
+        head.iter()
+            .rev()
+            .filter(|c| matches!(c, Command::Rename(_) | Command::Eval(_))),
+    );
+    for c in walked {
         match c {
             Command::Rename(pairs) => {
                 for ((old, _), new, _) in pairs.iter().rev() {
@@ -4149,9 +4165,21 @@ fn load_counts(
                 }
             }
             Command::Where(e) => later.extend(names(e)),
-            Command::Eval(named) => later.extend(named.iter().flat_map(|(_, e)| names(e))),
+            Command::Eval(named) => {
+                for (name, e) in named.iter().rev() {
+                    if later.remove(name) {
+                        later.extend(names(e));
+                    }
+                }
+            }
             Command::Sort(keys) => later.extend(keys.iter().map(|k| k.field.clone())),
-            Command::Stats(_, by) => later.extend(by.iter().flat_map(|(_, e)| names(e))),
+            Command::Stats(aggs, by) => {
+                later = (aggs.iter().chain(by))
+                    .flat_map(|(_, e)| names(e))
+                    .collect();
+                // COUNT(*) loads nothing.
+                later.remove("*");
+            }
             _ => {}
         }
     }
@@ -4165,31 +4193,48 @@ fn load_counts(
             Value::Array(a) => a.len(),
             _ => 1,
         };
-        rows.iter()
-            .flat_map(|r| (fields.iter().filter(|f| reads(f))).map(|f| count(r.field(f))))
+        // Column by column, so a document's column lookups hit `Group::at`'s hint.
+        (fields.iter().filter(|f| reads(f)))
+            .map(|f| rows.iter().map(|r| count(r.field(f))).sum::<usize>())
             .sum()
     };
-    // The query's own rows at the cut are this top N when it has one index, one SORT before the
-    // cut (a second one would have broken the ties) and the cut is a LIMIT or the end.
-    let reuse = groups.len() == 1
-        && matches!(tail.first(), None | Some(Command::Limit(_)))
-        && head
-            .iter()
-            .filter(|c| matches!(c, Command::Sort(_)))
-            .count()
-            == 1;
+    // With no EVAL or RENAME (which change them), the query's own rows at the cut are the ones a
+    // STATS reads, and this top N when it has one index, one SORT before the cut (a second one
+    // would have broken the ties) and the cut is a LIMIT or the end.
+    let reuse = !(head.iter()).any(|c| matches!(c, Command::Eval(_) | Command::Rename(_)))
+        && (stats
+            || groups.len() == 1
+                && matches!(tail.first(), None | Some(Command::Limit(_)))
+                && head
+                    .iter()
+                    .filter(|c| matches!(c, Command::Sort(_)))
+                    .count()
+                    == 1);
+    // A lone COUNT of everything or of a document field is each index's count when Lucene runs
+    // every filter.
+    if let Some(Command::Stats(aggs, by)) = tail.first()
+        && let ([(_, e)], []) = (&aggs[..], &by[..])
+        && let Some((f, arg, _)) = aggregate(e)
+        && f == "COUNT"
+        && arg.is_none_or(|a| matches!(a, Expr::Field(c, _) if from_documents(head, c)))
+        && residual.is_empty()
+    {
+        return (groups.len(), 0);
+    }
     let found = (groups.iter()).map(|g| g.lines().filter(|r| passes(r, &pushed)));
     if residual.is_empty() && keys.iter().all(|k| types[k] != "text") {
-        let emitted: Vec<Line> = match sort.is_empty() {
-            true => found.flatten().take(limit).collect(),
-            false if reuse => at_cut.iter().take(limit).cloned().collect(),
-            false => found
-                .flat_map(|g| {
-                    let mut g: Vec<Line> = g.collect();
-                    top_rows(&mut g, sort, limit);
-                    g
-                })
-                .collect(),
+        let emitted: Cow<[Line]> = match sort.is_empty() {
+            _ if reuse => Cow::Borrowed(&at_cut[..at_cut.len().min(limit)]),
+            true => Cow::Owned(found.flatten().take(limit).collect()),
+            false => Cow::Owned(
+                found
+                    .flat_map(|g| {
+                        let mut g: Vec<Line> = g.collect();
+                        top_rows(&mut g, sort, limit);
+                        g
+                    })
+                    .collect(),
+            ),
         };
         return (emitted.len(), values(&emitted, &(&keys | &later)));
     }
@@ -4206,16 +4251,45 @@ fn load_counts(
     (documents, n)
 }
 
-/// Where `load_counts` cuts the plan: at the first LIMIT, EVAL, RENAME or STATS.
+/// Where `load_counts` cuts the plan: at the first LIMIT or STATS, or before it at the first EVAL
+/// or RENAME when a WHERE or SORT follows that.
 fn plan_cut(cmds: &[Command]) -> usize {
-    (cmds.iter())
-        .position(|c| {
-            matches!(
-                c,
-                Command::Limit(_) | Command::Eval(_) | Command::Rename(_) | Command::Stats(..)
-            )
-        })
-        .unwrap_or(cmds.len())
+    let end = (cmds.iter())
+        .position(|c| matches!(c, Command::Limit(_) | Command::Stats(..)))
+        .unwrap_or(cmds.len());
+    let change =
+        (cmds[..end].iter()).position(|c| matches!(c, Command::Eval(_) | Command::Rename(_)));
+    match change {
+        Some(i)
+            if (cmds[i..end].iter()).any(|c| matches!(c, Command::Where(_) | Command::Sort(_))) =>
+        {
+            i
+        }
+        _ => end,
+    }
+}
+
+/// Whether column `c` after `head` is a document field, under its name or renamed, rather than
+/// one an EVAL computed.
+fn from_documents<'a>(head: &'a [Command], mut c: &'a str) -> bool {
+    for cmd in head.iter().rev() {
+        match cmd {
+            Command::Rename(pairs) => {
+                for ((old, _), new, _) in pairs.iter().rev() {
+                    if new == c {
+                        c = old;
+                    }
+                }
+            }
+            Command::Eval(named) => match named.iter().rev().find(|(n, _)| n == c) {
+                Some((_, Expr::Field(f, _))) => c = f,
+                Some(_) => return false,
+                None => {}
+            },
+            _ => {}
+        }
+    }
+    true
 }
 
 fn conjuncts<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
