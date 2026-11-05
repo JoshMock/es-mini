@@ -27,8 +27,20 @@ fn saved_segment(name: &str, idx: Index) -> (Scratch, SegmentReader) {
 fn disk_writer_completeness_stores_text_fields_mapped_with_store() {
     let mut idx = Index::default();
     let props = &mut idx.mappings.properties;
-    props.insert("st".into(), FieldMapping::Text { store: true });
-    props.insert("t".into(), FieldMapping::Text { store: false });
+    props.insert(
+        "st".into(),
+        FieldMapping::Text {
+            store: true,
+            fields: Default::default(),
+        },
+    );
+    props.insert(
+        "t".into(),
+        FieldMapping::Text {
+            store: false,
+            fields: Default::default(),
+        },
+    );
     idx.put(
         "1",
         json!({"st": ["Quick fox", "lazy dog"], "t": "not stored"}),
@@ -53,7 +65,8 @@ fn disk_writer_completeness_writes_multi_fields_and_honors_ignore_above() {
         ignore_above: Some(5),
         split_queries_on_whitespace: false,
     };
-    let s = FieldMapping::TextKeyword {
+    let s = FieldMapping::Text {
+        store: false,
         fields: [("keyword".to_owned(), keyword)].into(),
     };
     idx.mappings.properties.insert("s".into(), s);
@@ -85,7 +98,13 @@ fn disk_writer_completeness_coerces_scalars_and_skips_malformed_values() {
         split_queries_on_whitespace: false,
     };
     props.insert("k".into(), keyword);
-    props.insert("t".into(), FieldMapping::Text { store: false });
+    props.insert(
+        "t".into(),
+        FieldMapping::Text {
+            store: false,
+            fields: Default::default(),
+        },
+    );
     props.insert("n".into(), FieldMapping::Long);
     props.insert("b".into(), FieldMapping::Boolean);
     props.insert("i".into(), FieldMapping::Integer);
@@ -221,7 +240,8 @@ fn disk_writer_completeness_lists_ignore_above_fields_in_ignored() {
     };
     let props = &mut idx.mappings.properties;
     props.insert("a".into(), keyword());
-    let s = FieldMapping::TextKeyword {
+    let s = FieldMapping::Text {
+        store: false,
         fields: [("keyword".to_owned(), keyword())].into(),
     };
     props.insert("s".into(), s);

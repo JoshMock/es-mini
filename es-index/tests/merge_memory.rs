@@ -66,9 +66,13 @@ fn memory_bounds_2_a_merge_streams_postings_term_by_term() {
     }
     let dir = Scratch::new("merge-memory", Some("data"));
     let mut ix = Index::default();
-    ix.mappings
-        .properties
-        .insert("body".into(), FieldMapping::Text { store: false });
+    ix.mappings.properties.insert(
+        "body".into(),
+        FieldMapping::Text {
+            store: false,
+            fields: Default::default(),
+        },
+    );
     let mut indices = Indices::from([("big".to_owned(), ix)]);
     // As many segments as the merge policy leaves alone (`segmentsPerTier`).
     for round in 0..8 {

@@ -2204,7 +2204,13 @@ mod tests {
         assert_eq!(FieldMapping::Float.type_name(), "double");
         assert!(FieldMapping::Byte.is_numeric());
         assert!(!FieldMapping::Boolean.is_numeric());
-        assert!(!FieldMapping::Text { store: false }.is_numeric());
+        assert!(
+            !FieldMapping::Text {
+                store: false,
+                fields: Default::default()
+            }
+            .is_numeric()
+        );
     }
 
     #[test]
@@ -2240,7 +2246,7 @@ mod tests {
         )
         .unwrap();
         let p = &i.mappings.properties;
-        assert!(matches!(p["s"], FieldMapping::TextKeyword { .. }));
+        assert!(matches!(p["s"], FieldMapping::Text { .. }));
         assert_eq!(
             serde_json::to_value(&p["s"]).unwrap(),
             json!({"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}})
@@ -2250,7 +2256,7 @@ mod tests {
         assert_eq!(p["b"], FieldMapping::Boolean);
         assert!(matches!(p["d"], FieldMapping::Date { .. }));
         assert!(matches!(p["d2"], FieldMapping::Date { .. }));
-        assert!(matches!(p["notd"], FieldMapping::TextKeyword { .. }));
+        assert!(matches!(p["notd"], FieldMapping::Text { .. }));
         assert_eq!(p["arr"], FieldMapping::Long);
         assert!(!p.contains_key("nul"));
     }
@@ -2821,7 +2827,13 @@ mod tests {
             fields: Default::default(),
         };
         props.insert("at".into(), date);
-        props.insert("t".into(), FieldMapping::Text { store: false });
+        props.insert(
+            "t".into(),
+            FieldMapping::Text {
+                store: false,
+                fields: Default::default(),
+            },
+        );
         let doc = json!({"n": [3, -2], "d": -1.5, "f": 1.1, "k": ["b", "a", "b"], "ok": true,
             "at": "2021-05-01T00:00:00Z", "t": "x"});
         ix.put("1", doc);
@@ -2922,7 +2934,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("esm-term-freqs-{}", std::process::id()));
         let mut ix = Index::default();
         let props = &mut ix.mappings.properties;
-        props.insert("t".into(), FieldMapping::Text { store: false });
+        props.insert(
+            "t".into(),
+            FieldMapping::Text {
+                store: false,
+                fields: Default::default(),
+            },
+        );
         props.insert(
             "k".into(),
             FieldMapping::Keyword {

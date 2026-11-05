@@ -486,9 +486,13 @@ fn minimum_should_match_accepts_elasticsearch_specs() {
 #[test]
 fn sorting_on_a_text_field_is_refused() {
     let mut i = Index::default();
-    i.mappings
-        .properties
-        .insert("t".into(), FieldMapping::Text { store: false });
+    i.mappings.properties.insert(
+        "t".into(),
+        FieldMapping::Text {
+            store: false,
+            fields: Default::default(),
+        },
+    );
     i.put("1", json!({"t": "a"}));
     let targets = [("i", 0, &i, None)];
     let req = SearchRequest::parse(&json!({"sort": ["t"]})).unwrap();
@@ -812,7 +816,13 @@ fn postings_narrowed_queries_track_writes() {
 fn statistics_of_an_opened_index_count_later_writes() {
     let mapped = || {
         let mut i = Index::default();
-        (i.mappings.properties).insert("title".into(), FieldMapping::Text { store: false });
+        (i.mappings.properties).insert(
+            "title".into(),
+            FieldMapping::Text {
+                store: false,
+                fields: Default::default(),
+            },
+        );
         i
     };
     let (mut memory, mut saved) = (mapped(), mapped());
@@ -1009,7 +1019,13 @@ fn match_phrase_prefix_expands_from_an_opened_index() {
     let _ = std::fs::remove_dir_all(&dir);
     // mapped, so its terms are in the segment's term dictionary
     let mut idx = index();
-    (idx.mappings.properties).insert("title".into(), FieldMapping::Text { store: false });
+    (idx.mappings.properties).insert(
+        "title".into(),
+        FieldMapping::Text {
+            store: false,
+            fields: Default::default(),
+        },
+    );
     es_index::disk::save(&dir, &es_index::Indices::from([("idx".into(), idx)])).unwrap();
     let mut opened = es_index::disk::open(&dir).unwrap().remove("idx").unwrap();
     let _ = std::fs::remove_dir_all(&dir);
@@ -1326,7 +1342,13 @@ fn an_opened_index_matches_objects_at_text_and_keyword_leaves_like_memory() {
     let mapped = || {
         let mut i = Index::default();
         let p = &mut i.mappings.properties;
-        p.insert("t".into(), FieldMapping::Text { store: false });
+        p.insert(
+            "t".into(),
+            FieldMapping::Text {
+                store: false,
+                fields: Default::default(),
+            },
+        );
         let keyword = FieldMapping::Keyword {
             ignore_above: None,
             split_queries_on_whitespace: false,
@@ -1792,7 +1814,13 @@ fn ignore_above_values_are_not_indexed_in_memory_or_on_disk() {
         let props = &mut idx.mappings.properties;
         props.insert("k".into(), keyword());
         let fields = [("keyword".to_owned(), keyword())].into();
-        props.insert("s".into(), FieldMapping::TextKeyword { fields });
+        props.insert(
+            "s".into(),
+            FieldMapping::Text {
+                store: false,
+                fields,
+            },
+        );
         idx.put("1", json!({"k": ["abc", "abcd"], "s": "long text"}));
         idx.put("2", json!({"k": "ab", "s": "ab"}));
         idx.put("3", json!({"k": "abcde", "s": "abcde"}));

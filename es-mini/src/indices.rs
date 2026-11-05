@@ -34,8 +34,11 @@ pub fn parse_body(body: &Bytes) -> Result<Value, AppError> {
 }
 
 fn check_field_type(field: &str, spec: &Value) -> Result<(), AppError> {
+    // the multi-fields are checked after their parent's type
+    let mut own = spec.clone();
+    own.as_object_mut().map(|o| o.remove("fields"));
     if !matches!(spec["type"].as_str(), Some("object" | "nested"))
-        && FieldMapping::deserialize(spec).is_err()
+        && FieldMapping::deserialize(&own).is_err()
         && let Some(t) = spec["type"].as_str()
     {
         return Err(AppError::MapperParsing(format!(

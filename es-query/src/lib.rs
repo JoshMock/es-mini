@@ -118,7 +118,7 @@ fn source_path<'f>(index: &Index, field: &'f str) -> &'f str {
 fn resolve(index: &Index, field: &str, sample: impl Fn(&str) -> Option<Value>) -> Kind {
     // Object paths hold no values of their own, so they read like unmapped fields.
     match (index.mappings.field(field)).filter(|m| !m.is_object()) {
-        Some(FieldMapping::Text { .. } | FieldMapping::TextKeyword { .. }) => Kind::Text,
+        Some(FieldMapping::Text { .. }) => Kind::Text,
         Some(FieldMapping::Keyword { ignore_above, .. }) => Kind::Keyword(*ignore_above),
         Some(FieldMapping::Boolean) => Kind::Bool,
         // terms, ranges and sorts read dates as instants, and prefix and wildcard queries refuse
@@ -1348,22 +1348,14 @@ pub fn check_sortable(targets: &[Target], req: &SearchRequest) -> Result<(), Que
         for (_, _, index, _) in targets {
             let known = f.unmapped_ok
                 || f.field.starts_with('_')
-                || index.mappings.properties.contains_key(&f.field)
-                || f.field.strip_suffix(".keyword").is_some_and(|b| {
-                    matches!(
-                        index.mappings.properties.get(b),
-                        Some(FieldMapping::TextKeyword { .. })
-                    )
-                });
+                || index.mappings.field(&f.field).is_some();
             if !known {
                 return Err(QueryError::illegal(format!(
                     "No mapping found for [{}] in order to sort on",
                     f.field
                 )));
             }
-            if let Some(FieldMapping::Text { .. } | FieldMapping::TextKeyword { .. }) =
-                index.mappings.properties.get(&f.field)
-            {
+            if let Some(FieldMapping::Text { .. }) = index.mappings.properties.get(&f.field) {
                 return Err(fielddata_disabled(&f.field));
             }
         }
@@ -2197,7 +2189,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("esm-candidates-{}", std::process::id()));
         let mut ix = Index::default();
         let props = &mut ix.mappings.properties;
-        props.insert("title".into(), FieldMapping::Text { store: false });
+        props.insert(
+            "title".into(),
+            FieldMapping::Text {
+                store: false,
+                fields: Default::default(),
+            },
+        );
         props.insert(
             "tag".into(),
             FieldMapping::Keyword {
@@ -2391,7 +2389,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("esm-count-{}", std::process::id()));
         let mut ix = Index::default();
         let props = &mut ix.mappings.properties;
-        props.insert("title".into(), FieldMapping::Text { store: false });
+        props.insert(
+            "title".into(),
+            FieldMapping::Text {
+                store: false,
+                fields: Default::default(),
+            },
+        );
         props.insert(
             "tag".into(),
             FieldMapping::Keyword {
@@ -2468,7 +2472,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("esm-scores-{}", std::process::id()));
         let mut ix = Index::default();
         let props = &mut ix.mappings.properties;
-        props.insert("title".into(), FieldMapping::Text { store: false });
+        props.insert(
+            "title".into(),
+            FieldMapping::Text {
+                store: false,
+                fields: Default::default(),
+            },
+        );
         props.insert(
             "tag".into(),
             FieldMapping::Keyword {
@@ -2680,7 +2690,13 @@ mod tests {
     fn boost_score(q: Value) -> f64 {
         let mut ix = Index::default();
         let props = &mut ix.mappings.properties;
-        props.insert("title".into(), FieldMapping::Text { store: false });
+        props.insert(
+            "title".into(),
+            FieldMapping::Text {
+                store: false,
+                fields: Default::default(),
+            },
+        );
         props.insert(
             "tag".into(),
             FieldMapping::Keyword {

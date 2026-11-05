@@ -225,9 +225,13 @@ fn flushed_statistics_match_the_committed_segments() {
     ix.settings.record_creation("idx");
     ix.settings
         .merge(&json!({"index.translog.flush_threshold_size": "1b"}));
-    ix.mappings
-        .properties
-        .insert("t".into(), FieldMapping::Text { store: false });
+    ix.mappings.properties.insert(
+        "t".into(),
+        FieldMapping::Text {
+            store: false,
+            fields: Default::default(),
+        },
+    );
     let mut indices = Indices::from([("idx".to_owned(), ix)]);
     let stats = |ix: &Index| {
         let s = ix.shards()[0]
@@ -272,9 +276,13 @@ fn replacing_a_committed_document_counts_it_once() {
     let dir = scratch("recount");
     let mut ix = Index::default();
     ix.settings.record_creation("idx");
-    ix.mappings
-        .properties
-        .insert("t".into(), FieldMapping::Text { store: false });
+    ix.mappings.properties.insert(
+        "t".into(),
+        FieldMapping::Text {
+            store: false,
+            fields: Default::default(),
+        },
+    );
     ix.put("a", json!({"t": "fox"}));
     let mut indices = Indices::from([("idx".to_owned(), ix)]);
     disk::persist(&dir, &mut indices).unwrap();

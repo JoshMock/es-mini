@@ -16,10 +16,9 @@ pub enum FieldMapping {
         /// `stored_fields` from `_source`.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         store: bool,
-    },
-    /// Dynamically mapped string: `text` with a `keyword` subfield.
-    #[serde(rename = "text", skip_deserializing)]
-    TextKeyword {
+        /// Multi-fields, indexed from the same source value (a dynamically mapped string has
+        /// a `keyword`).
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         fields: BTreeMap<String, FieldMapping>,
     },
     Keyword {
@@ -149,7 +148,7 @@ impl FieldMapping {
     /// `date_nanos`, `ip`, or `unsupported` for ranges).
     pub fn type_name(&self) -> &'static str {
         match self {
-            Self::Text { .. } | Self::TextKeyword { .. } => "text",
+            Self::Text { .. } => "text",
             Self::Keyword { .. } => "keyword",
             Self::Long => "long",
             Self::Integer | Self::Short | Self::Byte => "integer",
@@ -180,7 +179,7 @@ impl FieldMapping {
     /// The multi-fields indexed from this field's value.
     pub fn fields(&self) -> Option<&BTreeMap<String, FieldMapping>> {
         match self {
-            Self::TextKeyword { fields } | Self::Date { fields, .. } => Some(fields),
+            Self::Text { fields, .. } | Self::Date { fields, .. } => Some(fields),
             _ => None,
         }
     }
@@ -529,8 +528,6 @@ impl Mappings {
     /// replace these, fields restated keep the multi-fields they omit, and changing a field's
     /// type, an object to a leaf (or the reverse), or a parameter Elasticsearch fixes fails with
     /// its reason.
-    // ponytail: `text` fields declared with `fields` drop them on parse (only dynamic text keeps
-    // its `keyword`), so their multi-fields are neither merged nor checked
     pub fn merged(&self, new: &Mappings) -> Result<Mappings, String> {
         #[derive(PartialEq)]
         enum Kind {
@@ -768,7 +765,8 @@ impl Index {
                 if self.settings.get("index.mapping.dynamic_strings.auto_text")
                     != Some("false") =>
             {
-                FieldMapping::TextKeyword {
+                FieldMapping::Text {
+                    store: false,
                     fields: [(
                         "keyword".to_owned(),
                         FieldMapping::Keyword {
@@ -979,6 +977,24 @@ fn maps_under(props: &BTreeMap<String, FieldMapping>, path: &str) -> bool {
     (props.range(child.clone()..).next()).is_some_and(|(p, _)| p.starts_with(&child))
 }
 
+/// The multi-fields `new` of the field at `path` merged into its `old` ones: those `new` omits
+/// are kept.
+fn merge_multi_fields(
+    path: &str,
+    old: &BTreeMap<String, FieldMapping>,
+    new: &BTreeMap<String, FieldMapping>,
+) -> Result<BTreeMap<String, FieldMapping>, String> {
+    let mut all = old.clone();
+    for (sub, m) in new {
+        let m = match old.get(sub) {
+            Some(o) => merge_field(&format!("{path}.{sub}"), o, m)?,
+            None => m.clone(),
+        };
+        all.insert(sub.clone(), m);
+    }
+    Ok(all)
+}
+
 /// `new` merged into the field `old` at `path` (see [`Mappings::merged`]).
 fn merge_field(path: &str, old: &FieldMapping, new: &FieldMapping) -> Result<FieldMapping, String> {
     use FieldMapping as M;
@@ -998,13 +1014,18 @@ fn merge_field(path: &str, old: &FieldMapping, new: &FieldMapping) -> Result<Fie
     let locale = |l: &Option<String>| l.clone().unwrap_or("en".into());
     const DATE: &str = "strict_date_optional_time||epoch_millis";
     let out = match (old, new) {
-        (M::Text { store: a }, M::Text { store: b }) => {
+        (
+            M::Text {
+                store: a,
+                fields: old_fields,
+            },
+            M::Text { store: b, fields },
+        ) => {
             fixed("store", a.to_string(), b.to_string());
-            new.clone()
-        }
-        (M::TextKeyword { .. }, M::Text { store }) => {
-            fixed("store", false.to_string(), store.to_string());
-            old.clone()
+            M::Text {
+                store: *b,
+                fields: merge_multi_fields(path, old_fields, fields)?,
+            }
         }
         (
             M::Date {
@@ -1020,18 +1041,10 @@ fn merge_field(path: &str, old: &FieldMapping, new: &FieldMapping) -> Result<Fie
         ) => {
             fixed("format", date_format(f1, DATE), date_format(format, DATE));
             fixed("locale", locale(l1), locale(l2));
-            let mut all = old_fields.clone();
-            for (sub, m) in fields {
-                let m = match old_fields.get(sub) {
-                    Some(o) => merge_field(&format!("{path}.{sub}"), o, m)?,
-                    None => m.clone(),
-                };
-                all.insert(sub.clone(), m);
-            }
             M::Date {
                 format: format.clone(),
                 locale: l2.clone(),
-                fields: all,
+                fields: merge_multi_fields(path, old_fields, fields)?,
             }
         }
         (

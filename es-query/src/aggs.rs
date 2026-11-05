@@ -1509,7 +1509,7 @@ fn stored_fields(s: &Searcher, fields: &[String], doc: &Document) -> Map<String,
         .filter(|f| {
             matches!(
                 s.index.mappings.field(f),
-                Some(FieldMapping::Text { store: true })
+                Some(FieldMapping::Text { store: true, .. })
             )
         })
         .map(|f| (f.clone(), values(&doc.source, source_path(s.index, f))))
@@ -1574,9 +1574,7 @@ pub(crate) fn hit_fields(
                 false => doc_values(s, f, m, doc),
                 true => (values(&doc.source, source_path(s.index, f)).into_iter())
                     .filter_map(|v| match m {
-                        FieldMapping::Text { .. } | FieldMapping::TextKeyword { .. } => {
-                            Some(es_index::postings::text(v).into())
-                        }
+                        FieldMapping::Text { .. } => Some(es_index::postings::text(v).into()),
                         _ => doc_value(s, f, m, v),
                     })
                     .collect(),
@@ -1654,7 +1652,7 @@ fn doc_value(s: &Searcher, field: &str, mapping: &FieldMapping, v: &Value) -> Op
             let n = |k| mapping.range_number(k).clamp(f64::MIN, f64::MAX);
             Some(Value::from(vec![n(from), n(to)]))
         }
-        M::Text { .. } | M::TextKeyword { .. } | M::Nested { .. } | M::Object { .. } => None,
+        M::Text { .. } | M::Nested { .. } | M::Object { .. } => None,
     }
 }
 
@@ -1738,7 +1736,7 @@ impl<'s, 'a> Collector<'s, 'a> {
                 f => index.mappings.field(f),
             };
             match m {
-                Some(FieldMapping::Text { .. } | FieldMapping::TextKeyword { .. }) => {
+                Some(FieldMapping::Text { .. }) => {
                     return Err(fielddata_disabled(&agg.field));
                 }
                 Some(FieldMapping::Keyword { .. })
@@ -2789,7 +2787,13 @@ mod tests {
             fields: Default::default(),
         };
         props.insert("at".into(), date);
-        props.insert("t".into(), FieldMapping::Text { store: false });
+        props.insert(
+            "t".into(),
+            FieldMapping::Text {
+                store: false,
+                fields: Default::default(),
+            },
+        );
         for (id, i, f, k, at) in [
             ("1", 1, 0.5, "a", "2021-05-01T00:00:00Z"),
             ("2", 51, 1.1, "b", "2021-05-02T00:00:00Z"),
@@ -3007,7 +3011,10 @@ mod tests {
     #[test]
     fn top_hits_stored_fields_render_stored_values_as_fields() {
         let mut ix = index();
-        let store = FieldMapping::Text { store: true };
+        let store = FieldMapping::Text {
+            store: true,
+            fields: Default::default(),
+        };
         ix.mappings.properties.insert("s".into(), store);
         ix.put("6", json!({"i": 200, "s": ["The Fox", "x"], "t": "y"}));
         let body = json!({"aggs": {

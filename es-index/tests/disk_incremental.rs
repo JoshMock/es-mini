@@ -29,9 +29,13 @@ fn commit(dir: &Path) -> SegmentInfos {
 fn a_one_document_write_adds_one_small_segment() {
     let dir = scratch("one");
     let mut idx = Index::default();
-    idx.mappings
-        .properties
-        .insert("title".into(), FieldMapping::Text { store: false });
+    idx.mappings.properties.insert(
+        "title".into(),
+        FieldMapping::Text {
+            store: false,
+            fields: Default::default(),
+        },
+    );
     for i in 0..5000 {
         idx.put(&i.to_string(), json!({"title": format!("doc number {i}")}));
     }

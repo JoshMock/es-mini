@@ -689,3 +689,45 @@ async fn api_gaps_stats_reports_all_metric_sections() {
         .collect();
     assert_eq!(keys, ["get", "store"]);
 }
+
+#[tokio::test]
+async fn mapping_and_settings_text_keeps_declared_multi_fields() {
+    let app = app();
+    let t = json!({"type": "text", "store": true, "fields": {"k": {"type": "keyword"}}});
+    let body = json!({"mappings": {"properties": {"t": t}},
+        "settings": {"index": {"sort.field": "t.k"}}});
+    let (s, r) = call(&app, Method::PUT, "/m", Some(body)).await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    let (_, r) = call(&app, Method::GET, "/m/_mapping", None).await;
+    assert_eq!(r["m"]["mappings"]["properties"]["t"], t);
+    call(
+        &app,
+        Method::PUT,
+        "/m/_doc/1?refresh=true",
+        Some(json!({"t": "Big Cat"})),
+    )
+    .await;
+    let q = json!({"query": {"term": {"t.k": "Big Cat"}}, "sort": ["t.k"]});
+    let (s, r) = call(&app, Method::POST, "/m/_search", Some(q)).await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    assert_eq!(r["hits"]["total"]["value"], 1);
+    // a restatement keeps the multi-fields it omits and merges the ones it changes
+    let restate = json!({"properties": {"t": {"type": "text", "store": true,
+        "fields": {"k": {"type": "long"}}}}});
+    let (s, r) = call(&app, Method::PUT, "/m/_mapping", Some(restate)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        r["error"]["reason"],
+        "mapper [t.k] cannot be changed from type [keyword] to [long]"
+    );
+    let add = json!({"properties": {"t": {"type": "text", "store": true,
+        "fields": {"n": {"type": "keyword"}}}}});
+    let (s, _) = call(&app, Method::PUT, "/m/_mapping", Some(add)).await;
+    assert_eq!(s, StatusCode::OK);
+    let (_, r) = call(&app, Method::GET, "/m/_mapping", None).await;
+    let fields = &r["m"]["mappings"]["properties"]["t"]["fields"];
+    assert_eq!(
+        fields,
+        &json!({"k": {"type": "keyword"}, "n": {"type": "keyword"}})
+    );
+}

@@ -18,7 +18,13 @@ fn index() -> Index {
     let props = &mut idx.mappings.properties;
     props.insert("k".into(), keyword());
     let fields = [("keyword".to_owned(), keyword())].into();
-    props.insert("s".into(), FieldMapping::TextKeyword { fields });
+    props.insert(
+        "s".into(),
+        FieldMapping::Text {
+            store: false,
+            fields,
+        },
+    );
     idx.put("1", json!({"k": ["abc", "abcd"], "s": "long text"}));
     idx.put("2", json!({"k": "ab", "s": "ab"}));
     idx.put("3", json!({"k": "abcde", "s": "abcde"}));

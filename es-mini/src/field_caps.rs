@@ -188,7 +188,7 @@ fn fields(
             continue;
         }
         out.push(mapped(name.clone(), m));
-        if let FieldMapping::TextKeyword { fields } = m
+        if let FieldMapping::Text { fields, .. } = m
             && !filters.contains(&"-multifield")
         {
             out.extend(

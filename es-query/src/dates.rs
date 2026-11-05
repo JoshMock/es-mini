@@ -85,14 +85,7 @@ pub(crate) fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, 
                     Query::Term { field, value }
                 }
                 // ES's case-insensitive term is a constant-score automaton query, as a wildcard's
-                (
-                    Some(
-                        FieldMapping::Text { .. }
-                        | FieldMapping::TextKeyword { .. }
-                        | FieldMapping::Keyword { .. },
-                    ),
-                    _,
-                )
+                (Some(FieldMapping::Text { .. } | FieldMapping::Keyword { .. }), _)
                 | (None, Kind::Text | Kind::Keyword(_)) => Query::Wildcard {
                     pattern: crate::parse::wildcard_escape(&text(&value)),
                     field,
@@ -330,12 +323,7 @@ pub(crate) fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, 
             let kind = Searcher::unscored(index, &Query::MatchAll).kind(field).0;
             let mapping = index.mappings.field(field).filter(|m| !m.is_object());
             let ok = match mapping {
-                Some(m) => matches!(
-                    m,
-                    FieldMapping::Text { .. }
-                        | FieldMapping::TextKeyword { .. }
-                        | FieldMapping::Keyword { .. }
-                ),
+                Some(m) => matches!(m, FieldMapping::Text { .. } | FieldMapping::Keyword { .. }),
                 None => matches!(kind, Kind::Text | Kind::Keyword(_)),
             };
             if !ok {

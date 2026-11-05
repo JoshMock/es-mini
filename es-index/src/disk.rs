@@ -872,7 +872,7 @@ fn user_fields(
         };
         let (mut point_width, mut point_dims) = (0, 1);
         let (index_options, doc_values, omit_norms) = match mapping {
-            M::Text { .. } | M::TextKeyword { .. } => {
+            M::Text { .. } => {
                 let Some(texts) = typed(&values, &|v| scalar_text(v).map(Some)) else {
                     continue;
                 };
@@ -892,7 +892,7 @@ fn user_fields(
                 if m.is_empty() {
                     continue;
                 }
-                if matches!(mapping, M::Text { store: true }) {
+                if matches!(mapping, M::Text { store: true, .. }) {
                     out.stored.push((number, texts));
                 }
                 out.norms.push((

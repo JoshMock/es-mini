@@ -150,9 +150,13 @@ fn resaving_keeps_commit_history() {
 fn saves_and_reloads_many_terms_and_docs() {
     use es_index::{FieldMapping, Index};
     let mut idx = Index::default();
-    idx.mappings
-        .properties
-        .insert("title".into(), FieldMapping::Text { store: false });
+    idx.mappings.properties.insert(
+        "title".into(),
+        FieldMapping::Text {
+            store: false,
+            fields: Default::default(),
+        },
+    );
     idx.mappings.properties.insert(
         "tag".into(),
         FieldMapping::Keyword {
@@ -215,9 +219,13 @@ fn text_fields_save_positions() {
     use es_codec::{SegmentInfos, SegmentReader, field_infos::IndexOptions};
     use es_index::{FieldMapping, Index};
     let mut idx = Index::default();
-    idx.mappings
-        .properties
-        .insert("t".into(), FieldMapping::Text { store: false });
+    idx.mappings.properties.insert(
+        "t".into(),
+        FieldMapping::Text {
+            store: false,
+            fields: Default::default(),
+        },
+    );
     idx.put("1", json!({"t": ["Quick fox fox", "", "lazy fox"]}));
     let root = scratch("positions");
     let dir = root.join("data");
