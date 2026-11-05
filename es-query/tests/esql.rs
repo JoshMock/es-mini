@@ -2698,3 +2698,58 @@ fn esql_conversions_to_ip_reads_strings() {
         other => panic!("{other:?}"),
     }
 }
+
+/// Cases from Elasticsearch 9.5.5's `ints.csv-spec` (`convertStringToBase*`) and the type checks
+/// of `ToIntegerSurrogate` and `ToLongSurrogate`.
+#[test]
+fn esql_semantics_2_to_integer_and_to_long_parse_in_a_base() {
+    let r = q(
+        r#"ROW a = TO_LONG("0x32", 16), b = TO_LONG("31", 13), c = TO_LONG("Hazelnut", 36),
+        d = TO_LONG("Hazelnut", 10), e = TO_INTEGER("Kona", 27), f = TO_INTEGER("0xdeadbeef", 16),
+        g = TO_LONG("0xdeadbeef", 16), h = TO_INTEGER("-0x1", 16), i = TO_INTEGER("0x-f", 16),
+        j = TO_INTEGER("0x1337", 10), k = TO_INTEGER("5", null), l = TO_LONG("12", 1),
+        m = TO_INTEGER("1", 3000000000), n = TO_LONG("52403", 7), o = TO_INTEGER("+314", 10),
+        p = TO_INTEGER(["1", "2"], 16)"#,
+    );
+    let types: Vec<&str> = r.columns.iter().map(|c| c.r#type.as_str()).collect();
+    assert_eq!(types[..2], ["long", "long"]);
+    assert_eq!(types[4], "integer");
+    assert_eq!(
+        r.values,
+        [[
+            json!(50),
+            json!(40),
+            json!(1356099454469u64),
+            Value::Null,
+            json!(411787),
+            Value::Null,
+            json!(3735928559u64),
+            Value::Null,
+            json!(-15),
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            json!(12890),
+            json!(314),
+            Value::Null,
+        ]]
+    );
+    for (query, problem) in [
+        (
+            "ROW a = TO_INTEGER(1, 16)",
+            "line 1:9: first argument of [TO_INTEGER(1, 16)] must be [string], found value [1] \
+             type [integer]",
+        ),
+        (
+            "ROW a = TO_LONG(\"1\", 1.5)",
+            "line 1:9: second argument of [TO_LONG(\"1\", 1.5)] must be [integer], found value \
+             [1.5] type [double]",
+        ),
+    ] {
+        match run(&indices(), query) {
+            Err(EsqlError::Verification(m)) => assert_eq!(m, format!("Found 1 problem\n{problem}")),
+            other => panic!("{query}: {other:?}"),
+        }
+    }
+}

@@ -1327,6 +1327,9 @@ fn eval(e: &Expr, row: &dyn Fields) -> Option<Value> {
                     _ => math_fn(f, t, &args),
                 };
             }
+            if let [s, base] = &args[..] {
+                return in_base(f, &eval(s, row)?, &eval(base, row)?);
+            }
             let v = eval(&args[0], row)?;
             let one = |v: &Value| convert(f, t, v);
             match v {
@@ -2202,6 +2205,28 @@ fn convert(f: &str, t: &str, v: &Value) -> Option<Value> {
     }
 }
 
+/// TO_INTEGER or TO_LONG (`f`) of string `s` in `base`, like Elasticsearch's `ToIntegerBase` and
+/// `ToLongBase`: `None` for a multi-value or what does not parse (where ES warns).
+// ponytail: ASCII digits only; Java's `Character.digit` also reads other Unicode digits
+fn in_base(f: &str, s: &Value, base: &Value) -> Option<Value> {
+    let (Value::String(s), base) = (s, convert("TO_INTEGER", "long", base)?.as_i64()?) else {
+        return None;
+    };
+    if base == 10 {
+        return convert(f, "keyword", &s.as_str().into());
+    }
+    let s = match base {
+        16 => s.strip_prefix("0x").unwrap_or(s),
+        _ => s,
+    };
+    // Java's `parseInt` and `parseLong` refuse a radix outside 2-36, where Rust's panic.
+    let radix = u32::try_from(base).ok().filter(|r| (2..=36).contains(r))?;
+    match f {
+        "TO_INTEGER" => i32::from_str_radix(s, radix).ok().map(Value::from),
+        _ => i64::from_str_radix(s, radix).ok().map(Value::from),
+    }
+}
+
 /// Calls `f` on `e` and on each expression in it, outermost first.
 fn walk<'e>(e: &'e Expr, f: &mut impl FnMut(&'e Expr)) {
     f(e);
@@ -2471,11 +2496,37 @@ fn resolve(
                 bad.push((*at, format!("Unknown function [{f}]")));
                 return None;
             };
-            // ponytail: TO_INTEGER and TO_LONG with a base fail here; ES parses in that base
-            let [arg] = &args[..] else {
-                bad.push((*at, format!("[{f}] with a base is not supported")));
-                return None;
-            };
+            // TO_INTEGER or TO_LONG of a string in a base, like ES's `ToIntegerSurrogate`.
+            if let [arg, base] = &args[..] {
+                let ts = [
+                    resolve(arg, src, types, bad),
+                    resolve(base, src, types, bad),
+                ];
+                let [Some(ta), Some(tb)] = ts else {
+                    return None;
+                };
+                let mismatch = if !matches!(ta.as_str(), "keyword" | "text" | "null") {
+                    Some((0, "string", ta))
+                } else if !matches!(tb.as_str(), "integer" | "long" | "unsigned_long" | "null") {
+                    Some((1, "integer", tb))
+                } else {
+                    None
+                };
+                if let Some((i, accepted, found)) = mismatch {
+                    let reason = format!(
+                        "{}argument of [{}] must be [{accepted}], found value [{}] type [{}]",
+                        ordinal(i),
+                        text(e),
+                        text(&args[i]),
+                        es_name(&found)
+                    );
+                    bad.push((*at, reason));
+                    return None;
+                }
+                let _ = t.set((name, "base"));
+                return Some(out.to_owned());
+            }
+            let arg = &args[0];
             let ta = resolve(arg, src, types, bad)?;
             // The types each conversion takes (of those es-mini has) and how ES lists all it
             // takes.
