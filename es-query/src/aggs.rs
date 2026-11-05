@@ -1750,13 +1750,13 @@ struct Timings {
     total_buckets: usize,
     /// Whether a document had several values. ponytail: a shard profiles as one segment.
     multi_valued: bool,
-    /// Keyword `terms`: the number of the field's terms on the shard (ES's global ordinals),
-    /// and the shard's documents.
+    /// Keyword or ip `terms`: the number of the field's terms on the shard (ES's global
+    /// ordinals), and the shard's documents.
     ords: usize,
     docs: usize,
-    /// Keyword `terms`: whether the shard keeps deleted documents.
+    /// Keyword or ip `terms`: whether the shard keeps deleted documents.
     deleted: bool,
-    /// Top-level keyword `terms` under match_all: the terms include/exclude accepts.
+    /// Top-level keyword or ip `terms` under match_all: the terms include/exclude accepts.
     keys: Vec<terms::Key>,
 }
 
@@ -2266,7 +2266,7 @@ impl Collector<'_, '_> {
         }
     }
 
-    /// Fills in each keyword `terms` aggregation's ordinals and the shard's documents, here
+    /// Fills in each keyword or ip `terms` aggregation's ordinals and the shard's documents, here
     /// and in sub-aggregations; with this shard's `stats` of a match_all search, the terms
     /// each top-level one's include/exclude accepts.
     fn count_ords(&mut self, stats: Option<&[Stats]>) {
