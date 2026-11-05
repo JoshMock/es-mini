@@ -82,3 +82,40 @@ fn disk_speed_terms_of_one_field_share_each_segments_norms() {
         assert_eq!(one, many, "{t}");
     }
 }
+
+#[test]
+fn disk_speed_commits_reuse_each_segments_statistics() {
+    let dir = Scratch::new("disk-speed-stats", Some("data"));
+    let mut ix = Index::default();
+    let text = FieldMapping::Text {
+        store: false,
+        fields: Default::default(),
+    };
+    ix.mappings.properties.insert("t".into(), text);
+    for i in 0..20 {
+        ix.put(&i.to_string(), json!({"t": format!("fox n{}", i % 7)}));
+    }
+    let mut indices = Indices::from([("i".to_owned(), ix)]);
+    // Each round commits a segment; replaced and deleted docs count until merges drop them.
+    for round in 0..15 {
+        let ix = indices.get_mut("i").unwrap();
+        ix.put(&format!("r{round}"), json!({"t": "dog fox fox"}));
+        ix.put(
+            &(round % 20).to_string(),
+            json!({"t": format!("cat n{round}")}),
+        );
+        ix.delete(&format!("r{}", round / 2));
+        ix.flush_requested = true;
+        disk::persist(&dir, &mut indices).unwrap();
+        let reopened = disk::open(&dir).unwrap();
+        let stats = |all: &Indices| all["i"].shards()[0].stats.clone().unwrap();
+        assert_eq!(stats(&indices), stats(&reopened), "round {round}");
+    }
+    // what reading every segment's terms on each commit gave
+    let stats = indices["i"].shards()[0].stats.clone().unwrap();
+    let df = |t: &str| stats.doc_freq[&("t".to_owned(), t.to_owned())];
+    assert_eq!(
+        (stats.fields["t"], df("fox"), df("dog"), df("cat"), df("n3")),
+        ((27.0, 61.0), 12.0, 7.0, 15.0, 2.0)
+    );
+}

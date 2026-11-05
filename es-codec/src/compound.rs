@@ -94,20 +94,30 @@ impl CompoundFile {
         Ok(cfs)
     }
 
+    /// Each file's length and the checksum its footer records, which covers all its bytes.
+    fn footer(&self, at: usize) -> Result<(u64, i64)> {
+        let io = |e: std::io::Error| crate::Error(format!("reading segment file: {e}"));
+        let len = self.files[at].metadata().map_err(io)?.len();
+        let Some(footer_at) = len.checked_sub(codec_util::FOOTER_LEN as u64) else {
+            return err("segment file is too short for a footer");
+        };
+        let footer = self.read_at(at, footer_at, codec_util::FOOTER_LEN as u64)?;
+        Ok((len, codec_util::check_footer_structure(&footer)?))
+    }
+
+    /// The checksum each file's footer records, unverified: a fingerprint of the segment's
+    /// bytes that reads only the footers.
+    pub fn checksums(&self) -> Result<Vec<i64>> {
+        (0..self.files.len())
+            .map(|at| Ok(self.footer(at)?.1))
+            .collect()
+    }
+
     /// Checks the CRC32 of each whole file against its footer (Lucene's
     /// `CodecUtil.checksumEntireFile`), reading it a chunk at a time.
     pub fn verify(&self) -> Result<()> {
-        for (at, file) in self.files.iter().enumerate() {
-            let io = |e: std::io::Error| crate::Error(format!("reading segment file: {e}"));
-            let len = file.metadata().map_err(io)?.len();
-            let Some(footer_at) = len.checked_sub(codec_util::FOOTER_LEN as u64) else {
-                return err("segment file is too short for a footer");
-            };
-            let footer = codec_util::check_footer_structure(&self.read_at(
-                at,
-                footer_at,
-                codec_util::FOOTER_LEN as u64,
-            )?)?;
+        for at in 0..self.files.len() {
+            let (len, footer) = self.footer(at)?;
             let (mut crc, mut from, end) = (0, 0, len - 8);
             while from < end {
                 let n = (end - from).min(1 << 20);

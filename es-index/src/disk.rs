@@ -419,17 +419,48 @@ fn add_stats(stats: &mut TermStats, seg: &SegmentReader) {
     }
 }
 
+/// Per segment, by its id and its files' checksums (ids alone repeat when a shard is
+/// rewritten whole): its term statistics.
+pub(crate) type SegmentStats = HashMap<([u8; 16], Vec<i64>), TermStats>;
+
+/// The key of `seg` in [`SegmentStats`].
+fn stats_key(seg: &SegmentReader) -> es_codec::Result<([u8; 16], Vec<i64>)> {
+    Ok((seg.seg.info.id, seg.cfs.checksums()?))
+}
+
+/// Adds the term statistics `seg` of one segment to `stats`.
+fn add_segment_stats(stats: &mut TermStats, seg: &TermStats) {
+    for (f, (docs, terms)) in &seg.fields {
+        let e = stats.fields.entry(f.clone()).or_default();
+        (e.0, e.1) = (e.0 + docs, e.1 + terms);
+    }
+    for (term, df) in &seg.doc_freq {
+        *stats.doc_freq.entry(term.clone()).or_default() += df;
+    }
+}
+
 /// The term statistics of the latest commit in the shard directory `dir`; `None` if it has no
-/// segments.
-fn commit_stats(dir: &Path) -> es_codec::Result<Option<TermStats>> {
-    let segments = SegmentInfos::read_latest(dir)?.segments;
-    if segments.is_empty() {
+/// segments. Reads the terms of the segments `cache` lacks, then holds just those of the commit.
+fn commit_stats(dir: &Path, cache: &mut SegmentStats) -> es_codec::Result<Option<TermStats>> {
+    let mut kept = SegmentStats::new();
+    for seg in SegmentInfos::read_latest(dir)?.segments {
+        let seg = SegmentReader::open(dir, seg)?;
+        let key = stats_key(&seg)?;
+        let stats = cache.remove(&key).unwrap_or_else(|| {
+            let mut stats = TermStats::default();
+            add_stats(&mut stats, &seg);
+            stats
+        });
+        kept.insert(key, stats);
+    }
+    *cache = kept;
+    if cache.is_empty() {
         return Ok(None);
     }
     let mut stats = TermStats::default();
-    for seg in segments {
-        add_stats(&mut stats, &SegmentReader::open(dir, seg)?);
-    }
+    cache
+        .values()
+        .for_each(|s| add_segment_stats(&mut stats, s));
     Ok(Some(stats))
 }
 
@@ -465,7 +496,10 @@ fn load_shard(index: &mut Shard, dir: &Path) -> es_codec::Result<()> {
         seg.cfs
             .verify()
             .map_err(|e| es_codec::Error(format!("{}: {}", seg.seg.name, e.0)))?;
-        add_stats(&mut stats, &seg);
+        let mut own = TermStats::default();
+        add_stats(&mut own, &seg);
+        add_segment_stats(&mut stats, &own);
+        index.segment_stats.insert(stats_key(&seg)?, own);
         let (versions, seq_nos) = (longs(&seg, "_version"), longs(&seg, "_seq_no"));
         let live = seg.live_docs()?;
         let segment = segments.len();
@@ -1437,13 +1471,14 @@ fn log(data_dir: &Path, indices: &mut Indices, all: bool) -> es_codec::Result<Pe
         commit(data_dir, indices)?;
         pending.appends.clear();
         forget_retries(&mut pending.saving, data_dir);
-        // ponytail: rereads every term of every index; cache per segment if commits get slow
         for (meta, ix) in metas.iter().zip(indices.values_mut()) {
             ix.flush_requested = false;
             for n in 0..ix.number_of_shards() {
                 let shard = ix.shard_mut(n).1;
                 drop(shard.take_unlogged());
-                shard.committed(commit_stats(&shard_dir(data_dir, &meta.uuid, n))?);
+                let dir = shard_dir(data_dir, &meta.uuid, n);
+                let stats = commit_stats(&dir, &mut shard.segment_stats)?;
+                shard.committed(stats);
             }
         }
     }

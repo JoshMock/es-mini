@@ -251,7 +251,7 @@ pub struct WriteResult {
 
 /// Lucene term statistics read from disk. They keep counting documents that were updated or
 /// deleted but not yet merged away, which BM25 scores depend on.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct TermStats {
     /// Per indexed field: (docs with the field, sum of term frequencies).
     pub fields: HashMap<String, (f64, f64)>,
@@ -292,6 +292,11 @@ pub struct Shard {
     /// Statistics of the segments of a shard opened from disk or last committed, deleted
     /// documents included; scoring adds those of the documents in memory not yet committed.
     pub stats: Option<TermStats>,
+    /// Each committed segment's part of `stats`, so a commit reads the terms of new segments
+    /// only. Snapshots, which never commit, leave it empty.
+    // ponytail: holds the statistics twice, summed and per segment; sum per lookup instead if
+    // their memory matters
+    segment_stats: disk::SegmentStats,
     /// User data of the shard commit the shard was opened from; saves keep its history markers.
     pub commit: BTreeMap<String, String>,
     /// Documents written since the index was opened; they replace any on disk. Shared with
