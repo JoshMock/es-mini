@@ -1827,8 +1827,7 @@ fn span_type(unit: &str) -> &'static str {
 /// is 7 days and a quarter 3 months, as in ES's literals. One day, week, month, quarter (3
 /// months) or year rounds to its calendar start; several months or years to intervals counted
 /// from year 1 (`DateUtils.roundIntervalMonthOfYear`); anything else to a fixed interval since
-/// the epoch.
-// ponytail: a zero or negative span is null, where ES fails the query
+/// the epoch. A zero or negative span (which `resolve` fails the query for) is null.
 fn date_trunc(n: i64, unit: &str, v: &Value) -> Option<Value> {
     const DAY: i64 = 86_400_000;
     let t = es_index::parse_date_millis(v)?;
@@ -2487,6 +2486,16 @@ fn resolve(
                 {
                     let reason = format!("invalid date field for [{}]: {part}", text(e));
                     fail(400, "invalid_argument_exception", reason);
+                }
+                // Like ES's `DateTrunc.createRounding`, used by both.
+                let span = match *name {
+                    "DATE_TRUNC" => args.first(),
+                    "BUCKET" => args.get(1),
+                    _ => None,
+                };
+                if let Some(Expr::Interval(..=0, ..)) = span {
+                    let reason = "Zero or negative time interval is not supported";
+                    fail(400, "illegal_argument_exception", reason.into());
                 }
                 // The result type: a string, an integer, a double, or the first argument's.
                 let out = match *name {

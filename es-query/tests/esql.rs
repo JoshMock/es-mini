@@ -2825,3 +2825,35 @@ fn esql_semantics_2_to_string_lists_what_it_takes() {
         }
     }
 }
+
+/// Like Elasticsearch 9.5.5 building DATE_TRUNC's and BUCKET's rounding (checked against a live
+/// node), a zero or negative span fails the query, even over no rows.
+#[test]
+fn esql_semantics_2_zero_or_negative_spans_fail() {
+    let mut i = Index::default();
+    i.mappings.properties.insert(
+        "d".into(),
+        FieldMapping::Date {
+            format: None,
+            locale: None,
+            fields: BTreeMap::new(),
+        },
+    );
+    let indices = BTreeMap::from([("e".to_owned(), i)]);
+    for query in [
+        "ROW d = TO_DATETIME(\"2020-01-01T00:00:00Z\") | EVAL x = DATE_TRUNC(0 day, d)",
+        "ROW d = TO_DATETIME(\"2020-01-01T00:00:00Z\") | EVAL x = DATE_TRUNC(-1 hour, d)",
+        "FROM e | EVAL x = DATE_TRUNC(0 minute, d)",
+        "FROM e | STATS c = COUNT(*) BY b = BUCKET(d, -1 month)",
+    ] {
+        assert_eq!(
+            run(&indices, query),
+            Err(EsqlError::Failed {
+                status: 400,
+                kind: "illegal_argument_exception",
+                reason: "Zero or negative time interval is not supported".into()
+            }),
+            "{query}"
+        );
+    }
+}
