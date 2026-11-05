@@ -14,6 +14,8 @@ pub enum Update {
     Final,
     /// Managed by Elasticsearch; PUT _settings rejects it.
     Private,
+    /// Managed through a dedicated API; PUT _settings rejects it.
+    Internal,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -21,15 +23,21 @@ enum Kind {
     /// `Setting.intSetting`/`longSetting` with inclusive bounds.
     Int(i64, i64),
     Bool,
-    /// `Setting.timeSetting` with a minimum: millis, and its `TimeValue.getStringRep`.
-    Time(i64, &'static str),
+    /// `Setting.timeSetting` with a minimum and maybe a maximum: millis, and their
+    /// `TimeValue.getStringRep`.
+    Time(i64, &'static str, Option<(i64, &'static str)>),
+    /// `Setting.doubleSetting` with inclusive bounds.
+    Float(f64, f64),
     /// `Setting.enumSetting`: the enum's canonical class name and constants.
     Enum(&'static str, &'static [&'static str]),
     Codec,
-    /// `Setting.byteSizeSetting` with a minimum in bytes, and its `ByteSizeValue.toString`.
-    Bytes(i64, &'static str),
+    /// `Setting.byteSizeSetting` with a minimum and maybe a maximum in bytes, and their
+    /// `ByteSizeValue.toString`.
+    Bytes(i64, &'static str, Option<(i64, &'static str)>),
     /// `Setting.listSetting`: each element goes through the parser.
     List(fn(&str) -> Result<(), String>),
+    /// A setting's own parser.
+    Parse(fn(&str) -> Result<(), String>),
     Any,
 }
 
@@ -99,7 +107,7 @@ pub const SETTINGS: &[Setting] = &[
         REFRESH_INTERVAL,
         Update::Dynamic,
         Some("1s"),
-        Kind::Time(-1, "-1"),
+        Kind::Time(-1, "-1", None),
     ),
     s("index.hidden", Update::Dynamic, Some("false"), Kind::Bool),
     s(
@@ -112,7 +120,7 @@ pub const SETTINGS: &[Setting] = &[
         GC_DELETES,
         Update::Dynamic,
         Some("60s"),
-        Kind::Time(-1, "-1"),
+        Kind::Time(-1, "-1", None),
     ),
     s(
         "index.soft_deletes.enabled",
@@ -145,13 +153,13 @@ pub const SETTINGS: &[Setting] = &[
         TRANSLOG_SYNC_INTERVAL,
         Update::Dynamic,
         Some("5s"),
-        Kind::Time(100, "100ms"),
+        Kind::Time(100, "100ms", None),
     ),
     s(
         TRANSLOG_FLUSH_THRESHOLD_SIZE,
         Update::Dynamic,
         Some("10gb"),
-        Kind::Bytes(8, "8b"),
+        Kind::Bytes(8, "8b", None),
     ),
     s(
         "index.mapping.array_objects.limit",
@@ -343,13 +351,13 @@ pub const SETTINGS: &[Setting] = &[
         "index.search.idle.after",
         Update::Dynamic,
         Some("30s"),
-        Kind::Time(0, "0s"),
+        Kind::Time(0, "0s", None),
     ),
     s(
         "index.unassigned.node_left.delayed_timeout",
         Update::Dynamic,
         Some("1m"),
-        Kind::Time(0, "0s"),
+        Kind::Time(0, "0s", None),
     ),
     s(
         "index.priority",
@@ -476,7 +484,863 @@ pub const SETTINGS: &[Setting] = &[
         Kind::Any,
     ),
     s(VERSION_CREATED, Update::Private, None, Kind::Any),
+    // The rest of IndexScopedSettings, x-pack's included, as ES 9.5.5 lists them under defaults.
+    // ponytail: bespoke parsers are not ported, so these take any value: compound_format,
+    // data_path, dense_vector.post_filter_selectivity_threshold, indexing.slowlog.source,
+    // recovery.type, store.type, semantic_text.default_inference_id, time_series.start_time and
+    // end_time, and merge.policy.floor_segment's and max_merged_segment's own bounds
+    s(
+        "index.allocation.existing_shards_allocator",
+        Update::Private,
+        Some("gateway_allocator"),
+        Kind::Any,
+    ),
+    s(
+        "index.allocation.max_retries",
+        Update::Dynamic,
+        Some("5"),
+        Kind::Int(0, INT),
+    ),
+    s(
+        "index.analyze.max_char_count",
+        Update::Dynamic,
+        Some("1000000"),
+        Kind::Int(1, INT),
+    ),
+    s(
+        "index.bloom_filter_for_id_field.enabled",
+        Update::Dynamic,
+        Some("true"),
+        Kind::Bool,
+    ),
+    s(
+        "index.compound_format",
+        Update::Dynamic,
+        Some("1gb"),
+        Kind::Any,
+    ),
+    s("index.data_path", Update::Static, Some(""), Kind::Any),
+    s(
+        "index.dense_vector.experimental_features",
+        Update::Final,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.dense_vector.hnsw_enable_early_termination",
+        Update::Dynamic,
+        Some("true"),
+        Kind::Bool,
+    ),
+    s(
+        "index.dense_vector.hnsw_filter_heuristic",
+        Update::Dynamic,
+        Some("ACORN"),
+        Kind::Enum(
+            "org.elasticsearch.index.mapper.vectors.DenseVectorFieldMapper.FilterHeuristic",
+            &["FANOUT", "ACORN"],
+        ),
+    ),
+    s(
+        "index.dense_vector.post_filter_selectivity_threshold",
+        Update::Private,
+        Some("1.0"),
+        Kind::Any,
+    ),
+    s(
+        "index.dimensions",
+        Update::Private,
+        Some("[]"),
+        Kind::List(|_| Ok(())),
+    ),
+    s(
+        "index.dimensions_tsid_strategy_enabled",
+        Update::Final,
+        Some("true"),
+        Kind::Bool,
+    ),
+    s(
+        "index.disable_sequence_numbers",
+        Update::Final,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.dlm.frozen.created",
+        Update::Internal,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.downsample.interval",
+        Update::Internal,
+        Some(""),
+        Kind::Any,
+    ),
+    s(
+        "index.downsample.origin.name",
+        Update::Private,
+        Some(""),
+        Kind::Any,
+    ),
+    s(
+        "index.downsample.origin.uuid",
+        Update::Private,
+        Some(""),
+        Kind::Any,
+    ),
+    s(
+        "index.downsample.sampling_method",
+        Update::Internal,
+        Some(""),
+        Kind::Any,
+    ),
+    s(
+        "index.downsample.source.name",
+        Update::Private,
+        Some(""),
+        Kind::Any,
+    ),
+    s(
+        "index.downsample.source.uuid",
+        Update::Private,
+        Some(""),
+        Kind::Any,
+    ),
+    s(
+        "index.downsample.status",
+        Update::Internal,
+        Some("unknown"),
+        Kind::Enum(
+            "org.elasticsearch.cluster.metadata.IndexMetadata.DownsampleTaskStatus",
+            &["UNKNOWN", "STARTED", "SUCCESS"],
+        ),
+    ),
+    s(
+        "index.esql.stored_fields_sequential_proportion",
+        Update::Dynamic,
+        Some("0.2"),
+        Kind::Float(0.0, 1.0),
+    ),
+    s(
+        "index.failure_store.version",
+        Update::Static,
+        Some("0"),
+        Kind::Int(-INT - 1, INT),
+    ),
+    s(
+        "index.fast_refresh",
+        Update::Final,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.fielddata.cache",
+        Update::Static,
+        Some("node"),
+        Kind::Parse(fielddata_cache),
+    ),
+    s(
+        "index.flush_after_merge",
+        Update::Dynamic,
+        Some("512mb"),
+        Kind::Bytes(0, "0", None),
+    ),
+    s(
+        "index.format",
+        Update::Final,
+        Some("0"),
+        Kind::Int(-INT - 1, INT),
+    ),
+    s(
+        "index.highlight.weight_matches_mode.enabled",
+        Update::Dynamic,
+        Some("true"),
+        Kind::Bool,
+    ),
+    s(
+        "index.indexing.slowlog.include.user",
+        Update::Dynamic,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.indexing.slowlog.reformat",
+        Update::Dynamic,
+        Some("true"),
+        Kind::Bool,
+    ),
+    s(
+        "index.indexing.slowlog.source",
+        Update::Dynamic,
+        Some("1000"),
+        Kind::Any,
+    ),
+    s(
+        "index.lifecycle.origination_date",
+        Update::Dynamic,
+        Some("-1"),
+        Kind::Int(-1, i64::MAX),
+    ),
+    s(
+        "index.lifecycle.prefer_ilm",
+        Update::Dynamic,
+        Some("true"),
+        Kind::Bool,
+    ),
+    s(
+        "index.lifecycle.skip",
+        Update::Dynamic,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.lifecycle.step.wait_time_threshold",
+        Update::Dynamic,
+        Some("12h"),
+        Kind::Time(3600000, "1h", None),
+    ),
+    s(
+        "index.logsdb.add_host_name_field",
+        Update::Private,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.logsdb.default_sort_on_message_template",
+        Update::Final,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.logsdb.route_on_sort_fields",
+        Update::Final,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.logsdb.sort_on_host_name",
+        Update::Private,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.logsdb.sort_on_message_template",
+        Update::Private,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.look_ahead_time",
+        Update::Dynamic,
+        Some("9m"),
+        Kind::Time(60000, "1m", Some((604800000, "7d"))),
+    ),
+    s(
+        "index.look_back_time",
+        Update::Dynamic,
+        Some("2h"),
+        Kind::Time(60000, "1m", Some((604800000, "7d"))),
+    ),
+    s(
+        "index.mapping.doc_values.multi_value",
+        Update::Final,
+        Some("true"),
+        Kind::Bool,
+    ),
+    s(
+        "index.mapping.doc_values.nullability",
+        Update::Final,
+        Some("true"),
+        Kind::Bool,
+    ),
+    s(
+        "index.mapping.exclude_source_vectors",
+        Update::Final,
+        Some("true"),
+        Kind::Bool,
+    ),
+    s(
+        "index.mapping.flattened.store_root_doc_values",
+        Update::Final,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.mapping.ignore_above",
+        Update::Static,
+        Some("2147483647"),
+        Kind::Int(0, INT),
+    ),
+    s(
+        "index.mapping.index_disabled_by_default",
+        Update::Final,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.mapping.pattern_text.disable_templating",
+        Update::Private,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.mapping.semantic_text.use_legacy_format",
+        Update::Internal,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.mapping.source.mode",
+        Update::Final,
+        Some("STORED"),
+        Kind::Enum(
+            "org.elasticsearch.index.mapper.SourceFieldMapper.Mode",
+            &["DISABLED", "STORED", "SYNTHETIC", "COLUMNAR_STORED"],
+        ),
+    ),
+    s(
+        "index.mapping.synthetic_id",
+        Update::Final,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.mapping.synthetic_source.skip_ignored_source_read",
+        Update::Dynamic,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.mapping.synthetic_source.skip_ignored_source_write",
+        Update::Dynamic,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.mapping.synthetic_source_keep",
+        Update::Static,
+        Some("none"),
+        Kind::Enum(
+            "org.elasticsearch.index.mapper.Mapper.SourceKeepMode",
+            &["NONE", "ARRAYS", "ALL"],
+        ),
+    ),
+    s(
+        "index.mapping.use_columnar_id_mode_by_default",
+        Update::Final,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.mapping.use_doc_values_skipper",
+        Update::Final,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.max_slices_per_scroll",
+        Update::Dynamic,
+        Some("1024"),
+        Kind::Int(1, INT),
+    ),
+    s(
+        "index.merge.intra_merge_parallelism_enabled",
+        Update::Dynamic,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.merge.policy.deletes_pct_allowed",
+        Update::Dynamic,
+        Some("20.0"),
+        Kind::Float(5.0, 50.0),
+    ),
+    s(
+        "index.merge.policy.expunge_deletes_allowed",
+        Update::Dynamic,
+        Some("10.0"),
+        Kind::Float(0.0, f64::INFINITY),
+    ),
+    s(
+        "index.merge.policy.floor_segment",
+        Update::Dynamic,
+        Some("16mb"),
+        Kind::Bytes(-1, "-1", None),
+    ),
+    s(
+        "index.merge.policy.max_merge_at_once",
+        Update::Dynamic,
+        Some("16"),
+        Kind::Int(2, INT),
+    ),
+    s(
+        "index.merge.policy.max_merge_at_once_explicit",
+        Update::Dynamic,
+        Some("30"),
+        Kind::Int(2, INT),
+    ),
+    s(
+        "index.merge.policy.max_merged_segment",
+        Update::Dynamic,
+        Some("0b"),
+        Kind::Bytes(-1, "-1", None),
+    ),
+    s(
+        "index.merge.policy.merge_factor",
+        Update::Dynamic,
+        Some("32"),
+        Kind::Int(2, INT),
+    ),
+    s(
+        "index.merge.policy.segments_per_tier",
+        Update::Dynamic,
+        Some("8.0"),
+        Kind::Float(2.0, f64::INFINITY),
+    ),
+    s(
+        "index.merge.policy.type",
+        Update::Dynamic,
+        Some("UNSET"),
+        Kind::Enum(
+            "org.elasticsearch.index.MergePolicyConfig.Type",
+            &["UNSET", "TIERED", "TIME_BASED"],
+        ),
+    ),
+    s(
+        "index.merge.scheduler.auto_throttle",
+        Update::Dynamic,
+        Some("true"),
+        Kind::Bool,
+    ),
+    s(
+        "index.merge.scheduler.max_merge_count",
+        Update::Dynamic,
+        Some("6"),
+        Kind::Int(1, INT),
+    ),
+    s(
+        "index.merge.scheduler.max_thread_count",
+        Update::Dynamic,
+        Some("1"),
+        Kind::Int(1, INT),
+    ),
+    s(
+        "index.mode",
+        Update::Final,
+        Some("standard"),
+        Kind::Enum(
+            "org.elasticsearch.index.IndexMode",
+            &[
+                "STANDARD",
+                "TIME_SERIES",
+                "LOGSDB",
+                "LOOKUP",
+                "COLUMNAR",
+                "LOGSDB_COLUMNAR",
+                "VECTORDB_DOCUMENT",
+            ],
+        ),
+    ),
+    s(
+        "index.override_write_load_forecast",
+        Update::Dynamic,
+        Some("0.0"),
+        Kind::Float(0.0, f64::INFINITY),
+    ),
+    s(
+        "index.percolator.map_unmapped_fields_as_text",
+        Update::Static,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.query.default_field",
+        Update::Dynamic,
+        Some("[\"*\"]"),
+        Kind::List(|_| Ok(())),
+    ),
+    s(
+        "index.query.parse.allow_unmapped_fields",
+        Update::Static,
+        Some("true"),
+        Kind::Bool,
+    ),
+    s("index.recovery.type", Update::Static, Some(""), Kind::Any),
+    s(
+        "index.recovery.use_synthetic_source",
+        Update::Final,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.rollup.source.name",
+        Update::Private,
+        Some(""),
+        Kind::Any,
+    ),
+    s(
+        "index.rollup.source.uuid",
+        Update::Private,
+        Some(""),
+        Kind::Any,
+    ),
+    s(
+        "index.routing.allocation.disk.watermark.ignore",
+        Update::Private,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.routing.allocation.enable",
+        Update::Dynamic,
+        Some("all"),
+        Kind::Enum(
+            "org.elasticsearch.cluster.routing.allocation.decider.EnableAllocationDecider.Allocation",
+            &["NONE", "NEW_PRIMARIES", "PRIMARIES", "ALL"],
+        ),
+    ),
+    s(
+        "index.routing.rebalance.enable",
+        Update::Dynamic,
+        Some("all"),
+        Kind::Enum(
+            "org.elasticsearch.cluster.routing.allocation.decider.EnableAllocationDecider.Rebalance",
+            &["NONE", "PRIMARIES", "REPLICAS", "ALL"],
+        ),
+    ),
+    s(
+        "index.routing_path",
+        Update::Final,
+        Some("[]"),
+        Kind::List(|_| Ok(())),
+    ),
+    s(
+        "index.search.slowlog.include.user",
+        Update::Dynamic,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.semantic_text.default_inference_id",
+        Update::Final,
+        Some(""),
+        Kind::Any,
+    ),
+    s(
+        "index.seq_no.index_options",
+        Update::Final,
+        Some("POINTS_AND_DOC_VALUES"),
+        Kind::Enum(
+            "org.elasticsearch.index.mapper.SeqNoFieldMapper.SeqNoIndexOptions",
+            &["DOC_VALUES_ONLY", "POINTS_AND_DOC_VALUES"],
+        ),
+    ),
+    s(
+        "index.shard_limit.group",
+        Update::Private,
+        Some("normal"),
+        Kind::Any,
+    ),
+    s(
+        "index.slice.enabled",
+        Update::Final,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.soft_deletes.retention.operations",
+        Update::Dynamic,
+        Some("0"),
+        Kind::Int(0, i64::MAX),
+    ),
+    s(
+        "index.soft_deletes.retention_lease.period",
+        Update::Dynamic,
+        Some("12h"),
+        Kind::Time(0, "0ms", None),
+    ),
+    s(
+        "index.source_only",
+        Update::Private,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.store.fs.directio_async_prefetch_limit",
+        Update::Static,
+        Some("64"),
+        Kind::Int(0, 256),
+    ),
+    s(
+        "index.store.fs.fs_lock",
+        Update::Static,
+        Some("native"),
+        Kind::Parse(fs_lock),
+    ),
+    s(
+        "index.store.preload",
+        Update::Static,
+        Some("[]"),
+        Kind::List(|_| Ok(())),
+    ),
+    s(
+        "index.store.snapshot.blob_cache.metadata_files.max_length",
+        Update::Static,
+        Some("64kb"),
+        Kind::Bytes(1024, "1kb", None),
+    ),
+    s(
+        "index.store.snapshot.cache.enabled",
+        Update::Static,
+        Some("true"),
+        Kind::Bool,
+    ),
+    s(
+        "index.store.snapshot.cache.excluded_file_types",
+        Update::Static,
+        Some("[]"),
+        Kind::List(|_| Ok(())),
+    ),
+    s(
+        "index.store.snapshot.cache.prewarm.enabled",
+        Update::Static,
+        Some("true"),
+        Kind::Bool,
+    ),
+    s(
+        "index.store.snapshot.delete_searchable_snapshot",
+        Update::Private,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.store.snapshot.index_name",
+        Update::Private,
+        Some(""),
+        Kind::Any,
+    ),
+    s(
+        "index.store.snapshot.index_uuid",
+        Update::Private,
+        Some(""),
+        Kind::Any,
+    ),
+    s(
+        "index.store.snapshot.partial",
+        Update::Private,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.store.snapshot.repository_name",
+        Update::Private,
+        Some(""),
+        Kind::Any,
+    ),
+    s(
+        "index.store.snapshot.repository_uuid",
+        Update::Private,
+        Some(""),
+        Kind::Any,
+    ),
+    s(
+        "index.store.snapshot.snapshot_name",
+        Update::Private,
+        Some(""),
+        Kind::Any,
+    ),
+    s(
+        "index.store.snapshot.snapshot_uuid",
+        Update::Private,
+        Some(""),
+        Kind::Any,
+    ),
+    s(
+        "index.store.snapshot.uncached_chunk_size",
+        Update::Static,
+        Some("-1b"),
+        Kind::Bytes(-1, "-1", None),
+    ),
+    s(
+        "index.store.stats_refresh_interval",
+        Update::Static,
+        Some("10s"),
+        Kind::Time(-1, "-1", None),
+    ),
+    s("index.store.type", Update::Static, Some(""), Kind::Any),
+    s(
+        "index.synthetic_id.bloom_filter.high_bits_per_doc",
+        Update::Final,
+        Some("128.0"),
+        Kind::Float(8.0, 256.0),
+    ),
+    s(
+        "index.synthetic_id.bloom_filter.large_segment_min_docs",
+        Update::Final,
+        Some("320000"),
+        Kind::Int(1, INT),
+    ),
+    s(
+        "index.synthetic_id.bloom_filter.low_bits_per_doc",
+        Update::Final,
+        Some("24.0"),
+        Kind::Float(8.0, 256.0),
+    ),
+    s(
+        "index.synthetic_id.bloom_filter.max_size",
+        Update::Final,
+        Some("8mb"),
+        Kind::Bytes(65536, "64kb", Some((8388608, "8mb"))),
+    ),
+    s(
+        "index.synthetic_id.bloom_filter.num_hash_functions",
+        Update::Final,
+        Some("4"),
+        Kind::Int(1, INT),
+    ),
+    s(
+        "index.synthetic_id.bloom_filter.optimized_merge",
+        Update::Final,
+        Some("true"),
+        Kind::Bool,
+    ),
+    s(
+        "index.synthetic_id.bloom_filter.small_segment_max_docs",
+        Update::Final,
+        Some("160000"),
+        Kind::Int(1, INT),
+    ),
+    s(
+        "index.time_series.end_time",
+        Update::Dynamic,
+        Some("9999-12-31T23:59:59.999Z"),
+        Kind::Any,
+    ),
+    s(
+        "index.time_series.es87tsdb_codec.enabled",
+        Update::Final,
+        Some("true"),
+        Kind::Bool,
+    ),
+    s(
+        "index.time_series.es95_codec.enabled",
+        Update::Final,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.time_series.start_time",
+        Update::Final,
+        Some("-9999-01-01T00:00:00Z"),
+        Kind::Any,
+    ),
+    s(
+        "index.time_series.temporality_field",
+        Update::Final,
+        Some(""),
+        Kind::Any,
+    ),
+    s(
+        "index.top_metrics_max_size",
+        Update::Dynamic,
+        Some("10"),
+        Kind::Int(1, INT),
+    ),
+    s(
+        "index.translog.flush_threshold_age",
+        Update::Dynamic,
+        Some("1m"),
+        Kind::Time(1000, "1s", Some((3600000, "1h"))),
+    ),
+    s(
+        "index.translog.generation_threshold_size",
+        Update::Dynamic,
+        Some("64mb"),
+        Kind::Bytes(56, "56b", None),
+    ),
+    s(
+        "index.translog.retention.age",
+        Update::Dynamic,
+        Some("-1"),
+        Kind::Parse(|v| {
+            time_millis(v, "index.translog.retention.age")?;
+            Err(TRANSLOG_RETENTION.into())
+        }),
+    ),
+    s(
+        "index.translog.retention.size",
+        Update::Dynamic,
+        Some("-1"),
+        Kind::Parse(|v| {
+            byte_size(v, "index.translog.retention.size")?;
+            Err(TRANSLOG_RETENTION.into())
+        }),
+    ),
+    s(
+        "index.use_legacy_postings_format",
+        Update::Final,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.use_time_series_doc_values_format",
+        Update::Final,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.use_time_series_doc_values_format_large_binary_block_size",
+        Update::Final,
+        Some("true"),
+        Kind::Bool,
+    ),
+    s(
+        "index.use_time_series_doc_values_format_large_block_size",
+        Update::Final,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.verified_before_close",
+        Update::Private,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.verified_read_only",
+        Update::Private,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s(
+        "index.version.compatibility",
+        Update::Private,
+        None,
+        Kind::Any,
+    ),
+    s(
+        "index.warmer.enabled",
+        Update::Dynamic,
+        Some("true"),
+        Kind::Bool,
+    ),
+    s(
+        "index.xpack.ccr.following_index",
+        Update::Internal,
+        Some("false"),
+        Kind::Bool,
+    ),
+    s("index.xpack.version", Update::Static, Some(""), Kind::Any),
+    s(
+        "index.xpack.watcher.template.version",
+        Update::Static,
+        Some(""),
+        Kind::Any,
+    ),
 ];
+
+const TRANSLOG_RETENTION: &str = "Translog retention settings [index.translog.retention.age] and [index.translog.retention.size] are no longer supported. Please do not specify values for these settings";
 
 /// The registered setting with this full key (`index.` included), or the group setting covering it.
 pub fn get(key: &str) -> Option<&'static Setting> {
@@ -513,13 +1377,19 @@ impl Setting {
             Kind::Bool => Err(format!(
                 "Failed to parse value [{v}] as only [true] or [false] are allowed."
             )),
-            Kind::Time(min, rep) => {
-                if time_millis(v, key)? < min {
-                    return Err(format!(
-                        "failed to parse value [{v}] for setting [{key}], must be >= [{rep}]"
-                    ));
+            Kind::Time(min, rep, max) => bounded(v, key, time_millis(v, key)?, (min, rep), max),
+            Kind::Float(min, max) => {
+                let n = (v.trim().parse::<f64>())
+                    .map_err(|_| format!("Failed to parse value [{v}] for setting [{key}]"))?;
+                match () {
+                    _ if n < min => Err(format!(
+                        "Failed to parse value [{v}] for setting [{key}] must be >= {min:?}"
+                    )),
+                    _ if n > max => Err(format!(
+                        "Failed to parse value [{v}] for setting [{key}] must be <= {max:?}"
+                    )),
+                    _ => Ok(()),
                 }
-                Ok(())
             }
             Kind::Enum(class, values) => {
                 let upper = v.to_uppercase();
@@ -550,18 +1420,17 @@ impl Setting {
                     "unknown value for [index.codec] must be one of [default, best_compression] but was: {v}"
                 )),
             },
-            Kind::Bytes(min, rep) => {
-                if byte_size(v, key)? < min as i128 {
-                    return Err(format!(
-                        "failed to parse value [{v}] for setting [{key}], must be >= [{rep}]"
-                    ));
-                }
-                Ok(())
+            Kind::Bytes(min, rep, max) => {
+                let n = byte_size(v, key)?
+                    .try_into()
+                    .expect("byte_size caps at i64::MAX");
+                bounded(v, key, n, (min, rep), max)
             }
             // A string holds a comma-separated list, as Settings.getAsList splits it.
             Kind::List(parse) => (v.split(',').map(str::trim))
                 .filter(|e| !e.is_empty())
                 .try_for_each(parse),
+            Kind::Parse(parse) => parse(v),
             Kind::Any => Ok(()),
         }
     }
@@ -574,6 +1443,43 @@ impl Setting {
                 .try_for_each(|e| parse(&crate::setting_string(e))),
             _ => self.validate(&crate::setting_string(v)),
         }
+    }
+}
+
+/// Checks a parsed time or byte size `n` against a setting's bounds, with their renderings.
+fn bounded(
+    v: &str,
+    key: &str,
+    n: i64,
+    (min, rep): (i64, &str),
+    max: Option<(i64, &str)>,
+) -> Result<(), String> {
+    if n < min {
+        return Err(format!(
+            "failed to parse value [{v}] for setting [{key}], must be >= [{rep}]"
+        ));
+    }
+    match max {
+        Some((max, rep)) if n > max => Err(format!(
+            "failed to parse value [{v}] for setting [{key}], must be <= [{rep}]"
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn fielddata_cache(v: &str) -> Result<(), String> {
+    match v {
+        "node" | "none" => Ok(()),
+        _ => Err(format!("failed to parse [{v}] must be one of [node,none]")),
+    }
+}
+
+fn fs_lock(v: &str) -> Result<(), String> {
+    match v {
+        "native" | "simple" => Ok(()),
+        _ => Err(format!(
+            "unrecognized [index.store.fs.fs_lock] \"{v}\": must be native or simple"
+        )),
     }
 }
 

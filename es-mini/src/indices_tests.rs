@@ -731,3 +731,46 @@ async fn mapping_and_settings_text_keeps_declared_multi_fields() {
         &json!({"k": {"type": "keyword"}, "n": {"type": "keyword"}})
     );
 }
+
+#[tokio::test]
+async fn mapping_and_settings_registers_every_index_scoped_setting() {
+    let app = app();
+    call(&app, Method::PUT, "/i", None).await;
+    let put = |body: Value| call(&app, Method::PUT, "/i/_settings", Some(body));
+    let (s, r) = put(json!({"index.merge.scheduler.max_thread_count": 2})).await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    let reason = async |body| put(body).await.1["error"]["reason"].clone();
+    assert_eq!(
+        reason(json!({"index.merge.policy.deletes_pct_allowed": 60})).await,
+        "Failed to parse value [60] for setting [index.merge.policy.deletes_pct_allowed] must be <= 50.0"
+    );
+    assert_eq!(
+        reason(json!({"index.look_ahead_time": "8d"})).await,
+        "failed to parse value [8d] for setting [index.look_ahead_time], must be <= [7d]"
+    );
+    assert_eq!(
+        reason(json!({"index.downsample.status": "success"})).await,
+        "can not update internal setting [index.downsample.status]; this setting is managed via a dedicated API"
+    );
+    let static_setting = reason(json!({"index.fielddata.cache": "none"})).await;
+    let static_setting = static_setting.as_str().unwrap();
+    assert!(
+        static_setting.starts_with("Can't update non dynamic setting(s) [[index.fielddata.cache]]")
+    );
+    assert_eq!(
+        reason(json!({"index.translog.retention.age": "1h"})).await,
+        "Translog retention settings [index.translog.retention.age] and [index.translog.retention.size] are no longer supported. Please do not specify values for these settings"
+    );
+    let (_, r) = call(
+        &app,
+        Method::GET,
+        "/i/_settings?include_defaults=true&flat_settings=true",
+        None,
+    )
+    .await;
+    assert_eq!(r["i"]["defaults"]["index.merge.policy.type"], "UNSET");
+    assert_eq!(
+        r["i"]["defaults"]["index.query.default_field"],
+        json!(["*"])
+    );
+}

@@ -287,7 +287,9 @@ async fn include_defaults_lists_every_modelled_default_not_set() {
     .await;
     assert_eq!(
         b["t"]["defaults"],
-        json!({"index": {"translog": {"durability": "REQUEST", "sync_interval": "5s", "flush_threshold_size": "10gb"}}})
+        json!({"index": {"translog": {"durability": "REQUEST", "sync_interval": "5s", "flush_threshold_size": "10gb",
+            "flush_threshold_age": "1m", "generation_threshold_size": "64mb",
+            "retention": {"age": "-1", "size": "-1"}}}})
     );
 }
 

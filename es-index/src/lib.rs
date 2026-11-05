@@ -107,11 +107,11 @@ impl Settings {
                     let d = s.default?;
                     Some((
                         s.key.to_owned(),
-                        if d == "[]" {
-                            Value::Array(vec![])
-                        } else {
-                            d.into()
-                        },
+                        // a list default is its JSON
+                        serde_json::from_str(d)
+                            .ok()
+                            .filter(Value::is_array)
+                            .unwrap_or_else(|| d.into()),
                     ))
                 })
                 .collect(),

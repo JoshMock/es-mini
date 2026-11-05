@@ -567,7 +567,6 @@ fn put_settings_on(
     let mut skipped = Vec::new();
     // Registered settings the request sets, with their new values.
     let mut values = Vec::new();
-    // ponytail: the registry lacks some rarely used IndexScopedSettings (merge, store, time series); they fail as unknown
     for (key, value) in es_index::flatten_settings(settings) {
         let short = key.strip_prefix("index.").unwrap_or(&key);
         let key = format!("index.{short}");
@@ -590,6 +589,11 @@ fn put_settings_on(
             Update::Private => {
                 return Err(AppError::IllegalArgument(format!(
                     "can not update private setting [{key}]; this setting is managed by Elasticsearch"
+                )));
+            }
+            Update::Internal => {
+                return Err(AppError::IllegalArgument(format!(
+                    "can not update internal setting [{key}]; this setting is managed via a dedicated API"
                 )));
             }
             Update::Static | Update::Final => {
