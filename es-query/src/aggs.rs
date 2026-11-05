@@ -1531,16 +1531,17 @@ pub(crate) fn inherit_fields(aggs: &mut [Agg], fields: &[FieldSpec]) {
 /// A hit's `fields`: each mapped field's values, dates formatted. `fetch` reads them like ES's
 /// FieldFetcher (source order, text included, only dates take a `format`), otherwise as doc
 /// values (numbers also take a DecimalFormat `format`). Patterns expand to mapped and runtime
-/// fields; the last match of a field sets its format, like FetchDocValuesContext.
-// ponytail: a `format` a field cannot take is ignored, and text fields matched by a pattern
-// have no doc values; ES fails the shard for both
+/// fields; the last match of a field sets its format, like FetchDocValuesContext. A `format`
+/// the field cannot take, or a text field's doc values, fail like ES's fetch (`index_name` is
+/// the searched index's name).
 pub(crate) fn hit_fields(
     s: &Searcher,
+    index_name: &str,
     fields: &[FieldSpec],
     doc: &Document,
     fetch: bool,
-) -> Map<String, Value> {
-    let mut expanded: Vec<(String, Option<&str>)> = vec![];
+) -> Result<Map<String, Value>, QueryError> {
+    let mut expanded: Vec<(String, Option<&str>, &str)> = vec![];
     let names = || {
         let mut names = s.index.mappings.names();
         names.extend(s.runtime_source.iter().cloned());
@@ -1554,22 +1555,54 @@ pub(crate) fn hit_fields(
             false => vec![spec.pattern.clone()],
         };
         for f in matched {
-            match expanded.iter_mut().find(|(e, _)| *e == f) {
-                Some(e) => e.1 = spec.format.as_deref(),
-                None => expanded.push((f, spec.format.as_deref())),
+            let (format, pattern) = (spec.format.as_deref(), spec.pattern.as_str());
+            match expanded.iter_mut().find(|(e, ..)| *e == f) {
+                Some(e) => (e.1, e.2) = (format, pattern),
+                None => expanded.push((f, format, pattern)),
             }
         }
     }
     (expanded.into_iter())
-        .filter_map(|(f, format)| {
+        .filter_map(|(f, format, pattern)| {
             let f = &f;
             if fetch && s.runtime_source.contains(f) {
-                return Some((
+                return Some(Ok((
                     f.clone(),
                     vec![Value::from(java_string(&doc.source))].into(),
-                ));
+                )));
             }
             let m = s.index.mappings.field(f)?;
+            use FieldMapping as M;
+            let ty = m.mapping_type();
+            let refused = match (fetch, m) {
+                (_, M::Object { .. } | M::Nested { .. }) => None,
+                (true, M::Date { .. } | M::DateNanos { .. }) => None,
+                (true, m) if m.is_range() => None,
+                (true, _) => format.map(|_| {
+                    let which = match pattern == f {
+                        true => String::new(),
+                        false => format!(" which matched [{pattern}]"),
+                    };
+                    let e = QueryError::illegal(format!(
+                        "Field [{f}] of type [{ty}] doesn't support formats."
+                    ));
+                    QueryError::illegal(format!("error fetching [{f}]{which}: {e}")).caused_by(e)
+                }),
+                (false, M::Text { .. }) => Some(QueryError::illegal(format!(
+                    "Fielddata is disabled on [{f}] in [{index_name}]. {}",
+                    fielddata_disabled(f)
+                ))),
+                (false, M::Date { .. } | M::DateNanos { .. } | M::DateRange { .. }) => None,
+                (false, m) if m.is_numeric() => None,
+                (false, _) => format.map(|_| {
+                    QueryError::illegal(format!(
+                        "Field [{f}] of type [{ty}] does not support custom formats"
+                    ))
+                }),
+            };
+            if let Some(e) = refused {
+                return Some(Err(e));
+            }
             let v = match fetch {
                 false => doc_values(s, f, m, doc),
                 true => (values(&doc.source, source_path(s.index, f)).into_iter())
@@ -1588,7 +1621,7 @@ pub(crate) fn hit_fields(
                     .collect(),
                 _ => v,
             };
-            (!v.is_empty()).then(|| (f.clone(), v.into()))
+            (!v.is_empty()).then(|| Ok((f.clone(), v.into())))
         })
         .collect()
 }
@@ -1872,6 +1905,21 @@ impl<'s, 'a> Collector<'s, 'a> {
     fn collect_one(&mut self, i: usize, id: &str, doc: &Document, score: f64) {
         let matches = match &self.aggs[i].metric {
             Metric::TopHits(t) => {
+                let (s, name) = (self.searcher, self.index_name);
+                let fetch = t.fields.as_deref().unwrap_or_default();
+                let fields =
+                    hit_fields(s, name, &t.docvalue_fields, doc, false).and_then(|mut f| {
+                        f.extend(stored_fields(s, &t.stored_fields, doc));
+                        f.extend(hit_fields(s, name, fetch, doc, true)?);
+                        Ok(f)
+                    });
+                let fields = match fields {
+                    Ok(f) => f,
+                    Err(e) => {
+                        self.failed.get_or_insert(e);
+                        return;
+                    }
+                };
                 let st = &mut self.stats[i];
                 st.count += 1;
                 st.top.push(TopHit {
@@ -1896,13 +1944,7 @@ impl<'s, 'a> Collector<'s, 'a> {
                         .map(|(f, h)| (f.clone(), h.into()))
                         .collect(),
                     doc: doc.clone(),
-                    fields: {
-                        let mut fields = hit_fields(self.searcher, &t.docvalue_fields, doc, false);
-                        fields.extend(stored_fields(self.searcher, &t.stored_fields, doc));
-                        let fetch = t.fields.as_deref().unwrap_or_default();
-                        fields.extend(hit_fields(self.searcher, fetch, doc, true));
-                        fields
-                    },
+                    fields,
                 });
                 // ponytail: re-sorts at twice the kept hits; a heap if top_hits get large
                 if st.top.len() > 2 * t.from.saturating_add(t.size).max(8) {
@@ -2990,17 +3032,58 @@ mod tests {
     }
 
     #[test]
+    fn aggs_gaps_2_fields_refuse_formats_and_text_doc_values() {
+        // Elasticsearch 9.5.5 fails the shard, only when it has hits to fetch
+        let run = |body: Value| {
+            let (ix, req) = (index(), SearchRequest::parse(&body).unwrap());
+            crate::search_many(&[("i", 0, &ix, None)], &req).map(drop)
+        };
+        let top = |spec: Value| json!({"size": 0, "aggs": {"top": {"top_hits": spec}}});
+        let err = |body: Value| run(body).unwrap_err();
+        let e = err(top(
+            json!({"docvalue_fields": [{"field": "k", "format": "x"}]}),
+        ));
+        assert_eq!(
+            e.msg,
+            "Field [k] of type [keyword] does not support custom formats"
+        );
+        assert_eq!(e.shards[0].0, "i");
+        let fielddata = "Fielddata is disabled on [t] in [i]. Text fields are not optimised";
+        for f in ["t", "*t"] {
+            let e = err(top(json!({"docvalue_fields": [f]})));
+            assert!(e.msg.starts_with(fielddata), "{f}: {}", e.msg);
+        }
+        let e = err(top(json!({"fields": [{"field": "i", "format": "0.0"}]})));
+        assert_eq!(
+            e.msg,
+            "error fetching [i]: Field [i] of type [integer] doesn't support formats."
+        );
+        let cause = "Field [i] of type [integer] doesn't support formats.";
+        assert_eq!(e.cause.unwrap().msg, cause);
+        let e = err(json!({"fields": [{"field": "k*", "format": "x"}]}));
+        assert_eq!(
+            e.msg,
+            "error fetching [k] which matched [k*]: Field [k] of type [keyword] doesn't support formats."
+        );
+        let none = json!({"term": {"k": "zzz"}});
+        let mut body = top(json!({"docvalue_fields": ["t"]}));
+        body["query"] = none.clone();
+        assert!(run(body).is_ok());
+        let body = json!({"query": none, "fields": [{"field": "k", "format": "x"}]});
+        assert!(run(body).is_ok());
+    }
+
+    #[test]
     fn aggs_gaps_fields_match_wildcards() {
         // like FetchDocValuesContext: patterns expand to mapped fields, the last match's
         // format wins
         let body = json!({"fields": ["k*", {"field": "a*", "format": "yyyy"}, "at"],
             "sort": ["i"], "aggs": {"top": {"top_hits": {"size": 1, "sort": [{"i": "desc"}],
             "_source": false, "fields": [],
-            "docvalue_fields": ["*t", {"field": "at", "format": "yyyy"}]}}}});
+            "docvalue_fields": ["a*", {"field": "at", "format": "yyyy"}]}}}});
         let (ix, req) = (index(), SearchRequest::parse(&body).unwrap());
         let r = search(&ix, &req);
         let top = &r.aggregations.unwrap()["top"]["hits"]["hits"][0];
-        // `t` is text, without doc values
         assert_eq!(top["fields"], json!({"at": ["2021"]}));
         assert_eq!(
             Value::from(r.hits[0].fields.clone()),

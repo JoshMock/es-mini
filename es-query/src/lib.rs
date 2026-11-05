@@ -1860,14 +1860,6 @@ pub fn search_many<'a>(
         hits.retain(|h| cmp_sorted(&req.sort, (&h.sort, h.score), (after, 0.0)).is_gt());
         skipped = n - hits.len();
     }
-    if !failures.is_empty() && failures.len() == targets.len() {
-        let shards = (failures.iter()).map(|(n, s, e)| (n.to_string(), *s, e.clone()));
-        let shards = shards.collect();
-        return Err(QueryError {
-            shards,
-            ..failures.swap_remove(0).2
-        });
-    }
     // Elasticsearch collects no top docs for size 0, so it reports no max_score; nor does it
     // track one for a sort other than by score alone (SortBuilder.buildSort, getMaxScore).
     let by_score_alone = match &req.sort[..] {
@@ -1878,33 +1870,55 @@ pub fn search_many<'a>(
     let max_score = (by_score_alone && req.size > 0)
         .then(|| hits.iter().map(|h| h.score as f32).reduce(f32::max))
         .flatten();
+    let found = hits.len();
+    // a hit whose `fields` fail fails its shard, as ES's fetch does
+    let page: Vec<_> = (hits.into_iter().skip(req.from).take(req.size))
+        .filter_map(|h| {
+            let s = &searchers[&h.target];
+            // ponytail: a hit whose segment cannot be read is left out
+            let doc = h.doc.or_else(|| s.shard.get(h.id))?;
+            let index = targets[h.target].0;
+            let hit = aggs::hit_fields(s, index, &req.fields, &doc, true).map(|fields| Hit {
+                index,
+                id: h.id,
+                score: by_score.then_some(h.score as f32),
+                sort: s.sort_values(&req.sort, h.score, &doc),
+                matched_queries: s.matched_queries(h.id, &doc),
+                fields,
+                doc,
+            });
+            Some((h.target, hit))
+        })
+        .collect();
+    let mut fetch_failed = HashSet::new();
+    let mut page_hits = vec![];
+    for (target, hit) in page {
+        match hit {
+            Ok(hit) => page_hits.push((target, hit)),
+            Err(e) if fetch_failed.insert(target) => {
+                failures.push((targets[target].0, targets[target].1, e));
+            }
+            Err(_) => {}
+        }
+    }
+    page_hits.retain(|(target, _)| !fetch_failed.contains(target));
+    if !failures.is_empty() && failures.len() == targets.len() {
+        let shards = (failures.iter()).map(|(n, s, e)| (n.to_string(), *s, e.clone()));
+        let shards = shards.collect();
+        return Err(QueryError {
+            shards,
+            ..failures.swap_remove(0).2
+        });
+    }
     Ok(SearchResult {
         failures,
         aggregations: (!req.aggs.is_empty())
             .then(|| aggs::render(&req.aggs, &req.pipelines, &mut aggs, req.typed_keys))
             .transpose()?,
         profile,
-        total: total + skipped + hits.len(),
+        total: total + skipped + found,
         max_score,
-        hits: hits
-            .into_iter()
-            .skip(req.from)
-            .take(req.size)
-            .filter_map(|h| {
-                let s = &searchers[&h.target];
-                // ponytail: a hit whose segment cannot be read is left out
-                let doc = h.doc.or_else(|| s.shard.get(h.id))?;
-                Some(Hit {
-                    index: targets[h.target].0,
-                    id: h.id,
-                    score: by_score.then_some(h.score as f32),
-                    sort: s.sort_values(&req.sort, h.score, &doc),
-                    matched_queries: s.matched_queries(h.id, &doc),
-                    fields: aggs::hit_fields(s, &req.fields, &doc, true),
-                    doc,
-                })
-            })
-            .collect(),
+        hits: page_hits.into_iter().map(|(_, hit)| hit).collect(),
     })
 }
 
