@@ -1541,6 +1541,58 @@ fn esql_speed_counts_push_filters_es_rewrites_to_a_field_and_a_literal() {
     }
 }
 
+/// A filter Lucene cannot run reads every match, as Elasticsearch 9.5.5 reported for the first
+/// two queries; with no SORT only the rows the LIMIT keeps load the output's fields.
+#[test]
+fn esql_speed_counts_read_every_match_of_an_unpushed_filter() {
+    let mut t = Index::default();
+    t.mappings.properties.insert("n".into(), FieldMapping::Long);
+    let keyword = FieldMapping::Keyword {
+        ignore_above: None,
+        split_queries_on_whitespace: false,
+    };
+    t.mappings.properties.insert("k".into(), keyword);
+    for i in 0..3000 {
+        t.put(&i.to_string(), json!({"n": i, "k": format!("k{}", i % 7)}));
+    }
+    let all = BTreeMap::from([("t".to_owned(), t)]);
+    for (filter, same, tail, docs, values) in [
+        ("n + n > 100", "n > 50", "KEEP k | LIMIT 10", 3000, 3010),
+        ("n + n > 100", "n > 50", "KEEP k", 3000, 4000),
+        (
+            "n % 1000 == 999",
+            "n IN (999, 1999, 2999)",
+            "LIMIT 10",
+            3000,
+            3003,
+        ),
+        (
+            "n < 2000 AND n % 2 == 1",
+            "n < 20 AND n % 2 == 1",
+            "KEEP k, n | LIMIT 10",
+            2000,
+            2010,
+        ),
+        (
+            "n + n > 100",
+            "n > 50",
+            "SORT k DESC | KEEP n | LIMIT 5",
+            3000,
+            5949,
+        ),
+    ] {
+        let query = format!("FROM t | WHERE {filter} | {tail}");
+        let r = run(&all, &query).unwrap();
+        let expected = run(&all, &format!("FROM t | WHERE {same} | {tail}")).unwrap();
+        assert_eq!(r.values, expected.values, "{query}");
+        assert_eq!(
+            (r.documents_found, r.values_loaded),
+            (docs, values),
+            "{query}"
+        );
+    }
+}
+
 #[test]
 fn stats_count_star_by_groups() {
     let r = q("FROM people METADATA _index | STATS c = COUNT(*) BY _index");

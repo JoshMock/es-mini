@@ -4238,12 +4238,17 @@ fn load_counts(
         };
         return (emitted.len(), values(&emitted, &(&keys | &later)));
     }
-    // ponytail: reads every match; ES's source can stop early once a plain LIMIT fills
     let mut rows: Vec<Line> = found.flatten().collect();
     let documents = rows.len();
     let mut loaded: BTreeSet<String> = residual.iter().flat_map(|e| names(e)).collect();
     let mut n = values(&rows, &loaded);
-    rows.retain(|r| passes(r, &residual));
+    // Every match loads the filter's fields, but with no SORT the filter stops once the LIMIT fills.
+    let (mut kept, keep) = (0, if sort.is_empty() { limit } else { usize::MAX });
+    rows.retain(|r| {
+        let pass = kept < keep && passes(r, &residual);
+        kept += usize::from(pass);
+        pass
+    });
     n += values(&rows, &(&keys - &loaded));
     loaded.extend(keys);
     top_rows(&mut rows, sort, limit);
