@@ -2887,7 +2887,7 @@ fn run_at(
             Arc::new(Table {
                 types: BTreeMap::new(),
                 conflicts: BTreeMap::new(),
-                groups: vec![Group::new(1, BTreeMap::new())],
+                groups: vec![Arc::new(Group::new(1, BTreeMap::new()))],
                 cols: Vec::new(),
                 empty: false,
                 counted: false,
@@ -2919,7 +2919,7 @@ fn run_at(
     // Per EVAL, the values it added to documents, which their rows then point into.
     let evals: Vec<(OnceCell<_>, OnceCell<Vec<Added>>)> =
         cmds.iter().map(|_| Default::default()).collect();
-    let mut rows: Vec<Line> = groups.iter().flat_map(Group::lines).collect();
+    let mut rows: Vec<Line> = groups.iter().flat_map(|g| g.lines()).collect();
     let mut explicit_limit = false;
     let fused = |k: usize| match (cmds.get(k), cmds.get(k + 1)) {
         (Some(Command::Eval(named)), Some(Command::Where(e))) => Some((named, e)),
@@ -3666,8 +3666,8 @@ impl Group {
         Some(at)
     }
 
-    // ponytail: an uncached table (several indices, an alias filter, METADATA) builds them per
-    // query, about one more hashing pass than keying alone
+    // ponytail: the table of an alias filter, or of indices whose types conflict, is built per
+    // query, these too; cache it per filter or conflict if such queries repeat
     fn ords(&self, c: &str) -> Option<&[u32]> {
         let at = self.at(c)?;
         let ords = self.ords[at].get_or_init(|| {
@@ -3737,8 +3737,8 @@ struct Table {
     types: BTreeMap<String, String>,
     /// For each conflicting column, the indices per mapping type.
     conflicts: BTreeMap<String, BTreeMap<String, Vec<String>>>,
-    /// One group of rows per index.
-    groups: Vec<Group>,
+    /// One group of rows per index, shared with the index's whole table (see `union`).
+    groups: Vec<Arc<Group>>,
     /// The columns, in output order.
     cols: Vec<String>,
     /// No index matched: the response is a placeholder column.
@@ -3791,15 +3791,25 @@ fn table_from(
     // ponytail: holds every value of the index in memory until its next write; cache per
     // column, or bound it, if memory matters more than repeated queries
     // It holds every metadata column too, which a query sees only when it lists them.
-    if let [t] = &targets[..]
-        && t.filter.is_none()
-    {
+    let whole = |t: &aliases::Target| {
         let index: &Index = indices[&t.index].borrow();
         let all = METADATA.map(String::from);
-        return Ok(index.memo(
-            || table_of(indices, &targets, &filters, &all, &|_| true),
+        index.memo(
+            || table_of(indices, std::slice::from_ref(t), &[None], &all, &|_| true),
             |table, removed, written| follow(table, index, &t.index, removed, written),
-        ));
+        )
+    };
+    if targets.iter().all(|t| t.filter.is_none()) {
+        match &targets[..] {
+            [] => {}
+            [t] => return Ok(whole(t)),
+            ts => {
+                let parts: Vec<_> = ts.iter().map(whole).collect();
+                if let Some(t) = union(indices, ts, &parts) {
+                    return Ok(Arc::new(t));
+                }
+            }
+        }
     }
     Ok(Arc::new(table_of(
         indices, &targets, &filters, metadata, read,
@@ -3818,6 +3828,10 @@ fn follow(
 ) -> bool {
     let mapped = columns(index, std::iter::empty());
     let [g] = &mut t.groups[..] else {
+        return false;
+    };
+    // A query over several indices may still read it.
+    let Some(g) = Arc::get_mut(g) else {
         return false;
     };
     if !mapped.keys().eq(t.types.keys())
@@ -3859,6 +3873,40 @@ fn column<'d>(
         || !mappings.properties.contains_key(c) && mappings.field(c).is_some();
     let m = mappings.field(c);
     docs.map(move |d| doc_value(cell(&d.source, c, multi_field), ty, m))
+}
+
+/// The table of several unfiltered indices, sharing the rows of their whole tables `parts`;
+/// none when a column's types differ between them (`table_of` makes it null).
+fn union(
+    indices: &aliases::Map<impl aliases::IndexMeta + std::borrow::Borrow<Index>>,
+    targets: &[aliases::Target],
+    parts: &[Arc<Table>],
+) -> Option<Table> {
+    let mut types: BTreeMap<&String, (String, &String)> = BTreeMap::new();
+    for (t, part) in targets.iter().zip(parts) {
+        // A column the mappings lack is typed from its values, both ways alike (see `columns`).
+        let mapped = columns(indices[&t.index].borrow(), std::iter::empty());
+        for (c, ty) in &part.types {
+            let es_type = mapped.get(c).map_or(ty, |(es_type, _)| es_type);
+            let (e, t) = types.entry(c).or_insert_with(|| (es_type.clone(), ty));
+            if e != es_type || *t != ty {
+                return None;
+            }
+        }
+    }
+    Some(Table {
+        cols: types.keys().map(|&c| c.clone()).collect(),
+        types: (types.into_iter())
+            .map(|(c, (_, ty))| (c.clone(), ty.clone()))
+            .collect(),
+        conflicts: BTreeMap::new(),
+        groups: parts
+            .iter()
+            .flat_map(|p| p.groups.iter().cloned())
+            .collect(),
+        empty: false,
+        counted: true,
+    })
 }
 
 /// The table of the documents of `targets` that their `filters` match.
@@ -3955,10 +4003,10 @@ fn table_of(
                 let v = g.iter().map(|(id, d)| metadata_value(f, &t.index, id, d));
                 cols.insert(f.clone(), v.collect());
             }
-            Group {
+            Arc::new(Group {
                 seqs: g.iter().map(|(_, d)| d.seq_no).collect(),
                 ..Group::new(g.len(), cols)
-            }
+            })
         })
         .collect();
     Table {
@@ -4120,7 +4168,7 @@ fn cmp_values(x: &Value, y: &Value, k: &SortKey) -> Ordering {
 /// COUNT. Everything after the first LIMIT or STATS runs on its output, so the fields it uses load
 /// for those rows.
 fn load_counts(
-    groups: &[Group],
+    groups: &[Arc<Group>],
     cmds: &[Command],
     out: &[String],
     types: &BTreeMap<String, String>,
@@ -4536,6 +4584,65 @@ mod tests {
         let groups = [&groups[..], &[vec![1.into(), Value::Null]]].concat();
         assert_eq!(cached.unwrap().values, groups);
         assert_eq!(uncached.unwrap().values, groups);
+    }
+
+    /// Several unfiltered indices read each one's cached table, sharing its rows (and so its
+    /// `Group::ords`), and answer as a table built for the query did: a column one index lacks
+    /// is null, writes show, and a type conflict still builds the query's own table.
+    #[test]
+    fn esql_speed_several_indices_read_their_cached_tables() {
+        use serde_json::json;
+        let mut a = Index::default();
+        a.mappings.properties.insert("n".into(), FieldMapping::Long);
+        a.put("1", json!({"n": 2, "k": "x"}));
+        a.put("2", json!({"n": 4, "k": "y"}));
+        let mut b = Index::default();
+        b.put("1", json!({"n": 3, "k": "x", "u": "z"}));
+        let mut c = Index::default();
+        c.put("1", json!({"n": "w"}));
+        let mut indices: BTreeMap<String, Index> = [("a", a), ("b", b), ("c", c)]
+            .map(|(n, i)| (n.to_owned(), i))
+            .into();
+        let shared = |indices: &BTreeMap<String, Index>, from: &str| {
+            let table = || {
+                table_from(indices, &[from.into()], &[], &|_| true, &|e| {
+                    Ok(e.to_owned())
+                })
+                .unwrap()
+            };
+            let (x, y) = (table(), table());
+            (x.groups.iter().zip(&y.groups)).all(|(x, y)| Arc::ptr_eq(x, y))
+        };
+        assert!(shared(&indices, "a,b"));
+        assert!(!shared(&indices, "a,c"));
+        let q = "FROM a,b METADATA _index | SORT n | KEEP n, k, u, _index";
+        let row = |n: i64, k: &str, u: Option<&str>, i: &str| -> Vec<Value> {
+            vec![n.into(), k.into(), u.into(), i.into()]
+        };
+        let r = run(&indices, q).unwrap();
+        let rows = [row(2, "x", None, "a"), row(3, "x", Some("z"), "b")];
+        assert_eq!(r.values, [&rows[..], &[row(4, "y", None, "a")]].concat());
+        assert_eq!((r.documents_found, r.values_loaded), (3, 10));
+        let stats = "FROM a,b | STATS c = COUNT(*), s = SUM(n) BY k | SORT k";
+        let r = run(&indices, stats).unwrap();
+        let x_y = [
+            [Value::from(2), 5.into(), "x".into()],
+            [1.into(), 4.into(), "y".into()],
+        ];
+        assert_eq!(r.values, x_y);
+        assert_eq!((r.documents_found, r.values_loaded), (3, 6));
+        let b = indices.get_mut("b").unwrap();
+        b.put("2", json!({"n": 1, "k": "y", "u": "v"}));
+        b.delete("1");
+        let r = run(&indices, q).unwrap();
+        let rows = [
+            row(1, "y", Some("v"), "b"),
+            row(2, "x", None, "a"),
+            row(4, "y", None, "a"),
+        ];
+        assert_eq!(r.values, rows);
+        let r = run(&indices, "FROM a,c | STATS c = COUNT(*)").unwrap();
+        assert_eq!(r.values, [[Value::from(3)]]);
     }
 
     /// Equal STATS keys hash alike, so they share a group.
