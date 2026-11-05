@@ -508,6 +508,20 @@ fn sorting_on_a_text_field_is_refused() {
 }
 
 #[test]
+fn sorting_on_a_text_multi_field_is_refused() {
+    let mut i = Index::default();
+    let t: FieldMapping =
+        serde_json::from_value(json!({"type": "text", "fields": {"en": {"type": "text"}}}))
+            .unwrap();
+    i.mappings.properties.insert("t".into(), t);
+    i.put("1", json!({"t": "a"}));
+    let targets = [("i", 0, &i, None)];
+    let req = SearchRequest::parse(&json!({"sort": ["t.en"]})).unwrap();
+    let e = es_query::check_sortable(&targets, &req).unwrap_err();
+    assert!(e.msg.starts_with("Text fields are not optimised"), "{e}");
+}
+
+#[test]
 fn sorting_on_an_unmapped_field_is_refused_unless_unmapped_type_is_set() {
     let idx = index();
     let targets = [("i", 0, &idx, None)];

@@ -1423,16 +1423,15 @@ fn with_filter(
 pub fn check_sortable(targets: &[Target], req: &SearchRequest) -> Result<(), QueryError> {
     for f in &req.sort {
         for (_, _, index, _) in targets {
-            let known = f.unmapped_ok
-                || f.field.starts_with('_')
-                || index.mappings.field(&f.field).is_some();
+            let m = index.mappings.field(&f.field);
+            let known = f.unmapped_ok || f.field.starts_with('_') || m.is_some();
             if !known {
                 return Err(QueryError::illegal(format!(
                     "No mapping found for [{}] in order to sort on",
                     f.field
                 )));
             }
-            if let Some(FieldMapping::Text { .. }) = index.mappings.properties.get(&f.field) {
+            if let Some(FieldMapping::Text { .. }) = m {
                 return Err(fielddata_disabled(&f.field));
             }
         }
