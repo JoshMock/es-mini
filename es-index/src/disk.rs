@@ -598,16 +598,49 @@ pub(crate) fn integer(v: &Value, min: i64, max: i64) -> Option<Option<i64>> {
 
 /// Epoch nanos of a `date_nanos` value, as Elasticsearch indexes it: [`crate::date_millis`] plus
 /// the sub-millisecond digits of its fraction (of a millisecond for `epoch_millis`, of a second
-/// otherwise). `None` before 1970 or after 2262, which Elasticsearch rejects and es-mini matches.
+/// otherwise). `None` before 1970 or after 2262 (see [`date_nanos_rejection`]).
 pub fn date_nanos(format: Option<&str>, locale: Option<&str>, v: &Value) -> Option<Option<i64>> {
-    let Some(millis) = crate::date_millis(format, locale, v) else {
+    let Some(nanos) = nanos(format, locale, v) else {
         return Some(None);
     };
-    let s = crate::postings::text(v);
-    let number = s.parse::<f64>().is_ok();
-    if number && s.starts_with('-') {
+    i64::try_from(nanos).ok().filter(|n| *n >= 0).map(Some)
+}
+
+/// Elasticsearch's reason for rejecting a `date_nanos` value that resolves before 1970 or after
+/// 2262 (`DateUtils.toLong`); `None` for values it accepts or finds malformed.
+pub fn date_nanos_rejection(
+    format: Option<&str>,
+    locale: Option<&str>,
+    v: &Value,
+) -> Option<String> {
+    if epoch_long_nanos(format, locale, v).is_some() {
         return None;
     }
+    let n = nanos(format, locale, v)?;
+    let why = match n {
+        ..0 => "is before the epoch in 1970",
+        0..=0x7fff_ffff_ffff_ffff => return None,
+        _ => "is after 2262-04-11T23:47:16.854775807",
+    };
+    let instant = crate::date_math::instant_string(n);
+    Some(format!(
+        "date[{instant}] {why} and cannot be stored in nanosecond resolution"
+    ))
+}
+
+/// Elasticsearch's `DateFieldMapper.isEpochMillis` shortcut: under the default format, a JSON
+/// integer outside the int range (Jackson's `LONG`) is epoch millis, converted to nanos with
+/// `TimeUnit.toNanos` (saturating) and never range-checked.
+fn epoch_long_nanos(format: Option<&str>, locale: Option<&str>, v: &Value) -> Option<i64> {
+    let n = v.as_i64().filter(|n| i32::try_from(*n).is_err())?;
+    (format.is_none() && locale.is_none()).then(|| n.saturating_mul(1_000_000))
+}
+
+/// Epoch nanos of a `date_nanos` value, unbounded; `None` if malformed.
+fn nanos(format: Option<&str>, locale: Option<&str>, v: &Value) -> Option<i128> {
+    let millis = crate::date_millis(format, locale, v)?;
+    let s = crate::postings::text(v);
+    let number = s.parse::<f64>().is_ok();
     let digits = s.split_once(['.', ',']).map_or("", |(_, f)| f);
     let digits = &digits[..digits.bytes().take_while(u8::is_ascii_digit).count()];
     let epoch_millis = number
@@ -619,9 +652,14 @@ pub fn date_nanos(format: Option<&str>, locale: Option<&str>, v: &Value) -> Opti
     } else {
         digits.get(3..).unwrap_or("")
     };
-    let sub: i64 = format!("{:0<6}", &sub[..sub.len().min(6)]).parse().ok()?;
-    let nanos = millis.checked_mul(1_000_000)?.checked_add(sub)?;
-    (nanos >= 0).then_some(Some(nanos))
+    let sub: i128 = format!("{:0<6}", &sub[..sub.len().min(6)]).parse().ok()?;
+    // epoch millis truncate toward zero, so a negative one's fraction counts down
+    let sub = if epoch_millis && s.starts_with('-') {
+        -sub
+    } else {
+        sub
+    };
+    Some(i128::from(millis) * 1_000_000 + sub)
 }
 
 /// A range key's point bytes in a `width`-byte dimension: a long's sortable bytes, or an

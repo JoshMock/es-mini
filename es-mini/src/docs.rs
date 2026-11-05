@@ -224,12 +224,19 @@ pub fn put_or_create(
                 ),
                 _ => continue,
             };
+            let nanos = |v| match m {
+                FieldMapping::DateNanos { format, locale } => {
+                    es_index::disk::date_nanos_rejection(format.as_deref(), locale.as_deref(), v)
+                }
+                _ => None,
+            };
             let (format, locale) = (format.as_deref().unwrap_or(default), locale.as_deref());
-            let values = es_index::postings::values(&source, name);
-            if let Some(v) = values
-                .iter()
-                .find(|v| es_query::bad_date(Some(format), locale, v))
-            {
+            for v in es_index::postings::values(&source, name) {
+                let bad = es_query::bad_date(Some(format), locale, v);
+                let out_of_range = if bad { None } else { nanos(v) };
+                if !bad && out_of_range.is_none() {
+                    continue;
+                }
                 let text = es_index::postings::text(v);
                 let at = es_index::mapping::locate(raw, name, v, false)
                     .map_or(String::new(), |(l, c)| format!("[{l}:{c}] "));
@@ -238,6 +245,10 @@ pub fn put_or_create(
                      Preview of field's value: '{text}'",
                     m.type_name(),
                 ));
+                if let Some(reason) = out_of_range {
+                    let cause = json!({"type": "illegal_argument_exception", "reason": reason});
+                    return Err(AppError::Caused(Box::new(error), cause));
+                }
                 let mut cause = json!({
                     "type": "illegal_argument_exception",
                     "reason": format!("failed to parse date field [{text}] with format [{format}]"),

@@ -35,7 +35,7 @@ pub fn parse(
             let when = if t > 0 { "future" } else { "past" };
             format!(
                 "date[{}] is too far in the {when} {TOO_FAR}",
-                instant_string(t)
+                instant_string(t * 1_000_000)
             )
         })
     };
@@ -124,24 +124,24 @@ fn apply(math: &str, mut t: i64, round_up: bool, tz: &TimeZone) -> Result<i64, S
     Ok(t)
 }
 
-/// Epoch millis `t` as Java's `Instant.toString`: `+` before years past 9999, a fraction only if
-/// there is one.
-fn instant_string(t: i128) -> String {
-    let (days, ms) = (
-        t.div_euclid(DAY.into()) as i64,
-        t.rem_euclid(DAY.into()) as i64,
-    );
+/// Epoch nanos `t` as Java's `Instant.toString`: `+` before years past 9999, a fraction only if
+/// there is one, in groups of three digits.
+pub(crate) fn instant_string(t: i128) -> String {
+    let day = i128::from(DAY) * 1_000_000;
+    let (days, ns) = (t.div_euclid(day) as i64, t.rem_euclid(day) as i64);
     let (y, m, d) = civil_from_days(days);
     let year = match y {
         10_000.. => format!("+{y}"),
         ..0 => format!("-{:04}", -y),
         _ => format!("{y:04}"),
     };
-    let (h, mi, s, milli) = (ms / 3_600_000, ms / 60_000 % 60, ms / 1000 % 60, ms % 1000);
-    let fraction = if milli > 0 {
-        format!(".{milli:03}")
-    } else {
-        String::new()
+    let s = ns / 1_000_000_000;
+    let (h, mi, s, fraction) = (s / 3600, s / 60 % 60, s % 60, ns % 1_000_000_000);
+    let fraction = match fraction {
+        0 => String::new(),
+        f if f % 1_000_000 == 0 => format!(".{:03}", f / 1_000_000),
+        f if f % 1000 == 0 => format!(".{:06}", f / 1000),
+        f => format!(".{f:09}"),
     };
     format!("{year}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}{fraction}Z")
 }

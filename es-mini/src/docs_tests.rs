@@ -188,6 +188,52 @@ async fn date_not_in_the_field_format_is_rejected() {
 }
 
 #[tokio::test]
+async fn disk_fidelity_date_nanos_outside_nanosecond_range_are_rejected() {
+    let app = app();
+    let mappings = json!({"mappings": {"properties": {"dn": {"type": "date_nanos"}}}});
+    call(&app, Method::PUT, "/idx", Some(mappings)).await;
+    // Elasticsearch 9.5.5's responses.
+    let before = "is before the epoch in 1970 and cannot be stored in nanosecond resolution";
+    let after =
+        "is after 2262-04-11T23:47:16.854775807 and cannot be stored in nanosecond resolution";
+    for (value, at, instant, why) in [
+        (json!("1960-01-01"), "1:7", "1960-01-01T00:00:00Z", before),
+        (json!(-5), "1:7", "1969-12-31T23:59:59.995Z", before),
+        (json!(-5.5), "1:7", "1969-12-31T23:59:59.994500Z", before),
+        (
+            json!("1969-12-31T23:59:59.999999999Z"),
+            "1:7",
+            "1969-12-31T23:59:59.999999999Z",
+            before,
+        ),
+        (json!("2263-01-01"), "1:7", "2263-01-01T00:00:00Z", after),
+        (
+            json!([1, "1960-01-01"]),
+            "1:10",
+            "1960-01-01T00:00:00Z",
+            before,
+        ),
+    ] {
+        let (s, r) = call(&app, Method::PUT, "/idx/_doc/1", Some(json!({"dn": value}))).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{value}");
+        let preview = es_index::postings::text(value.as_array().map_or(&value, |a| &a[1]));
+        let reason = format!(
+            "[{at}] failed to parse field [dn] of type [date_nanos] in document with id '1'. \
+             Preview of field's value: '{preview}'"
+        );
+        assert_eq!(r["error"]["type"], "document_parsing_exception");
+        assert_eq!(r["error"]["reason"], reason);
+        let cause = json!({"type": "illegal_argument_exception", "reason": format!("date[{instant}] {why}")});
+        assert_eq!(r["error"]["caused_by"], cause, "{value}");
+    }
+    // A JSON long outside the int range takes Elasticsearch's epoch-millis shortcut, unchecked.
+    for value in [json!(-5_000_000_000_i64), json!(99_999_999_999_999_i64)] {
+        let (s, _) = call(&app, Method::PUT, "/idx/_doc/1", Some(json!({"dn": value}))).await;
+        assert!(s.is_success(), "{value}");
+    }
+}
+
+#[tokio::test]
 async fn rejected_document_adds_no_dynamic_mappings() {
     let app = app();
     let mappings =
