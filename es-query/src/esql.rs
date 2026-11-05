@@ -2550,31 +2550,33 @@ fn resolve(
             // ponytail: no TO_VERSION, as es-mini has no version type; no TO_IP leading_zeros
             // option, so it always rejects leading zeros like ES's default
             let (takes, accepted): (&[&str], _) = match name {
-                "TO_STRING" => (&["boolean", "date", "date_nanos", "ip"], None),
+                "TO_STRING" => (
+                    &["boolean", "date", "date_nanos", "ip"],
+                    "aggregate_metric_double or boolean or cartesian_point or cartesian_shape \
+                     or date_nanos or date_range or datetime or dense_vector or \
+                     exponential_histogram or flattened or geo_point or geo_shape or geohash \
+                     or geohex or geotile or histogram or ip or numeric or string or version",
+                ),
                 "TO_DATETIME" => (
                     &["date", "date_nanos"],
-                    Some("date_nanos or datetime or numeric or string"),
+                    "date_nanos or datetime or numeric or string",
                 ),
                 "TO_INTEGER" => (
                     &["boolean", "date"],
-                    Some("boolean or counter_integer or datetime or numeric or string"),
+                    "boolean or counter_integer or datetime or numeric or string",
                 ),
                 "TO_LONG" => (
                     &["boolean", "date", "date_nanos"],
-                    Some(
-                        "boolean or counter_integer or counter_long or date_nanos or datetime \
-                         or geohash or geohex or geotile or numeric or string",
-                    ),
+                    "boolean or counter_integer or counter_long or date_nanos or datetime or \
+                     geohash or geohex or geotile or numeric or string",
                 ),
                 "TO_DOUBLE" => (
                     &["boolean", "date"],
-                    Some(
-                        "boolean or counter_double or counter_integer or counter_long or \
-                         datetime or numeric or string",
-                    ),
+                    "boolean or counter_double or counter_integer or counter_long or datetime \
+                     or numeric or string",
                 ),
-                "TO_IP" => (&["ip"], Some("ip or string")),
-                _ => (&["boolean"], Some("boolean or numeric or string")),
+                "TO_IP" => (&["ip"], "ip or string"),
+                _ => (&["boolean"], "boolean or numeric or string"),
             };
             let numeric: &[&str] = if name == "TO_IP" { &[] } else { &NUMERIC };
             let Some(&ta) = ["null", "keyword", "text"]
@@ -2583,16 +2585,12 @@ fn resolve(
                 .chain(takes)
                 .find(|n| **n == ta)
             else {
-                let reason = match accepted {
-                    Some(a) => format!(
-                        "argument of [{}] must be [{a}], found value [{}] type [{}]",
-                        text(e),
-                        text(arg),
-                        es_name(&ta)
-                    ),
-                    // ponytail: ES's list of what TO_STRING takes is not spelled out here
-                    None => format!("[{f}] of [{ta}] is not supported by es-mini"),
-                };
+                let reason = format!(
+                    "argument of [{}] must be [{accepted}], found value [{}] type [{}]",
+                    text(e),
+                    text(arg),
+                    es_name(&ta)
+                );
                 bad.push((*at, reason));
                 return None;
             };

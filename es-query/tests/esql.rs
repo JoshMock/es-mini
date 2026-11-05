@@ -2803,3 +2803,25 @@ fn esql_semantics_2_stats_aggregate_endings() {
         assert_eq!(err(q), format!("line {msg}"), "{q}");
     }
 }
+
+/// Elasticsearch 9.5.5's message (checked against a live node) for a TO_STRING argument it
+/// cannot convert.
+#[test]
+fn esql_semantics_2_to_string_lists_what_it_takes() {
+    let takes = "aggregate_metric_double or boolean or cartesian_point or cartesian_shape or \
+                 date_nanos or date_range or datetime or dense_vector or exponential_histogram \
+                 or flattened or geo_point or geo_shape or geohash or geohex or geotile or \
+                 histogram or ip or numeric or string or version";
+    for (span, t) in [("1 day", "date_period"), ("1 hour", "time_duration")] {
+        match run(&indices(), &format!("ROW x = TO_STRING({span})")) {
+            Err(EsqlError::Verification(m)) => assert_eq!(
+                m,
+                format!(
+                    "Found 1 problem\nline 1:9: argument of [TO_STRING({span})] must be \
+                     [{takes}], found value [{span}] type [{t}]"
+                )
+            ),
+            other => panic!("{span}: {other:?}"),
+        }
+    }
+}
