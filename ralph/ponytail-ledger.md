@@ -230,10 +230,10 @@ above are retagged to the perf goals that now hold them.
 - `es-mini/src/security/query.rs:56` **security-validation**: translated before it is parsed, so an unknown query type gets the
 - `es-mini/src/security/query.rs:75` **needs-scope**: es-query has no scripts in aggregations; ES parses them and
 - `es-mini/src/template.rs:140` **api-fidelity**: integers past u64 print as doubles; Java's are BigIntegers
-- `es-mini/tests/security_api_keys.rs:1244` **error-positions**: ES also gives the parsing_exception's line and col
+- `es-mini/tests/security_api_keys.rs:1244` **keep** (line/col out of scope, human 2026-11-05): ES also gives the parsing_exception's line and col
 - `es-mini/tests/security_api_keys.rs:1275` **needs-scope**: aggregations on metadata are left out: es-mini has no flattened type, so they
 - `es-mini/tests/security_api_keys.rs:1396` **needs-scope**: recorded with a script query, which es-query cannot parse
-- `es-mini/tests/security_api_keys.rs:1425` **error-positions**: ES also gives the line and col
+- `es-mini/tests/security_api_keys.rs:1425` **keep** (line/col out of scope, human 2026-11-05): ES also gives the line and col
 - `es-query/src/aggs.rs:1136` **error-positions**: malformed elements (`[x]`, `a[`) are names, not ES's invalid path element error
 - `es-query/src/aggs.rs:1215` **search-speed**: clones the digest per comparison; cache values per bucket if
 - `es-query/src/aggs.rs:1429` **aggs-gaps-2**: a `format` a field cannot take is ignored, and text fields matched by a pattern
