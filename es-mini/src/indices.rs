@@ -48,6 +48,31 @@ fn check_field_type(field: &str, spec: &Value) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Refuses a runtime field of `mappings` whose type Elasticsearch does not know.
+fn check_runtime_types(mappings: &Value) -> Result<(), AppError> {
+    for (field, spec) in mappings["runtime"].as_object().into_iter().flatten() {
+        const TYPES: [&str; 9] = [
+            "boolean",
+            "composite",
+            "date",
+            "double",
+            "geo_point",
+            "ip",
+            "keyword",
+            "long",
+            "lookup",
+        ];
+        if let Some(t) = spec["type"].as_str()
+            && !TYPES.contains(&t)
+        {
+            return Err(AppError::MapperParsing(format!(
+                "Failed to parse mapping: The mapper type [{t}] declared on runtime field [{field}] does not exist. It might have been created within a future version or requires a plugin to be installed. Check the documentation."
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// A mapping body that does not parse, as Elasticsearch reports it.
 fn mapping_error(e: serde_json::Error) -> AppError {
     let e = e.to_string();
@@ -149,30 +174,7 @@ pub async fn create(
             }
             check_field_type(field, spec)?;
         }
-        for (field, spec) in body["mappings"]["runtime"]
-            .as_object()
-            .into_iter()
-            .flatten()
-        {
-            const TYPES: [&str; 9] = [
-                "boolean",
-                "composite",
-                "date",
-                "double",
-                "geo_point",
-                "ip",
-                "keyword",
-                "long",
-                "lookup",
-            ];
-            if let Some(t) = spec["type"].as_str()
-                && !TYPES.contains(&t)
-            {
-                return Err(AppError::MapperParsing(format!(
-                    "Failed to parse mapping: The mapper type [{t}] declared on runtime field [{field}] does not exist. It might have been created within a future version or requires a plugin to be installed. Check the documentation."
-                )));
-            }
-        }
+        check_runtime_types(&body["mappings"])?;
         index.mappings = Mappings::deserialize(&body["mappings"]).map_err(mapping_error)?;
     }
     for (alias, meta) in body["aliases"].as_object().into_iter().flatten() {
@@ -700,6 +702,7 @@ pub async fn put_mapping(
     for (field, spec) in body["properties"].as_object().into_iter().flatten() {
         check_field_type(field, spec)?;
     }
+    check_runtime_types(&body)?;
     let new = Mappings::deserialize(&body).map_err(mapping_error)?;
     let mut indices = state.write();
     let names = read_indices(&indices, &name, &params)?;

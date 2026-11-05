@@ -113,6 +113,25 @@ async fn bad_mapping_is_400() {
 }
 
 #[tokio::test]
+async fn put_mapping_refuses_an_unknown_runtime_type() {
+    // Elasticsearch 9.5.5's error, as for index creation; the mapping keeps nothing.
+    let app = app();
+    call(&app, Method::PUT, "/idx", None).await;
+    let body = json!({"runtime": {"bad": {"type": "bogus"}}});
+    let (s, r) = call(&app, Method::PUT, "/idx/_mapping", Some(body)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(r["error"]["type"], "mapper_parsing_exception");
+    assert_eq!(
+        r["error"]["reason"],
+        "Failed to parse mapping: The mapper type [bogus] declared on runtime field [bad] does \
+         not exist. It might have been created within a future version or requires a plugin to \
+         be installed. Check the documentation."
+    );
+    let (_, r) = call(&app, Method::GET, "/idx/_mapping", None).await;
+    assert_eq!(r["idx"]["mappings"].get("runtime"), None);
+}
+
+#[tokio::test]
 async fn date_nanos_fields_and_date_multi_fields() {
     let app = app();
     let props = json!({
