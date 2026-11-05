@@ -20,8 +20,7 @@ pub fn decode(v: &[u8]) -> i64 {
     ((raw << shift) as i64 ^ i64::MIN) >> shift
 }
 
-/// [`SegmentReader::point_docs`].
-// ponytail: reads the whole .kdd per call; slice out the leaves it visits if files get huge.
+/// [`SegmentReader::point_docs`]. Only the leaves it visits are read from `.kdd`.
 pub(crate) fn read_point_docs(
     r: &SegmentReader,
     field: &str,
@@ -31,7 +30,7 @@ pub(crate) fn read_point_docs(
     if (info.point_dimensions, info.point_index_dimensions) != (1, 1) {
         return err(format!("{field} has no one-dimensional points"));
     }
-    let (m, index, data) = field_meta(r, field)?;
+    let (m, index) = field_meta(r, field)?;
     let width = m.width;
     if !(1..=8).contains(&width) {
         return err(format!("{field} has {width}-byte points"));
@@ -41,7 +40,7 @@ pub(crate) fn read_point_docs(
     };
     let tree = Tree {
         index,
-        data: &data,
+        r,
         leaves: m.leaves,
         max_leaf: m.max_leaf,
         max_doc: r.seg.info.max_doc.max(0) as u32,
@@ -49,7 +48,8 @@ pub(crate) fn read_point_docs(
         place,
     };
     let mut out = Vec::new();
-    tree.node(1, 0, 0, &vec![0; width], (&m.lo, &m.hi), &mut out)?;
+    let (root, split) = ((0, m.end), vec![0; width]);
+    tree.node(1, 0, root, &split, (&m.lo, &m.hi), &mut out)?;
     Ok(out)
 }
 
@@ -65,29 +65,40 @@ struct FieldMeta {
     index: std::ops::Range<usize>,
     /// `.kdd` offset of the first leaf; the leaves follow it in order
     first_leaf: usize,
+    /// `.kdd` offset past the last leaf: the next field's first leaf, or the footer
+    end: u64,
 }
 
-/// `field`'s meta entry, and the `.kdi` and `.kdd` files, checked.
-fn field_meta(r: &SegmentReader, field: &str) -> Result<(FieldMeta, Vec<u8>, Vec<u8>)> {
+/// `field`'s meta entry and the `.kdi` file, checked, with the `.kdd` header and footer checked.
+fn field_meta(r: &SegmentReader, field: &str) -> Result<(FieldMeta, Vec<u8>)> {
     let info = r.field(field)?;
-    let (meta, index, data) = (
-        r.cfs_file(".kdm")?,
-        r.cfs_file(".kdi")?,
-        r.cfs_file(".kdd")?,
-    );
+    let (meta, index) = (r.cfs_file(".kdm")?, r.cfs_file(".kdi")?);
+    let Some(data_len) = r.cfs.file_len(".kdd") else {
+        return err(format!("{} has no .kdd", r.seg.name));
+    };
+    let Some(footer_at) = data_len.checked_sub(codec_util::FOOTER_LEN as u64) else {
+        return err(".kdd is too short for a footer");
+    };
+    let footer = r.cfs_slice(".kdd", footer_at, codec_util::FOOTER_LEN as u64)?;
+    codec_util::check_footer_structure(&footer)?;
+    // its header is 50 bytes
+    let header = r.cfs_slice(".kdd", 0, footer_at.min(64))?;
+    codec_util::check_footer(&meta)?;
+    codec_util::check_footer(&index)?;
     let id = &r.seg.info.id;
-    let m = &mut DataInput::new(&meta);
-    for (file, codec) in [(&meta, "Meta"), (&index, "Index"), (&data, "Data")] {
-        codec_util::check_footer(file)?;
+    for (file, codec) in [(&meta, "Meta"), (&index, "Index"), (&header, "Data")] {
         let name = format!("Lucene90PointsFormat{codec}");
         // version 0 (BKD 9) encodes 24-bit doc ids differently; callers fall back to doc values
         codec_util::check_index_header(&mut DataInput::new(file), &name, 1, 1, id, "")?;
     }
+    let m = &mut DataInput::new(&meta);
     codec_util::check_index_header(m, "Lucene90PointsFormatMeta", 1, 1, id, "")?;
+    let mut found = None;
+    let mut starts = vec![];
     loop {
         let number = m.read_int()?;
         if number == -1 {
-            return err(format!("{} has no points for {field}", r.seg.name));
+            break;
         }
         codec_util::check_header(m, "BKD", 10, 10)?;
         m.read_vint()?; // numDims
@@ -102,8 +113,9 @@ fn field_meta(r: &SegmentReader, field: &str) -> Result<(FieldMeta, Vec<u8>, Vec
         let len = m.read_len()?;
         let first_leaf = usize::try_from(m.read_long()?).or_else(|_| err("negative first leaf"))?;
         let start = usize::try_from(m.read_long()?).or_else(|_| err("negative index start"))?;
+        starts.push(first_leaf);
         if number == info.number {
-            let meta = FieldMeta {
+            found = Some(FieldMeta {
                 dims,
                 max_leaf,
                 width,
@@ -112,15 +124,24 @@ fn field_meta(r: &SegmentReader, field: &str) -> Result<(FieldMeta, Vec<u8>, Vec
                 hi,
                 index: start..start.saturating_add(len),
                 first_leaf,
-            };
-            return Ok((meta, index, data));
+                end: 0,
+            });
         }
     }
+    let Some(mut meta) = found else {
+        return err(format!("{} has no points for {field}", r.seg.name));
+    };
+    // each field's leaves follow the previous field's
+    let later = starts.into_iter().filter(|&s| s > meta.first_leaf);
+    meta.end = later.min().map_or(footer_at, |s| s as u64);
+    Ok((meta, index))
 }
 
 /// [`SegmentReader::points`]: every leaf of `field`'s tree decoded in turn.
 pub(crate) fn read_points(r: &SegmentReader, field: &str) -> Result<PointValues> {
-    let (m, _, data) = field_meta(r, field)?;
+    let (m, _) = field_meta(r, field)?;
+    let data = r.cfs_file(".kdd")?;
+    codec_util::check_footer(&data)?;
     let max_doc = r.seg.info.max_doc.max(0) as u32;
     let d = &mut DataInput::new(&data);
     d.pos = m.first_leaf;
@@ -226,7 +247,8 @@ fn leaf_values(
 /// A one-dimensional BKD tree: `BKDReader`'s packed index (`.kdi`) over leaves in `.kdd`.
 struct Tree<'a, F> {
     index: &'a [u8],
-    data: &'a [u8],
+    /// the segment, whose `.kdd` holds the leaves
+    r: &'a SegmentReader,
     leaves: usize,
     max_leaf: usize,
     max_doc: u32,
@@ -237,13 +259,13 @@ struct Tree<'a, F> {
 impl<F: Fn(i64) -> Ordering> Tree<'_, F> {
     /// Visits node `id` (the root is 1, children of `n` are `2n` and `2n + 1`, and ids at and
     /// past `leaves` are leaves), whose packed data starts at `pos`, below a node whose leftmost
-    /// leaf is at `fp`. `split` is the nearest ancestor's split value; `lo..=hi` bound the
-    /// node's values.
+    /// leaf is at `fp`, and whose leaves end at `end`. `split` is the nearest ancestor's split
+    /// value; `lo..=hi` bound the node's values.
     fn node(
         &self,
         id: usize,
         pos: usize,
-        fp: u64,
+        (fp, end): (u64, u64),
         split: &[u8],
         (lo, hi): (&[u8], &[u8]),
         out: &mut Vec<u32>,
@@ -263,7 +285,7 @@ impl<F: Fn(i64) -> Ordering> Tree<'_, F> {
         };
         if id >= self.leaves {
             return self.leaf(
-                fp,
+                (fp, end),
                 lo_at == Ordering::Equal && hi_at == Ordering::Equal,
                 out,
             );
@@ -287,16 +309,21 @@ impl<F: Fn(i64) -> Ordering> Tree<'_, F> {
         } else {
             0
         };
-        let left = r.pos;
-        self.node(id * 2, left, fp, &split, (lo, &split), out)?;
-        let right = left.saturating_add(left_len);
-        self.node(id * 2 + 1, right, fp, &split, (&split, hi), out)
+        let (left, right) = (r.pos, r.pos.saturating_add(left_len));
+        // the right child's leaves start where the left child's end
+        r.pos = right;
+        let mid = fp.wrapping_add(r.read_vlong()? as u64);
+        self.node(id * 2, left, (fp, mid), &split, (lo, &split), out)?;
+        self.node(id * 2 + 1, right, (fp, end), &split, (&split, hi), out)
     }
 
-    /// Adds a leaf's docs whose value is in range, or all of them with `all`.
-    fn leaf(&self, fp: u64, all: bool, out: &mut Vec<u32>) -> Result<()> {
-        let r = &mut DataInput::new(self.data);
-        r.pos = usize::try_from(fp).or_else(|_| err("bad leaf pointer"))?;
+    /// Adds the docs of the leaf at `fp..end` whose value is in range, or all of them with `all`.
+    fn leaf(&self, (fp, end): (u64, u64), all: bool, out: &mut Vec<u32>) -> Result<()> {
+        let Some(len) = end.checked_sub(fp) else {
+            return err("bad leaf pointer");
+        };
+        let leaf = self.r.cfs_slice(".kdd", fp, len)?;
+        let r = &mut DataInput::new(&leaf);
         let docs = leaf_docs(r, self.max_leaf, self.max_doc)?;
         if all {
             out.extend(docs);

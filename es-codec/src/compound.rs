@@ -160,6 +160,11 @@ impl CompoundFile {
         self.read_at(f, o + offset, len).map(Some)
     }
 
+    /// The length of a sub-file, or `None` if there is no such sub-file.
+    pub fn file_len(&self, ext: &str) -> Option<u64> {
+        self.entries.get(ext).map(|e| e.2)
+    }
+
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.entries.keys().map(String::as_str)
     }

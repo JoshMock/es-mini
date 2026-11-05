@@ -71,6 +71,39 @@ fn ranges_match_every_point_in_them() {
     }
 }
 
+/// Ranges read only the leaves they visit, each bounded by the next leaf's start or the next
+/// field's data; windows across every leaf boundary of each field match every point in them.
+#[test]
+fn disk_speed_ranges_across_leaf_and_field_boundaries_match_every_point() {
+    let r = common::open("points");
+    for (field, step) in [
+        ("sparse", 70_000_170),
+        ("mod", 37),
+        ("const", 1),
+        ("seq", 97),
+    ] {
+        let points = expected(field);
+        let (min, max) = (
+            points.iter().map(|p| p.1).min(),
+            points.iter().map(|p| p.1).max(),
+        );
+        let (min, max) = (min.unwrap(), max.unwrap());
+        let mut lo = min - step;
+        while lo <= max + step {
+            let hi = lo + step;
+            let mut got = r.point_docs(field, place(lo, hi)).unwrap();
+            got.sort_unstable();
+            let mut want: Vec<u32> = (points.iter())
+                .filter(|(_, v)| (lo..=hi).contains(v))
+                .map(|(d, _)| *d)
+                .collect();
+            want.sort_unstable();
+            assert_eq!(got, want, "{field} {lo}..={hi}");
+            lo = hi;
+        }
+    }
+}
+
 /// A narrow range reads a leaf or two, not every value.
 #[test]
 fn a_narrow_range_skips_other_leaves() {
