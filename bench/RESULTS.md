@@ -5,45 +5,42 @@ includes a few ms of curl process start-up for both servers).
 
 | Setting | Value |
 |---|---|
-| Date | 2026-10-29 |
-| Commit | b680a96 |
+| Date | 2026-11-05 |
+| Commit | da69a74 |
 | Command | `DOCS=100000 RUNS=100 CPUS=2 MEMORY=2g bench/run.sh` |
 | Warmup | 5 runs |
 | Hardware | Intel Core i7-1365U laptop (12 threads); each server in Docker with 2 CPUs, 2 GB; Elasticsearch heap 512 MB |
 
 Times are mean ± σ in ms; speedup = Elasticsearch mean / es-mini mean (above 1 means es-mini is
-faster). The last column is es-mini's mean in the previous run (2026-10-27, commit d0dd9c9).
+faster). The last column is es-mini's mean in the previous run (2026-10-29, commit b680a96).
 
-| Request | Elasticsearch (ms) | es-mini (ms) | Speedup | es-mini 2026-10-27 (ms) |
+| Request | Elasticsearch (ms) | es-mini (ms) | Speedup | es-mini 2026-10-29 (ms) |
 |---|---|---|---|---|
-| info | 10.13 ± 3.51 | 9.80 ± 3.24 | 1.03× | 7.87 |
-| get_doc | 13.35 ± 4.99 | 11.61 ± 3.82 | 1.15× | 7.60 |
-| match_all | 17.08 ± 4.71 | 12.14 ± 2.79 | 1.41× | 35.30 |
-| match | 13.32 ± 3.92 | 14.02 ± 3.81 | 0.95× | 11.76 |
-| term | 13.85 ± 4.69 | 18.99 ± 4.34 | 0.73× | 15.76 |
-| range_sort | 13.53 ± 5.64 | 16.45 ± 4.15 | 0.82× | 19.61 |
-| bool | 15.63 ± 3.93 | 11.09 ± 2.48 | 1.41× | 29.88 |
-| count | 14.57 ± 3.56 | 9.62 ± 2.40 | 1.51× | 66.13 |
-| esql | 28.39 ± 5.81 | 19.76 ± 4.40 | 1.44× | 232.11 |
-| index_doc | 20.21 ± 4.48 | 18.84 ± 3.89 | 1.07× | 18.66 |
-| terms_agg | 12.67 ± 3.79 | 9.74 ± 2.54 | 1.30× | 8.40 |
-| date_histogram | 10.83 ± 2.51 | 10.16 ± 2.24 | 1.07× | 8.07 |
-| range_agg | 12.95 ± 3.77 | 10.07 ± 2.43 | 1.29× | 8.70 |
-| stats_agg | 13.66 ± 3.85 | 10.20 ± 1.87 | 1.34× | 8.61 |
-| match_phrase | 11.14 ± 3.29 | 11.15 ± 2.85 | 1.00× | 9.28 |
-| esql_stats | 22.99 ± 4.83 | 18.17 ± 4.88 | 1.27× | 198.51 |
-| esql_eval | 22.52 ± 13.97 | 19.39 ± 4.21 | 1.16× | 198.19 |
+| info | 9.37 ± 2.33 | 7.82 ± 1.63 | 1.20× | 9.80 |
+| get_doc | 9.70 ± 2.38 | 7.95 ± 1.07 | 1.22× | 11.61 |
+| match_all | 12.36 ± 2.84 | 10.17 ± 1.39 | 1.22× | 12.14 |
+| match | 11.51 ± 2.32 | 11.91 ± 1.55 | 0.97× | 14.02 |
+| term | 12.72 ± 2.74 | 8.70 ± 1.46 | 1.46× | 18.99 |
+| range_sort | 12.28 ± 2.68 | 8.61 ± 2.07 | 1.43× | 16.45 |
+| bool | 10.55 ± 1.73 | 9.69 ± 1.93 | 1.09× | 11.09 |
+| count | 12.09 ± 3.75 | 7.76 ± 1.51 | 1.56× | 9.62 |
+| esql | 20.26 ± 2.99 | 15.90 ± 1.86 | 1.27× | 19.76 |
+| index_doc | 23.95 ± 3.47 | 21.39 ± 2.53 | 1.12× | 18.84 |
+| terms_agg | 11.39 ± 2.70 | 8.34 ± 1.62 | 1.37× | 9.74 |
+| date_histogram | 10.97 ± 2.39 | 7.92 ± 1.64 | 1.39× | 10.16 |
+| range_agg | 10.94 ± 2.93 | 7.67 ± 1.58 | 1.43× | 10.07 |
+| stats_agg | 11.41 ± 2.48 | 8.12 ± 1.42 | 1.41× | 10.20 |
+| match_phrase | 8.93 ± 2.08 | 8.83 ± 1.42 | 1.01× | 11.15 |
+| esql_stats | 23.23 ± 3.63 | 17.36 ± 2.99 | 1.34× | 18.17 |
+| esql_eval | 20.89 ± 4.23 | 18.20 ± 2.88 | 1.15× | 19.39 |
 
 ## Where es-mini is slower
 
-- `match`: es-mini 14.0 ms vs Elasticsearch 13.3 ms (0.95×)
-- `term`: es-mini 19.0 ms vs Elasticsearch 13.9 ms (0.73×)
-- `range_sort`: es-mini 16.5 ms vs Elasticsearch 13.5 ms (0.82×)
-- `match_phrase`: es-mini 11.2 ms vs Elasticsearch 11.1 ms (1.00×)
+- `match`: es-mini 11.9 ms vs Elasticsearch 11.5 ms (0.97×), within noise
 
 ## Sanity lines
 
-Status and hit count matched between the two servers for all 17 requests. No differences.
+HTTP status matched between the two servers for all 17 requests.
 
 ## Notes
 
@@ -54,4 +51,4 @@ Status and hit count matched between the two servers for all 17 requests. No dif
   searches here take its in-memory path.
 - es-mini answers HTTP 413 to a 17 MB `_bulk` body (its limit is 2 MB; Elasticsearch allows
   100 MB), so `bench/inside.sh` loads the data in 2,000-document chunks for both servers.
-- Single run on a shared laptop (load average about 4-5); treat differences under ~15% as noise.
+- Single run on a shared laptop (load average about 2.5-3.5); treat differences under ~15% as noise.
