@@ -257,53 +257,63 @@ impl Segments {
         Some(out)
     }
 
-    /// Per doc holding `term` in `field`: its frequency, and the field's length as the norm
-    /// stands for it (1 for a field without norms). `None` if a segment has no postings or norms
-    /// for the field the codec can read (e.g. one that does not index it). Some docs may no longer be live.
-    /// With `positions`, also each doc's positions of the term, or `None` for them if a segment
-    /// has none to read.
-    // ponytail: reads the field's norms once per term; cache them per query if that shows up
+    /// Per term, per doc holding it in `field`: its frequency, and the field's length as the
+    /// norm stands for it (1 for a field without norms). `None` for a term if a segment has no
+    /// postings or norms for the field the codec can read (e.g. one that does not index it).
+    /// Some docs may no longer be live. With `positions`, also each doc's positions of the term,
+    /// or `None` for them if a segment has none to read. Each segment's norms are read once, for
+    /// all the terms.
     pub(crate) fn term_freqs(
         &self,
         field: &str,
-        term: &str,
+        terms: &[String],
         positions: bool,
-    ) -> Option<crate::postings::TermFreqs> {
-        let mut out = HashMap::new();
-        let mut at = positions.then(HashMap::new);
+    ) -> Vec<Option<crate::postings::TermFreqs>> {
+        let empty = || crate::postings::TermFreqs {
+            positions: positions.then(HashMap::new),
+            ..Default::default()
+        };
+        let mut out: Vec<_> = terms.iter().map(|_| Some(empty())).collect();
         for (s, seg) in self.segments.iter().enumerate() {
             if self.nested(s, field) {
-                return None;
+                return terms.iter().map(|_| None).collect();
             }
-            let t = match positions {
-                true => seg.term_positions(field, term.as_bytes()),
-                false => seg.term(field, term.as_bytes()),
-            };
-            let Some(t) = t.ok()? else {
-                continue;
-            };
-            let norms = seg.norms(field).ok()?;
-            if t.positions.len() != t.docs.len() {
-                at = None;
-            }
-            if let Some(at) = &mut at {
-                for ((doc, _), p) in t.docs.iter().zip(t.positions) {
-                    let p = p.into_iter().map(|p| p.position).collect();
-                    at.insert((s, *doc as usize), p);
+            let norms = std::cell::OnceCell::new();
+            for (term, slot) in terms.iter().zip(&mut out) {
+                let Some(f) = slot else { continue };
+                let mut add = || -> Option<()> {
+                    let t = match positions {
+                        true => seg.term_positions(field, term.as_bytes()),
+                        false => seg.term(field, term.as_bytes()),
+                    };
+                    let Some(t) = t.ok()? else {
+                        return Some(());
+                    };
+                    let norms = norms.get_or_init(|| seg.norms(field).ok()).as_ref()?;
+                    if t.positions.len() != t.docs.len() {
+                        f.positions = None;
+                    }
+                    if let Some(at) = &mut f.positions {
+                        for ((doc, _), p) in t.docs.iter().zip(t.positions) {
+                            let p = p.into_iter().map(|p| p.position).collect();
+                            at.insert((s, *doc as usize), p);
+                        }
+                    }
+                    for (doc, freq) in t.docs {
+                        let norm = norms
+                            .as_ref()
+                            .map_or(Some(1), |n| n.get(doc as usize).copied())?;
+                        f.disk
+                            .insert((s, doc as usize), (freq, norm_len(norm as i8)));
+                    }
+                    Some(())
+                };
+                if add().is_none() {
+                    *slot = None;
                 }
             }
-            for (doc, freq) in t.docs {
-                let norm = norms
-                    .as_ref()
-                    .map_or(Some(1), |n| n.get(doc as usize).copied())?;
-                out.insert((s, doc as usize), (freq, norm_len(norm as i8)));
-            }
         }
-        Some(crate::postings::TermFreqs {
-            disk: out,
-            positions: at,
-            memory: Default::default(),
-        })
+        out
     }
 
     /// The docs with a value of numeric `field` that monotone `place` puts in a range, walking

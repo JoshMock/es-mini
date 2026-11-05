@@ -429,8 +429,8 @@ impl<'a> Searcher<'a> {
         if matches!(kind, Kind::Number | Kind::Bool) {
             return;
         }
-        for w in &wanted {
-            let f = (self.shard).term_postings(field, path, kind.indexed(), w, positions);
+        let all = (self.shard).term_postings(field, path, kind.indexed(), &wanted, positions);
+        for (w, f) in wanted.iter().zip(all) {
             if let Some(f) = f {
                 let freqs = self.freqs.entry(field.clone()).or_default();
                 // keep a phrase's entry, which holds positions, over a term query's

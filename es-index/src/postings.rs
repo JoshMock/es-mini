@@ -478,28 +478,40 @@ impl crate::Shard {
         indexed: Indexed,
         term: &str,
     ) -> Option<TermFreqs> {
-        self.term_postings(field, path, indexed, term, false)
+        let terms = [term.to_owned()];
+        self.term_postings(field, path, indexed, &terms, false)
+            .pop()?
     }
 
-    /// [`term_freqs`](Self::term_freqs), with the term's on-disk positions if `positions`.
+    /// [`term_freqs`](Self::term_freqs) of each of `terms`, with their on-disk positions if
+    /// `positions`.
     pub fn term_postings(
         &self,
         field: &str,
         path: &str,
         indexed: Indexed,
-        term: &str,
+        terms: &[String],
         positions: bool,
-    ) -> Option<TermFreqs> {
-        let mut freqs = match &self.disk {
-            Some(d) => d.term_freqs(field, term, positions)?,
-            None => TermFreqs {
-                positions: positions.then(HashMap::new),
-                ..Default::default()
-            },
+    ) -> Vec<Option<TermFreqs>> {
+        let disk = match &self.disk {
+            Some(d) => d.term_freqs(field, terms, positions),
+            None => (terms.iter())
+                .map(|_| {
+                    Some(TermFreqs {
+                        positions: positions.then(HashMap::new),
+                        ..Default::default()
+                    })
+                })
+                .collect(),
         };
-        let memory = self.postings_for(path, indexed, |f| f.docs.get(term).cloned());
-        freqs.memory = memory.unwrap_or_default();
-        Some(freqs)
+        (terms.iter().zip(disk))
+            .map(|(term, freqs)| {
+                let mut freqs = freqs?;
+                let memory = self.postings_for(path, indexed, |f| f.docs.get(term).cloned());
+                freqs.memory = memory.unwrap_or_default();
+                Some(freqs)
+            })
+            .collect()
     }
 
     /// The in-memory documents with a value of the numeric or date field `mapping` maps (at source `path`)
