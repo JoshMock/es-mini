@@ -1319,20 +1319,23 @@ impl Index {
     }
 
     /// Merges `partial` into an existing document, or indexes `upsert` if it is missing,
-    /// mapping new fields as [`Index::map_dynamic`] does (whose error it returns). `None` means
-    /// the document is missing and there is no upsert.
-    pub fn update(
+    /// mapping new fields as [`Index::map_dynamic`] does (whose error it returns). `check` sees
+    /// the document to write first, and its error stops the write. `None` means the document is
+    /// missing and there is no upsert.
+    pub fn update<E: From<mapping::MapError>>(
         &mut self,
         id: &str,
         routing: Option<&str>,
         partial: &Value,
         upsert: Option<Value>,
         detect_noop: bool,
-    ) -> Result<Option<WriteResult>, mapping::MapError> {
+        check: impl FnOnce(&Self, &Value) -> Result<(), E>,
+    ) -> Result<Option<WriteResult>, E> {
         let Some(doc) = self.shard_of(id, routing).and_then(|s| s.get(id)) else {
             let Some(source) = upsert else {
                 return Ok(None);
             };
+            check(self, &source)?;
             self.map_dynamic(id, &source)?;
             return Ok(Some(self.put_auto(id, routing, source, -1)));
         };
@@ -1347,6 +1350,7 @@ impl Index {
             }));
         }
         drop(doc);
+        check(self, &source)?;
         self.map_dynamic(id, &source)?;
         Ok(Some(self.put_auto(id, routing, source, -1)))
     }
@@ -1658,6 +1662,10 @@ pub type Indices = BTreeMap<String, Index>;
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn no_check(_: &Index, _: &Value) -> Result<(), mapping::MapError> {
+        Ok(())
+    }
 
     #[test]
     fn docs_are_visited_in_indexing_order() {
@@ -2728,7 +2736,14 @@ mod tests {
     fn update_merges_recursively() {
         let mut idx = Index::default();
         idx.put("1", json!({"a": 1, "o": {"x": 1, "y": 1}}));
-        let r = idx.update("1", None, &json!({"b": 2, "o": {"y": 2}}), None, true);
+        let r = idx.update(
+            "1",
+            None,
+            &json!({"b": 2, "o": {"y": 2}}),
+            None,
+            true,
+            no_check,
+        );
         assert_eq!(r, Ok(Some(w(DocResult::Updated, 2, 1))));
         assert_eq!(
             idx.get("1").unwrap().source,
@@ -2741,7 +2756,7 @@ mod tests {
         let mut idx = Index::default();
         idx.put("1", json!({"a": 1}));
         assert_eq!(
-            idx.update("1", None, &json!({"a": 1}), None, true),
+            idx.update("1", None, &json!({"a": 1}), None, true, no_check),
             Ok(Some(w(DocResult::Noop, 1, 0)))
         );
     }
@@ -2751,7 +2766,7 @@ mod tests {
         let mut idx = Index::default();
         idx.put("1", json!({"a": 1}));
         let r = idx
-            .update("1", None, &json!({"a": 1}), None, false)
+            .update("1", None, &json!({"a": 1}), None, false, no_check)
             .unwrap()
             .unwrap();
         assert_eq!((r.result, r.version), (DocResult::Updated, 2));
@@ -2761,10 +2776,17 @@ mod tests {
     fn update_missing_doc() {
         let mut idx = Index::default();
         assert_eq!(
-            idx.update("1", None, &json!({"a": 1}), None, true),
+            idx.update("1", None, &json!({"a": 1}), None, true, no_check),
             Ok(None)
         );
-        let r = idx.update("1", None, &json!({"a": 1}), Some(json!({"u": 1})), true);
+        let r = idx.update(
+            "1",
+            None,
+            &json!({"a": 1}),
+            Some(json!({"u": 1})),
+            true,
+            no_check,
+        );
         assert_eq!(r, Ok(Some(w(DocResult::Created, 1, 0))));
         assert_eq!(idx.get("1").unwrap().source, json!({"u": 1}));
     }

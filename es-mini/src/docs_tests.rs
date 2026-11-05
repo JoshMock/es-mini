@@ -349,6 +349,122 @@ async fn disk_fidelity_out_of_range_integers_are_rejected() {
     }
 }
 
+/// Elasticsearch 9.5.5 checks the document an update writes (merged, or the upsert) like an
+/// indexed one; positions and Jackson's quote refer to the merged source serialized compactly.
+#[tokio::test]
+async fn disk_fidelity_updates_reject_values_index_rejects() {
+    let app = app();
+    let mappings = json!({"mappings": {"properties": {
+        "l": {"type": "long"}, "b": {"type": "byte"}, "dn": {"type": "date_nanos"},
+        "d": {"type": "date"}, "o": {"properties": {"i": {"type": "integer"}}}
+    }}});
+    call(&app, Method::PUT, "/t", Some(mappings)).await;
+    let doc = json!({"a": "x", "l": 1, "o": {"i": 2}});
+    call(&app, Method::PUT, "/t/_doc/1", Some(doc)).await;
+    let failed = |at: &str, field: &str, ty: &str, id: &str, preview: &str| {
+        format!(
+            "[{at}] failed to parse field [{field}] of type [{ty}] in document with id '{id}'. \
+             Preview of field's value: '{preview}'"
+        )
+    };
+    let illegal = |reason: &str| json!({"type": "illegal_argument_exception", "reason": reason});
+    let coercion = |message: &str, source: &str, column: u32| {
+        let at = format!("\n at [Source: (byte[])\"{source}\"; line: 1, column: {column}]");
+        json!({
+            "type": "x_content_parse_exception",
+            "reason": format!("[1:{column}] {message}{at}"),
+            "caused_by": {"type": "input_coercion_exception", "reason": format!("{message}{at}")},
+        })
+    };
+    let long = "out of range of long (-9223372036854775808 - 9223372036854775807)";
+    let bad_date = json!({
+        "type": "illegal_argument_exception",
+        "reason": "failed to parse date field [notadate] with format [strict_date_optional_time||epoch_millis]",
+        "caused_by": {"type": "date_time_parse_exception", "reason": "Failed to parse with all enclosed parsers"},
+    });
+    let cases = [
+        (
+            "1",
+            r#"{"doc":{"l":9223372036854775808}}"#,
+            failed("1:14", "l", "long", "1", "9223372036854775808"),
+            coercion(
+                &format!("Numeric value (9223372036854775808) {long}"),
+                r#"{"a":"x","l":9223372036854775808,"o":{"i":2}}"#,
+                33,
+            ),
+        ),
+        (
+            "1",
+            r#"{"doc":{"l":1e30}}"#,
+            failed("1:14", "l", "long", "1", "1.0E30"),
+            coercion(
+                &format!("Numeric value (1.0E30) {long}"),
+                r#"{"a":"x","l":1.0E30,"o":{"i":2}}"#,
+                20,
+            ),
+        ),
+        (
+            "1",
+            r#"{"doc":{"b":"300"}}"#,
+            failed("1:32", "b", "byte", "1", "300"),
+            illegal("Value [300] is out of range for a byte"),
+        ),
+        (
+            "1",
+            r#"{"doc":{"o":{"i":3000000000}}}"#,
+            failed("1:25", "o.i", "integer", "1", "3000000000"),
+            coercion(
+                "Numeric value (3000000000) out of range of int (-2147483648 - 2147483647)",
+                r#"{"a":"x","l":1,"o":{"i":3000000000}}"#,
+                35,
+            ),
+        ),
+        (
+            "1",
+            r#"{"doc":{"dn":"1969-01-01"}}"#,
+            failed("1:33", "dn", "date_nanos", "1", "1969-01-01"),
+            illegal(
+                "date[1969-01-01T00:00:00Z] is before the epoch in 1970 and cannot be stored in \
+                 nanosecond resolution",
+            ),
+        ),
+        (
+            "1",
+            r#"{"doc":{"d":"notadate"}}"#,
+            failed("1:32", "d", "date", "1", "notadate"),
+            bad_date,
+        ),
+        (
+            "2",
+            r#"{"doc":{"x":1},"upsert":{"b":300}}"#,
+            failed("1:6", "b", "byte", "2", "300"),
+            illegal("Value [300] is out of range for a byte"),
+        ),
+        (
+            "3",
+            r#"{"doc":{"b":300},"doc_as_upsert":true}"#,
+            failed("1:6", "b", "byte", "3", "300"),
+            illegal("Value [300] is out of range for a byte"),
+        ),
+    ];
+    for (id, body, reason, cause) in cases {
+        let r = raw(&app, Method::POST, &format!("/t/_update/{id}"), body).await;
+        let error = json!({"type": "document_parsing_exception", "reason": reason});
+        let mut expected = error.clone();
+        expected["caused_by"] = cause;
+        assert_eq!(
+            r,
+            json!({"error": {"root_cause": [error], "type": expected["type"],
+                "reason": expected["reason"], "caused_by": expected["caused_by"]}, "status": 400}),
+            "{body}"
+        );
+    }
+    let (_, r) = call(&app, Method::GET, "/t/_doc/1", None).await;
+    assert_eq!(r["_source"], json!({"a": "x", "l": 1, "o": {"i": 2}}));
+    let (s, _) = call(&app, Method::GET, "/t/_doc/2", None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
 #[tokio::test]
 async fn rejected_document_adds_no_dynamic_mappings() {
     let app = app();

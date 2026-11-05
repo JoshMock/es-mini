@@ -212,55 +212,7 @@ pub fn put_or_create(
                 "failed to parse: The total number of objects across all arrays in a document has exceeded the allowed limit of [{limit}]."
             )));
         }
-        for (name, m) in &i.mappings.properties {
-            if let Some(error) = out_of_range(raw, id, name, m, &source) {
-                return Err(error);
-            }
-            let (format, locale, default) = match m {
-                FieldMapping::Date { format, locale, .. } => {
-                    (format, locale, "strict_date_optional_time||epoch_millis")
-                }
-                FieldMapping::DateNanos { format, locale } => (
-                    format,
-                    locale,
-                    "strict_date_optional_time_nanos||epoch_millis",
-                ),
-                _ => continue,
-            };
-            let nanos = |v| match m {
-                FieldMapping::DateNanos { format, locale } => {
-                    es_index::disk::date_nanos_rejection(format.as_deref(), locale.as_deref(), v)
-                }
-                _ => None,
-            };
-            let (format, locale) = (format.as_deref().unwrap_or(default), locale.as_deref());
-            for v in es_index::postings::values(&source, name) {
-                let bad = es_query::bad_date(Some(format), locale, v);
-                let out_of_range = if bad { None } else { nanos(v) };
-                if !bad && out_of_range.is_none() {
-                    continue;
-                }
-                let text = es_index::postings::text(v);
-                let error = failed_to_parse(raw, id, (name, m), v, &text);
-                if let Some(reason) = out_of_range {
-                    let cause = json!({"type": "illegal_argument_exception", "reason": reason});
-                    return Err(AppError::Caused(Box::new(error), cause));
-                }
-                let mut cause = json!({
-                    "type": "illegal_argument_exception",
-                    "reason": format!("failed to parse date field [{text}] with format [{format}]"),
-                });
-                // ponytail: a value that parses but does not resolve gets this cause, where ES's
-                // is a date_time_exception naming the field out of range
-                if let Some(reason) = es_index::date_parse_error(format, locale, &text) {
-                    cause["caused_by"] = json!({
-                        "type": "date_time_parse_exception",
-                        "reason": reason,
-                    });
-                }
-                return Err(AppError::Caused(Box::new(error), cause));
-            }
-        }
+        check_fields(i, raw, id, &source)?;
         // only once the document is accepted; dynamic dates never fail the check above
         i.map_dynamic_in(id, &source, Some(raw))?;
         Ok(match create {
@@ -274,6 +226,61 @@ pub fn put_or_create(
         current_version,
     })?;
     Ok(reply(&index, id, w, total))
+}
+
+/// Elasticsearch's document_parsing_exception for the first mapped field value in `source` it
+/// rejects: out of the field's range, or a malformed date. `raw` is `source`'s JSON text.
+fn check_fields(i: &Index, raw: &[u8], id: &str, source: &Value) -> Result<(), AppError> {
+    for (name, m) in &i.mappings.properties {
+        if let Some(error) = out_of_range(raw, id, name, m, source) {
+            return Err(error);
+        }
+        let (format, locale, default) = match m {
+            FieldMapping::Date { format, locale, .. } => {
+                (format, locale, "strict_date_optional_time||epoch_millis")
+            }
+            FieldMapping::DateNanos { format, locale } => (
+                format,
+                locale,
+                "strict_date_optional_time_nanos||epoch_millis",
+            ),
+            _ => continue,
+        };
+        let nanos = |v| match m {
+            FieldMapping::DateNanos { format, locale } => {
+                es_index::disk::date_nanos_rejection(format.as_deref(), locale.as_deref(), v)
+            }
+            _ => None,
+        };
+        let (format, locale) = (format.as_deref().unwrap_or(default), locale.as_deref());
+        for v in es_index::postings::values(source, name) {
+            let bad = es_query::bad_date(Some(format), locale, v);
+            let out_of_range = if bad { None } else { nanos(v) };
+            if !bad && out_of_range.is_none() {
+                continue;
+            }
+            let text = es_index::postings::text(v);
+            let error = failed_to_parse(raw, id, (name, m), v, &text);
+            if let Some(reason) = out_of_range {
+                let cause = json!({"type": "illegal_argument_exception", "reason": reason});
+                return Err(AppError::Caused(Box::new(error), cause));
+            }
+            let mut cause = json!({
+                "type": "illegal_argument_exception",
+                "reason": format!("failed to parse date field [{text}] with format [{format}]"),
+            });
+            // ponytail: a value that parses but does not resolve gets this cause, where ES's
+            // is a date_time_exception naming the field out of range
+            if let Some(reason) = es_index::date_parse_error(format, locale, &text) {
+                cause["caused_by"] = json!({
+                    "type": "date_time_parse_exception",
+                    "reason": reason,
+                });
+            }
+            return Err(AppError::Caused(Box::new(error), cause));
+        }
+    }
+    Ok(())
 }
 
 /// Elasticsearch's document_parsing_exception for the value `v` (shown as `preview`) of a field.
@@ -768,14 +775,31 @@ pub fn update_doc(
     };
     let detect_noop = body["detect_noop"].as_bool() != Some(false);
     let (w, total, index) = write_doc(state, index, (id, routing), |i, routing| {
-        i.update(id, routing, &partial, upsert, detect_noop)
-            .map_err(AppError::from)
+        i.update(id, routing, &partial, upsert, detect_noop, |i, source| {
+            check_fields(i, java_json(source).as_bytes(), id, source)
+        })
     })?;
     let w = w?.ok_or_else(|| AppError::DocumentMissing {
         index: index.clone(),
         id: id.to_owned(),
     })?;
     Ok(reply(&index, id, w, total))
+}
+
+/// `v` as Elasticsearch serializes the source an update writes: compact, with Java's doubles.
+fn java_json(v: &Value) -> String {
+    let join = |items: Vec<String>| items.join(",");
+    match v {
+        Value::Number(n) if n.is_f64() => es_query::java_double(n.as_f64().unwrap_or(f64::NAN)),
+        Value::Array(a) => format!("[{}]", join(a.iter().map(java_json).collect())),
+        Value::Object(o) => {
+            let pairs = o
+                .iter()
+                .map(|(k, v)| format!("{}:{}", Value::from(k.as_str()), java_json(v)));
+            format!("{{{}}}", join(pairs.collect()))
+        }
+        v => v.to_string(),
+    }
 }
 
 fn edit_distance(a: &str, b: &str) -> usize {

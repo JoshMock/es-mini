@@ -8,6 +8,10 @@ use std::path::{Path, PathBuf};
 mod common;
 use common::Scratch;
 
+fn no_check(_: &Index, _: &serde_json::Value) -> Result<(), es_index::mapping::MapError> {
+    Ok(())
+}
+
 fn scratch(name: &str) -> Scratch {
     Scratch::new(&format!("incr-{name}"), Some("data"))
 }
@@ -196,7 +200,7 @@ fn writes_replace_and_delete_documents_served_from_disk() {
     let ix = indices.get_mut("idx").unwrap();
     assert_eq!(ix.create("0", json!({})), Err(1));
     let r = ix
-        .update("1", None, &json!({"w": 1}), None, true)
+        .update("1", None, &json!({"w": 1}), None, true, no_check)
         .unwrap()
         .unwrap();
     assert_eq!((r.version, r.seq_no), (2, 5));
