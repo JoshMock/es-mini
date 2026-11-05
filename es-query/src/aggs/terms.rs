@@ -216,18 +216,39 @@ impl Terms {
         self.shard_size.unwrap_or(default).max(self.size)
     }
 
-    fn cmp(&self, a: &(Key, Bucket), b: &(Key, Bucket)) -> Ordering {
+    /// Sorts buckets by `order`, reading each bucket's sub-aggregation values once.
+    fn sort(&self, v: Vec<(Key, Bucket)>) -> Vec<(Key, Bucket)> {
+        let values = |b: &Bucket| -> Vec<f64> {
+            (self.order.iter())
+                .filter_map(|(by, _)| match by {
+                    By::Agg { index, agg, rest } => Some(
+                        super::sort_value(agg, rest, Some(&b.subs[*index])).unwrap_or(f64::NAN),
+                    ),
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut v: Vec<_> = v.into_iter().map(|b| (values(&b.1), b)).collect();
+        v.sort_by(|a, b| self.cmp(a, b));
+        v.into_iter().map(|(_, b)| b).collect()
+    }
+
+    /// Compares buckets with their `order` sub-aggregation values (see `sort`).
+    fn cmp(
+        &self,
+        (av, a): &(Vec<f64>, (Key, Bucket)),
+        (bv, b): &(Vec<f64>, (Key, Bucket)),
+    ) -> Ordering {
+        let mut aggs = av.iter().zip(bv);
         let by = |(by, asc): &(By, bool)| {
             let o = match by {
                 By::Count => a.1.count.cmp(&b.1.count),
                 By::Key => a.0.cmp(&b.0),
                 // ponytail: NaN sorts as Java's Double.compare (last ascending, first
                 // descending); ES's shards instead always put NaN last
-                By::Agg { index, agg, rest } => {
-                    let v = |b: &Bucket| {
-                        super::sort_value(agg, rest, Some(&b.subs[*index])).unwrap_or(f64::NAN)
-                    };
-                    v(&a.1).total_cmp(&v(&b.1))
+                By::Agg { .. } => {
+                    let (x, y) = aggs.next().expect("a value per agg order");
+                    x.total_cmp(y)
                 }
             };
             if *asc { o } else { o.reverse() }
@@ -293,7 +314,7 @@ impl Terms {
         let mut v: Vec<(Key, Bucket)> = std::mem::take(&mut b.counts).into_iter().collect();
         let total: u64 = v.iter().map(|b| b.1.count).sum();
         v.retain(|b| b.1.count >= min);
-        v.sort_by(|a, b| self.cmp(a, b));
+        let mut v = self.sort(v);
         v.truncate(shard_size);
         b.other += total - v.iter().map(|b| b.1.count).sum::<u64>();
         // AbstractInternalTerms.getDocCountError
@@ -320,10 +341,11 @@ impl Terms {
         date: Option<&str>,
         mut sub: impl FnMut(&mut [Stats], &mut Map<String, Value>) -> Result<(), QueryError>,
     ) -> Result<&'static str, QueryError> {
-        let mut v: Vec<(Key, Bucket)> = (std::mem::take(&mut b.counts).into_iter())
-            .filter(|b| b.1.count >= self.min_doc_count)
-            .collect();
-        v.sort_by(|a, b| self.cmp(a, b));
+        let mut v = self.sort(
+            (std::mem::take(&mut b.counts).into_iter())
+                .filter(|b| b.1.count >= self.min_doc_count)
+                .collect(),
+        );
         let rest = v.split_off(self.size.min(v.len()));
         // counted before their sub-aggregations, as TopBucketBuilder adds them
         super::consume_buckets(buckets, v.len())?;
@@ -1219,6 +1241,62 @@ mod tests {
         );
         let r = json!({"r": {"percentile_ranks": {"field": "n", "values": [1.5]}}});
         assert_eq!(order(json!({"r[1.5]": "asc"}), r).unwrap(), ["b", "c", "a"]);
+    }
+
+    #[test]
+    fn search_speed_order_by_percentiles_of_many_values() {
+        // merging digests (over 2,000 values), exact ones, ties and an empty one, over two shards
+        let shard = |docs: &[(&str, Vec<i64>)]| {
+            let mut ix = Index::default();
+            let props = &mut ix.mappings.properties;
+            let keyword = FieldMapping::Keyword {
+                ignore_above: None,
+                split_queries_on_whitespace: false,
+            };
+            props.insert("k".into(), keyword);
+            props.insert("n".into(), FieldMapping::Long);
+            for (i, (k, n)) in docs.iter().enumerate() {
+                ix.put(&format!("{k}{i}"), json!({"k": k, "n": n}));
+            }
+            ix
+        };
+        let s1 = shard(&[
+            ("a", (0..3000).map(|i| i * 7 % 1000).collect()),
+            ("b", (0..2500).map(|i| i % 800).collect()),
+            ("c", (500..510).collect()),
+            ("e", vec![]),
+        ]);
+        let s2 = shard(&[
+            ("a", (0..1000).map(|i| i * 3 % 700).collect()),
+            ("d", (500..510).collect()),
+            ("f", (0..2100).map(|i| i * 13 % 1000 + 1).collect()),
+            ("b", vec![999]),
+        ]);
+        let keys = |order: Value| {
+            let body = json!({"size": 0, "aggs": {"t": {"terms": {"field": "k", "order": order},
+                "aggs": {"p": {"percentiles": {"field": "n", "percents": [50, 90]}},
+                    "r": {"percentile_ranks": {"field": "n", "values": [400]}}}}}});
+            let b = run(&[&s1, &s2], body).unwrap()["t"]["buckets"].take();
+            (b.as_array().unwrap().iter())
+                .map(|b| b["key"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            keys(json!({"p.50": "desc"})),
+            ["e", "c", "d", "f", "a", "b"]
+        );
+        assert_eq!(
+            keys(json!({"p[90]": "asc"})),
+            ["c", "d", "b", "a", "f", "e"]
+        );
+        assert_eq!(
+            keys(json!([{"p.50": "asc"}, {"r.400": "desc"}])),
+            ["b", "a", "f", "c", "d", "e"]
+        );
+        assert_eq!(
+            keys(json!([{"r[400]": "asc"}, {"_key": "desc"}])),
+            ["d", "c", "f", "a", "b", "e"]
+        );
     }
 
     #[test]

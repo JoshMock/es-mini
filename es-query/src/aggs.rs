@@ -1303,8 +1303,6 @@ fn sort_value(agg: &Agg, rest: &str, st: Option<&Stats>) -> Result<f64, String> 
                     if !percents.contains(&x) {
                         return Err(unknown(k));
                     }
-                    // ponytail: clones the digest per comparison; cache values per bucket if
-                    // sorting many buckets shows up in profiles
                     let Some(mut d) = st.digest.clone() else {
                         return Ok(f64::NAN);
                     };
