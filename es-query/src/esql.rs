@@ -2093,8 +2093,7 @@ fn parse_double(s: &str) -> Option<f64> {
 }
 
 /// A Java hexadecimal float after its `0x`: hex digits with an optional point, then a binary
-/// exponent (`1.8p1` is 3), rounded to the nearest double.
-// ponytail: a subnormal result may round twice (scaling after rounding to 53 bits)
+/// exponent (`1.8p1` is 3), rounded once to the nearest double, subnormal or not.
 fn parse_hex_double(s: &str) -> Option<f64> {
     let (digits, exp) = s.split_once(['p', 'P'])?;
     let (int, frac) = digits.split_once('.').unwrap_or((digits, ""));
@@ -2114,8 +2113,22 @@ fn parse_hex_double(s: &str) -> Option<f64> {
             exp += 4;
         }
     }
+    if mantissa == 0 {
+        return Some(0.0);
+    }
+    // Keep the bits a double holds at this magnitude (53, fewer when subnormal, where the
+    // lowest is 2^-1074), rounding the rest half to even; scaling the kept bits is then exact.
+    let bits = 64 - mantissa.leading_zeros() as i32;
+    let keep = 53.min(exp + bits + 1074);
+    let drop = (bits - keep).max(0);
+    let (m, d) = (u128::from(mantissa), drop.min(127) as u32);
+    let (mut kept, rest, half) = (m >> d, m & ((1 << d) - 1), (1 << d) >> 1);
+    if d > 0 && (rest > half || rest == half && kept & 1 == 1) {
+        kept += 1;
+    }
+    let exp = exp + drop;
     let half = exp / 2;
-    Some(mantissa as f64 * 2f64.powi(half) * 2f64.powi(exp - half))
+    Some(kept as f64 * 2f64.powi(half) * 2f64.powi(exp - half))
 }
 
 /// Java's `Math.round`: halves round up.

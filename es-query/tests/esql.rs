@@ -2753,3 +2753,31 @@ fn esql_semantics_2_to_integer_and_to_long_parse_in_a_base() {
         }
     }
 }
+
+/// A hexadecimal float rounds once to the nearest double, subnormal or not, like Java's
+/// `Double.parseDouble`.
+#[test]
+fn esql_semantics_2_subnormal_hexadecimal_floats_round_once() {
+    let r = q(
+        "ROW a = TO_DOUBLE(\"0x1.000000000000001p-1075\"), b = TO_DOUBLE(\"0x1p-1074\"), \
+               c = TO_DOUBLE(\"0x1p-1076\"), d = TO_DOUBLE(\"0x1.8p-1074\"), \
+               e = TO_DOUBLE(\"0x0.0000000000001p-1022\"), f = TO_DOUBLE(\"0x1.fffffffffffffp1023\"), \
+               g = TO_DOUBLE(\"0x1p1024\"), h = TO_DOUBLE(\"0x1.0000000000080000001p-1030\")",
+    );
+    let sub = |bits| json!(f64::from_bits(bits));
+    assert_eq!(
+        r.values,
+        [[
+            sub(1),
+            sub(1),
+            json!(0.0),
+            sub(2),
+            sub(1),
+            json!(f64::MAX),
+            Value::Null,
+            // 2^-1030 has 45 bits of precision, so the bit past them, set with more after it,
+            // rounds up once.
+            sub((1 << 44) + 1),
+        ]]
+    );
+}
