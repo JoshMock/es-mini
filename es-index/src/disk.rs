@@ -390,7 +390,7 @@ fn longs(seg: &SegmentReader, field: &str) -> Vec<Option<i64>> {
 }
 
 /// Adds the term statistics of `seg`, deleted documents included, to `stats`.
-fn add_stats(stats: &mut TermStats, seg: &SegmentReader) {
+fn add_stats(stats: &mut TermStats, seg: &SegmentReader) -> es_codec::Result<()> {
     for f in seg
         .fields
         .iter()
@@ -399,9 +399,14 @@ fn add_stats(stats: &mut TermStats, seg: &SegmentReader) {
         // ponytail: only Lucene104 postings are read, which Elasticsearch writes for every field
         // but `_id` (ES812Postings, never scored); indices created with
         // `index.use_legacy_postings_format` hold every field in ES812Postings and get no stats
-        let Ok(terms) = seg.terms(&f.name) else {
+        if f.attributes
+            .get("PerFieldPostingsFormat.format")
+            .map(String::as_str)
+            == Some("ES812Postings")
+        {
             continue;
-        };
+        }
+        let terms = seg.terms(&f.name)?;
         let mut docs = HashSet::new();
         let entry = stats.fields.entry(f.name.clone()).or_default();
         for t in terms {
@@ -417,6 +422,7 @@ fn add_stats(stats: &mut TermStats, seg: &SegmentReader) {
         }
         entry.0 += docs.len() as f64;
     }
+    Ok(())
 }
 
 /// Per segment, by its id and its files' checksums (ids alone repeat when a shard is
@@ -446,11 +452,14 @@ fn commit_stats(dir: &Path, cache: &mut SegmentStats) -> es_codec::Result<Option
     for seg in SegmentInfos::read_latest(dir)?.segments {
         let seg = SegmentReader::open(dir, seg)?;
         let key = stats_key(&seg)?;
-        let stats = cache.remove(&key).unwrap_or_else(|| {
-            let mut stats = TermStats::default();
-            add_stats(&mut stats, &seg);
-            stats
-        });
+        let stats = match cache.remove(&key) {
+            Some(stats) => stats,
+            None => {
+                let mut stats = TermStats::default();
+                add_stats(&mut stats, &seg)?;
+                stats
+            }
+        };
         kept.insert(key, stats);
     }
     *cache = kept;
@@ -497,7 +506,7 @@ fn load_shard(index: &mut Shard, dir: &Path) -> es_codec::Result<()> {
             .verify()
             .map_err(|e| es_codec::Error(format!("{}: {}", seg.seg.name, e.0)))?;
         let mut own = TermStats::default();
-        add_stats(&mut own, &seg);
+        add_stats(&mut own, &seg)?;
         add_segment_stats(&mut stats, &own);
         index.segment_stats.insert(stats_key(&seg)?, own);
         let (versions, seq_nos) = (longs(&seg, "_version"), longs(&seg, "_seq_no"));
