@@ -136,9 +136,15 @@ const COUNT_PARAMS: [&str; 15] = [
     "terminate_after",
 ];
 
-/// The `_shards` header of a search over `n` shards that all succeeded.
-pub(crate) fn shards(n: usize) -> Value {
-    json!({"total": n, "successful": n, "skipped": 0, "failed": 0})
+/// The `_shards` header of a search over `n` shards, of which `failed` failed.
+pub(crate) fn shards(n: usize, failed: &[es_query::ShardFailure]) -> Value {
+    let mut s = json!({"total": n, "successful": n - failed.len(), "skipped": 0,
+        "failed": failed.len()});
+    if !failed.is_empty() {
+        let failures = (failed.iter()).map(|(i, n, e)| (*i, *n, e.clone()));
+        s["failures"] = crate::error::shard_failures(failures).2.into();
+    }
+    s
 }
 
 /// The `profile` section: one entry per searched shard, ordered by id like ES. ponytail: only
@@ -388,16 +394,9 @@ pub async fn search(
         let mut resp = json!({
             "took": start.elapsed().as_millis() as u64,
             "timed_out": false,
-            "_shards": shards(targets.len()),
+            "_shards": shards(targets.len(), &r.failures),
             "hits": hits
         });
-        if !r.failures.is_empty() {
-            let s = &mut resp["_shards"];
-            s["successful"] = (targets.len() - r.failures.len()).into();
-            s["failed"] = r.failures.len().into();
-            let failures = (r.failures.iter()).map(|(i, n, e)| (*i, *n, e.clone()));
-            s["failures"] = crate::error::shard_failures(failures).2.into();
-        }
         if let Some(a) = r.aggregations {
             resp["aggregations"] = a;
         }
@@ -669,14 +668,9 @@ pub async fn count(
     let split = split(&indices, &resolved);
     let targets = targets(&indices, &resolved, &split);
     let (n, failures) = es_query::count_many(&targets, &query)?;
-    let mut resp = json!({"count": n, "_shards": shards(targets.len())});
-    if !failures.is_empty() {
-        let s = &mut resp["_shards"];
-        s["successful"] = (targets.len() - failures.len()).into();
-        s["failed"] = failures.len().into();
-        s["failures"] = crate::error::shard_failures(failures).2.into();
-    }
-    Ok(Json(resp))
+    Ok(Json(
+        json!({"count": n, "_shards": shards(targets.len(), &failures)}),
+    ))
 }
 
 pub async fn esql(

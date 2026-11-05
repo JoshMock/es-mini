@@ -215,7 +215,7 @@ pub async fn open_pit(
         },
     );
     Ok(Json(
-        json!({"id": format!("esmini-pit-{id}"), "_shards": crate::search::shards(n)}),
+        json!({"id": format!("esmini-pit-{id}"), "_shards": crate::search::shards(n, &[])}),
     ))
 }
 
