@@ -1359,16 +1359,6 @@ pub async fn cat_shards(
     Ok(cat_view(&COLUMNS, rows, right, default, &params))
 }
 
-/// Whether `name` matches `pat`, where `*` matches any run of characters.
-fn glob(pat: &str, name: &str) -> bool {
-    match pat.split_once('*') {
-        None => pat == name,
-        Some((head, rest)) => name
-            .strip_prefix(head)
-            .is_some_and(|n| (0..=n.len()).any(|i| n.is_char_boundary(i) && glob(rest, &n[i..]))),
-    }
-}
-
 /// [`cat_table`] after the `help`, `h` (columns by name or alias, unknown ones ignored) and `s`
 /// (`col[:asc|:desc]`, numeric when both cells are numbers) parameters, for `columns` given as
 /// (name, comma-separated aliases, description).
@@ -1417,7 +1407,7 @@ fn cat_view(
         Some(h) => (h.split(','))
             .flat_map(|h| match h.contains('*') {
                 true => (0..columns.len())
-                    .filter(|&c| glob(h.trim(), columns[c].0))
+                    .filter(|&c| aliases::glob(h.trim(), columns[c].0))
                     .collect(),
                 false => find(h).into_iter().collect::<Vec<_>>(),
             })
