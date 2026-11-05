@@ -173,6 +173,24 @@ fn disk_fidelity_date_nanos_epoch_longs_are_written_unchecked() {
 }
 
 #[test]
+fn disk_fidelity_ranges_differing_only_in_inclusion_are_both_written() {
+    use es_codec::doc_values::DocValues;
+    let mut idx = Index::default();
+    idx.mappings
+        .properties
+        .insert("l".into(), FieldMapping::LongRange);
+    // RangeFieldMapper's HashSet tells ranges apart by their include flags too, so `gt 0` and
+    // `gte 1` are both written, though they hold the same longs; exact repeats are not.
+    let r = |k: &str, n: i64| json!({k: n, "lte": 5});
+    idx.put("1", json!({"l": [r("gte", 1), r("gt", 0), r("gte", 1)]}));
+    let (_root, r) = saved_segment("range-flags", idx);
+    let DocValues::Bytes(l) = r.doc_values("l").unwrap() else {
+        panic!("range doc values are binary");
+    };
+    assert_eq!(l[0].as_deref(), Some(&[2, 0x81, 0x85, 0x81, 0x85][..]));
+}
+
+#[test]
 fn disk_writer_completeness_lists_ignore_above_fields_in_ignored() {
     use es_codec::doc_values::DocValues;
     let mut idx = Index::default();

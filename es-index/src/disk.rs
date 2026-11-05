@@ -954,8 +954,19 @@ fn user_fields(
             | M::IpRange
             | M::DateRange { .. }) => {
                 // Like ES: a two-dimensional range point per range, and binary doc values of
-                // the doc's distinct ranges.
-                let Some(mut ranges) = typed(&values, &|v| m.range_keys(v)) else {
+                // the doc's distinct ranges. Like RangeFieldMapper.Range.equals, ranges with the
+                // same keys but other include flags (`gt 0`, `gte 1`) are distinct.
+                let flags = |v: &Value| {
+                    let include = |exclusive: &str, inclusive: &str| {
+                        (v.as_object().into_iter().flat_map(|o| o.keys()))
+                            .rfind(|k| *k == exclusive || *k == inclusive)
+                            .is_none_or(|k| k == inclusive)
+                    };
+                    (include("gt", "gte"), include("lt", "lte"))
+                };
+                let Some(mut ranges) =
+                    typed(&values, &|v| Some(m.range_keys(v)?.map(|r| (r, flags(v)))))
+                else {
                     continue;
                 };
                 let width = match m {
@@ -967,7 +978,7 @@ fn user_fields(
                     number,
                     (ranges.iter().enumerate())
                         .flat_map(|(doc, rs)| {
-                            rs.iter().map(move |r| {
+                            rs.iter().map(move |(r, _)| {
                                 (
                                     doc as u32,
                                     [key_bytes(r.0, width), key_bytes(r.1, width)].concat(),
@@ -988,8 +999,9 @@ fn user_fields(
                     number,
                     (ranges.iter())
                         .map(|rs| {
+                            let keys: Vec<_> = rs.iter().map(|r| r.0).collect();
                             (!rs.is_empty())
-                                .then(|| encode_ranges(rs, if long { 0 } else { width }))
+                                .then(|| encode_ranges(&keys, if long { 0 } else { width }))
                         })
                         .collect(),
                 ));
