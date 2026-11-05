@@ -800,7 +800,7 @@ impl Simple<'_> {
 }
 
 /// A boolean of `clauses`, all required (`must`) or all optional.
-fn boolean_of(must: bool, clauses: Vec<Query>) -> Query {
+pub(crate) fn boolean_of(must: bool, clauses: Vec<Query>) -> Query {
     let (must, should) = match must {
         true => (clauses, vec![]),
         false => (vec![], clauses),

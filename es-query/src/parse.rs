@@ -12,6 +12,14 @@ pub enum Query {
         query: String,
         and: bool,
     },
+    /// MatchQueryParser's boolean prefix query (multi_match's bool_prefix type): a term query
+    /// for each analyzed term, the last a prefix query if it ends the text; `resolve_dates`
+    /// builds it.
+    MatchBoolPrefix {
+        field: String,
+        query: String,
+        and: bool,
+    },
     /// The analyzed terms in order, at most `slop` position moves apart in all.
     MatchPhrase {
         field: String,
@@ -165,6 +173,7 @@ impl Query {
     pub(crate) fn on_field(mut self, to: &str) -> Query {
         match &mut self {
             Query::Match { field, .. }
+            | Query::MatchBoolPrefix { field, .. }
             | Query::MatchPhrase { field, .. }
             | Query::MatchPhrasePrefix { field, .. }
             | Query::Term { field, .. }
@@ -660,7 +669,7 @@ fn parse_kind(kind: &str, body: &Value) -> Result<Query, QueryError> {
             )?;
             o.get("query")
                 .ok_or("No text specified for multi_match query")?;
-            // ponytail: no cross_fields or bool_prefix types
+            // ponytail: no cross_fields type
             let (field_kind, params, tie) = match o.get("type").and_then(Value::as_str) {
                 None | Some("best_fields") => ("match", &["query", "operator"][..], 0.0),
                 Some("most_fields") => ("match", &["query", "operator"][..], 1.0),
@@ -670,7 +679,11 @@ fn parse_kind(kind: &str, body: &Value) -> Result<Query, QueryError> {
                     &["query", "slop", "max_expansions"][..],
                     0.0,
                 ),
-                Some(t @ ("cross_fields" | "bool_prefix")) => {
+                Some("bool_prefix") if o.get("slop").is_some_and(|s| s.as_u64() != Some(0)) => {
+                    return Err("[slop] not allowed for type [bool_prefix]".into());
+                }
+                Some("bool_prefix") => ("match_bool_prefix", &["query", "operator"][..], 1.0),
+                Some(t @ "cross_fields") => {
                     return Err(format!("[multi_match] type [{t}] is not supported").into());
                 }
                 Some(t) => {
@@ -700,9 +713,18 @@ fn parse_kind(kind: &str, body: &Value) -> Result<Query, QueryError> {
                     .as_f64()
                     .ok_or("[multi_match] tie_breaker must be a number")?,
             };
+            let query = match field_kind {
+                "match_bool_prefix" => match parse_kind("match", &serde_json::json!({ "*": p }))? {
+                    Query::Match { field, query, and } => {
+                        Query::MatchBoolPrefix { field, query, and }
+                    }
+                    q => q,
+                },
+                k => parse_kind(k, &serde_json::json!({ "*": p }))?,
+            };
             Ok(Query::Fields {
                 fields,
-                query: Box::new(parse_kind(field_kind, &serde_json::json!({ "*": p }))?),
+                query: Box::new(query),
                 tie_breaker,
                 lenient: false,
             })

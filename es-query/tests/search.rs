@@ -2066,6 +2066,76 @@ fn query_gaps_2_simple_query_string_operators() {
     assert!(hits.iter().all(|h| h.1 == Some(1.0)), "{hits:?}");
 }
 
+/// multi_match's bool_prefix type: per field, a term query for each analyzed term but the last,
+/// which is a constant-scoring prefix query when it ends the text, and the fields' scores
+/// summed (tie_breaker 1), as ES 9.5.5's MatchQueryParser.analyzeMultiBoolean builds it.
+#[test]
+fn query_gaps_2_multi_match_bool_prefix() {
+    let mut idx = Index::default();
+    (idx.mappings.properties).insert(
+        "tag".into(),
+        FieldMapping::Keyword {
+            ignore_above: None,
+            split_queries_on_whitespace: false,
+        },
+    );
+    idx.put("1", json!({"title": "quick brown fox", "body": "lazy dog"}));
+    idx.put(
+        "2",
+        json!({"title": "lazy fox", "body": "quick quick brown dog"}),
+    );
+    idx.put(
+        "3",
+        json!({"title": "brown dog", "body": "brown fox jumps"}),
+    );
+    idx.put("4", json!({"title": "slow turtle", "tag": "quick"}));
+    let run = |mut q: Value| {
+        if q.get("fields").is_none() {
+            q["fields"] = json!(["title", "body"]);
+        }
+        q["type"] = json!("bool_prefix");
+        let req = SearchRequest::parse(&json!({"query": {"multi_match": q}}))?;
+        es_query::search_many(&[("", 0, &idx, None)], &req).map(|r| {
+            (r.hits.iter())
+                .map(|h| (h.id.to_owned(), h.score.unwrap()))
+                .collect::<Vec<_>>()
+        })
+    };
+    let close = |q: Value, want: &[(&str, f32)]| {
+        let got = run(q).unwrap();
+        assert_eq!(got.len(), want.len(), "{got:?}");
+        for ((id, s), (wid, ws)) in got.iter().zip(want) {
+            assert_eq!(id, wid, "{got:?}");
+            assert!((s - ws).abs() < 1e-5, "{got:?} vs {want:?}");
+        }
+    };
+    // "quick" scores as multi_match_combines_per_field_queries_by_type's; each prefix match 1
+    close(
+        json!({"query": "quick f"}),
+        &[("2", 2.2330425), ("1", 2.0594962), ("3", 1.0)],
+    );
+    // text after the last term makes it a term query
+    close(
+        json!({"query": "quick f "}),
+        &[("2", 1.2330425), ("1", 1.0594962)],
+    );
+    close(
+        json!({"query": "QUICK f", "operator": "and"}),
+        &[("1", 2.0594962)],
+    );
+    close(
+        json!({"query": "FO"}),
+        &[("1", 1.0), ("2", 1.0), ("3", 1.0)],
+    );
+    close(json!({"query": "qui", "fields": ["tag"]}), &[("4", 1.0)]);
+    assert_eq!(
+        run(json!({"query": "x", "slop": 1}))
+            .unwrap_err()
+            .to_string(),
+        "[slop] not allowed for type [bool_prefix]"
+    );
+}
+
 /// Without `fields`, simple_query_string searches index.query.default_field, `*`.
 #[test]
 fn query_gaps_2_simple_query_string_default_fields() {

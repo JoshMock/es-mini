@@ -109,6 +109,37 @@ pub(crate) fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, 
             let value = query.into();
             resolve_dates(index, Query::Term { field, value }, now)?
         }
+        // MatchQueryParser.analyzeMultiBoolean
+        Query::MatchBoolPrefix { field, query, and } => {
+            let searcher = Searcher::unscored(index, &Query::MatchAll);
+            let kind = searcher.kind(&field).0;
+            let mut terms = searcher.match_terms(&field, &query);
+            // the last term is a prefix if no text follows it
+            let prefix = match kind {
+                Kind::Text => es_index::analysis::standard_tokenize(&query)
+                    .last()
+                    .copied(),
+                _ => terms.last().map(String::as_str),
+            }
+            .is_some_and(|t| query.ends_with(t))
+            .then(|| terms.pop())
+            .flatten();
+            let mut clauses: Vec<Query> = (terms.into_iter())
+                .map(|t| Query::Term {
+                    field: field.clone(),
+                    value: Value::String(t),
+                })
+                .collect();
+            clauses.extend(prefix.map(|prefix| Query::Prefix {
+                field: field.clone(),
+                prefix,
+            }));
+            let q = match clauses.len() {
+                1 => clauses.remove(0),
+                _ => query_string::boolean_of(and, clauses),
+            };
+            resolve_dates(index, q, now)?
+        }
         Query::MatchPhrasePrefix {
             field,
             query,
