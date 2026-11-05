@@ -344,8 +344,15 @@ pub struct Shard {
 /// the heap, for a 1 GiB heap.
 pub const REQUEST_CACHE_BYTES: usize = (1 << 30) / 100;
 
-#[derive(Default)]
-struct Memo(Mutex<Option<Memoized>>);
+/// The cap on the estimated size of the values [`Index::memo`] keeps (ES|QL's tables), over
+/// all the shards sharing a [`RequestCache`].
+pub const MEMO_BYTES: usize = 256 << 20;
+
+/// A shard's memo; the [`RequestCache`] it shares can drop it to stay under [`MEMO_BYTES`].
+#[derive(Debug, Default)]
+struct Memo(Arc<MemoSlot>);
+
+type MemoSlot = Mutex<Option<Memoized>>;
 
 /// A value [`Index::memo`] built, the mappings and stamp it was built with, and the writes
 /// since: the sequence numbers of the documents removed and the ids of those stored.
@@ -355,22 +362,47 @@ struct Memoized {
     value: Arc<dyn std::any::Any + Send + Sync>,
     removed: Vec<u64>,
     written: Vec<String>,
+    /// The value's estimated size, and the tick of its last use in [`Memos`].
+    size: usize,
+    tick: u64,
 }
 
 /// Writes past which the memo is dropped instead of followed, as rebuilding it then costs less.
 const MEMO_WRITES: usize = 10_000;
 
-impl std::fmt::Debug for Memo {
+impl std::fmt::Debug for Memoized {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Memo")
+        f.write_str("Memoized")
     }
 }
 
 /// Elasticsearch's node-wide request cache (`IndicesRequestCache`): the entries of every shard
 /// sharing it (see [`Index::share_request_cache`]), capped together at [`REQUEST_CACHE_BYTES`]
-/// by evicting the least recently used of any shard (see [`Shard::cached`]).
+/// by evicting the least recently used of any shard (see [`Shard::cached`]). Also caps the
+/// shards' memos together at [`MEMO_BYTES`] the same way (see [`Shard::memo`]).
 #[derive(Debug, Default)]
-pub struct RequestCache(Mutex<NodeCache>);
+pub struct RequestCache(Mutex<NodeCache>, Mutex<Memos>);
+
+/// The memos kept by the shards sharing a [`RequestCache`].
+#[derive(Debug, Default)]
+struct Memos {
+    /// Their estimated size.
+    bytes: usize,
+    tick: u64,
+    /// Shard ids by the tick of their memo's last use, least recent first.
+    recency: BTreeMap<u64, u64>,
+    /// By shard id: the memo's size and tick, and where to drop it.
+    shards: HashMap<u64, (usize, u64, std::sync::Weak<MemoSlot>)>,
+}
+
+impl Memos {
+    fn remove(&mut self, id: u64) {
+        if let Some((size, tick, _)) = self.shards.remove(&id) {
+            self.recency.remove(&tick);
+            self.bytes -= size;
+        }
+    }
+}
 
 #[derive(Debug, Default)]
 struct NodeCache {
@@ -413,6 +445,10 @@ impl CacheHandle {
     fn lock(&self) -> std::sync::MutexGuard<'_, NodeCache> {
         self.node.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
+
+    fn memos(&self) -> std::sync::MutexGuard<'_, Memos> {
+        self.node.1.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 impl Default for CacheHandle {
@@ -433,6 +469,8 @@ impl Drop for CacheHandle {
         if let Some(mut c) = shards.remove(&self.id) {
             c.clear(bytes, recency);
         }
+        drop(node);
+        self.memos().remove(self.id);
     }
 }
 
@@ -488,15 +526,12 @@ impl Shard {
 
     /// Notes a write for the memo to follow, or drops it past [`MEMO_WRITES`].
     fn memo_log(&mut self, log: impl FnOnce(&mut Memoized)) {
-        let memo = self
-            .memo
-            .0
-            .get_mut()
-            .unwrap_or_else(PoisonError::into_inner);
-        if let Some(m) = memo {
+        let mut memo = self.memo.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(m) = &mut *memo {
             log(m);
             if m.removed.len() + m.written.len() > MEMO_WRITES {
                 *memo = None;
+                self.request_cache.memos().remove(self.request_cache.id);
             }
         }
     }
@@ -657,22 +692,53 @@ impl Shard {
     /// new `stamp`. After writes, `follow` updates it with the sequence numbers of the documents they removed and
     /// the live documents they stored, by sequence number; it is rebuilt instead if `follow`
     /// returns false or a caller still holds it. One value at a time: building another type
-    /// replaces it.
+    /// replaces it. Kept only while the memos of the shards sharing its [`RequestCache`] fit in
+    /// [`MEMO_BYTES`] by their `size`, dropping the least recently used ones.
     pub fn memo<T: std::any::Any + Send + Sync>(
         &self,
         mappings: &Mappings,
         stamp: Vec<u64>,
         build: impl FnOnce() -> T,
         follow: impl FnOnce(&mut T, &[u64], &[(&str, &Document)]) -> bool,
+        size: impl FnOnce(&T) -> usize,
     ) -> Arc<T> {
         // Held while building, so concurrent callers wait for one build.
         let mut memo = self.memo.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let (v, m) = self.memo_find(&mut memo, mappings, stamp, build, follow, size);
+        // Drops other shards' memos with none held, so that two dropping each other's cannot
+        // deadlock.
+        let victims = self.memo_keep(&mut memo, m);
+        drop(memo);
+        for (slot, tick) in victims {
+            if let Some(slot) = slot.upgrade() {
+                let mut memo = slot.lock().unwrap_or_else(PoisonError::into_inner);
+                // unless used since
+                if memo.as_ref().is_some_and(|m| m.tick == tick) {
+                    *memo = None;
+                }
+            }
+        }
+        v
+    }
+
+    /// The value of [`Shard::memo`], and the memo to keep for it.
+    fn memo_find<T: std::any::Any + Send + Sync>(
+        &self,
+        memo: &mut Option<Memoized>,
+        mappings: &Mappings,
+        stamp: Vec<u64>,
+        build: impl FnOnce() -> T,
+        follow: impl FnOnce(&mut T, &[u64], &[(&str, &Document)]) -> bool,
+        size: impl FnOnce(&T) -> usize,
+    ) -> (Arc<T>, Memoized) {
         let keep = |v: &Arc<T>| Memoized {
             mappings: mappings.clone(),
             stamp: stamp.clone(),
             value: v.clone(),
             removed: Vec::new(),
             written: Vec::new(),
+            size: size(v),
+            tick: 0,
         };
         if let Some(m) = memo.take()
             && m.mappings == *mappings
@@ -680,11 +746,11 @@ impl Shard {
             && let Ok(mut v) = m.value.downcast::<T>()
         {
             if m.removed.is_empty() && m.written.is_empty() {
-                *memo = Some(Memoized {
+                let m = Memoized {
                     value: v.clone(),
                     ..m
-                });
-                return v;
+                };
+                return (v, m);
             }
             let mut written: Vec<_> = (m.written.iter())
                 .filter_map(|id| self.docs.get_key_value(id))
@@ -693,13 +759,45 @@ impl Shard {
             written.sort_by_key(|(_, d)| d.seq_no);
             written.dedup_by_key(|(_, d)| d.seq_no);
             if Arc::get_mut(&mut v).is_some_and(|t| follow(t, &m.removed, &written)) {
-                *memo = Some(keep(&v));
-                return v;
+                let m = keep(&v);
+                return (v, m);
             }
         }
         let v = Arc::new(build());
-        *memo = Some(keep(&v));
-        v
+        let m = keep(&v);
+        (v, m)
+    }
+
+    /// Keeps `m` as the memo, unless it alone is larger than [`MEMO_BYTES`]. Returns the memos
+    /// of other shards to drop for it, least recently used first, with their ticks.
+    fn memo_keep(
+        &self,
+        memo: &mut Option<Memoized>,
+        mut m: Memoized,
+    ) -> Vec<(std::sync::Weak<MemoSlot>, u64)> {
+        let id = self.request_cache.id;
+        let mut node = self.request_cache.memos();
+        node.remove(id);
+        if m.size > MEMO_BYTES {
+            return Vec::new();
+        }
+        node.tick += 1;
+        m.tick = node.tick;
+        node.bytes += m.size;
+        node.recency.insert(m.tick, id);
+        let slot = Arc::downgrade(&self.memo.0);
+        node.shards.insert(id, (m.size, m.tick, slot));
+        *memo = Some(m);
+        let mut victims = Vec::new();
+        // `m` fits, so it is never its own victim
+        while node.bytes > MEMO_BYTES
+            && let Some((_, shard)) = node.recency.pop_first()
+        {
+            let (size, tick, slot) = node.shards.remove(&shard).expect("recency lists memos");
+            node.bytes -= size;
+            victims.push((slot, tick));
+        }
+        victims
     }
 
     /// The result of `compute` for `key`, reused until the visible documents or the mappings
@@ -1132,6 +1230,7 @@ impl Index {
         for s in &mut self.shards {
             if !Arc::ptr_eq(&s.request_cache.node, node) {
                 s.request_cache = CacheHandle::new(node.clone());
+                s.memo = Memo::default();
             }
         }
     }
@@ -1287,14 +1386,15 @@ impl Index {
         &self,
         build: impl FnOnce() -> T,
         follow: impl FnOnce(&mut T, &[u64], &[(&str, &Document)]) -> bool,
+        size: impl FnOnce(&T) -> usize,
     ) -> Arc<T> {
         if let [shard] = &self.shards[..] {
-            return shard.memo(&self.mappings, Vec::new(), build, follow);
+            return shard.memo(&self.mappings, Vec::new(), build, follow, size);
         }
         // Several shards: kept in shard 0 and rebuilt after a write to any of them (whose
         // sequence numbers then move), as a value of all of them cannot follow one shard's.
         let stamp = self.shards.iter().map(|s| s.next_seq_no).collect();
-        self.shards[0].memo(&self.mappings, stamp, build, |_, _, _| false)
+        self.shards[0].memo(&self.mappings, stamp, build, |_, _, _| false, size)
     }
 
     /// A copy for point-in-time searches: later writes to `self` do not change it. It shares
@@ -1763,6 +1863,7 @@ mod tests {
                     v.push(format!("{removed:?} {ids:?}"));
                     follows
                 },
+                |_| 0,
             );
             v.join("; ")
         };
@@ -1779,7 +1880,7 @@ mod tests {
         // One that cannot follow is rebuilt, as is one a caller still holds.
         ix.put("d", json!({}));
         assert_eq!(memo(&ix, false), "2");
-        let held = ix.memo(Vec::<String>::new, |_, _, _| true);
+        let held = ix.memo(Vec::<String>::new, |_, _, _| true, |_| 0);
         ix.put("e", json!({}));
         assert_eq!(memo(&ix, true), "3");
         drop(held);
@@ -1799,7 +1900,7 @@ mod tests {
                 builds.set(builds.get() + 1);
                 builds.get()
             };
-            *ix.memo(build, |_, _, _| true)
+            *ix.memo(build, |_, _, _| true, |_| 0)
         };
         assert_eq!(memo(&ix), 1);
         assert_eq!(memo(&ix), 1);
@@ -1811,6 +1912,64 @@ mod tests {
         assert_eq!(memo(&ix), 3);
         ix.mappings.source = Some(json!({"enabled": false}));
         assert_eq!(memo(&ix), 4);
+    }
+
+    /// The memos of the indices sharing a [`RequestCache`] (ES|QL's tables) are capped together
+    /// at [`MEMO_BYTES`] of their estimated size, evicting the least recently used.
+    #[test]
+    fn esql_speed_memos_are_capped_together_evicting_the_least_recently_used() {
+        let node = Arc::new(RequestCache::default());
+        let mut ixs: Vec<Index> = (0..4).map(|_| Index::default()).collect();
+        ixs.iter_mut().for_each(|ix| ix.share_request_cache(&node));
+        let builds = std::cell::Cell::new(0);
+        // three fit
+        let memo = |ix: &Index| {
+            let build = || {
+                builds.set(builds.get() + 1);
+                builds.get()
+            };
+            *ix.memo(build, |_, _, _| true, |_| MEMO_BYTES / 3)
+        };
+        assert_eq!([0, 1, 2].map(|i| memo(&ixs[i])), [1, 2, 3]);
+        assert_eq!(memo(&ixs[0]), 1, "kept, and now the most recently used");
+        assert_eq!(memo(&ixs[3]), 4, "evicts ixs[1]'s, the least recently used");
+        assert_eq!((memo(&ixs[0]), memo(&ixs[2]), memo(&ixs[3])), (1, 3, 4));
+        assert_eq!(memo(&ixs[1]), 5, "rebuilt, evicting ixs[0]'s");
+        assert_eq!((memo(&ixs[2]), memo(&ixs[3]), memo(&ixs[1])), (3, 4, 5));
+        assert_eq!(memo(&ixs[0]), 6);
+        let bytes = || node.1.lock().unwrap().bytes;
+        assert_eq!(bytes(), MEMO_BYTES / 3 * 3);
+        // A memo dropped past MEMO_WRITES, or with its index, leaves the count.
+        for n in 0..=MEMO_WRITES {
+            ixs[0].put(&n.to_string(), json!({}));
+        }
+        assert_eq!(bytes(), MEMO_BYTES / 3 * 2);
+        ixs.truncate(2);
+        assert_eq!(bytes(), MEMO_BYTES / 3);
+    }
+
+    /// A memo larger than [`MEMO_BYTES`] alone is built on every call, not kept; one that grows
+    /// past it as it follows writes is dropped.
+    #[test]
+    fn esql_speed_a_memo_past_the_cap_alone_is_built_per_call() {
+        let mut ix = Index::default();
+        let builds = std::cell::Cell::new(0);
+        let memo = |ix: &Index, size: usize| {
+            let build = || {
+                builds.set(builds.get() + 1);
+                builds.get()
+            };
+            *ix.memo(build, |_, _, _| true, |_| size)
+        };
+        assert_eq!(memo(&ix, MEMO_BYTES + 1), 1);
+        assert_eq!(memo(&ix, MEMO_BYTES + 1), 2);
+        assert_eq!(memo(&ix, MEMO_BYTES), 3);
+        assert_eq!(memo(&ix, MEMO_BYTES), 3);
+        ix.put("a", json!({}));
+        assert_eq!(memo(&ix, MEMO_BYTES + 1), 3, "followed, then dropped");
+        assert_eq!(memo(&ix, MEMO_BYTES), 4);
+        let node = &ix.shards[0].request_cache.node;
+        assert_eq!(node.1.lock().unwrap().bytes, MEMO_BYTES);
     }
 
     #[test]

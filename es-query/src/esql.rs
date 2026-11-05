@@ -3787,16 +3787,16 @@ fn table_from(
         .map(|t| t.filter.as_ref().map(crate::parse_query).transpose())
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| EsqlError::Verification(e.msg))?;
-    // A whole index's table, every column read, is kept until the index changes.
-    // ponytail: holds every value of the index in memory until its next write; cache per
-    // column, or bound it, if memory matters more than repeated queries
-    // It holds every metadata column too, which a query sees only when it lists them.
+    // A whole index's table, every column read, is kept and follows writes, while the node's
+    // tables fit in es_index::MEMO_BYTES. It holds every metadata column too, which a query
+    // sees only when it lists them.
     let whole = |t: &aliases::Target| {
         let index: &Index = indices[&t.index].borrow();
         let all = METADATA.map(String::from);
         index.memo(
             || table_of(indices, std::slice::from_ref(t), &[None], &all, &|_| true),
             |table, removed, written| follow(table, index, &t.index, removed, written),
+            table_bytes,
         )
     };
     if targets.iter().all(|t| t.filter.is_none()) {
@@ -3814,6 +3814,29 @@ fn table_from(
     Ok(Arc::new(table_of(
         indices, &targets, &filters, metadata, read,
     )))
+}
+
+/// A table's estimated size in memory: its values, its rows' sequence numbers, and the
+/// `Group::ords` STATS keys may add.
+fn table_bytes(t: &Table) -> usize {
+    fn value(v: &Value) -> usize {
+        size_of::<Value>()
+            + match v {
+                Value::String(s) => s.len(),
+                Value::Array(a) => a.iter().map(value).sum(),
+                Value::Object(o) => o.iter().map(|(k, v)| k.len() + value(v)).sum(),
+                _ => 0,
+            }
+    }
+    let col = |(c, vs): &(String, Vec<Value>)| -> usize {
+        c.len()
+            + vs.iter()
+                .map(|v| value(v) + size_of::<u32>())
+                .sum::<usize>()
+    };
+    (t.groups.iter())
+        .map(|g| g.seqs.len() * size_of::<u64>() + g.cols.iter().map(col).sum::<usize>())
+        .sum()
 }
 
 /// Updates a whole index's cached table after writes (see [`Index::memo`]): drops the rows of
@@ -4521,6 +4544,60 @@ mod tests {
             write(indices.get_mut("i").unwrap());
             check(&indices);
         }
+    }
+
+    /// A cached table another index's memo evicts (`es_index::MEMO_BYTES` caps them together)
+    /// is built again, and answers the same.
+    #[test]
+    fn esql_speed_an_evicted_table_answers_the_same() {
+        let node = Arc::new(es_index::RequestCache::default());
+        let mut i = Index::default();
+        for n in 0..6 {
+            let k = ["a", "b"][n % 2];
+            i.put(&n.to_string(), serde_json::json!({"n": n, "k": k}));
+        }
+        let mut other = Index::default();
+        i.share_request_cache(&node);
+        other.share_request_cache(&node);
+        let indices = BTreeMap::from([("i".to_owned(), i)]);
+        let table = || {
+            table_from(&indices, &["i".into()], &[], &|_| true, &|e| {
+                Ok(e.to_owned())
+            })
+        };
+        let q = "FROM i | STATS c = COUNT(*), s = SUM(n) BY k | SORT k";
+        let before = run(&indices, q).unwrap();
+        let cached = table().unwrap();
+        assert!(Arc::ptr_eq(&cached, &table().unwrap()));
+        other.memo(|| (), |_, _, _| true, |_| es_index::MEMO_BYTES);
+        assert!(!Arc::ptr_eq(&cached, &table().unwrap()), "evicted");
+        assert_eq!(run(&indices, q).unwrap(), before);
+        let rows = [
+            [Value::from(3), 6.into(), "a".into()],
+            [3.into(), 9.into(), "b".into()],
+        ];
+        assert_eq!(before.values, rows);
+    }
+
+    /// A table's estimated size counts every value it holds, with the per-row overhead.
+    #[test]
+    fn esql_speed_table_size_counts_its_values() {
+        let mut i = Index::default();
+        let keyword = FieldMapping::Keyword {
+            ignore_above: None,
+            split_queries_on_whitespace: false,
+        };
+        i.mappings.properties.insert("s".into(), keyword);
+        for n in 0..100 {
+            i.put(&n.to_string(), serde_json::json!({"s": "x".repeat(1000)}));
+        }
+        let indices = BTreeMap::from([("i".to_owned(), i)]);
+        let t = table_from(&indices, &["i".into()], &[], &|_| true, &|e| {
+            Ok(e.to_owned())
+        });
+        let bytes = table_bytes(&t.unwrap());
+        // s, and the metadata columns
+        assert!((100_000..150_000).contains(&bytes), "{bytes}");
     }
 
     /// METADATA reads an index's cached table, which follows writes: updated versions, deleted
