@@ -1914,3 +1914,31 @@ fn ignore_above_values_have_no_doc_values_in_memory_or_on_disk() {
         assert_eq!(search(idx, &req).aggregations, Some(want));
     }
 }
+
+#[test]
+fn error_positions_case_insensitive_term_needs_a_term_based_field() {
+    let mut i = index();
+    let date = FieldMapping::Date {
+        format: None,
+        locale: None,
+        fields: Default::default(),
+    };
+    i.mappings.properties.insert("d".into(), date);
+    i.put("5", json!({"d": "2020-01-01"}));
+    let run = |f: &str, v: Value| {
+        let q = json!({"term": {f: {"value": v, "case_insensitive": true}}});
+        let req = SearchRequest::parse(&json!({ "query": q })).unwrap();
+        es_query::search_many(&[("", 0, &i, None)], &req).map(|r| r.total)
+    };
+    for (f, v, ty) in [("n", json!(5), "long"), ("d", json!("2020-01-01"), "date")] {
+        assert_eq!(
+            run(f, v).unwrap_err().msg,
+            format!(
+                "[{f}] field which is of type [{ty}], does not support case insensitive term queries"
+            ),
+        );
+    }
+    assert_eq!(run("ok", json!(true)).unwrap(), 1);
+    assert_eq!(run("tag", json!("PET")).unwrap(), 2);
+    assert_eq!(run("nope", json!("x")).unwrap(), 0);
+}

@@ -1031,6 +1031,8 @@ impl<'a> Searcher<'a> {
             Query::Normalized(query) => self.score(query, id, d),
             // `resolve_dates` expands it before a search
             Query::Fields { .. } => None,
+            // `resolve_dates` replaces it before a search
+            Query::TermCaseInsensitive { .. } => None,
         }
     }
 

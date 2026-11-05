@@ -70,6 +70,38 @@ pub(crate) fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, 
         {
             query_string::match_none()
         }
+        Query::TermCaseInsensitive { field, value } => {
+            let kind = Searcher::unscored(index, &Query::MatchAll).kind(&field).0;
+            let q = match (
+                index.mappings.field(&field).filter(|m| !m.is_object()),
+                kind,
+            ) {
+                (Some(FieldMapping::Boolean), _) | (None, Kind::Bool) => {
+                    Query::Term { field, value }
+                }
+                // ES's case-insensitive term is a constant-score automaton query, as a wildcard's
+                (
+                    Some(
+                        FieldMapping::Text { .. }
+                        | FieldMapping::TextKeyword { .. }
+                        | FieldMapping::Keyword { .. },
+                    ),
+                    _,
+                )
+                | (None, Kind::Text | Kind::Keyword(_)) => Query::Wildcard {
+                    pattern: crate::parse::wildcard_escape(&text(&value)),
+                    field,
+                    case_insensitive: true,
+                },
+                _ => {
+                    return Err(QueryError::illegal(format!(
+                        "[{field}] field which is of type [{}], does not support case insensitive term queries",
+                        type_name(index, &field, kind)
+                    )));
+                }
+            };
+            resolve_dates(index, q, now)?
+        }
         Query::Term { field, value } if ip(&field) => ranges::ip_term(field, &value)?,
         Query::Term { field, value } if ranged(&field) => term(field, value)?,
         // non-text fields read a match query as a term query

@@ -31,6 +31,13 @@ pub enum Query {
         field: String,
         value: Value,
     },
+    /// A case-insensitive `term`: `resolve_dates` makes it a wildcard on a keyword or text
+    /// field and a term on a boolean one, and refuses it on other mapped fields, as ES's
+    /// termQueryCaseInsensitive does.
+    TermCaseInsensitive {
+        field: String,
+        value: Value,
+    },
     Prefix {
         field: String,
         prefix: String,
@@ -197,7 +204,7 @@ fn case_insensitive(o: &serde_json::Map<String, Value>) -> bool {
 }
 
 /// A literal as a wildcard pattern that matches only itself.
-fn wildcard_escape(s: &str) -> String {
+pub(crate) fn wildcard_escape(s: &str) -> String {
     s.chars()
         .flat_map(|c| match c {
             '*' | '?' | '\\' => vec!['\\', c],
@@ -400,12 +407,9 @@ fn parse_kind(kind: &str, body: &Value) -> Result<Query, QueryError> {
                 v => (v.clone(), false),
             };
             Ok(match case_insensitive {
-                // ES's case-insensitive term is a constant-score automaton query, as a wildcard's
-                // ponytail: on other than keyword or text fields it fails with the wildcard's error
-                true => Query::Wildcard {
+                true => Query::TermCaseInsensitive {
                     field: field.clone(),
-                    pattern: wildcard_escape(&text(&value)),
-                    case_insensitive,
+                    value,
                 },
                 false => Query::Term {
                     field: field.clone(),
