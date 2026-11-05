@@ -1307,6 +1307,26 @@ fn rlike_matches_lucene_regular_expressions() {
     ));
 }
 
+/// RLIKE compiles its pattern once per query; every row still gets its own answer, and a
+/// missing or multi-valued operand is null.
+#[test]
+fn esql_speed_rlike_compiled_once_answers_every_row() {
+    let r = q(
+        r#"FROM people | EVAL m = city RLIKE "[OR].*o.*", n = name NOT RLIKE "[ab].*" | KEEP name, m, n | SORT name"#,
+    );
+    assert_eq!(
+        r.values,
+        [
+            [json!("ann"), json!(true), json!(false)],
+            [json!("bob"), Value::Null, json!(false)],
+            [json!("cid"), json!(true), json!(true)],
+        ]
+    );
+    let r =
+        q(r#"ROW a = ["x", "y"], b = "xy" | EVAL m = a RLIKE "x", n = b RLIKE "x." | KEEP m, n"#);
+    assert_eq!(r.values, [[Value::Null, json!(true)]]);
+}
+
 #[test]
 fn stats_count_star_by_groups() {
     let r = q("FROM people METADATA _index | STATS c = COUNT(*) BY _index");

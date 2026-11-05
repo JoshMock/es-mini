@@ -327,8 +327,8 @@ enum Expr {
     Or(Box<Expr>, Box<Expr>, Span),
     Not(Box<Expr>, Span),
     IsNull(Box<Expr>, bool, Span),
-    /// `x LIKE "pattern"`, or `x RLIKE "pattern"` when the flag is set.
-    Like(Box<Expr>, String, bool, Span),
+    /// `x LIKE "pattern"`, or `x RLIKE "pattern"` with the pattern compiled.
+    Like(Box<Expr>, String, Option<crate::regexp::Automaton>, Span),
     /// `+ - * / %`, with the numeric type `resolve` gives it, which `eval` computes in, or
     /// `date` for a date plus or minus a time span.
     Arith(
@@ -782,13 +782,16 @@ impl Parser<'_> {
             let Some(Tok::Str(p)) = self.peek().cloned() else {
                 return self.mismatched("QUOTED_STRING");
             };
-            if rlike && let Err(reason) = crate::regexp::compile(&p) {
-                let msg = format!("Invalid regex pattern for RLIKE [{p}]: [{reason}]");
-                return Err(parse_error(self.toks[start].1, &msg));
-            }
+            let regex = match rlike.then(|| crate::regexp::compile(&p)).transpose() {
+                Ok(regex) => regex,
+                Err(reason) => {
+                    let msg = format!("Invalid regex pattern for RLIKE [{p}]: [{reason}]");
+                    return Err(parse_error(self.toks[start].1, &msg));
+                }
+            };
             self.pos += 1;
             self.follow = AFTER_LITERAL;
-            let e = Expr::Like(Box::new(left), p, rlike, self.span(start));
+            let e = Expr::Like(Box::new(left), p, regex, self.span(start));
             return Ok(match negated {
                 true => Expr::Not(Box::new(e), self.span(start)),
                 false => e,
@@ -1250,9 +1253,8 @@ fn eval(e: &Expr, row: &dyn Fields) -> Option<Value> {
         Expr::Field(f, _) => Some(row.field(f).clone()).filter(|v| !v.is_null()),
         Expr::IsNull(x, negated, _) => Some(Value::Bool(eval(x, row).is_none() != *negated)),
         // A multi-value is null, like ES (which warns).
-        Expr::Like(x, p, rlike, _) => match eval(x, row)? {
-            // ponytail: parsed again per row; `resolve` checked that it parses
-            Value::String(s) if *rlike => Some(crate::regexp::compile(p).ok()?.matches(&s).into()),
+        Expr::Like(x, p, regex, _) => match eval(x, row)? {
+            Value::String(s) if let Some(r) = regex => Some(r.matches(&s).into()),
             Value::String(s) => {
                 let (p, s): (Vec<char>, Vec<char>) = (p.chars().collect(), s.chars().collect());
                 Some(crate::wildcard_match(&p, &s).into())

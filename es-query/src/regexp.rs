@@ -132,7 +132,7 @@ fn gaps(ranges: &[(u32, u32)]) -> Vec<(u32, u32)> {
 }
 
 /// Lucene's `Automaton` over code points, without epsilon moves, starting at state 0 (if any).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct Automaton {
     accept: Vec<bool>,
     /// Each state's transitions: an inclusive code point range and the target state.
