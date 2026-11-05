@@ -328,6 +328,9 @@ pub struct Shard {
     /// Writes not yet in the translog (see [`disk::persist`]).
     unlogged: Vec<es_codec::translog::Op>,
     request_cache: std::sync::Mutex<RequestCache>,
+    /// Index and delete operations this shard has run since it started, as `_stats` reports.
+    index_total: u64,
+    delete_total: u64,
     /// What [`Index::memo`] built, and the writes since.
     memo: Memo,
 }
@@ -469,6 +472,7 @@ impl Shard {
         self.prune_tombstones(settings);
         let version = self.last_version(id) + 1;
         let seq_no = self.next_seq_no(settings);
+        self.index_total += 1;
         self.unlogged.push(es_codec::translog::Op::Index {
             id: id.to_owned(),
             source: serde_json::to_vec(&source).unwrap_or_default(),
@@ -714,6 +718,11 @@ impl Shard {
         self.request_cache
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The (index, delete) operations this shard has run since it started.
+    pub fn write_totals(&self) -> (u64, u64) {
+        (self.index_total, self.delete_total)
     }
 
     /// The request cache's (hit count, miss count, eviction count, size of its entries in
@@ -1000,6 +1009,7 @@ impl Shard {
         self.prune_tombstones(settings);
         let version = self.last_version(id) + 1;
         let seq_no = self.next_seq_no(settings);
+        self.delete_total += 1;
         self.unlogged.push(es_codec::translog::Op::Delete {
             id: id.to_owned(),
             seq_no: seq_no as i64,

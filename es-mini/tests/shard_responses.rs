@@ -445,3 +445,38 @@ async fn replica_counts_cat_indices_reports_health_and_replicas() {
     assert!(lines[2].starts_with("green  open   b     "), "{lines:?}");
     assert_eq!(lines.len(), 3);
 }
+
+async fn cat_text(app: &axum::Router, uri: &str) -> String {
+    let req = Request::get(uri).body(Body::empty()).unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    let text = res.into_body().collect().await.unwrap().to_bytes();
+    String::from_utf8(text.to_vec()).unwrap()
+}
+
+#[tokio::test]
+async fn stats_and_cat_shards_take_h_s_bytes_and_help() {
+    let app = setup("keyword", "keyword").await;
+    let settings = json!({"index": {"number_of_replicas": 0}});
+    call(&app, "PUT", "/a,b/_settings", settings).await;
+    let text = cat_text(&app, "/_cat/shards/a?h=sh,i&s=shard:desc&v").await;
+    assert_eq!(text, "shard index\n2     a\n1     a\n0     a\n");
+    let text = cat_text(&app, "/_cat/shards/b?h=store,docs&bytes=kb").await;
+    assert_eq!(text, "0 6\n");
+    let text = cat_text(&app, "/_cat/shards?help").await;
+    assert!(text.starts_with("index   | i,idx"), "{text}");
+    assert!(text.contains("number of docs in shard"), "{text}");
+    let (s, _) = call(&app, "GET", "/_cat/shards?bytes=zz", Value::Null).await;
+    assert_eq!(s, 400);
+}
+
+#[tokio::test]
+async fn stats_and_cat_stats_count_indexing_operations() {
+    let app = setup("keyword", "keyword").await;
+    call(&app, "DELETE", "/b/_doc/0", Value::Null).await;
+    let (_, r) = call(&app, "GET", "/b/_stats/indexing", Value::Null).await;
+    let ix = &r["_all"]["primaries"]["indexing"];
+    assert_eq!(
+        (&ix["index_total"], &ix["delete_total"]),
+        (&json!(6), &json!(1))
+    );
+}

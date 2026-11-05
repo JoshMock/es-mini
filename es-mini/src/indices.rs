@@ -728,7 +728,7 @@ pub async fn get_all_mappings(
 }
 
 /// `GET [/{index}]/_stats[/{metric}]`: every metric section Elasticsearch reports.
-// ponytail: only docs and request_cache are counted; the other sections report zeros (es-mini keeps no such counters)
+// ponytail: only docs, indexing's index_total and delete_total, and request_cache are counted; the rest of indexing and the other sections report zeros (es-mini keeps no such counters)
 pub async fn stats(
     State(state): State<AppState>,
     path: Option<Path<HashMap<String, String>>>,
@@ -762,7 +762,9 @@ pub async fn stats(
         &params,
     )?;
     let indices = shared.lock(&names);
-    let section = |docs: usize, (hits, misses, evictions, bytes): (u64, u64, u64, usize)| {
+    let section = |docs: usize,
+                   (index_total, delete_total): (u64, u64),
+                   (hits, misses, evictions, bytes): (u64, u64, u64, usize)| {
         let mut s = Map::new();
         if wanted("docs") {
             s.insert("docs".into(), json!({"count": docs, "deleted": 0}));
@@ -770,6 +772,22 @@ pub async fn stats(
         let zeros = |names: &[&str]| {
             Value::Object(names.iter().map(|k| (k.to_string(), json!(0))).collect())
         };
+        if wanted("indexing") {
+            let mut ix = zeros(&[
+                "index_total",
+                "index_time_in_millis",
+                "index_current",
+                "index_failed",
+                "delete_total",
+                "delete_time_in_millis",
+                "delete_current",
+                "noop_update_total",
+                "throttle_time_in_millis",
+            ]);
+            ix["index_total"] = json!(index_total);
+            ix["delete_total"] = json!(delete_total);
+            s.insert("indexing".into(), ix);
+        }
         let mut zero = |m: &str, names: &[&str]| {
             if wanted(m) {
                 s.insert(m.into(), zeros(names));
@@ -781,20 +799,6 @@ pub async fn stats(
                 "size_in_bytes",
                 "total_data_set_size_in_bytes",
                 "reserved_in_bytes",
-            ],
-        );
-        zero(
-            "indexing",
-            &[
-                "index_total",
-                "index_time_in_millis",
-                "index_current",
-                "index_failed",
-                "delete_total",
-                "delete_time_in_millis",
-                "delete_current",
-                "noop_update_total",
-                "throttle_time_in_millis",
             ],
         );
         zero(
@@ -916,7 +920,7 @@ pub async fn stats(
         }
         Value::Object(s)
     };
-    let (mut total, mut cache_total) = (0, (0, 0, 0, 0));
+    let (mut total, mut writes_total, mut cache_total) = (0, (0, 0), (0, 0, 0, 0));
     let mut per_index = Map::new();
     for n in &names {
         let docs = indices[n].docs().count();
@@ -931,7 +935,10 @@ pub async fn stats(
             cache_total.2 + cache.2,
             cache_total.3 + cache.3,
         );
-        let s = section(docs, cache);
+        let writes = (indices[n].shards().iter().map(|s| s.write_totals()))
+            .fold((0, 0), |a, w| (a.0 + w.0, a.1 + w.1));
+        writes_total = (writes_total.0 + writes.0, writes_total.1 + writes.1);
+        let s = section(docs, writes, cache);
         let mut stats = json!({"primaries": s, "total": s});
         if level == "shards" {
             let routing = json!({"state": "STARTED", "primary": true, "node": crate::nodes::NODE_ID, "relocating_node": null});
@@ -940,10 +947,11 @@ pub async fn stats(
                 .map(|i| {
                     let shard = indices[n].shards().get(i);
                     let docs = shard.map_or(0, |s| s.docs().count());
+                    let writes = shard.map_or((0, 0), |s| s.write_totals());
                     let cache = shard.map_or((0, 0, 0, 0), |s| s.request_cache_stats());
                     let mut copy = Map::from_iter([("routing".to_string(), routing.clone())]);
                     copy.extend(
-                        section(docs, cache)
+                        section(docs, writes, cache)
                             .as_object()
                             .cloned()
                             .unwrap_or_default(),
@@ -955,7 +963,7 @@ pub async fn stats(
         }
         per_index.insert(n.clone(), stats);
     }
-    let all = section(total, cache_total);
+    let all = section(total, writes_total, cache_total);
     let mut out = json!({
         "_shards": broadcast_shards(names.iter().map(|n| &*indices[n])),
         "_all": {"primaries": all, "total": all},
@@ -967,23 +975,53 @@ pub async fn stats(
 }
 
 /// `GET /_cat/shards[/{index}]`: one row per shard (see [`cat_table`]).
-// ponytail: only the default columns; no h, s, bytes or help. Store sizes are 0b like _stats.
+// ponytail: only the nine default columns (no sync_id, unassigned.*, or other optional ones). Store sizes are 0b like _stats.
 pub async fn cat_shards(
     State(state): State<AppState>,
     path: Option<Path<String>>,
     uri: Uri,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<axum::response::Response, AppError> {
-    check(&uri, &params, &["format", "v"])?;
-    const COLUMNS: [&str; 9] = [
-        "index", "shard", "prirep", "state", "docs", "store", "dataset", "ip", "node",
+    check(&uri, &params, &["format", "v", "h", "s", "bytes", "help"])?;
+    // name, aliases and description, as RestShardsAction declares them
+    const COLUMNS: [(&str, &str, &str); 9] = [
+        ("index", "i,idx", "index name"),
+        ("shard", "s,sh", "shard name"),
+        ("prirep", "p,pr,primaryOrReplica", "primary or replica"),
+        ("state", "st", "shard state"),
+        ("docs", "d,dc", "number of docs in shard"),
+        (
+            "store",
+            "sto",
+            "store size of shard (how much disk it uses)",
+        ),
+        (
+            "dataset",
+            "dto",
+            "total data set size of a shard (including the cache for partially mounted indices)",
+        ),
+        ("ip", "", "ip of node where it lives"),
+        ("node", "n", "name of node where it lives"),
     ];
+    if let Some(unit) = params.get("bytes")
+        && !["b", "kb", "mb", "gb", "tb", "pb"].contains(&unit.as_str())
+    {
+        return Err(AppError::IllegalArgument(format!(
+            "failed to parse setting [bytes] with value [{unit}] as a size in bytes"
+        )));
+    }
     let shared = state.read();
     let expr = path.map_or("_all".to_string(), |Path(p)| p);
     let names = read_indices(&*shared, &expr, &params)?;
     let indices = shared.lock(&names);
     // Each primary is followed by its replicas, unassigned on this one node; their empty cells
     // are null in JSON.
+    // with `bytes`, sizes are bare numbers of that unit
+    let zero = if params.contains_key("bytes") {
+        "0"
+    } else {
+        "0b"
+    };
     let rows: Vec<Vec<String>> = (names.iter())
         .flat_map(|n| (0..indices[n].number_of_shards()).map(move |i| (n, i)))
         .flat_map(|(n, i)| {
@@ -995,8 +1033,8 @@ pub async fn cat_shards(
                 "p",
                 "STARTED",
                 &docs,
-                "0b",
-                "0b",
+                zero,
+                zero,
                 "127.0.0.1",
                 crate::CLUSTER_NAME,
             ];
@@ -1009,7 +1047,61 @@ pub async fn cat_shards(
         })
         .collect();
     // docs, store and dataset align right, as RestShardsAction declares
-    Ok(cat_table(&COLUMNS, rows, |c| (4..=6).contains(&c), &params))
+    Ok(cat_view(&COLUMNS, rows, |c| (4..=6).contains(&c), &params))
+}
+
+/// [`cat_table`] after the `help`, `h` (columns by name or alias, unknown ones ignored) and `s`
+/// (`col[:asc|:desc]`, numeric when both cells are numbers) parameters, for `columns` given as
+/// (name, comma-separated aliases, description).
+fn cat_view(
+    columns: &[(&str, &str, &str)],
+    mut rows: Vec<Vec<String>>,
+    right: impl Fn(usize) -> bool,
+    params: &HashMap<String, String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if params.get("help").is_some_and(|v| v != "false") {
+        let w = |f: fn(&(&str, &str, &str)) -> usize| columns.iter().map(f).max().unwrap_or(0);
+        let (nw, aw) = (w(|c| c.0.len()), w(|c| c.1.len()));
+        let out: String = (columns.iter())
+            .map(|(n, a, d)| format!("{n:<nw$} | {a:<aw$} | {d}\n"))
+            .collect();
+        return ([("content-type", "text/plain; charset=UTF-8")], out).into_response();
+    }
+    let find = |name: &str| {
+        let name = name.trim();
+        columns
+            .iter()
+            .position(|(n, a, _)| *n == name || a.split(',').any(|a| a == name))
+    };
+    for key in (params.get("s").into_iter().flat_map(|s| s.split(',')))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+    {
+        let (name, desc) = key
+            .strip_suffix(":desc")
+            .map_or((key, false), |n| (n, true));
+        let Some(c) = find(name.strip_suffix(":asc").unwrap_or(name)) else {
+            continue;
+        };
+        rows.sort_by(|a, b| {
+            let ord = match (a[c].parse::<f64>(), b[c].parse::<f64>()) {
+                (Ok(x), Ok(y)) => x.total_cmp(&y),
+                _ => a[c].cmp(&b[c]),
+            };
+            if desc { ord.reverse() } else { ord }
+        });
+    }
+    let shown: Vec<usize> = match params.get("h") {
+        Some(h) => h.split(',').filter_map(find).collect(),
+        None => (0..columns.len()).collect(),
+    };
+    let names: Vec<&str> = shown.iter().map(|&c| columns[c].0).collect();
+    let rows = (rows.into_iter())
+        .map(|r| shown.iter().map(|&c| r[c].clone()).collect())
+        .collect();
+    cat_table(&names, rows, |c| right(shown[c]), params)
 }
 
 /// `GET /_cat/indices[/{index}]`: one row per index (see [`cat_table`]).
