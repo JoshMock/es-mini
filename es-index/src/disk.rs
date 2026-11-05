@@ -1720,21 +1720,55 @@ fn reuse_segments(
 /// value of -1 on every root, which tells Lucene's sorter where each block of nested docs ends.
 const ROOT_DOC_FIELD: &str = "__root_doc_for_nested";
 
+/// A list setting of `ix` (`index.sort.*`), given as an array or a comma-separated string.
+fn sort_setting(ix: &Index, key: &str) -> Option<Vec<String>> {
+    Some(match ix.settings.flat().get(key)? {
+        Value::Array(items) => items.iter().map(crate::setting_string).collect(),
+        v => (crate::setting_string(v).split(',').map(str::trim))
+            .filter(|e| !e.is_empty())
+            .map(str::to_owned)
+            .collect(),
+    })
+}
+
+/// Why Elasticsearch 9.5.5 refuses to create the index `name` that `ix` describes for its index
+/// sort (`DocumentMapper.validate`, then `IndexSortConfig.buildIndexSort`): the reason, and the
+/// cause it reports for a text field, whose fielddata is disabled.
+pub fn index_sort_error(ix: &Index, name: &str) -> Option<(String, Option<String>)> {
+    let nested = nested_paths(&ix.mappings);
+    for f in sort_setting(ix, "index.sort.field").unwrap_or_default() {
+        let parent = match nested.contains(&f.as_str()) {
+            true => f.as_str(),
+            false => nested_scope(&nested, &f),
+        };
+        if !parent.is_empty() {
+            let reason =
+                format!("cannot apply index sort to field [{f}] under nested object [{parent}]");
+            return Some((reason, None));
+        }
+    }
+    let reason = index_sort(ix).err()?.0;
+    let text = (reason.strip_prefix("docvalues not found for index sort field:["))
+        .and_then(|r| r.strip_suffix(']'));
+    let cause = text.map(|f| {
+        format!(
+            "Fielddata is disabled on [{f}] in [{name}]. Text fields are not optimised for \
+             operations that require per-document field data like aggregations and sorting, so \
+             these operations are disabled by default. Please use a keyword field instead. \
+             Alternatively, set fielddata=true on [{f}] in order to load field data by \
+             uninverting the inverted index. Note that this can use significant memory."
+        )
+    });
+    Some((reason, cause))
+}
+
 /// The index sort of `ix`, as Elasticsearch 9.5.5's `IndexSortConfig.buildIndexSort` builds it
 /// from the `index.sort.*` settings (order `asc`, mode `min` or `max` for `desc`, missing
 /// `_last` by default) and the fields' doc values; empty for an unsorted index.
 fn index_sort(ix: &Index) -> es_codec::Result<Vec<es_codec::segment_infos::SortField>> {
     use crate::FieldMapping as M;
     use es_codec::segment_infos::SortField;
-    let list = |key: &str| -> Option<Vec<String>> {
-        Some(match ix.settings.flat().get(key)? {
-            Value::Array(items) => items.iter().map(crate::setting_string).collect(),
-            v => (crate::setting_string(v).split(',').map(str::trim))
-                .filter(|e| !e.is_empty())
-                .map(str::to_owned)
-                .collect(),
-        })
-    };
+    let list = |key: &str| sort_setting(ix, key);
     let fields = list("index.sort.field").unwrap_or_default();
     let (order, mode, missing) = (
         list("index.sort.order"),
@@ -1766,7 +1800,10 @@ fn index_sort(ix: &Index) -> es_codec::Result<Vec<es_codec::segment_infos::SortF
             let float = |f: f32| i64::from(crate::mapping::sortable_int(f));
             let infinities = |f: fn(f64) -> i64| (f(f64::NEG_INFINITY), f(f64::INFINITY));
             Ok(
-                match ix.mappings.field(f).ok_or_else(|| err("unknown", f))? {
+                match (ix.mappings.field(f))
+                    .filter(|m| !m.is_object())
+                    .ok_or_else(|| err("unknown", f))?
+                {
                     M::Keyword { .. } | M::Ip => SortField::SortedSet {
                         field: f.clone(),
                         reverse,
@@ -1783,6 +1820,10 @@ fn index_sort(ix: &Index) -> es_codec::Result<Vec<es_codec::segment_infos::SortF
                     M::Double => numeric("DOUBLE", infinities(crate::mapping::sortable_long)),
                     // Its comparator is a custom one, which Lucene cannot sort an index by.
                     M::HalfFloat => return Err(err("invalid", f)),
+                    m if m.is_range() => {
+                        let reason = format!("Sorting by range field [{f}] is not supported");
+                        return Err(es_codec::Error(reason));
+                    }
                     _ => return Err(err("docvalues not found for", f)),
                 },
             )

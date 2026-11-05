@@ -58,7 +58,11 @@ async fn settings_validation_2_sort_lists_parse_each_element() {
         b["error"]["reason"],
         "Illegal missing value:[_middle], must be one of [_last, _first]"
     );
-    let (s, _) = create(json!({"index.sort.field": "a", "index.sort.order": "desc"})).await;
+    // Elasticsearch refuses an index sort on an unmapped field, so `a` is mapped.
+    let settings = json!({"index.sort.field": "a", "index.sort.order": "desc"});
+    let mappings = json!({"properties": {"a": {"type": "keyword"}}});
+    let body = json!({"settings": settings, "mappings": mappings});
+    let (s, _) = call(&es_mini::app(), "PUT", "/t", body).await;
     assert_eq!(s, 200);
 }
 

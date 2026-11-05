@@ -184,6 +184,53 @@ async fn empty_field_name_is_illegal_argument() {
 }
 
 #[tokio::test]
+async fn disk_fidelity_index_sorts_lucene_refuses_fail_index_creation() {
+    // Elasticsearch 9.5.5's responses; es-mini used to accept these and fail every later save.
+    let app = app();
+    let props = json!({
+        "t": {"type": "text"}, "h": {"type": "half_float"}, "r": {"type": "ip_range"},
+        "o": {"type": "object"}, "n": {"type": "nested", "properties": {"m": {"properties": {"x": {"type": "long"}}}}},
+        "k": {"type": "keyword"}, "d": {"type": "date"}
+    });
+    for (sort, reason) in [
+        (json!("foo"), "unknown index sort field:[foo]"),
+        (json!(["k", "o"]), "unknown index sort field:[o]"),
+        (json!("h"), "invalid index sort field:[h]"),
+        (json!("r"), "Sorting by range field [r] is not supported"),
+        (json!("t"), "docvalues not found for index sort field:[t]"),
+        (
+            json!("n"),
+            "cannot apply index sort to field [n] under nested object [n]",
+        ),
+        (
+            json!(["foo", "n.m.x"]),
+            "cannot apply index sort to field [n.m.x] under nested object [n]",
+        ),
+    ] {
+        let body =
+            json!({"settings": {"index.sort.field": sort}, "mappings": {"properties": props}});
+        let (s, r) = call(&app, Method::PUT, "/idx", Some(body)).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{sort}: {r}");
+        let want = json!({"type": "illegal_argument_exception", "reason": reason});
+        assert_eq!(r["error"]["root_cause"], json!([want]), "{sort}");
+    }
+    let body = json!({"settings": {"index.sort.field": "t"}, "mappings": {"properties": props}});
+    let (_, r) = call(&app, Method::PUT, "/idx", Some(body)).await;
+    assert_eq!(
+        r["error"]["caused_by"],
+        json!({"type": "illegal_argument_exception", "reason": "Fielddata is disabled on [t] in [idx]. \
+            Text fields are not optimised for operations that require per-document field data like \
+            aggregations and sorting, so these operations are disabled by default. Please use a \
+            keyword field instead. Alternatively, set fielddata=true on [t] in order to load field \
+            data by uninverting the inverted index. Note that this can use significant memory."})
+    );
+    let body =
+        json!({"settings": {"index.sort.field": ["k", "d"]}, "mappings": {"properties": props}});
+    let (s, r) = call(&app, Method::PUT, "/idx", Some(body)).await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+}
+
+#[tokio::test]
 async fn disabling_soft_deletes_is_illegal_argument() {
     let body = json!({"settings": {"soft_deletes.enabled": false}});
     let (s, r) = call(&app(), Method::PUT, "/idx", Some(body)).await;

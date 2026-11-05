@@ -177,6 +177,16 @@ pub async fn create(
         check_runtime_types(&body["mappings"])?;
         index.mappings = Mappings::deserialize(&body["mappings"]).map_err(mapping_error)?;
     }
+    if let Some((reason, cause)) = es_index::disk::index_sort_error(&index, &name) {
+        let error = AppError::IllegalArgument(reason);
+        return Err(match cause {
+            Some(c) => AppError::Caused(
+                Box::new(error),
+                json!({"type": "illegal_argument_exception", "reason": c}),
+            ),
+            None => error,
+        });
+    }
     for (alias, meta) in body["aliases"].as_object().into_iter().flatten() {
         reject_bad_scalars(alias, meta)?;
         index
