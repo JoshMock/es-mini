@@ -1456,21 +1456,21 @@ const SEGS_PER_TIER: f64 = 8.0;
 const MAX_MERGE_AT_ONCE: usize = 16;
 const DELETES_PCT_ALLOWED: f64 = 20.0;
 
-/// Lucene 10.5.1 `TieredMergePolicy.findMerges`' first merge (natural merges, search
-/// concurrency 1) of segments given as `(bytes, max_doc, del_count)`: the positions of a few
-/// similar-size segments to merge into at most [`MAX_MERGED_SEGMENT`] bytes, or none while the
-/// index is within its segment and deleted-doc budgets.
-// ponytail: one merge per commit and ties broken by position, not name; Lucene may pick several
-fn find_merge(segments: &[(u64, i32, i32)]) -> Vec<usize> {
-    struct Seg {
+/// Lucene 10.5.1 `TieredMergePolicy.findMerges` (natural merges, search concurrency 1) of
+/// segments given as `(name, bytes, max_doc, del_count)`: per merge, the positions of a few
+/// similar-size segments to merge into at most [`MAX_MERGED_SEGMENT`] bytes, picked until the
+/// rest are within the index's segment and deleted-doc budgets (at most one of the maximum size).
+fn find_merges(segments: &[(&str, u64, i32, i32)]) -> Vec<Vec<usize>> {
+    struct Seg<'a> {
         at: usize,
+        name: &'a str,
         total: u64,
         bytes: u64,
         max_doc: f64,
         del: f64,
     }
     let mut segs: Vec<Seg> = (segments.iter().enumerate())
-        .map(|(at, &(total, max_doc, del))| {
+        .map(|(at, &(name, total, max_doc, del))| {
             let (max_doc, del) = (f64::from(max_doc), f64::from(del));
             let live = if max_doc <= 0.0 {
                 1.0
@@ -1480,6 +1480,7 @@ fn find_merge(segments: &[(u64, i32, i32)]) -> Vec<usize> {
             let bytes = (total as f64 * live) as u64;
             Seg {
                 at,
+                name,
                 total,
                 bytes,
                 max_doc,
@@ -1487,7 +1488,7 @@ fn find_merge(segments: &[(u64, i32, i32)]) -> Vec<usize> {
             }
         })
         .collect();
-    segs.sort_by_key(|s| std::cmp::Reverse(s.bytes));
+    segs.sort_by(|a, b| b.bytes.cmp(&a.bytes).then(a.name.cmp(b.name)));
     let total_max_doc: f64 = segs.iter().map(|s| s.max_doc).sum();
     let total_del_pct = 100.0 * segs.iter().map(|s| s.del).sum::<f64>() / total_max_doc;
     let mut allowed_del = DELETES_PCT_ALLOWED * total_max_doc / 100.0;
@@ -1516,59 +1517,70 @@ fn find_merge(segments: &[(u64, i32, i32)]) -> Vec<usize> {
         bytes_left -= (SEGS_PER_TIER * level as f64) as u64;
         level = (level * merge_factor as u64).min(MAX_MERGED_SEGMENT);
     }
-    if segs.len() as f64 <= allowed.max(SEGS_PER_TIER)
-        && segs.iter().map(|s| s.del).sum::<f64>() <= allowed_del.max(0.0).floor()
-    {
-        return vec![];
-    }
+    let (allowed, allowed_del) = (allowed.max(SEGS_PER_TIER), allowed_del.max(0.0).floor());
     let floor = |b: u64| b.max(FLOOR_SEGMENT) as f64;
-    let mut best: Option<(f64, Vec<&Seg>)> = None;
-    for start in 0..segs.len() {
-        let (mut merge, mut bytes, mut too_large) = (Vec::<&Seg>::new(), 0, false);
-        for s in &segs[start..] {
-            if merge.len() >= MAX_MERGE_AT_ONCE
-                || (merge.len() >= merge_factor && bytes >= FLOOR_SEGMENT)
-                || bytes >= MAX_MERGED_SEGMENT
+    let (mut merges, mut have_large) = (vec![], false);
+    while !segs.is_empty()
+        && (segs.len() as f64 > allowed || segs.iter().map(|s| s.del).sum::<f64>() > allowed_del)
+    {
+        let mut best: Option<(f64, Vec<&Seg>, bool)> = None;
+        for start in 0..segs.len() {
+            let (mut merge, mut bytes, mut too_large) = (Vec::<&Seg>::new(), 0, false);
+            for s in &segs[start..] {
+                if merge.len() >= MAX_MERGE_AT_ONCE
+                    || (merge.len() >= merge_factor && bytes >= FLOOR_SEGMENT)
+                    || bytes >= MAX_MERGED_SEGMENT
+                {
+                    break;
+                }
+                if bytes + s.bytes > MAX_MERGED_SEGMENT {
+                    too_large = true;
+                    // Try packing smaller segments in instead.
+                    if !merge.is_empty() {
+                        continue;
+                    }
+                }
+                merge.push(s);
+                bytes += s.bytes;
+            }
+            let first = merge[0];
+            // Skip merges that grow their largest segment by under 50%, unless they reclaim many of
+            // its deletes: they would rewrite it again and again.
+            if !too_large
+                && (bytes as f64) < first.bytes as f64 * 1.5
+                && first.del < first.max_doc * DELETES_PCT_ALLOWED / 100.0
             {
+                continue;
+            }
+            if merge.len() == 1 && first.del == 0.0 {
+                continue;
+            }
+            if best.is_some() && !too_large && merge.len() < merge_factor {
                 break;
             }
-            if bytes + s.bytes > MAX_MERGED_SEGMENT {
-                too_large = true;
-                // Try packing smaller segments in instead.
-                if !merge.is_empty() {
-                    continue;
-                }
+            let skew = if too_large {
+                1.0 / merge_factor as f64
+            } else {
+                floor(first.bytes) / merge.iter().map(|s| floor(s.bytes)).sum::<f64>()
+            };
+            let before: u64 = merge.iter().map(|s| s.total).sum();
+            let score = skew * (bytes as f64).powf(0.05) * (bytes as f64 / before as f64).powi(2);
+            if best.as_ref().is_none_or(|(b, ..)| score < *b) {
+                best = Some((score, merge, too_large));
             }
-            merge.push(s);
-            bytes += s.bytes;
         }
-        let first = merge[0];
-        // Skip merges that grow their largest segment by under 50%, unless they reclaim many of
-        // its deletes: they would rewrite it again and again.
-        if !too_large
-            && (bytes as f64) < first.bytes as f64 * 1.5
-            && first.del < first.max_doc * DELETES_PCT_ALLOWED / 100.0
-        {
-            continue;
-        }
-        if merge.len() == 1 && first.del == 0.0 {
-            continue;
-        }
-        if best.is_some() && !too_large && merge.len() < merge_factor {
+        let Some((_, merge, too_large)) = best else {
             break;
-        }
-        let skew = if too_large {
-            1.0 / merge_factor as f64
-        } else {
-            floor(first.bytes) / merge.iter().map(|s| floor(s.bytes)).sum::<f64>()
         };
-        let before: u64 = merge.iter().map(|s| s.total).sum();
-        let score = skew * (bytes as f64).powf(0.05) * (bytes as f64 / before as f64).powi(2);
-        if best.as_ref().is_none_or(|(b, _)| score < *b) {
-            best = Some((score, merge));
+        let picked: Vec<usize> = merge.iter().map(|s| s.at).collect();
+        // Like Lucene, a second merge of the maximum size waits for a later commit.
+        if !have_large || !too_large {
+            have_large |= too_large;
+            merges.push(picked.clone());
         }
+        segs.retain(|s| !picked.contains(&s.at));
     }
-    best.map_or(vec![], |(_, merge)| merge.iter().map(|s| s.at).collect())
+    merges
 }
 
 fn link(from: &Path, to: &Path) -> es_codec::Result<()> {
@@ -1792,31 +1804,60 @@ fn ours(mut seg: es_codec::SegmentCommitInfo, empty: &[String]) -> es_codec::Seg
     seg
 }
 
-/// Merges the segments of `infos` that [`find_merge`] picks into one new segment of their live
-/// documents, in the first one's place, as Lucene's `SegmentInfos.applyMergeChanges` does. Like
-/// Lucene's `SegmentMerger`, it appends the segments' live docs in the merge's order, copying
-/// each format from them a field at a time, postings a term at a time, and stored fields a doc
-/// at a time. Fields a segment leaves out without listing them [`EMPTY`] are left out of the
-/// merge.
-// ponytail: holds one field's merged doc values, norms and points at a time, plus the new
-// segment's encoded index files until it is written. Lucene streams both (doc by doc, to its
-// outputs); do that if one field or a segment's index outgrows memory.
+/// Merges the segments of `infos` as [`find_merges`] picks, each merge into one new segment
+/// of its live documents in the first one's place, as Lucene's `SegmentInfos.applyMergeChanges`
+/// does. Like Lucene's `SegmentMerger`, it appends the segments' live docs in the merge's order,
+/// copying each format from them a field at a time, postings a term at a time, and stored fields
+/// a doc at a time. Fields a segment leaves out without listing them [`EMPTY`] are left out of
+/// the merge.
 fn merge(
     dir: &Path,
     infos: &mut SegmentInfos,
+    compound_format: Option<&str>,
+) -> es_codec::Result<()> {
+    let sizes: Vec<_> = (infos.segments.iter())
+        .map(|s| {
+            let (bytes, max_doc, del) = segment_size(dir, s);
+            (s.name.clone(), bytes, max_doc, del)
+        })
+        .collect();
+    let named: Vec<_> = (sizes.iter())
+        .map(|(name, b, m, d)| (name.as_str(), *b, *m, *d))
+        .collect();
+    for picked in find_merges(&named) {
+        // Positions move as earlier merges replace their segments.
+        let picked: Vec<usize> = (picked.iter())
+            .filter_map(|&at| (infos.segments.iter()).position(|s| s.name == sizes[at].0))
+            .collect();
+        merge_segments(dir, infos, &picked, compound_format)?;
+    }
+    Ok(())
+}
+
+/// A segment's `(bytes, max_doc, del_count)`.
+fn segment_size(dir: &Path, s: &es_codec::SegmentCommitInfo) -> (u64, i32, i32) {
+    let files = s.info.files.iter();
+    let bytes = files.filter_map(|f| std::fs::metadata(dir.join(f)).ok());
+    (bytes.map(|m| m.len()).sum(), s.info.max_doc, s.del_count)
+}
+
+/// Merges the segments of `infos` at `picked` (see [`merge`]).
+// ponytail: holds one field's merged doc values, norms and points at a time, plus the new
+// segment's encoded index files until it is written. Lucene streams both (doc by doc, to its
+// outputs); do that if one field or a segment's index outgrows memory.
+fn merge_segments(
+    dir: &Path,
+    infos: &mut SegmentInfos,
+    picked: &[usize],
     compound_format: Option<&str>,
 ) -> es_codec::Result<()> {
     use es_codec::{
         field_infos::DocValuesType as Dv,
         segment_writer::{DocValuesData, FieldData, SegmentWriter},
     };
-    let size = |s: &es_codec::SegmentCommitInfo| {
-        let files = s.info.files.iter();
-        let bytes = files.filter_map(|f| std::fs::metadata(dir.join(f)).ok());
-        (bytes.map(|m| m.len()).sum(), s.info.max_doc, s.del_count)
-    };
-    let sizes: Vec<_> = infos.segments.iter().map(size).collect();
-    let picked = find_merge(&sizes);
+    let sizes: Vec<_> = (infos.segments.iter())
+        .map(|s| segment_size(dir, s))
+        .collect();
     let Some(&first) = picked.iter().min() else {
         return Ok(());
     };
@@ -2364,10 +2405,26 @@ mod tests {
     #[test]
     fn a_merge_writes_at_most_the_max_merged_segment_size() {
         let gb = 1 << 30;
-        assert!(find_merge(&[(gb, 100, 0); 9]).is_empty());
+        assert!(find_merges(&[("_0", gb, 100, 0); 9]).is_empty());
         // Twelve 1.1gb segments exceed the 9 allowed; only four fit under 5gb.
-        let picked = find_merge(&[(gb * 11 / 10, 100, 0); 12]);
-        assert_eq!(picked, [0, 1, 2, 3]);
+        let names: Vec<String> = (0..12).map(|i| format!("_{i:02}")).collect();
+        let segments: Vec<_> = (names.iter())
+            .map(|n| (n.as_str(), gb * 11 / 10, 100, 0))
+            .collect();
+        assert_eq!(find_merges(&segments), [[0, 1, 2, 3]]);
+    }
+
+    #[test]
+    fn disk_fidelity_merges_pick_several_and_break_ties_by_name() {
+        // Thirty 1mb segments, whose names sort apart from their positions (`_10` before `_2`):
+        // like Lucene, two merges of the first sixteen and the other fourteen by name.
+        let names: Vec<String> = (0..30).map(|i| format!("_{i}")).collect();
+        let segments: Vec<_> = (names.iter())
+            .map(|n| (n.as_str(), 1 << 20, 10, 0))
+            .collect();
+        let first = [0, 1, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 2, 20, 21, 22];
+        let second = [23, 24, 25, 26, 27, 28, 29, 3, 4, 5, 6, 7, 8, 9];
+        assert_eq!(find_merges(&segments), [&first[..], &second[..]]);
     }
 
     #[test]
