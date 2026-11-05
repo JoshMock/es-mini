@@ -232,6 +232,72 @@ impl FieldMapping {
         }
     }
 
+    /// Why Elasticsearch rejects `v` as a value of this integer field, if it is out of range
+    /// (NumberFieldMapper parsing through AbstractXContentParser and Jackson); `token` is the
+    /// JSON text of a number. `None` for values in range (fractions truncate), malformed values
+    /// and other field types.
+    pub fn out_of_range(&self, v: &Value, token: &str) -> Option<OutOfRange> {
+        let ints = f64::from(i32::MIN)..=f64::from(i32::MAX);
+        let int = match (self, v) {
+            (Self::Long, Value::String(s)) => {
+                return (!long_string_in_range(s)?)
+                    .then(|| OutOfRange::Value(format!("Value [{s}] is out of range for a long")));
+            }
+            (Self::Integer | Self::Short | Self::Byte, Value::String(s)) => {
+                let n = s.trim();
+                let unsigned = n.trim_start_matches(['+', '-']);
+                if unsigned
+                    .bytes()
+                    .any(|b| b.is_ascii_alphabetic() && !b"eE".contains(&b))
+                    && !matches!(unsigned, "Infinity" | "NaN")
+                {
+                    return None;
+                }
+                let n: f64 = n.parse().ok()?;
+                let (range, what) = match self {
+                    Self::Short => (f64::from(i16::MIN)..=f64::from(i16::MAX), "a short"),
+                    _ => (ints, "an integer"),
+                };
+                if !n.is_nan() && !range.contains(&n) {
+                    let why = format!("Value [{s}] is out of range for {what}");
+                    return Some(OutOfRange::Value(why));
+                }
+                // Java's (int) cast: toward zero, NaN to 0
+                n as i64
+            }
+            (Self::Long | Self::Integer | Self::Short | Self::Byte, Value::Number(_)) => {
+                let float = token.contains(['.', 'e', 'E']);
+                let coercion = |range| {
+                    Some(OutOfRange::Coercion(format!(
+                        "Numeric value ({token}) out of range of {range}"
+                    )))
+                };
+                if *self == Self::Long {
+                    let two63 = 2f64.powi(63);
+                    let fits = match float {
+                        true => (-two63..=two63).contains(&token.parse().ok()?),
+                        false => token.parse::<i64>().is_ok(),
+                    };
+                    return match fits {
+                        true => None,
+                        false => coercion("long (-9223372036854775808 - 9223372036854775807)"),
+                    };
+                }
+                let n: f64 = token.parse().ok()?;
+                if !ints.contains(&n) {
+                    return coercion("int (-2147483648 - 2147483647)");
+                }
+                if *self == Self::Short && i16::try_from(n as i64).is_err() {
+                    return coercion("Java short");
+                }
+                n as i64
+            }
+            _ => return None,
+        };
+        (*self == Self::Byte && i8::try_from(int).is_err())
+            .then(|| OutOfRange::Value(format!("Value [{int}] is out of range for a byte")))
+    }
+
     /// A range field's bound as a key (a `gt` or `lte` date rounds up when `round_up`):
     /// `Some(None)` if malformed (Elasticsearch rejects the document), `None` if es-mini's
     /// encoding cannot hold it (a fraction or overflow of an integer type).
@@ -750,10 +816,74 @@ enum Refused {
     },
 }
 
+/// Why Elasticsearch rejects an integer field's value (see [`FieldMapping::out_of_range`]).
+#[derive(Debug, PartialEq)]
+pub enum OutOfRange {
+    /// The reason of an `illegal_argument_exception`
+    Value(String),
+    /// The message of Jackson's `InputCoercionException`, before its location
+    Coercion(String),
+}
+
+/// Whether a string fits a long as AbstractXContentParser.toLong reads it: a decimal truncated
+/// toward zero, with BigDecimal's scale limits (`0e25` is out of range, `1e-25` is 0). `None`
+/// if malformed.
+fn long_string_in_range(s: &str) -> Option<bool> {
+    if s.parse::<i64>().is_ok() {
+        return Some(true);
+    }
+    let (mantissa, exp) = match s.split_once(['e', 'E']) {
+        Some((m, e)) => (m, e.parse::<i64>().ok()?),
+        None => (s, 0),
+    };
+    let unsigned = mantissa.trim_start_matches(['+', '-']);
+    let negative = mantissa.starts_with('-');
+    if mantissa.len() - unsigned.len() > 1 {
+        return None;
+    }
+    let (int, frac) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+    let digits = format!("{int}{frac}");
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let scale = frac.len() as i64 - exp;
+    if scale < -19 {
+        return Some(false);
+    }
+    if scale > 19 {
+        return Some(true);
+    }
+    let digits = digits.trim_start_matches('0');
+    let whole = match usize::try_from(scale) {
+        Ok(scale) => digits[..digits.len().saturating_sub(scale)].to_owned(),
+        Err(_) => format!("{digits}{}", "0".repeat(scale.unsigned_abs() as usize)),
+    };
+    if whole.len() > 19 {
+        return Some(false);
+    }
+    let n = whole.parse::<i128>().unwrap_or(0);
+    Some(i64::try_from(if negative { -n } else { n }).is_ok())
+}
+
 /// Where (1-based line, and column in bytes, as Jackson counts) the first value equal to `v`
 /// under the dotted key `path` starts in the JSON document `raw`, or with `at_name` the key
 /// naming that value.
 pub fn locate(raw: &[u8], path: &str, v: &Value, at_name: bool) -> Option<(usize, usize)> {
+    locate_at(raw, path, v, at_name).map(|at| line_column(raw, at))
+}
+
+/// The 1-based line, and column in bytes, of the byte at `at` in `raw`.
+pub fn line_column(raw: &[u8], at: usize) -> (usize, usize) {
+    let line_start = raw[..at]
+        .iter()
+        .rposition(|b| *b == b'\n')
+        .map_or(0, |i| i + 1);
+    let line = 1 + raw[..at].iter().filter(|b| **b == b'\n').count();
+    (line, at - line_start + 1)
+}
+
+/// The byte offset where [`locate`] finds the value (or key).
+pub fn locate_at(raw: &[u8], path: &str, v: &Value, at_name: bool) -> Option<usize> {
     fn skip_ws(raw: &[u8], at: &mut usize) {
         while raw.get(*at).is_some_and(u8::is_ascii_whitespace) {
             *at += 1;
@@ -835,12 +965,7 @@ pub fn locate(raw: &[u8], path: &str, v: &Value, at_name: bool) -> Option<(usize
             }
         }
     }
-    let line_start = raw[..start]
-        .iter()
-        .rposition(|b| *b == b'\n')
-        .map_or(0, |i| i + 1);
-    let line = 1 + raw[..start].iter().filter(|b| **b == b'\n').count();
-    Some((line, start - line_start + 1))
+    Some(start)
 }
 
 /// Whether `props` holds a field under `path.`.

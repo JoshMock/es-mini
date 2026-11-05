@@ -233,6 +233,122 @@ async fn disk_fidelity_date_nanos_outside_nanosecond_range_are_rejected() {
     }
 }
 
+/// Sends `body` as is, for documents `json!` cannot spell (number tokens, layout).
+async fn raw(app: &axum::Router, method: Method, uri: &str, body: &str) -> serde_json::Value {
+    use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+    let req = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_owned()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+/// Elasticsearch 9.5.5's responses to integer field values out of the field's range: strings and
+/// bytes fail with an illegal_argument_exception, other JSON numbers with Jackson's coercion error,
+/// which names the end of the number and quotes the document. Fractions in range are truncated.
+#[tokio::test]
+async fn disk_fidelity_out_of_range_integers_are_rejected() {
+    let app = app();
+    let mappings = json!({"mappings": {"properties": {
+        "l": {"type": "long"}, "i": {"type": "integer"}, "s": {"type": "short"},
+        "b": {"type": "byte"}, "t": {"type": "keyword"},
+        "o": {"properties": {"n": {"type": "integer"}}}
+    }}});
+    call(&app, Method::PUT, "/i", Some(mappings)).await;
+    let (long, int) = (
+        "long (-9223372036854775808 - 9223372036854775807)",
+        "int (-2147483648 - 2147483647)",
+    );
+    let coercion = |body: &str, token: &str, range: &str, end: &str| {
+        let message = format!("Numeric value ({token}) out of range of {range}");
+        let (line, column) = end.split_once(':').unwrap();
+        let body = match body.len() > 500 {
+            true => format!("{}\"[truncated {} bytes]", &body[..500], body.len() - 500),
+            false => format!("{body}\""),
+        };
+        let at = format!("\n at [Source: (byte[])\"{body}; line: {line}, column: {column}]");
+        json!({
+            "type": "x_content_parse_exception",
+            "reason": format!("[{end}] {message}{at}"),
+            "caused_by": {"type": "input_coercion_exception", "reason": format!("{message}{at}")},
+        })
+    };
+    let check = async |body: &str, what: &str, preview: &str, cause: serde_json::Value| {
+        let [at, field, ty] = what.split(' ').collect::<Vec<_>>()[..] else {
+            panic!()
+        };
+        let r = raw(&app, Method::PUT, "/i/_doc/1", body).await;
+        let reason = format!(
+            "[{at}] failed to parse field [{field}] of type [{ty}] in document with id '1'. \
+             Preview of field's value: '{preview}'"
+        );
+        assert_eq!(r["error"]["reason"], reason, "{body}");
+        assert_eq!(r["error"]["caused_by"], cause, "{body}");
+    };
+    let padded = format!(r#"{{"t": "{}", "i": 3000000000}}"#, "x".repeat(600));
+    let multi_line = "{\n  \"t\": \"é\",\n  \"i\": 3000000000\n}";
+    // (document, "where field type", preview, number, range, where the number ends)
+    #[rustfmt::skip]
+    let coercions = [
+        (r#"{"l": 9223372036854775808}"#, "1:7 l long", "9223372036854775808", "9223372036854775808", long, "1:26"),
+        (r#"{"l": -9223372036854775809}"#, "1:7 l long", "-9223372036854775809", "-9223372036854775809", long, "1:27"),
+        (r#"{"l": 1e20}"#, "1:7 l long", "1.0E20", "1e20", long, "1:11"),
+        (r#"{"l": [1,  1e300 ] }"#, "1:12 l long", "1.0E300", "1e300", long, "1:17"),
+        (r#"{"i": [1, 3000000000]}"#, "1:11 i integer", "3000000000", "3000000000", int, "1:21"),
+        (r#"{"i": -2147483648.5}"#, "1:7 i integer", "-2.1474836485E9", "-2147483648.5", int, "1:20"),
+        (r#"{"i": 1E10}"#, "1:7 i integer", "1.0E10", "1E10", int, "1:11"),
+        (r#"{"o": {"n": 3000000000}}"#, "1:13 o.n integer", "3000000000", "3000000000", int, "1:23"),
+        (multi_line, "3:8 i integer", "3000000000", "3000000000", int, "3:18"),
+        (&padded, "1:616 i integer", "3000000000", "3000000000", int, "1:626"),
+        (r#"{"s": 40000.5}"#, "1:7 s short", "40000.5", "40000.5", "Java short", "1:14"),
+        (r#"{"s": 3000000000}"#, "1:7 s short", "3000000000", "3000000000", int, "1:17"),
+        (r#"{"b": 3000000000}"#, "1:7 b byte", "3000000000", "3000000000", int, "1:17"),
+    ];
+    for (body, what, preview, token, range, end) in coercions {
+        check(body, what, preview, coercion(body, token, range, end)).await;
+    }
+    #[rustfmt::skip]
+    let values = [
+        (r#"{"l": "1e20"}"#, "1:7 l long", "1e20", "Value [1e20] is out of range for a long"),
+        (r#"{"l": "0e25"}"#, "1:7 l long", "0e25", "Value [0e25] is out of range for a long"),
+        (r#"{"l": "9223372036854775808"}"#, "1:7 l long", "9223372036854775808", "Value [9223372036854775808] is out of range for a long"),
+        (r#"{"i": "2147483647.5"}"#, "1:7 i integer", "2147483647.5", "Value [2147483647.5] is out of range for an integer"),
+        (r#"{"o.n": "3000000000"}"#, "1:9 o.n integer", "3000000000", "Value [3000000000] is out of range for an integer"),
+        (r#"{"s": "40000"}"#, "1:7 s short", "40000", "Value [40000] is out of range for a short"),
+        (r#"{"b": 300.7}"#, "1:7 b byte", "300.7", "Value [300] is out of range for a byte"),
+        (r#"{"b": "300.5"}"#, "1:7 b byte", "300.5", "Value [300] is out of range for a byte"),
+        (r#"{"b": "-129"}"#, "1:7 b byte", "-129", "Value [-129] is out of range for a byte"),
+    ];
+    for (body, what, preview, reason) in values {
+        let cause = json!({"type": "illegal_argument_exception", "reason": reason});
+        check(body, what, preview, cause).await;
+    }
+    let bulk = "{\"index\":{\"_index\":\"i\",\"_id\":\"1\"}}\n{\"i\": 3000000000}\n";
+    let r = raw(&app, Method::POST, "/_bulk", bulk).await;
+    let cause = coercion(r#"{"i": 3000000000}"#, "3000000000", int, "1:17");
+    assert_eq!(r["items"][0]["index"]["error"]["caused_by"], cause);
+    for body in [
+        r#"{"l": 1.5}"#,
+        r#"{"l": 9223372036854775807.5}"#,
+        r#"{"l": "9223372036854775807.5"}"#,
+        r#"{"l": "123456789012345678901234e-21"}"#,
+        r#"{"i": "1.5"}"#,
+        r#"{"i": -0}"#,
+        r#"{"b": 127.9}"#,
+        r#"{"b": -128.5}"#,
+        r#"{"b": "-128.9"}"#,
+    ] {
+        let r = raw(&app, Method::PUT, "/i/_doc/1", body).await;
+        assert!(r["result"].is_string(), "{body}: {r}");
+    }
+}
+
 #[tokio::test]
 async fn rejected_document_adds_no_dynamic_mappings() {
     let app = app();

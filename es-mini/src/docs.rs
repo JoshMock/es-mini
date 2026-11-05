@@ -213,6 +213,9 @@ pub fn put_or_create(
             )));
         }
         for (name, m) in &i.mappings.properties {
+            if let Some(error) = out_of_range(raw, id, name, m, &source) {
+                return Err(error);
+            }
             let (format, locale, default) = match m {
                 FieldMapping::Date { format, locale, .. } => {
                     (format, locale, "strict_date_optional_time||epoch_millis")
@@ -238,13 +241,7 @@ pub fn put_or_create(
                     continue;
                 }
                 let text = es_index::postings::text(v);
-                let at = es_index::mapping::locate(raw, name, v, false)
-                    .map_or(String::new(), |(l, c)| format!("[{l}:{c}] "));
-                let error = AppError::DocumentParsing(format!(
-                    "{at}failed to parse field [{name}] of type [{}] in document with id '{id}'. \
-                     Preview of field's value: '{text}'",
-                    m.type_name(),
-                ));
+                let error = failed_to_parse(raw, id, (name, m), v, &text);
                 if let Some(reason) = out_of_range {
                     let cause = json!({"type": "illegal_argument_exception", "reason": reason});
                     return Err(AppError::Caused(Box::new(error), cause));
@@ -277,6 +274,88 @@ pub fn put_or_create(
         current_version,
     })?;
     Ok(reply(&index, id, w, total))
+}
+
+/// Elasticsearch's document_parsing_exception for the value `v` (shown as `preview`) of a field.
+fn failed_to_parse(
+    raw: &[u8],
+    id: &str,
+    (name, m): (&str, &FieldMapping),
+    v: &Value,
+    preview: &str,
+) -> AppError {
+    let at = es_index::mapping::locate(raw, name, v, false)
+        .map_or(String::new(), |(l, c)| format!("[{l}:{c}] "));
+    AppError::DocumentParsing(format!(
+        "{at}failed to parse field [{name}] of type [{}] in document with id '{id}'. \
+         Preview of field's value: '{preview}'",
+        m.mapping_type(),
+    ))
+}
+
+/// Elasticsearch's error for the first value of the integer field `name` out of its range.
+fn out_of_range(
+    raw: &[u8],
+    id: &str,
+    name: &str,
+    m: &FieldMapping,
+    source: &Value,
+) -> Option<AppError> {
+    use es_index::mapping::{OutOfRange, line_column, locate_at};
+    es_index::postings::values(source, name).into_iter().find_map(|v| {
+        let at = locate_at(raw, name, v, false);
+        let token = at.map_or_else(
+            || v.to_string(),
+            |at| {
+                let len = raw[at..].iter().take_while(|b| !b",]} \t\r\n".contains(b));
+                String::from_utf8_lossy(&raw[at..at + len.count()]).into_owned()
+            },
+        );
+        let why = m.out_of_range(v, &token)?;
+        let preview = match v {
+            Value::Number(n) if token.contains(['.', 'e', 'E']) => {
+                es_query::java_double(n.as_f64().unwrap_or(f64::NAN))
+            }
+            Value::Number(_) => token.clone(),
+            v => es_index::postings::text(v),
+        };
+        let error = failed_to_parse(raw, id, (name, m), v, &preview);
+        let cause = match why {
+            OutOfRange::Value(reason) => {
+                json!({"type": "illegal_argument_exception", "reason": reason})
+            }
+            OutOfRange::Coercion(message) => {
+                // Jackson names where the number ends
+                let (line, column) = line_column(raw, at.unwrap_or(0) + token.len());
+                let at = format!(
+                    "\n at [Source: {}; line: {line}, column: {column}]",
+                    jackson_source(raw)
+                );
+                json!({
+                    "type": "x_content_parse_exception",
+                    "reason": format!("[{line}:{column}] {message}{at}"),
+                    "caused_by": {"type": "input_coercion_exception", "reason": format!("{message}{at}")},
+                })
+            }
+        };
+        Some(AppError::Caused(Box::new(error), cause))
+    })
+}
+
+/// Jackson's description of a document read from bytes: its first 500 bytes, quoted, with
+/// control characters other than line breaks escaped.
+fn jackson_source(raw: &[u8]) -> String {
+    let text: String = String::from_utf8_lossy(&raw[..raw.len().min(500)])
+        .chars()
+        .map(|c| match c.is_control() && !matches!(c, '\r' | '\n') {
+            true => format!("\\u{:04X}", c as u32),
+            false => c.to_string(),
+        })
+        .collect();
+    match raw.len().saturating_sub(500) {
+        0 => format!("(byte[])\"{text}\""),
+        cut => format!("(byte[])\"{text}\"[truncated {cut} bytes]"),
+    }
 }
 
 pub(crate) fn force_refresh(
