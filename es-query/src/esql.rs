@@ -4350,6 +4350,43 @@ mod tests {
         assert!(run(&indices, "FROM i | KEEP _id").is_err());
     }
 
+    /// STATS ... BY one column groups by each index's `Group::ords` (a multi-valued key by
+    /// hashing it): an uncached table of two indices groups like the cached one of both.
+    #[test]
+    fn esql_speed_uncached_stats_by_groups_like_cached() {
+        let index = |docs: &[serde_json::Value]| {
+            let mut i = Index::default();
+            for (n, d) in docs.iter().enumerate() {
+                i.put(&n.to_string(), d.clone());
+            }
+            i
+        };
+        use serde_json::json;
+        let a = [
+            json!({"k": "x"}),
+            json!({"k": ["x", "y"]}),
+            json!({"k": "z"}),
+        ];
+        let b = [
+            json!({"k": "y"}),
+            json!({}),
+            json!({"k": "x"}),
+            json!({"k": "z"}),
+        ];
+        let both = [&a[..], &b[..]].concat();
+        let indices = BTreeMap::from([
+            ("a".to_owned(), index(&a)),
+            ("b".to_owned(), index(&b)),
+            ("ab".to_owned(), index(&both)),
+        ]);
+        let q = |from: &str| format!("FROM {from} | STATS c = COUNT(*) BY k | SORT k");
+        let (cached, uncached) = (run(&indices, &q("ab")), run(&indices, &q("a,b")));
+        let groups = [(3, "x"), (2, "y"), (2, "z")].map(|(c, k)| vec![c.into(), k.into()]);
+        let groups = [&groups[..], &[vec![1.into(), Value::Null]]].concat();
+        assert_eq!(cached.unwrap().values, groups);
+        assert_eq!(uncached.unwrap().values, groups);
+    }
+
     /// Equal STATS keys hash alike, so they share a group.
     #[test]
     fn after_bench_equal_group_keys_hash_alike() {
