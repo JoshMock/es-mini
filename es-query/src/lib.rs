@@ -338,6 +338,18 @@ impl<'a> Searcher<'a> {
         }
     }
 
+    /// `vals` of `field` as its doc values hold them: an integer field's numbers truncated
+    /// toward zero (see [`es_index::json_int`]).
+    fn doc_values<'v>(&self, field: &str, vals: Vec<&'v Value>) -> Vec<Cow<'v, Value>> {
+        let int = (self.index.mappings.field(field)).is_some_and(FieldMapping::is_integer);
+        (vals.into_iter())
+            .map(|v| match es_index::json_int(v) {
+                Some(n) if int && !v.is_i64() => Cow::Owned(n.into()),
+                _ => Cow::Borrowed(v),
+            })
+            .collect()
+    }
+
     /// [`kind`](Self::kind) for document `d` (see [`at`](Self::at)).
     fn doc_kind<'f>(&self, field: &'f str, d: &Document) -> (Kind, &'f str) {
         let (kind, path) = self.kind(field);
@@ -981,9 +993,11 @@ impl<'a> Searcher<'a> {
                         _ => Ordering::Less,
                     },
                 };
-                (indexed(kind, values(&d.source, path)).into_iter())
-                    .any(|v| in_range(bounds, |b| cmp(v, b)))
-                    .then_some(1.0)
+                (self
+                    .doc_values(field, indexed(kind, values(&d.source, path)))
+                    .iter())
+                .any(|v| in_range(bounds, |b| cmp(v, b)))
+                .then_some(1.0)
             }
             Query::Interval {
                 field,
@@ -1247,7 +1261,7 @@ impl<'a> Searcher<'a> {
         let matched = |w: &String| match kind {
             Kind::Number => {
                 let w = Value::String(w.clone());
-                vals.iter().any(|v| match (int(v), int(&w)) {
+                (self.doc_values(field, vals.clone()).iter()).any(|v| match (int(v), int(&w)) {
                     (Some(a), Some(b)) => a == b,
                     _ => num(v).is_some_and(|a| num(&w) == Some(a)),
                 })
@@ -1397,7 +1411,10 @@ impl<'a> Searcher<'a> {
                             (format, locale)
                         }
                         Some(FieldMapping::Boolean) => return bool_sort_value(f, vals),
-                        _ => return sort_value(f, vals),
+                        _ => {
+                            let vals = self.doc_values(field, vals);
+                            return sort_value(f, vals.iter().map(|v| &**v).collect());
+                        }
                     };
                     let instants: Vec<Value> = (vals.into_iter())
                         .filter_map(|v| instant(format.as_deref(), locale.as_deref(), v))
@@ -2606,7 +2623,7 @@ mod tests {
         let mut ix = Index::default();
         ix.mappings
             .properties
-            .insert("n".into(), FieldMapping::Long);
+            .insert("n".into(), FieldMapping::Double);
         for (id, n) in [
             ("a", json!(5)),
             ("b", json!(3)),

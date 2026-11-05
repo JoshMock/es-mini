@@ -228,6 +228,8 @@ impl Field {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Key {
     Number,
+    /// A number truncated toward zero, as integer fields index it.
+    Integer,
     /// Epoch millis, with the mapping's `format` and `locale`.
     Date(Option<String>, Option<String>),
 }
@@ -239,6 +241,7 @@ impl Key {
             | FieldMapping::DateNanos { format, locale } => {
                 Some(Key::Date(format.clone(), locale.clone()))
             }
+            m if m.is_integer() => Some(Key::Integer),
             m if m.is_numeric() => Some(Key::Number),
             _ => None,
         }
@@ -248,6 +251,7 @@ impl Key {
     fn read(&self, v: &Value) -> Option<i64> {
         let x = match self {
             Key::Number => crate::json_num(v)?,
+            Key::Integer => crate::json_int(v)? as f64,
             Key::Date(format, locale) => {
                 crate::date_millis(format.as_deref(), locale.as_deref(), v)? as f64
             }
@@ -494,7 +498,8 @@ impl crate::Shard {
         // a date range's bounds are epoch millis once resolved (es-query's `resolve_dates`)
         let read_bound = |b: &Value| match (&key, b.as_i64()) {
             (Key::Date(..), Some(t)) => Key::Number.read(&t.into()),
-            _ => key.read(b),
+            (Key::Date(..), None) => key.read(b),
+            _ => Key::Number.read(b),
         };
         let read = |b: Option<&Value>| b.map_or(Some(None), |b| read_bound(b).map(Some));
         let [gt, gte, lt, lte] = bounds.map(read);
@@ -527,10 +532,10 @@ impl crate::Shard {
         let key = Key::of(mapping)?;
         let all_visible = self.docs.last().is_none_or(|d| d.seq_no < visible);
         let plain_bounds = [gt, gte, lt, lte].into_iter().flatten().all(plain);
-        if key != Key::Number || !all_visible || !plain_bounds {
+        if matches!(key, Key::Date(..)) || !all_visible || !plain_bounds {
             return None;
         }
-        let read = |b: Option<&Value>| b.and_then(|b| key.read(b));
+        let read = |b: Option<&Value>| b.and_then(|b| Key::Number.read(b));
         // the tighter bound of each side; at the same key, the strict one
         let lo = [read(gt).map(|k| (k, true)), read(gte).map(|k| (k, false))];
         let hi = [read(lt).map(|k| (k, false)), read(lte).map(|k| (k, true))];
@@ -805,7 +810,7 @@ mod tests {
         let mut i = Index::default();
         i.mappings
             .properties
-            .insert("n".into(), crate::FieldMapping::Long);
+            .insert("n".into(), crate::FieldMapping::Double);
         i.put("1", json!({"n": 5}));
         i.put("2", json!({"n": 3.5}));
         i.put("3", json!({"n": 5}));

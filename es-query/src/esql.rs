@@ -1136,8 +1136,8 @@ fn cell(source: &Value, column: &str, multi_field: bool) -> Value {
     }
 }
 
-/// A source value as ES|QL reads it from doc values: dates as ISO strings, multi-values sorted,
-/// keywords deduplicated. Text has no doc values and keeps source order.
+/// A source value as ES|QL reads it from doc values: dates as ISO strings, integers truncated
+/// toward zero, multi-values sorted, keywords deduplicated. Text has no doc values and keeps source order.
 fn doc_value(v: Value, ty: &str, m: Option<&FieldMapping>) -> Value {
     let mut vals = match v {
         Value::Array(a) => a,
@@ -1155,6 +1155,13 @@ fn doc_value(v: Value, ty: &str, m: Option<&FieldMapping>) -> Value {
             .iter()
             .filter_map(|v| es_index::date_millis(format.as_deref(), locale.as_deref(), v))
             .map(|ms| es_index::iso_date(ms).into())
+            .collect();
+    }
+    if m.is_some_and(FieldMapping::is_integer) {
+        vals = vals
+            .iter()
+            .filter_map(es_index::json_int)
+            .map(Value::from)
             .collect();
     }
     if ty != "text" {

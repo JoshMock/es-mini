@@ -1639,6 +1639,14 @@ pub fn json_num(v: &Value) -> Option<f64> {
     v.as_f64().or_else(|| v.as_str()?.parse().ok())
 }
 
+/// A JSON number, or a string holding one, as an integer field indexes it: fractions truncated
+/// toward zero, as NumberFieldMapper's `coerce` (on by default) does.
+pub fn json_int(v: &Value) -> Option<i64> {
+    (v.as_i64())
+        .or_else(|| v.as_str()?.parse().ok())
+        .or_else(|| json_num(v).map(|f| f as i64))
+}
+
 /// Parses an ES time value (`250ms`, `60s`, `2m`, `1h`, `1d`); `None` for `-1` or junk.
 pub fn parse_time(v: &str) -> Option<Duration> {
     let ms = index_settings::time_millis(v, "").ok()?;

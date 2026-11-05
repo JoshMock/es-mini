@@ -706,3 +706,73 @@ async fn routed_shard_ids_name_the_profiled_shard() {
     let id = format!("[{}][t][2]", crate::nodes::NODE_ID);
     assert_eq!(shards[0]["id"], id);
 }
+
+/// Integer fields index a fraction truncated toward zero (NumberFieldMapper with `coerce`), so
+/// queries, sorts, fields and aggregations read `1.5` as 1, as Elasticsearch 9.5.5 does.
+async fn fractions_in_integer_fields() -> axum::Router {
+    let app = app();
+    let mappings = json!({"mappings": {"properties": {
+        "n": {"type": "integer"}, "l": {"type": "long"},
+    }}});
+    call(&app, Method::PUT, "/i", Some(mappings)).await;
+    for (id, doc) in [
+        ("1", json!({"n": 1.5, "l": "2.9"})),
+        ("2", json!({"n": "-2.7", "l": -3.5})),
+        ("3", json!({"n": 3, "l": 3})),
+    ] {
+        call(&app, Method::PUT, &format!("/i/_doc/{id}"), Some(doc)).await;
+    }
+    app
+}
+
+async fn hit_ids(app: &axum::Router, body: serde_json::Value) -> Vec<String> {
+    let (s, r) = call(app, Method::POST, "/i/_search", Some(body)).await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    let mut ids: Vec<String> = (r["hits"]["hits"].as_array().unwrap().iter())
+        .map(|h| h["_id"].as_str().unwrap().to_owned())
+        .collect();
+    ids.sort();
+    ids
+}
+
+#[tokio::test]
+async fn disk_fidelity_integer_fields_match_fractions_truncated() {
+    let app = fractions_in_integer_fields().await;
+    let q = |q| hit_ids(&app, json!({"query": q}));
+    assert_eq!(q(json!({"term": {"n": 1}})).await, ["1"]);
+    assert!(q(json!({"term": {"n": 1.5}})).await.is_empty());
+    assert_eq!(q(json!({"term": {"n": -2}})).await, ["2"]);
+    assert_eq!(q(json!({"range": {"n": {"gte": 1.2}}})).await, ["3"]);
+    assert_eq!(q(json!({"range": {"n": {"gte": 1, "lt": 2}}})).await, ["1"]);
+    assert_eq!(q(json!({"terms": {"l": [2, -3]}})).await, ["1", "2"]);
+    assert_eq!(q(json!({"match": {"l": 2}})).await, ["1"]);
+}
+
+#[tokio::test]
+async fn disk_fidelity_integer_fields_sort_fetch_and_aggregate_fractions_truncated() {
+    let app = fractions_in_integer_fields().await;
+    let aggs =
+        json!({"size": 0, "aggs": {"s": {"sum": {"field": "n"}}, "t": {"terms": {"field": "l"}}}});
+    let (_, r) = call(&app, Method::POST, "/i/_search", Some(aggs)).await;
+    assert_eq!(r["aggregations"]["s"]["value"], 2.0);
+    let keys: Vec<_> = (r["aggregations"]["t"]["buckets"].as_array().unwrap().iter())
+        .map(|b| b["key"].clone())
+        .collect();
+    assert_eq!(keys, [-3, 2, 3]);
+    let esql = json!({"query": "FROM i | KEEP n, l | SORT n"});
+    let (_, r) = call(&app, Method::POST, "/_query", Some(esql)).await;
+    assert_eq!(r["values"], json!([[-2, -3], [1, 2], [3, 3]]));
+    let body = json!({"sort": [{"n": "asc"}], "fields": ["n", "l"]});
+    let (_, r) = call(&app, Method::POST, "/i/_search", Some(body)).await;
+    let hits: Vec<_> = (r["hits"]["hits"].as_array().unwrap().iter())
+        .map(|h| json!([h["_id"], h["sort"], h["fields"]]))
+        .collect();
+    assert_eq!(
+        hits,
+        [
+            json!(["2", [-2], {"l": [-3], "n": [-2]}]),
+            json!(["1", [1], {"l": [2], "n": [1]}]),
+            json!(["3", [3], {"l": [3], "n": [3]}]),
+        ]
+    );
+}

@@ -1617,9 +1617,7 @@ fn java_string(v: &Value) -> String {
 fn doc_value(s: &Searcher, field: &str, mapping: &FieldMapping, v: &Value) -> Option<Value> {
     use FieldMapping as M;
     match mapping {
-        M::Long | M::Integer | M::Short | M::Byte => {
-            int(v).or_else(|| num(v).map(|f| f as i64)).map(Value::from)
-        }
+        M::Long | M::Integer | M::Short | M::Byte => es_index::json_int(v).map(Value::from),
         M::Double => num(v).map(Value::from),
         M::Float => num(v).map(|f| Value::from(f64::from(f as f32))),
         M::HalfFloat => num(v).map(|f| {

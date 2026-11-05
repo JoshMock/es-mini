@@ -202,6 +202,11 @@ impl FieldMapping {
         matches!(self.type_name(), "long" | "integer" | "double")
     }
 
+    /// Whether this maps a long, integer, short or byte field.
+    pub fn is_integer(&self) -> bool {
+        matches!(self.type_name(), "long" | "integer")
+    }
+
     /// Whether this maps a range field.
     pub fn is_range(&self) -> bool {
         matches!(
