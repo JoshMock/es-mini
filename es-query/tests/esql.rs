@@ -2857,3 +2857,78 @@ fn esql_semantics_2_zero_or_negative_spans_fail() {
         );
     }
 }
+
+/// Like Elasticsearch 9.5.5's optimizer (checked against a live node), a constant expression
+/// that fails evaluating fails the query even over no rows, once ROW and EVAL constants are
+/// propagated; a CASE or COALESCE that is constant as a whole folds only the branch it takes.
+#[test]
+fn esql_semantics_2_folding_a_constant_fails_the_query() {
+    let overflow = Err(EsqlError::Failed {
+        status: 500,
+        kind: "arithmetic_exception",
+        reason: "long overflow".into(),
+    });
+    let negative = Err(EsqlError::Failed {
+        status: 400,
+        kind: "illegal_argument_exception",
+        reason: "Length parameter cannot be negative, found [-1]".into(),
+    });
+    for (query, expected) in [
+        (
+            "ROW x = 9223372036854775807 | WHERE false | EVAL y = ROUND(x, -1)",
+            &overflow,
+        ),
+        (
+            "ROW a = 1 | WHERE false | EVAL y = SUBSTRING(\"abc\", 1, a - 2)",
+            &negative,
+        ),
+        (
+            "FROM people | WHERE false | EVAL y = SUBSTRING(\"abc\", 1, -1)",
+            &negative,
+        ),
+        (
+            "FROM people | EVAL n = -1 | WHERE false | EVAL y = SUBSTRING(\"x\", 1, n)",
+            &negative,
+        ),
+        (
+            "FROM people | EVAL y = CASE(name == \"zz\", SUBSTRING(\"abc\", 1, -1), \"x\")",
+            &negative,
+        ),
+        (
+            "FROM people | EVAL n = -1 | RENAME n AS q | WHERE false | EVAL y = SUBSTRING(\"x\", 1, q)",
+            &negative,
+        ),
+        (
+            "FROM people | EVAL y = SUBSTRING(\"abc\", 1, -1) | DROP y | LIMIT 0",
+            &negative,
+        ),
+        // AND and OR read both sides; a constant inside a non-constant one still folds.
+        (
+            "ROW a = 1 | EVAL y = false AND ROUND(9223372036854775807, -1) > 0",
+            &overflow,
+        ),
+        (
+            "FROM people | WHERE age > 100 OR ROUND(9223372036854775807, -1) > 0",
+            &overflow,
+        ),
+        (
+            "FROM people | WHERE false | STATS m = MAX(ROUND(9223372036854775807, -1))",
+            &overflow,
+        ),
+        // Folding comes first, so its failure wins over one evaluating a row.
+        (
+            "FROM people | EVAL a = SUBSTRING(name, 1, -1), b = ROUND(9223372036854775807, -1)",
+            &overflow,
+        ),
+    ] {
+        assert_eq!(&run(&indices(), query), expected, "{query}");
+    }
+    for query in [
+        "ROW a = 1 | EVAL y = CASE(a > 5, SUBSTRING(\"abc\", 1, -1), \"x\")",
+        "ROW a = 1 | EVAL y = COALESCE(\"x\", SUBSTRING(\"abc\", 1, -1))",
+        "FROM people | EVAL y = CASE(name == \"zz\", SUBSTRING(name, 1, -1), \"x\")",
+        "FROM people | WHERE name == \"zz\" | EVAL y = SUBSTRING(name, 1, -1)",
+    ] {
+        assert!(run(&indices(), query).is_ok(), "{query}");
+    }
+}

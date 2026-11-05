@@ -57,8 +57,6 @@ thread_local! {
 }
 
 /// Fails the running query with `kind` and `reason` (once `run` finishes); null meanwhile.
-// ponytail: fails only when a row is evaluated; ES also fails folding a constant expression,
-// even over no rows (`ROW x = 9223372036854775807 | WHERE false | EVAL ROUND(x, -1)`)
 fn fail(status: u16, kind: &'static str, reason: String) -> Option<Value> {
     FAILURE.with_borrow_mut(|f| {
         f.get_or_insert(EsqlError::Failed {
@@ -2246,16 +2244,68 @@ fn in_base(f: &str, s: &Value, base: &Value) -> Option<Value> {
 /// Calls `f` on `e` and on each expression in it, outermost first.
 fn walk<'e>(e: &'e Expr, f: &mut impl FnMut(&'e Expr)) {
     f(e);
+    children(e, &mut |c| walk(c, f));
+}
+
+/// Calls `f` on each expression `e` is made of.
+fn children<'e>(e: &'e Expr, f: &mut impl FnMut(&'e Expr)) {
     match e {
-        Expr::Call(_, args, ..) => args.iter().for_each(|a| walk(a, f)),
+        Expr::Call(_, args, ..) => args.iter().for_each(f),
         Expr::Field(..) | Expr::Lit(..) | Expr::Interval(..) => {}
-        Expr::Not(x, _) | Expr::IsNull(x, ..) | Expr::Neg(x, ..) | Expr::Like(x, ..) => walk(x, f),
+        Expr::Not(x, _) | Expr::IsNull(x, ..) | Expr::Neg(x, ..) | Expr::Like(x, ..) => f(x),
         Expr::Cmp(_, a, b, ..)
         | Expr::And(a, b, _)
         | Expr::Or(a, b, _)
         | Expr::Arith(_, a, b, ..) => {
-            walk(a, f);
-            walk(b, f);
+            f(a);
+            f(b);
+        }
+    }
+}
+
+/// Evaluates each constant expression in the commands once, outermost first, as Elasticsearch's
+/// optimizer folds them (after propagating the constants ROW and EVAL assign), so the failures
+/// they raise fail the query even over no rows.
+fn fold_constants(cmds: &[Command]) {
+    // The value of `e` if it is constant (null as `Value::Null`).
+    fn fold(e: &Expr, consts: &Row) -> Option<Value> {
+        if names(e).iter().all(|f| consts.contains_key(f)) {
+            return Some(eval(e, consts).unwrap_or_default());
+        }
+        children(e, &mut |c| drop(fold(c, consts)));
+        None
+    }
+    let mut consts = Row::new();
+    for cmd in cmds {
+        match cmd {
+            Command::Eval(named) => {
+                for (name, e) in named {
+                    match fold(e, &consts) {
+                        Some(v) => consts.insert(name.clone(), v),
+                        None => consts.remove(name),
+                    };
+                }
+            }
+            Command::Where(e) => drop(fold(e, &consts)),
+            Command::Rename(pairs) => {
+                for ((old, _), new, _) in pairs.iter().filter(|(o, n, _)| o.0 != *n) {
+                    consts.remove(new);
+                    if let Some(v) = consts.remove(old) {
+                        consts.insert(new.clone(), v);
+                    }
+                }
+            }
+            Command::Stats(aggs, by) => {
+                for (_, e) in aggs {
+                    let (_, arg, param) = aggregate(e).expect("STATS was verified");
+                    arg.into_iter()
+                        .chain(param)
+                        .for_each(|a| drop(fold(a, &consts)));
+                }
+                by.iter().for_each(|(_, e)| drop(fold(e, &consts)));
+                consts.clear();
+            }
+            Command::Keep(_) | Command::Drop(_) | Command::Sort(_) | Command::Limit(_) => {}
         }
     }
 }
@@ -3331,6 +3381,10 @@ fn run_at(
             at_cut = rows.iter().take(MAX_LIMIT).cloned().collect();
         }
     }
+    // Folding comes before evaluating in ES, so its failure is the one reported.
+    let evaluating = FAILURE.take();
+    fold_constants(&cmds);
+    FAILURE.with_borrow_mut(|f| *f = f.take().or(evaluating));
     if !explicit_limit {
         rows.truncate(DEFAULT_LIMIT);
     }
