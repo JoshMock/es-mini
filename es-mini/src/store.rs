@@ -3,10 +3,10 @@
 //! then the system indices.
 
 use es_index::aliases::{Alias, IndexMeta};
-use es_index::{Index, Indices};
+use es_index::{Index, Indices, RequestCache};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 /// System indices: once [`Store::secure`]d, only the API that owns one reads or writes it,
 /// through [`Store::system`]; index expressions, listings and document requests never see them.
@@ -35,15 +35,18 @@ impl IndexMeta for Slot {
     }
 }
 
-/// The indices, the system indices once [`Store::secure`]d, and whether it was.
-pub(crate) struct Store(RwLock<Map>, Mutex<Indices>, AtomicBool);
+/// The indices, the system indices once [`Store::secure`]d, whether it was, and the request
+/// cache the indices share, as a node's do.
+pub(crate) struct Store(RwLock<Map>, Mutex<Indices>, AtomicBool, Arc<RequestCache>);
 
 impl Store {
     pub fn new(indices: Indices) -> Self {
+        let cache = Arc::default();
         Self(
-            RwLock::new(wrap(indices)),
+            RwLock::new(wrap(indices, &cache)),
             Mutex::new(Indices::new()),
             false.into(),
+            cache,
         )
     }
 
@@ -82,6 +85,7 @@ impl Store {
             map,
             indices,
             system: None,
+            cache: &self.3,
         }
     }
 
@@ -104,10 +108,11 @@ fn take_system(indices: &mut Indices) -> Indices {
         .collect()
 }
 
-fn wrap(indices: Indices) -> Map {
+fn wrap(indices: Indices, cache: &Arc<RequestCache>) -> Map {
     indices
         .into_iter()
-        .map(|(name, ix)| {
+        .map(|(name, mut ix)| {
+            ix.share_request_cache(cache);
             let (aliases, closed, hidden) = (ix.aliases.clone(), ix.closed, ix.hidden());
             (
                 name,
@@ -197,6 +202,7 @@ pub(crate) struct Exclusive<'a> {
     indices: Indices,
     /// Set by [`Store::write_all`], whose system indices are in `indices` until dropped.
     system: Option<MutexGuard<'a, Indices>>,
+    cache: &'a Arc<RequestCache>,
 }
 
 impl std::ops::Deref for Exclusive<'_> {
@@ -217,6 +223,6 @@ impl Drop for Exclusive<'_> {
         if let Some(system) = &mut self.system {
             **system = take_system(&mut self.indices);
         }
-        *self.map = wrap(std::mem::take(&mut self.indices));
+        *self.map = wrap(std::mem::take(&mut self.indices), self.cache);
     }
 }

@@ -540,6 +540,26 @@ fn searches_do_not_wait_for_writes_to_other_indices() {
     assert_eq!(searched, Ok(StatusCode::OK));
 }
 
+#[test]
+fn memory_bounds_2_indices_share_one_request_cache() {
+    use es_index::{Index, REQUEST_CACHE_BYTES};
+    let state = crate::store::Store::new(es_index::Indices::from([("a".into(), Index::default())]));
+    // one created later too
+    state.write().insert("b".into(), Index::default());
+    let shared = state.read();
+    let (a, b) = (shared.read("a").unwrap(), shared.read("b").unwrap());
+    // two entries fit in each index, three in both
+    for (ix, key) in [(&a, "1"), (&a, "2"), (&b, "1"), (&b, "2")] {
+        let entry = json!("x".repeat(REQUEST_CACHE_BYTES / 3 - 16));
+        (ix.shards()[0].cached(&ix.settings, &ix.mappings, key.into(), || {
+            Ok::<_, ()>(entry)
+        }))
+        .unwrap();
+    }
+    let evictions = |ix: &Index| ix.shards()[0].request_cache_stats().2;
+    assert_eq!((evictions(&a), evictions(&b)), (1, 0));
+}
+
 #[tokio::test]
 async fn search_response_keys_in_es_order() {
     let app = seeded().await;

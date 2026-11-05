@@ -327,7 +327,7 @@ pub struct Shard {
     refreshed_at: Option<Instant>,
     /// Writes not yet in the translog (see [`disk::persist`]).
     unlogged: Vec<es_codec::translog::Op>,
-    request_cache: std::sync::Mutex<RequestCache>,
+    request_cache: CacheHandle,
     /// Index and delete operations this shard has run since it started, as `_stats` reports.
     index_total: u64,
     delete_total: u64,
@@ -337,8 +337,6 @@ pub struct Shard {
 
 /// The request cache's cap, `indices.requests.cache.size`: Elasticsearch's default of 1% of
 /// the heap, for a 1 GiB heap.
-// ponytail: each index is capped on its own, where ES caps all of a node's together; es-mini
-// has no heap or node settings to size it from
 pub const REQUEST_CACHE_BYTES: usize = (1 << 30) / 100;
 
 #[derive(Default)]
@@ -362,9 +360,25 @@ impl std::fmt::Debug for Memo {
     }
 }
 
-/// Elasticsearch's shard request cache (see [`Shard::cached`]).
+/// Elasticsearch's node-wide request cache (`IndicesRequestCache`): the entries of every shard
+/// sharing it (see [`Index::share_request_cache`]), capped together at [`REQUEST_CACHE_BYTES`]
+/// by evicting the least recently used of any shard (see [`Shard::cached`]).
 #[derive(Debug, Default)]
-struct RequestCache {
+pub struct RequestCache(Mutex<NodeCache>);
+
+#[derive(Debug, Default)]
+struct NodeCache {
+    /// Serialized size of the keys and entries of every shard.
+    bytes: usize,
+    /// Shard ids and keys by the tick of their last use, least recent first.
+    recency: BTreeMap<u64, (u64, String)>,
+    tick: u64,
+    shards: HashMap<u64, ShardCache>,
+}
+
+/// A shard's part of its [`RequestCache`], with the shard's statistics.
+#[derive(Debug, Default)]
+struct ShardCache {
     hits: u64,
     misses: u64,
     evictions: u64,
@@ -372,11 +386,59 @@ struct RequestCache {
     bytes: usize,
     /// The visible sequence number and mappings the entries were computed against.
     reader: Option<(u64, Mappings)>,
-    /// Entries with the tick of their last use.
-    entries: HashMap<String, (Value, u64)>,
-    /// Keys by the tick of their last use, least recent first.
-    recency: BTreeMap<u64, String>,
-    tick: u64,
+    /// Entries with their size and the tick of their last use.
+    entries: HashMap<String, (Value, usize, u64)>,
+}
+
+/// A shard's place in the [`RequestCache`] it shares; dropping it drops the shard's entries.
+#[derive(Debug)]
+struct CacheHandle {
+    node: Arc<RequestCache>,
+    id: u64,
+}
+
+impl CacheHandle {
+    fn new(node: Arc<RequestCache>) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        CacheHandle { node, id }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, NodeCache> {
+        self.node.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl Default for CacheHandle {
+    fn default() -> Self {
+        Self::new(Arc::default())
+    }
+}
+
+impl Drop for CacheHandle {
+    fn drop(&mut self) {
+        let mut node = self.lock();
+        let NodeCache {
+            bytes,
+            recency,
+            shards,
+            ..
+        } = &mut *node;
+        if let Some(mut c) = shards.remove(&self.id) {
+            c.clear(bytes, recency);
+        }
+    }
+}
+
+impl ShardCache {
+    /// Drops the entries, from the node's `bytes` and `recency` too.
+    fn clear(&mut self, bytes: &mut usize, recency: &mut BTreeMap<u64, (u64, String)>) {
+        for (_, (_, size, last)) in self.entries.drain() {
+            recency.remove(&last);
+            *bytes -= size;
+        }
+        self.bytes = 0;
+    }
 }
 
 impl Shard {
@@ -660,23 +722,28 @@ impl Shard {
         key: &str,
     ) -> (Option<Value>, u64) {
         let visible = self.visible_seq_no(settings);
-        let mut c = self.cache_lock();
+        let id = self.request_cache.id;
+        let mut node = self.request_cache.lock();
+        let NodeCache {
+            bytes,
+            recency,
+            tick,
+            shards,
+        } = &mut *node;
+        let c = shards.entry(id).or_default();
         if !c
             .reader
             .as_ref()
             .is_some_and(|r| r.0 == visible && r.1 == *mappings)
         {
             c.reader = Some((visible, mappings.clone()));
-            c.entries.clear();
-            c.recency.clear();
-            c.bytes = 0;
+            c.clear(bytes, recency);
         }
-        c.tick += 1;
-        let tick = c.tick;
-        if let Some((v, used)) = c.entries.get_mut(key) {
-            let (v, last) = (v.clone(), std::mem::replace(used, tick));
-            c.recency.remove(&last);
-            c.recency.insert(tick, key.to_owned());
+        *tick += 1;
+        if let Some((v, _, used)) = c.entries.get_mut(key) {
+            let (v, last) = (v.clone(), std::mem::replace(used, *tick));
+            recency.remove(&last);
+            recency.insert(*tick, (id, key.to_owned()));
             c.hits += 1;
             return (Some(v), visible);
         }
@@ -686,38 +753,39 @@ impl Shard {
 
     /// Caches `v` for `key` unless the documents visible at `visible` (from
     /// [`Shard::cache_get`]) or the mappings changed since. Past [`REQUEST_CACHE_BYTES`] it
-    /// evicts the least recently used entries.
+    /// evicts the least recently used entries of the shards sharing its [`RequestCache`].
     pub fn cache_put(&self, mappings: &Mappings, visible: u64, key: String, v: &Value) {
-        let mut c = self.cache_lock();
-        if !(c.reader)
-            .as_ref()
-            .is_some_and(|r| r.0 == visible && r.1 == *mappings)
-        {
+        let size = key.len() + v.to_string().len();
+        let id = self.request_cache.id;
+        let mut node = self.request_cache.lock();
+        let NodeCache {
+            bytes,
+            recency,
+            tick,
+            shards,
+        } = &mut *node;
+        let Some(c) = (shards.get_mut(&id))
+            .filter(|c| (c.reader.as_ref()).is_some_and(|r| r.0 == visible && r.1 == *mappings))
+        else {
             return;
-        }
-        c.tick += 1;
-        let tick = c.tick;
-        c.bytes += key.len() + v.to_string().len();
-        c.recency.insert(tick, key.clone());
+        };
+        *tick += 1;
+        (*bytes, c.bytes) = (*bytes + size, c.bytes + size);
+        recency.insert(*tick, (id, key.clone()));
         // another search may have computed it at the same time
-        if let Some((old, last)) = c.entries.insert(key.clone(), (v.clone(), tick)) {
-            c.recency.remove(&last);
-            c.bytes -= key.len() + old.to_string().len();
+        if let Some((_, old, last)) = c.entries.insert(key, (v.clone(), size, *tick)) {
+            recency.remove(&last);
+            (*bytes, c.bytes) = (*bytes - old, c.bytes - old);
         }
-        while c.bytes > REQUEST_CACHE_BYTES {
-            let Some((_, k)) = c.recency.pop_first() else {
+        while *bytes > REQUEST_CACHE_BYTES {
+            let Some((_, (shard, k))) = recency.pop_first() else {
                 break;
             };
-            let (old, _) = c.entries.remove(&k).expect("recency lists cached keys");
-            c.bytes -= k.len() + old.to_string().len();
+            let c = shards.get_mut(&shard).expect("recency lists cached shards");
+            let (_, size, _) = c.entries.remove(&k).expect("recency lists cached keys");
+            (*bytes, c.bytes) = (*bytes - size, c.bytes - size);
             c.evictions += 1;
         }
-    }
-
-    fn cache_lock(&self) -> std::sync::MutexGuard<'_, RequestCache> {
-        self.request_cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// The highest sequence number this shard has given a write, or -1 before its first.
@@ -733,8 +801,9 @@ impl Shard {
     /// The request cache's (hit count, miss count, eviction count, size of its entries in
     /// bytes).
     pub fn request_cache_stats(&self) -> (u64, u64, u64, usize) {
-        let c = self.cache_lock();
-        (c.hits, c.misses, c.evictions, c.bytes)
+        let node = self.request_cache.lock();
+        (node.shards.get(&self.request_cache.id))
+            .map_or((0, 0, 0, 0), |c| (c.hits, c.misses, c.evictions, c.bytes))
     }
 
     /// Makes all writes so far visible to search.
@@ -1050,6 +1119,17 @@ impl Index {
         &self.shards
     }
 
+    /// Puts its shards' request caches in `node`, capped together with those of the other
+    /// indices there, as Elasticsearch caps all of a node's. Shards not there already start
+    /// with an empty cache and statistics.
+    pub fn share_request_cache(&mut self, node: &Arc<RequestCache>) {
+        for s in &mut self.shards {
+            if !Arc::ptr_eq(&s.request_cache.node, node) {
+                s.request_cache = CacheHandle::new(node.clone());
+            }
+        }
+    }
+
     /// `index.number_of_shards`.
     pub fn number_of_shards(&self) -> usize {
         (self.settings.get(index_settings::NUMBER_OF_SHARDS))
@@ -1071,7 +1151,12 @@ impl Index {
     /// Shard `n` with the settings to write to it, created empty if it was not written yet.
     pub(crate) fn shard_mut(&mut self, n: usize) -> (&Settings, &mut Shard) {
         if self.shards.len() <= n {
-            self.shards.resize_with(n + 1, Shard::default);
+            let node = self.shards[0].request_cache.node.clone();
+            let shard = || Shard {
+                request_cache: CacheHandle::new(node.clone()),
+                ..Shard::default()
+            };
+            self.shards.resize_with(n + 1, shard);
         }
         (&self.settings, &mut self.shards[n])
     }
@@ -1705,6 +1790,44 @@ mod tests {
         assert!(bytes <= REQUEST_CACHE_BYTES);
         assert_eq!(search("a"), 4);
         assert_eq!(search("b"), 5);
+    }
+
+    #[test]
+    fn memory_bounds_2_request_cache_caps_the_indices_sharing_it_together() {
+        let node = Arc::new(RequestCache::default());
+        let (mut a, mut b) = (Index::default(), Index::default());
+        a.share_request_cache(&node);
+        b.share_request_cache(&node);
+        // two entries fit in each index, three in both
+        for (ix, key) in [(&a, "1"), (&a, "2"), (&b, "1"), (&b, "2")] {
+            ix.shards[0]
+                .cached(&ix.settings, &ix.mappings, key.into(), || {
+                    Ok::<_, ()>(json!("x".repeat(REQUEST_CACHE_BYTES / 3 - 16)))
+                })
+                .unwrap();
+        }
+        let (_, _, a_evicted, a_bytes) = a.shards[0].request_cache_stats();
+        let (_, _, b_evicted, b_bytes) = b.shards[0].request_cache_stats();
+        assert_eq!(
+            (a_evicted, b_evicted),
+            (1, 0),
+            "a's first, the least recently used"
+        );
+        assert!(a_bytes + b_bytes <= REQUEST_CACHE_BYTES);
+        drop(a);
+        assert_eq!(
+            node.0.lock().unwrap().bytes,
+            b_bytes,
+            "a's entries left with it"
+        );
+        // shards written later share it too
+        b.settings
+            .merge(&json!({index_settings::NUMBER_OF_SHARDS: "2"}));
+        for id in 0..10 {
+            b.put(&id.to_string(), json!({}));
+        }
+        assert_eq!(b.shards.len(), 2);
+        assert!((b.shards.iter()).all(|s| Arc::ptr_eq(&s.request_cache.node, &node)));
     }
 
     #[test]
