@@ -37,7 +37,7 @@ Every `ponytail:` marker as of 2026-10-27 (its first comment line), with what ha
 - `es-index/src/disk.rs:294` **disk-writer-completeness**: fields in formats the codec lacks (e.g. ES812Postings `_id`) get no stats
 - `es-index/src/disk.rs:451` **disk-writer-completeness**: fields the writer cannot encode yet are left out of the segment, which only
 - `es-index/src/disk.rs:572` **disk-writer-completeness**: date_nanos and ranges are not indexed on disk; their `_source` is kept
-- `es-index/src/disk.rs:831` **disk-speed**: one timer for all indices, so some sync more often than they ask (never less)
+- `es-index/src/disk.rs:831` **keep**: one timer for all indices, so some sync more often than they ask (never less)
 - `es-index/src/disk.rs:903` **disk-speed**: rereads every term of every index; cache per segment if commits get slow
 - `es-index/src/disk.rs:1007` **disk-fidelity**: one merge per commit and ties broken by position, not name; Lucene may pick several
 - `es-index/src/disk.rs:1270` **memory-bounds**: holds the merged documents in memory; stream them if large merges need it
@@ -163,8 +163,8 @@ Every `ponytail:` marker as of 2026-10-27 (its first comment line), with what ha
 - `es-query/src/aggs/histogram.rs:125` **aggs-gaps**: ES fails after 5,000 attempts; this gives up on the last one
 - `es-query/src/aggs/histogram.rs:368` **keep**: a range whose keys stop advancing (f64 precision) ends there; ES loops forever
 - `es-query/src/aggs/histogram.rs:378` **keep**: open date ends stop at ±2^53 millis so rounding cannot overflow
-- `es-codec/src/inflate.rs:52` **disk-speed**: one table of 2^maxlen entries (up to 32K); use two-level tables if building them shows up in profiles.
-- `es-codec/src/inflate.rs:268` **disk-speed**: fixed Huffman codes and a single-candidate hash match; add dynamic Huffman blocks and
+- `es-codec/src/inflate.rs:52` **keep**: one table of 2^maxlen entries (up to 32K); use two-level tables if building them shows up in profiles.
+- `es-codec/src/inflate.rs:268` **keep**: fixed Huffman codes and a single-candidate hash match; add dynamic Huffman blocks and
 - `es-codec/src/lib.rs:3` **keep**: a compound file's sub-files are `pread` from disk, whole via `file` or by range via
 - `es-codec/src/points.rs:22` **disk-speed**: reads the whole .kdd per call; slice out the leaves it visits if files get huge.
 - `es-codec/src/translog.rs:275` **keep**: older formats; Elasticsearch 9.5.5 writes these two
