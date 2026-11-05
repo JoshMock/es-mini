@@ -515,13 +515,21 @@ impl Histogram {
         date: Option<&str>,
         mut sub: impl FnMut(&mut [Stats], &mut Map<String, Value>) -> Result<(), QueryError>,
     ) -> Result<(), QueryError> {
-        // an empty bucket's sub-aggregations are `None`: they render (and count) once for all
-        let mut v: Vec<(f64, u64, Option<Vec<Stats>>)> = std::mem::take(&mut b.counts)
-            .into_iter()
-            .map(|(k, bucket)| (k.f64(), bucket.count, Some(bucket.subs)))
-            .filter(|b| b.1 >= self.min_doc_count)
-            .collect();
-        super::consume_buckets(buckets, v.len())?;
+        // an empty bucket's sub-aggregations are `None`: they render (and count) once for all.
+        // Like InternalHistogram.maybeAddBucket, each bucket's sub-aggregations count before
+        // min_doc_count drops it and takes back those it would have rendered.
+        let mut v = vec![];
+        for (k, mut bucket) in std::mem::take(&mut b.counts) {
+            let mut subs = Map::new();
+            sub(&mut bucket.subs, &mut subs)?;
+            match bucket.count >= self.min_doc_count {
+                true => {
+                    super::consume_buckets(buckets, 1)?;
+                    v.push((k.f64(), bucket.count, Some(subs)));
+                }
+                false => buckets.set(buckets.get() - super::inner_buckets(&subs)),
+            }
+        }
         let mut empty = Map::new();
         if self.min_doc_count == 0 {
             // InternalHistogram.iterateEmptyBuckets
@@ -590,10 +598,7 @@ impl Histogram {
                 false => out.insert("key".into(), key.into()),
             };
             out.insert("doc_count".into(), count.into());
-            match subs {
-                Some(mut subs) => sub(&mut subs, &mut out)?,
-                None => out.extend(empty.clone()),
-            }
+            out.extend(subs.unwrap_or_else(|| empty.clone()));
             Ok((
                 key_as_string.unwrap_or_else(|| super::java_double(key)),
                 out,

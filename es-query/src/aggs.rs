@@ -2441,8 +2441,9 @@ pub(crate) fn render(
 
 /// Counts `n` more buckets toward the request's [`MAX_BUCKETS`], like ES's MultiBucketConsumer
 /// in the final reduce.
-// ponytail: counts the buckets rendered; ES also counts buckets it drops (min_doc_count, size),
-// then takes them back, so it can fail on a peak this never reaches
+// ponytail: terms count their buckets after rendering them and take back none they evict; ES
+// counts them first (interleaved for key order) and, ordering by a sub-aggregation, counts the
+// sub-buckets of terms it evicts, so it can fail on a peak this never reaches
 fn consume_buckets(buckets: &Cell<usize>, n: usize) -> Result<(), QueryError> {
     buckets.set(buckets.get() + n);
     match buckets.get() > MAX_BUCKETS {
@@ -2454,6 +2455,20 @@ fn consume_buckets(buckets: &Cell<usize>, n: usize) -> Result<(), QueryError> {
         )),
         false => Ok(()),
     }
+}
+
+/// The buckets in rendered sub-aggregations, as ES's `countInnerBucket` counts them: those of
+/// multi-bucket aggregations and everything below them, or below a single-bucket one.
+fn inner_buckets(aggs: &Map<String, Value>) -> usize {
+    let below = |b: &Value| b.as_object().map_or(0, |b| 1 + inner_buckets(b));
+    (aggs.values().filter_map(Value::as_object))
+        .map(|a| match a.get("buckets") {
+            Some(Value::Array(b)) => b.iter().map(below).sum(),
+            Some(Value::Object(b)) => b.values().map(below).sum(),
+            _ if a.contains_key("doc_count") => inner_buckets(a),
+            _ => 0,
+        })
+        .sum()
 }
 
 fn render_counted(
@@ -3166,6 +3181,33 @@ mod tests {
             err(json!({"date_histogram": {"field": "r", "fixed_interval": "1d"}})),
             "Expected date range type but found range type [ip_range]"
         );
+    }
+
+    #[test]
+    fn aggs_gaps_2_histograms_count_the_sub_buckets_of_dropped_buckets() {
+        // as Elasticsearch 9.5.5's InternalHistogram.maybeAddBucket: a bucket below
+        // min_doc_count counts its sub-buckets (empty ones twice: before and while adding them),
+        // then takes back only those it would have rendered
+        let run = |interval: u32, max: u32| {
+            let sub = json!({"histogram": {"field": "i", "interval": 1, "min_doc_count": 0,
+                "extended_bounds": {"min": 0, "max": max}}});
+            let aggs = json!({"h": {"histogram": {"field": "i", "interval": interval,
+                "min_doc_count": 5}, "aggs": {"s": sub}}});
+            let (ix, req) = (
+                index(),
+                SearchRequest::parse(&json!({"aggs": aggs})).unwrap(),
+            );
+            crate::search_many(&[("i", 0, &ix, None)], &req).map(|r| r.aggregations.unwrap())
+        };
+        let too_many = |r: Result<Value, crate::QueryError>| {
+            r.unwrap_err().kind == crate::ErrorKind::TooManyBuckets
+        };
+        // one bucket of 4 documents: 80,001, then 60,001
+        assert!(too_many(run(1000, 40_000)));
+        assert_eq!(run(1000, 30_000).unwrap(), json!({"h": {"buckets": []}}));
+        // two of 2: 30,000 left counted by the first
+        assert!(too_many(run(100, 30_000)));
+        assert!(run(100, 9_000).is_ok());
     }
 
     #[test]
