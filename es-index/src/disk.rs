@@ -674,13 +674,11 @@ struct LuceneDoc<'a> {
     /// The saved document's position in the segment's list
     doc: usize,
     path: String,
-    object: &'a Value,
+    object: Cow<'a, Value>,
 }
 
 /// The Lucene documents of `docs`, as Elasticsearch's DocumentParser orders them: each nested
 /// object right before the one holding it, after those nested in it, in source order.
-// ponytail: a dotted source key that crosses into a nested path (`{"c.a": 1}` with `c` nested)
-// stays in its parent; Elasticsearch expands the dots and makes it a nested document
 fn lucene_docs<'a>(mappings: &Mappings, docs: &[(&str, &'a Document)]) -> Vec<LuceneDoc<'a>> {
     fn walk<'a>(
         nested: &[&str],
@@ -694,6 +692,25 @@ fn lucene_docs<'a>(mappings: &Mappings, docs: &[(&str, &'a Document)]) -> Vec<Lu
             Value::Object(o) => {
                 for (k, x) in o {
                     let path = format!("{prefix}{k}");
+                    // Like DotExpandingXContentParser, a dotted key crossing into a nested path
+                    // (`{"c.a": 1}` with `c` nested) is the object `{"a": 1}` there.
+                    let crossing = (k.match_indices('.'))
+                        .map(|(i, _)| prefix.len() + i)
+                        .find(|&i| nested.contains(&&path[..i]));
+                    if let Some(i) = crossing {
+                        let object = serde_json::json!({ &path[i + 1..]: x });
+                        let path = path[..i].to_owned();
+                        let mut inner = vec![];
+                        walk(nested, doc, &format!("{path}."), &object, &mut inner);
+                        out.extend(inner.into_iter().map(|d| LuceneDoc {
+                            doc: d.doc,
+                            path: d.path,
+                            object: Cow::Owned(d.object.into_owned()),
+                        }));
+                        let object = Cow::Owned(object);
+                        out.push(LuceneDoc { doc, path, object });
+                        continue;
+                    }
                     if !nested.contains(&path.as_str()) {
                         walk(nested, doc, &format!("{path}."), x, out);
                         continue;
@@ -702,7 +719,7 @@ fn lucene_docs<'a>(mappings: &Mappings, docs: &[(&str, &'a Document)]) -> Vec<Lu
                     let objects = crate::postings::values(x, "").into_iter();
                     for object in objects.filter(|o| o.is_object()) {
                         walk(nested, doc, &format!("{path}."), object, out);
-                        let path = path.clone();
+                        let (path, object) = (path.clone(), Cow::Borrowed(object));
                         out.push(LuceneDoc { doc, path, object });
                     }
                 }
@@ -714,7 +731,7 @@ fn lucene_docs<'a>(mappings: &Mappings, docs: &[(&str, &'a Document)]) -> Vec<Lu
     let mut out = vec![];
     for (doc, (_, d)) in docs.iter().enumerate() {
         walk(&nested, doc, "", &d.source, &mut out);
-        let (path, object) = (String::new(), &d.source);
+        let (path, object) = (String::new(), Cow::Borrowed(&d.source));
         out.push(LuceneDoc { doc, path, object });
     }
     out
@@ -787,7 +804,7 @@ fn user_fields(
             let relative = path[scope.len()..].trim_start_matches('.');
             (docs.iter())
                 .map(|d| match d.path == scope {
-                    true => crate::postings::values(d.object, relative),
+                    true => crate::postings::values(&d.object, relative),
                     false => vec![],
                 })
                 .collect()

@@ -430,3 +430,30 @@ fn ip_and_range_fields_writes_every_range_type_as_elasticsearch_does() {
     assert_eq!(bytes("x"), want);
     assert_eq!(bytes("ip"), [[1].as_slice(), &v4(0), &v4(3)].concat());
 }
+
+/// Like DotExpandingXContentParser: a dotted key crossing into a nested path (`c.a` with `c`
+/// nested) is expanded to objects, so it becomes a nested document of its own, in source order.
+#[test]
+fn disk_fidelity_dotted_keys_into_nested_paths_become_nested_documents() {
+    let mut idx = Index::default();
+    idx.mappings = nested_index().mappings;
+    idx.put(
+        "1",
+        json!({"c.a": "p", "c": {"a": "q"}, "c.r.n": 5, "t": "x"}),
+    );
+    let (_root, r) = saved_segment("dotted-nested", idx);
+    let terms = |f: &str| -> Vec<_> {
+        (r.terms(f).unwrap().into_iter())
+            .map(|t| (t.term, t.docs.iter().map(|d| d.0).collect::<Vec<_>>()))
+            .collect()
+    };
+    let s = |s: &str| s.as_bytes().to_vec();
+    // Docs: c {a: p}, c {a: q}, c.r {n: 5}, c {r.n: 5}, the root.
+    assert_eq!(r.max_doc(), 5);
+    assert_eq!(
+        terms("_nested_path"),
+        [(s("c"), vec![0, 1, 3]), (s("c.r"), vec![2])]
+    );
+    assert_eq!(terms("c.a"), [(s("p"), vec![0]), (s("q"), vec![1])]);
+    assert_eq!(terms("t"), [(s("x"), vec![4])]);
+}
