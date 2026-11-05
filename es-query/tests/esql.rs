@@ -1359,6 +1359,45 @@ fn esql_speed_rename_before_limit_keeps_the_same_rows() {
     }
 }
 
+/// An EVAL evaluates only the rows a later LIMIT keeps, which are the ones it would have kept,
+/// so like Elasticsearch 9.5.5 (which pushes the LIMIT below it) a row past the LIMIT cannot
+/// fail the query.
+#[test]
+fn esql_speed_eval_before_limit_keeps_the_same_rows() {
+    let values = |query: &str| q(query).values;
+    for (query, rows) in [
+        (
+            "FROM people | EVAL a = age * 2 | KEEP name, a | LIMIT 2",
+            json!([["ann", 60], ["bob", 50]]),
+        ),
+        (
+            "FROM people | EVAL a = age * 2 | RENAME name AS who | EVAL b = a + 1 | KEEP who, b | LIMIT 1",
+            json!([["ann", 61]]),
+        ),
+        (
+            "FROM people | SORT age DESC | EVAL a = age * 2 | KEEP name, a | LIMIT 2",
+            json!([["cid", 82], ["ann", 60]]),
+        ),
+        (
+            "FROM people | EVAL a = age * 2 | WHERE a < 60 | KEEP name, a | LIMIT 1",
+            json!([["bob", 50]]),
+        ),
+        (
+            "FROM people | EVAL a = age * 2 | SORT a | KEEP name, a | LIMIT 1",
+            json!([["bob", 50]]),
+        ),
+    ] {
+        assert_eq!(json!(values(query)), rows, "{query}");
+    }
+    let mut o = Index::default();
+    o.put("1", json!({"n": 1}));
+    o.put("2", json!({"n": i64::MAX}));
+    let all = BTreeMap::from([("o".to_owned(), o)]);
+    let r = run(&all, "FROM o | EVAL x = ROUND(n, -1) | KEEP x | LIMIT 1").unwrap();
+    assert_eq!(r.values, [[json!(0)]]);
+    assert!(run(&all, "FROM o | EVAL x = ROUND(n, -1) | KEEP x").is_err());
+}
+
 #[test]
 fn stats_count_star_by_groups() {
     let r = q("FROM people METADATA _index | STATS c = COUNT(*) BY _index");

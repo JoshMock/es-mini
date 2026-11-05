@@ -2925,11 +2925,14 @@ fn run_at(
         (Some(Command::Eval(named)), Some(Command::Where(e))) => Some((named, e)),
         _ => None,
     };
-    // The LIMIT after command `i`, when only KEEP, DROP and RENAME (which keep every row) come
-    // between them.
-    let next_limit = |i: usize| match (cmds[i + 1..].iter())
-        .find(|c| !matches!(c, Command::Keep(_) | Command::Drop(_) | Command::Rename(_)))
-    {
+    // The LIMIT after command `i`, when only KEEP, DROP, RENAME and EVAL (which keep every row)
+    // come between them.
+    let next_limit = |i: usize| match (cmds[i + 1..].iter()).find(|c| {
+        !matches!(
+            c,
+            Command::Keep(_) | Command::Drop(_) | Command::Rename(_) | Command::Eval(_)
+        )
+    }) {
         Some(&Command::Limit(n)) => Some(n.min(MAX_LIMIT)),
         _ => None,
     };
@@ -3168,7 +3171,11 @@ fn run_at(
                 Some((named, _)) => eval_rows(&mut rows, named, Some(e), &evals[i - 1]),
                 None => rows.retain(|r| truth(e, r) == Some(true)),
             },
-            Command::Eval(named) => eval_rows(&mut rows, named, None, &evals[i]),
+            // Like ES, which pushes a LIMIT below an EVAL, only the rows it keeps are evaluated.
+            Command::Eval(named) => {
+                rows.truncate(next_limit(i).unwrap_or(usize::MAX));
+                eval_rows(&mut rows, named, None, &evals[i]);
+            }
             &Command::Limit(n) => {
                 rows.truncate(n.min(MAX_LIMIT));
                 explicit_limit = true;
