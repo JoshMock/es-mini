@@ -74,7 +74,8 @@ fn write<T>(
             "auto_configure,create_index,manage,all",
         ),
     };
-    crate::security::refuse_restricted(state, &target, action, privileges)?;
+    // Elasticsearch checks the name the request gives: a user alias reaches a system index.
+    crate::security::refuse_restricted(state, name, action, privileges)?;
     if let Some(mut index) = shared.write(&target) {
         return Ok(apply(&mut index, target, f));
     }

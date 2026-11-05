@@ -41,6 +41,11 @@ async fn call(
 /// document each), with API keys on `*` without and with restricted indices, as (app, [key id,
 /// key header, restricted key id, restricted key header]).
 async fn secured(test: &str) -> (axum::Router, [String; 4]) {
+    secured_with(test, &[]).await
+}
+
+/// [`secured`], after sending the `setup` requests (method, uri, body) with security off.
+async fn secured_with(test: &str, setup: &[(&str, &str, Value)]) -> (axum::Router, [String; 4]) {
     let dir = std::env::temp_dir().join(format!("esm-system-{test}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let open = es_mini::app_persisted(&dir).unwrap();
@@ -54,6 +59,10 @@ async fn secured(test: &str) -> (axum::Router, [String; 4]) {
         )
         .await;
         assert_eq!(status, 201, "{body}");
+    }
+    for (method, uri, body) in setup {
+        let (status, body) = call(&open, "", method, uri, Some(body.clone())).await;
+        assert!(status < 300, "{method} {uri}: {body}");
     }
     drop(open);
     let settings = HashMap::from([
@@ -206,6 +215,47 @@ async fn wildcards_and_ignore_unavailable_skip_system_names_for_api_keys() {
         shards(&rh, "/.tas*/_search?size=0&expand_wildcards=all").await,
         (json!(1), json!(1))
     );
+}
+
+#[tokio::test]
+async fn api_keys_reach_system_indices_through_user_aliases() {
+    let alias = json!({"actions": [{"add": {"index": ".kibana_1", "alias": "kalias"}}]});
+    let setup = [
+        ("PUT", "/.kibana_1/_doc/1?refresh=true", json!({"a": 1})),
+        ("POST", "/_aliases", alias),
+    ];
+    let (app, [k, kh, ..]) = secured_with("kalias", &setup).await;
+    let (status, got) = call(&app, &kh, "GET", "/kalias/_search", None).await;
+    assert_eq!(status, 200, "{got}");
+    assert_eq!(got["hits"]["hits"][0]["_index"], ".kibana_1");
+    let (status, got) = call(&app, &kh, "GET", "/kalias/_doc/1", None).await;
+    assert_eq!((status, &got["found"]), (200, &json!(true)), "{got}");
+    let doc = Some(json!({"b": 2}));
+    let (status, got) = call(&app, &kh, "PUT", "/kalias/_doc/2?refresh=true", doc).await;
+    assert_eq!(
+        (status, &got["_index"]),
+        (201, &json!(".kibana_1")),
+        "{got}"
+    );
+    let (status, got) = call(&app, &kh, "GET", "/k*/_search?size=0", None).await;
+    assert_eq!(status, 200, "{got}");
+    assert_eq!(got["hits"]["total"]["value"], 2);
+    let (status, got) = call(&app, &kh, "DELETE", "/kalias/_doc/2", None).await;
+    assert_eq!((status, &got["result"]), (200, &json!("deleted")), "{got}");
+    let got = warning(&app, &kh, "GET", "/kalias/_doc/1", None).await;
+    assert_eq!(got, accesses(".kibana_1"));
+    // So does elastic, which may not write to the index by its name.
+    let doc = Some(json!({"b": 3}));
+    let (status, got) = call(&app, ELASTIC, "PUT", "/kalias/_doc/3", doc).await;
+    assert_eq!(
+        (status, &got["_index"]),
+        (201, &json!(".kibana_1")),
+        "{got}"
+    );
+    // The index itself stays restricted.
+    let got = call(&app, &kh, "GET", "/.kibana_1/_doc/1", None).await;
+    let refused = restricted(&k, "indices:data/read/get", ".kibana_1", "read,all");
+    assert_eq!(got, (403, refused));
 }
 
 #[tokio::test]
