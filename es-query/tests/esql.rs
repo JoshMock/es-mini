@@ -1480,6 +1480,67 @@ fn esql_speed_counts_push_a_limit_through_eval_and_read_every_match_for_stats() 
     }
 }
 
+/// Counts Elasticsearch 9.5.5 reported for the same documents and queries: a filter it rewrites
+/// into a comparison of a field with a literal (`SimplifyComparisonsArithmetics`) is pushed to
+/// Lucene, others read every match. The rows are those of the rewritten filter.
+#[test]
+fn esql_speed_counts_push_filters_es_rewrites_to_a_field_and_a_literal() {
+    let mut t = Index::default();
+    t.mappings.properties.insert("n".into(), FieldMapping::Long);
+    t.mappings
+        .properties
+        .insert("d".into(), FieldMapping::Double);
+    let keyword = FieldMapping::Keyword {
+        ignore_above: None,
+        split_queries_on_whitespace: false,
+    };
+    t.mappings.properties.insert("k".into(), keyword);
+    for i in 0..3000 {
+        t.put(
+            &i.to_string(),
+            json!({"n": i, "d": i, "k": format!("k{}", i % 3)}),
+        );
+    }
+    let all = BTreeMap::from([("t".to_owned(), t)]);
+    let pushed = [
+        ("n + 1 > 5", "n > 4", 10, 30),
+        ("n * 2 > 100", "n > 50", 10, 30),
+        ("-n < -5", "n > 5", 10, 30),
+        ("5 - n < 1", "n > 4", 10, 30),
+        ("1 + n > 5", "n > 4", 10, 30),
+        ("30 < n + 1", "n > 29", 10, 30),
+        ("(n + 1) * 2 > 100", "n > 49", 10, 30),
+        ("n * -2 < -100", "n > 50", 10, 30),
+        ("d * 2 > 100", "d > 50", 10, 30),
+        ("d / 2 > 5", "d > 10", 10, 30),
+        ("-d > -5.5", "d < 5.5", 6, 18),
+        ("n + 1 + 1 > 5", "n > 3", 10, 30),
+        ("n + 1 == 5", "n == 4", 1, 3),
+        ("NOT n + 1 > 5", "n <= 4", 5, 15),
+    ];
+    let read_all = [
+        ("n * 3 > 100", "n > 33", 3000, 3020),
+        ("n / 2 > 5", "n > 11", 3000, 3020),
+        ("n % 2 == 0", "n % 2 == 0", 3000, 3020),
+        ("n * 2.0 > 100", "n > 50", 3000, 3020),
+        ("n * 0 > 1", "n < 0", 3000, 3000),
+        ("d + 1 > 5", "d > 4", 3000, 3020),
+        ("d * 2 * 3 > 600", "d > 100", 3000, 3020),
+        ("10 / n < 1", "n > 10", 3000, 3020),
+    ];
+    for (filter, same, docs, values) in pushed.into_iter().chain(read_all) {
+        let query = format!("FROM t | WHERE {filter} | LIMIT 10");
+        let r = run(&all, &query).unwrap();
+        let expected = run(&all, &format!("FROM t | WHERE {same} | LIMIT 10")).unwrap();
+        assert_eq!(r.values, expected.values, "{query}");
+        assert_eq!(
+            (r.documents_found, r.values_loaded),
+            (docs, values),
+            "{query}"
+        );
+    }
+}
+
 #[test]
 fn stats_count_star_by_groups() {
     let r = q("FROM people METADATA _index | STATS c = COUNT(*) BY _index");

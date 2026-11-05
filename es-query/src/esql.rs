@@ -4292,6 +4292,59 @@ fn from_documents<'a>(head: &'a [Command], mut c: &'a str) -> bool {
     true
 }
 
+/// What Elasticsearch's `SimplifyComparisonsArithmetics` leaves of `e` in a comparison with
+/// literal `c`: `n + 1 > 5` becomes `n > 4`.
+fn isolated<'a>(e: &'a Expr, c: &Value) -> &'a Expr {
+    match move_literal(e, c) {
+        Some((x, c)) => isolated(x, &c),
+        None => e,
+    }
+}
+
+/// One step of `isolated`: the operand left of `e` and the literal it compares with once ES moves
+/// a `-` or a literal operand of `+ - * /` over to `c`. ES moves only whole-number literals, and
+/// none where the result could differ (integer division, `+ -` of doubles, an inexact quotient).
+// ponytail: where folding the literal overflows ES drops every row (no documents found); this
+// reads every match
+fn move_literal<'a>(e: &'a Expr, c: &Value) -> Option<(&'a Expr, Value)> {
+    let (op, a, b, t) = match e {
+        Expr::Neg(x, ..) => return Some((x, arith("-", literal_type(c), &0.into(), c)?)),
+        Expr::Arith(op, a, b, t, _) => (*op, &**a, &**b, *t.get()?),
+        _ => return None,
+    };
+    // ES puts a literal operand of `+` and `*` second; one before `-` or `/` stays first.
+    let (x, lit, first) = match (a, b) {
+        (x, Expr::Lit(v, _)) => (x, v, false),
+        (Expr::Lit(v, _), x) => (x, v, true),
+        _ => return None,
+    };
+    let kinds = [literal_type(lit), literal_type(c)];
+    if !kinds.iter().all(|k| matches!(*k, "integer" | "long"))
+        || !matches!(t, "integer" | "long" | "double")
+        || lit.as_i64() == Some(0) && matches!(op, "*" | "/")
+    {
+        return None;
+    }
+    let double = t == "double";
+    let ft = match kinds {
+        _ if double => "double",
+        ["integer", "integer"] => "integer",
+        _ => "long",
+    };
+    let c = match (op, first) {
+        ("+" | "-", _) if double => None,
+        ("+", _) => arith("-", ft, c, lit),
+        ("-", false) => arith("+", ft, c, lit),
+        // `5 - n < 1` is `n > 4`.
+        ("-", true) => arith("-", ft, lit, c),
+        ("*", _) if !double && c.as_i64()?.wrapping_rem(lit.as_i64()?) != 0 => None,
+        ("*", _) => arith("/", ft, c, lit),
+        ("/", false) if double => arith("*", ft, c, lit),
+        _ => None,
+    }?;
+    Some((x, c))
+}
+
 fn conjuncts<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
     match e {
         Expr::And(a, b, _) => {
@@ -4302,15 +4355,21 @@ fn conjuncts<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
     }
 }
 
-/// Whether Lucene can run the filter: anything but a comparison of two fields.
+/// Whether Lucene can run the filter: anything but a comparison of two fields, once ES moved a
+/// literal to the right of a comparison and isolated what it compares (see `isolated`).
 fn pushable(e: &Expr) -> bool {
     match e {
         Expr::Cmp(_, a, b, ..) => {
-            !matches!((&**a, &**b), (Expr::Field(..), Expr::Field(..)))
-                && pushable(a)
-                && pushable(b)
+            let (a, b) = match (&**a, &**b) {
+                (Expr::Lit(..), x) => (x, &**a),
+                ab => ab,
+            };
+            let a = match b {
+                Expr::Lit(c, _) => isolated(a, c),
+                _ => a,
+            };
+            !matches!((a, b), (Expr::Field(..), Expr::Field(..))) && pushable(a) && pushable(b)
         }
-        // ponytail: ES may rewrite `age + 1 > 30` into a pushable `age > 29`; this does not
         Expr::Arith(..) | Expr::Call(..) | Expr::Neg(..) => names(e).is_empty(),
         Expr::Not(x, _) | Expr::IsNull(x, ..) | Expr::Like(x, ..) => pushable(x),
         Expr::And(a, b, _) | Expr::Or(a, b, _) => pushable(a) && pushable(b),
