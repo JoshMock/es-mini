@@ -689,7 +689,8 @@ impl<'a> Searcher<'a> {
     }
 
     /// The on-disk documents whose values of numeric or date `field` are within `bounds`
-    /// (see [`range_place`] and [`Shard::disk_numbers`]).
+    /// (see [`range_place`] and [`Shard::disk_numbers`]). With `exact`, of a float field, only
+    /// those it surely matches (see [`float_inside`](Self::float_inside)).
     fn number_docs(
         &self,
         field: &str,
@@ -697,11 +698,9 @@ impl<'a> Searcher<'a> {
         exact: bool,
     ) -> Option<BTreeSet<DiskPos>> {
         if let Some(FieldMapping::Float) = self.index.mappings.field(field) {
-            // ponytail: a superset, so exact answers read sources; exact once scoring rounds too
-            return if exact {
-                None
-            } else {
-                self.float_docs(field, bounds)
+            return match exact {
+                true => self.float_inside(field, bounds),
+                false => self.float_docs(field, bounds),
             };
         }
         let instant = self.instant(field);
@@ -736,6 +735,33 @@ impl<'a> Searcher<'a> {
         };
         self.shard
             .disk_numbers(&self.index.mappings, field, place, false)
+    }
+
+    /// The on-disk documents a range of float `field` surely matches: a value whose f32 is
+    /// more than an ulp inside the bounds rounded is inside the bounds, as rounding is monotone
+    /// (the ulp allows for a writer rounding decimals straight to f32). Only the sources of the
+    /// rest of [`float_docs`](Self::float_docs) can tell (see [`disk_leaf`](Self::disk_leaf)).
+    fn float_inside(&self, field: &str, bounds: [Option<&Value>; 4]) -> Option<BTreeSet<DiskPos>> {
+        // a string bound compares as text with a string value (see `scalar_cmp`)
+        if bounds.iter().flatten().any(|b| !b.is_number()) {
+            return None;
+        }
+        let [gt, gte, lt, lte] = bounds.map(|b| b.and_then(num).map(|x| x as f32));
+        let low = gt.into_iter().chain(gte).reduce(f32::max).map(f32::next_up);
+        let high = lt
+            .into_iter()
+            .chain(lte)
+            .reduce(f32::min)
+            .map(f32::next_down);
+        let place = |v: &Value| {
+            let x = v.as_f64().unwrap_or_default() as f32;
+            match (low, high) {
+                (Some(l), _) if x <= l => Ordering::Less,
+                (_, Some(h)) if x >= h => Ordering::Greater,
+                _ => Ordering::Equal,
+            }
+        };
+        (self.shard).disk_numbers(&self.index.mappings, field, place, true)
     }
 
     /// For a date field, how it reads a value as epoch millis.
@@ -1496,15 +1522,23 @@ impl<'a> Searcher<'a> {
             .collect()
     }
 
-    /// The on-disk documents a leaf query matches, from postings and doc values; `None` if
-    /// they cannot tell (see [`exact`]).
-    fn disk_leaf(&self, q: &Query) -> Option<HashSet<DiskPos>> {
-        match q {
-            Query::Term { .. } | Query::Match { .. } | Query::Range { .. } => {
-                Some(self.candidates(q, true)?.into_iter().collect())
-            }
-            _ => None,
-        }
+    /// The on-disk documents a leaf query surely matches, and those it leaves in doubt, from
+    /// postings and doc values; `None` if they cannot tell (see [`exact`]).
+    fn disk_leaf(&self, q: &Query) -> Option<[HashSet<DiskPos>; 2]> {
+        let (Query::Term { field, .. } | Query::Match { field, .. } | Query::Range { field, .. }) =
+            q
+        else {
+            return None;
+        };
+        let sure: HashSet<_> = self.candidates(q, true)?.into_iter().collect();
+        let doubt = match self.index.mappings.field(field) {
+            // f32 doc values leave values near a bound in doubt
+            Some(FieldMapping::Float) => (self.candidates(q, false)?.into_iter())
+                .filter(|p| !sure.contains(p))
+                .collect(),
+            _ => HashSet::new(),
+        };
+        Some([sure, doubt])
     }
 
     /// The score of every in-memory document `q` matches, if they all score alike: a term on a
@@ -1550,8 +1584,8 @@ impl<'a> Searcher<'a> {
     }
 
     /// The searchable on-disk documents `q` matches, as hits of `target` ordered by `sort`
-    /// values (and scores, if hits are ordered `by_score`), from postings and doc values alone;
-    /// `None` if they cannot tell.
+    /// values (and scores, if hits are ordered `by_score`), from postings and doc values, and
+    /// the sources of the documents they leave in doubt; `None` if they cannot tell.
     fn select_on_disk(
         &self,
         target: usize,
@@ -1592,10 +1626,16 @@ impl<'a> Searcher<'a> {
             })
             .collect::<Option<Vec<_>>>()?;
         let live: HashMap<_, _> = self.shard.disk_live().collect();
-        let matched = exact(q, &live.keys().copied().collect(), &|c| self.disk_leaf(c))?;
+        let [sure, doubt] = exact(q, &live.keys().copied().collect(), &|c| self.disk_leaf(c))?;
+        let doubt: BTreeSet<_> = doubt.into_iter().collect();
+        let none = HashSet::new();
+        let matched = (self.shard.docs_at(Some(&none), Some(&doubt)))
+            .filter(|(id, d)| self.score(q, id, d).is_some())
+            .filter_map(|(id, _)| self.shard.disk_pos(id))
+            .chain(sure);
         let visible = self.shard.visible_seq_no(&self.index.settings);
         let mut out = vec![];
-        for (id, seq_no) in matched.iter().map(|p| live[p]) {
+        for (id, seq_no) in matched.map(|p| live[&p]) {
             if seq_no >= visible {
                 continue;
             }
@@ -2000,24 +2040,28 @@ pub fn count_many<'a>(
             Query::Term { field, .. } if s.kind(field).0 == Kind::Number => None,
             Query::Term { .. } | Query::Match { .. } => {
                 let ids = s.memory_candidates(c, None)?;
-                Some(
-                    ids.iter()
-                        .filter_map(|id| memory.get(id.as_str()).copied())
-                        .collect(),
-                )
+                let ids: HashSet<_> = (ids.iter())
+                    .filter_map(|id| memory.get(id.as_str()).copied())
+                    .collect();
+                Some([ids, HashSet::new()])
             }
             _ => None,
         });
-        n += on_disk.as_ref().map_or(0, HashSet::len) + in_memory.as_ref().map_or(0, HashSet::len);
-        if on_disk.is_some() && in_memory.is_some() {
+        // sure matches are counted and on-disk documents in doubt read (in memory, none are)
+        let on_disk = on_disk.map(|[sure, doubt]| {
+            n += sure.len();
+            doubt
+        });
+        let in_memory = in_memory.map(|[sure, _]| n += sure.len());
+        if on_disk.as_ref().is_some_and(HashSet::is_empty) && in_memory.is_some() {
             continue;
         }
         s.on_disk = match on_disk {
-            Some(_) => Some(BTreeSet::new()),
+            Some(doubt) => Some(doubt.into_iter().collect()),
             None => s.candidates(&q, false),
         };
         s.in_memory = match in_memory {
-            Some(_) => Some(HashSet::new()),
+            Some(()) => Some(HashSet::new()),
             None => s.memory_candidates(&q, None),
         };
         n += (s.docs())
@@ -2035,15 +2079,16 @@ pub fn count_many<'a>(
     }
 }
 
-/// The documents of `all` that `q` matches, from the exact matches `leaf` gives for leaf
-/// queries; `None` if it gives none for one.
+/// The documents of `all` that `q` surely matches, and those it leaves in doubt (which only
+/// their sources tell), from those `leaf` gives for leaf queries; `None` if it gives none for
+/// one.
 fn exact<K: Copy + Eq + std::hash::Hash>(
     q: &Query,
     all: &HashSet<K>,
-    leaf: &dyn Fn(&Query) -> Option<HashSet<K>>,
-) -> Option<HashSet<K>> {
+    leaf: &dyn Fn(&Query) -> Option<[HashSet<K>; 2]>,
+) -> Option<[HashSet<K>; 2]> {
     match q {
-        Query::MatchAll => Some(all.clone()),
+        Query::MatchAll => Some([all.clone(), HashSet::new()]),
         Query::Named { query, .. } | Query::Boosted { query, .. } | Query::Blended(query) => {
             exact(query, all, leaf)
         }
@@ -2054,25 +2099,42 @@ fn exact<K: Copy + Eq + std::hash::Hash>(
             filter,
             min_should,
         } => {
-            let mut out = all.clone();
+            let (mut sure, mut doubt) = (all.clone(), HashSet::new());
             for c in must.iter().chain(filter) {
-                out = &out & &exact(c, all, leaf)?;
+                let [s, d] = exact(c, all, leaf)?;
+                doubt.retain(|k| s.contains(k) || d.contains(k));
+                doubt.extend(d.iter().filter(|k| sure.contains(k)));
+                sure = &sure & &s;
             }
             for c in must_not {
-                out = &out - &exact(c, all, leaf)?;
+                let [s, d] = exact(c, all, leaf)?;
+                doubt.retain(|k| !s.contains(k));
+                doubt.extend(d.iter().filter(|k| sure.contains(k)));
+                sure.retain(|k| !s.contains(k) && !d.contains(k));
             }
             if *min_should > 0 {
-                let mut hits = HashMap::new();
+                // per document, the clauses it surely matches and those it may
+                let mut hits: HashMap<K, [usize; 2]> = HashMap::new();
                 for c in should {
-                    (exact(c, all, leaf)?)
-                        .into_iter()
-                        .for_each(|k| *hits.entry(k).or_insert(0) += 1);
+                    let [s, d] = exact(c, all, leaf)?;
+                    for k in s {
+                        hits.entry(k).or_default().iter_mut().for_each(|n| *n += 1);
+                    }
+                    for k in d {
+                        hits.entry(k).or_default()[1] += 1;
+                    }
                 }
-                out.retain(|k| hits.get(k).is_some_and(|n| n >= min_should));
+                let reach = |k: &K| hits.get(k).copied().unwrap_or_default();
+                doubt.retain(|k| reach(k)[1] >= *min_should);
+                let (kept, lost): (HashSet<K>, HashSet<K>) = (sure.into_iter())
+                    .filter(|k| reach(k)[1] >= *min_should)
+                    .partition(|k| reach(k)[0] >= *min_should);
+                sure = kept;
+                doubt.extend(lost);
             }
-            Some(out)
+            Some([sure, doubt])
         }
-        q => Some(&leaf(q)? & all),
+        q => leaf(q).map(|[s, d]| [&s & all, &d & all]),
     }
 }
 
@@ -2455,9 +2517,11 @@ mod tests {
         let read = |q: Value| {
             let q = parse_query(&q).unwrap();
             let s = Searcher::new(ix, &q);
-            // values a strict bound excludes may round onto it, so floats only narrow
-            assert_eq!(s.candidates(&q, true), None);
+            // values a strict bound excludes may round onto it, so floats only narrow (exact
+            // sets check those sources: search_speed_float_ranges_on_disk_match_as_in_memory)
             let on_disk = s.candidates(&q, false).expect("narrowed");
+            let exact = s.candidates(&q, true);
+            assert!(exact.is_none_or(|e| e.is_subset(&on_disk)));
             let mut ids: Vec<_> = ix.shards()[0]
                 .docs_at(None, Some(&on_disk))
                 .map(|(id, _)| id)
@@ -2473,6 +2537,88 @@ mod tests {
         assert_eq!(read(json!({"term": {"f": 1.1}})), "11");
         let q = parse_query(&json!({"range": {"f": {"gt": 0.3, "lte": 1.1}}})).unwrap();
         assert_eq!(count(ix, &q), 8);
+    }
+
+    /// Float ranges on an opened index read only the sources of documents whose f32 doc values
+    /// sit within an ulp of a bound, and match exactly what the in-memory index matches.
+    #[test]
+    fn search_speed_float_ranges_on_disk_match_as_in_memory() {
+        let dir = std::env::temp_dir().join(format!("esm-speed-float-{}", std::process::id()));
+        let values = [
+            json!(0.3),
+            json!(0.30000001),
+            json!(0.29999999),
+            json!(1.1),
+            json!(1.1000000001),
+            json!(-0.0),
+            json!(0),
+            json!(2),
+            json!(16_777_217),
+            json!("0.5"),
+            json!([0.1, 5.0]),
+            json!([-3, 0.7]),
+        ];
+        let build = || {
+            let mut ix = Index::default();
+            (ix.mappings.properties).insert("f".into(), FieldMapping::Float);
+            for (i, v) in values.iter().enumerate() {
+                ix.put(&i.to_string(), json!({"f": v}));
+            }
+            ix
+        };
+        let ix = build();
+        disk::save(&dir, &Indices::from([("i".to_owned(), build())])).unwrap();
+        let opened = disk::open(&dir).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let ids = |ix: &Index, q: &Value| {
+            let body = json!({"query": q, "size": 100});
+            let r = search(ix, &SearchRequest::parse(&body).unwrap());
+            let mut ids: Vec<_> = r
+                .hits
+                .iter()
+                .map(|h| h.id.parse::<u32>().unwrap())
+                .collect();
+            ids.sort_unstable();
+            ids
+        };
+        let ranges = [
+            json!({"gt": 0.3}),
+            json!({"gte": 0.3, "lte": 1.1}),
+            json!({"gt": 0.3, "lt": 1.1}),
+            json!({"gt": -0.0}),
+            json!({"gte": 0, "lt": 2}),
+            json!({"gt": 16_777_216}),
+            json!({"lte": 0.5}),
+            json!({"gt": 1e38}),
+            json!({"gte": 2, "lte": 0.5}),
+        ];
+        for r in ranges {
+            let q = json!({"range": {"f": r}});
+            let parsed = parse_query(&q).unwrap();
+            let s = Searcher::new(&opened["i"], &parsed);
+            assert!(s.candidates(&parsed, true).is_some(), "{q}");
+            assert_eq!(ids(&opened["i"], &q), ids(&ix, &q), "{q}");
+            assert_eq!(count(&opened["i"], &parsed), count(&ix, &parsed), "{q}");
+        }
+        let q = json!({"term": {"f": 0.3}});
+        assert_eq!(ids(&opened["i"], &q), ids(&ix, &q));
+        assert_eq!(ids(&ix, &q), [0]);
+        // documents in doubt through bool clauses
+        let gt = json!({"range": {"f": {"gt": 0.3}}});
+        let lt = json!({"range": {"f": {"lt": 1.1}}});
+        let queries = [
+            json!({"bool": {"must_not": gt}}),
+            json!({"bool": {"filter": [gt, {"range": {"f": {"lt": 2}}}]}}),
+            json!({"bool": {"filter": gt, "should": gt, "minimum_should_match": 1}}),
+            json!({"bool": {"filter": gt, "must_not": lt}}),
+            json!({"bool": {"should": [gt, lt], "minimum_should_match": 2}}),
+            json!({"bool": {"should": [gt, {"term": {"f": 2}}], "must_not": {"term": {"f": 0}}}}),
+        ];
+        for q in queries {
+            let parsed = parse_query(&q).unwrap();
+            assert_eq!(ids(&opened["i"], &q), ids(&ix, &q), "{q}");
+            assert_eq!(count(&opened["i"], &parsed), count(&ix, &parsed), "{q}");
+        }
     }
 
     /// Zeroes the stored fields (`.fdt`) in every segment of every shard under `dir`.
