@@ -1140,7 +1140,6 @@ fn parse_one(name: &str, body: &Value) -> Result<Agg, QueryError> {
 /// Splits an order path into its first aggregation's name and the rest: `>` and the path into
 /// that single-bucket aggregation, `[key]` or `.` and a metric key, or nothing. Like ES's
 /// AggregationPath, only the last element may have a `[key]`.
-// ponytail: malformed elements (`[x]`, `a[`) are names, not ES's invalid path element error
 fn split_path(path: &str) -> Result<(&str, &str), String> {
     let key = |e: &str| e.rfind('[').filter(|&k| k > 0 && e[k..].contains(']'));
     if let Some(i) = path.find('>') {
@@ -1153,6 +1152,29 @@ fn split_path(path: &str) -> Result<(&str, &str), String> {
         };
     }
     Ok(path.split_at(key(path).or_else(|| path.rfind('.')).unwrap_or(path.len())))
+}
+
+/// Refuses an order path with a malformed element, as ES's AggregationPath.parse does: a
+/// `[key]` with no name before it, an empty or unclosed key, text after the last element's
+/// key, or a metric `.` at either end of the last element.
+fn check_path(path: &str) -> Result<(), QueryError> {
+    let elements: Vec<&str> = path.split('>').filter(|e| !e.is_empty()).collect();
+    for (i, e) in elements.iter().enumerate() {
+        let (key, metric, end) = (e.rfind('['), e.rfind('.'), e.rfind(']'));
+        let bad = match (key, i + 1 == elements.len()) {
+            (Some(k), _) if k == 0 || k + 3 > e.len() => true,
+            (Some(_), false) => !e.ends_with(']'),
+            (Some(k), true) => end.is_none_or(|j| j < k) || (metric.is_none() && !e.ends_with(']')),
+            (None, true) => metric.is_some_and(|m| m == 0 || m + 2 > e.len()),
+            (None, false) => false,
+        };
+        if bad {
+            let msg = format!("Invalid path element [{e}] in path [{path}]");
+            let outer = QueryError::x_content("[terms] failed to parse field [order]");
+            return Err(outer.caused_by(QueryError::illegal(msg)));
+        }
+    }
+    Ok(())
 }
 
 /// The message of an order path into an aggregation that has no single value.

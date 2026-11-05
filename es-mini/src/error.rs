@@ -382,6 +382,12 @@ impl From<es_query::QueryError> for AppError {
         if !e.shards.is_empty() {
             return Self::AllShardsFailed(e.shards);
         }
+        if let Some(cause) = e.cause {
+            let (_, mut cause) = Self::from(*cause).parts();
+            cause.as_object_mut().map(|c| c.remove("root_cause"));
+            let error = Self::from(es_query::QueryError::new(e.kind, e.msg));
+            return Self::Caused(Box::new(error), cause);
+        }
         match e.kind {
             es_query::ErrorKind::Parsing => Self::ParsingException(e.msg),
             es_query::ErrorKind::IllegalArgument => Self::IllegalArgument(e.msg),

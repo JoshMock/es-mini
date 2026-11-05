@@ -71,12 +71,25 @@ pub struct QueryError {
     /// When the search failed on every shard: each shard's index, number and failure; the
     /// first gives `kind` and `msg`.
     pub shards: Vec<(String, usize, QueryError)>,
+    /// The error this one wraps, rendered as its `caused_by`.
+    pub cause: Option<Box<QueryError>>,
 }
 
 impl QueryError {
     pub fn new(kind: ErrorKind, msg: impl Into<String>) -> Self {
-        let (msg, shards) = (msg.into(), vec![]);
-        Self { kind, msg, shards }
+        let (msg, shards, cause) = (msg.into(), vec![], None);
+        Self {
+            kind,
+            msg,
+            shards,
+            cause,
+        }
+    }
+
+    /// This error, caused by `cause`.
+    pub fn caused_by(self, cause: QueryError) -> Self {
+        let cause = Some(Box::new(cause));
+        Self { cause, ..self }
     }
 
     pub fn illegal(msg: impl Into<String>) -> Self {

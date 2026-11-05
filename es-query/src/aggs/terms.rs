@@ -380,6 +380,7 @@ fn parse_order(v: &Value, subs: &[Agg]) -> Result<Vec<(By, bool)>, QueryError> {
                 let invalid = |e: String| {
                     QueryError::illegal(format!("Invalid aggregation order path [{path}]. {e}"))
                 };
+                super::check_path(path)?;
                 let (agg, rest) = super::split_path(path).map_err(invalid)?;
                 let index = (subs.iter().position(|s| s.name == agg))
                     .ok_or_else(|| invalid(format!("The provided aggregation [{agg}] either does not exist, or is a pipeline aggregation and cannot be used to sort the buckets.")))?;
