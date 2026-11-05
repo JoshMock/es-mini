@@ -455,7 +455,7 @@ impl crate::Shard {
             seq_nos.select_nth_unstable(n);
             seq_nos.truncate(n);
         }
-        let docs = seq_nos.iter().filter_map(|s| self.by_seq_no.get(s));
+        let docs = seq_nos.iter().filter_map(|&s| self.docs.by_seq_no(s));
         (count, docs.map(|(id, d)| (id.as_str(), &**d)).collect())
     }
 
@@ -525,11 +525,7 @@ impl crate::Shard {
     ) -> Option<(usize, Vec<(&str, &crate::Document)>)> {
         use std::ops::Bound::{Excluded, Included, Unbounded};
         let key = Key::of(mapping)?;
-        let all_visible = self
-            .by_seq_no
-            .keys()
-            .next_back()
-            .is_none_or(|&s| s < visible);
+        let all_visible = self.docs.last().is_none_or(|d| d.seq_no < visible);
         let plain_bounds = [gt, gte, lt, lte].into_iter().flatten().all(plain);
         if key != Key::Number || !all_visible || !plain_bounds {
             return None;
@@ -588,7 +584,7 @@ impl crate::Shard {
             .entry((path.to_owned(), key))
             .or_insert_with_key(|(path, key)| {
                 let mut n = Numbers::default();
-                for (id, d) in &self.docs {
+                for (id, d) in self.docs.iter() {
                     n.add(id, keys(key, &d.source, path));
                 }
                 n

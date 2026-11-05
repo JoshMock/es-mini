@@ -130,8 +130,11 @@ pub(crate) struct DiskDoc {
 #[derive(Clone)]
 pub(crate) struct Segments {
     segments: Arc<Vec<SegmentReader>>,
-    /// Live documents by id. Writes to the index remove the ones they replace or delete.
-    ids: HashMap<String, DiskDoc>,
+    /// The documents live when the segments were opened, by id; shared by clones.
+    ids: Arc<HashMap<String, DiskDoc>>,
+    /// Per segment, the documents of `ids` that writes to the index since replaced or deleted,
+    /// as Lucene's live docs: a clone shares them until either removes a document.
+    removed: Vec<Arc<HashSet<usize>>>,
     /// Per segment, the paths of its nested documents (`_nested_path` terms)
     nested: Vec<Vec<String>>,
 }
@@ -140,7 +143,7 @@ impl std::fmt::Debug for Segments {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Segments")
             .field("segments", &self.segments.len())
-            .field("docs", &self.ids.len())
+            .field("docs", &self.live().count())
             .finish()
     }
 }
@@ -172,13 +175,23 @@ fn document(d: &DiskDoc, (_, source, routing): Stored) -> es_codec::Result<Docum
 }
 
 impl Segments {
+    /// A live document by id, with its id as `ids` holds it.
+    fn get(&self, id: &str) -> Option<(&String, &DiskDoc)> {
+        (self.ids.get_key_value(id)).filter(|(_, d)| !self.removed[d.segment].contains(&d.doc))
+    }
+
+    /// The live documents.
+    fn live(&self) -> impl Iterator<Item = (&String, &DiskDoc)> {
+        (self.ids.iter()).filter(|(_, d)| !self.removed[d.segment].contains(&d.doc))
+    }
+
     pub(crate) fn meta(&self, id: &str) -> Option<DiskDoc> {
-        self.ids.get(id).copied()
+        self.get(id).map(|(_, d)| *d)
     }
 
     /// Where a live document is.
     pub(crate) fn pos(&self, id: &str) -> Option<DiskPos> {
-        self.ids.get(id).map(|d| (d.segment, d.doc))
+        self.get(id).map(|(_, d)| (d.segment, d.doc))
     }
 
     /// A segment's doc values of `field`; `None` if it has none the codec reads.
@@ -198,7 +211,9 @@ impl Segments {
 
     /// Forgets a document the index replaced or deleted.
     pub(crate) fn remove(&mut self, id: &str) -> Option<DiskDoc> {
-        self.ids.remove(id)
+        let d = self.meta(id)?;
+        Arc::make_mut(&mut self.removed[d.segment]).insert(d.doc);
+        Some(d)
     }
 
     /// Reads a live document from its segment.
@@ -293,7 +308,8 @@ impl Segments {
 
     /// Where every live document is, with its id and sequence number.
     pub(crate) fn positions(&self) -> impl Iterator<Item = (DiskPos, (&str, u64))> {
-        (self.ids.iter()).map(|(id, d)| ((d.segment, d.doc), (id.as_str(), d.seq_no)))
+        self.live()
+            .map(|(id, d)| ((d.segment, d.doc), (id.as_str(), d.seq_no)))
     }
 
     /// The live documents at a position `keep` accepts, segment by segment, read a chunk at a
@@ -312,9 +328,7 @@ impl Segments {
                 let read = || {
                     let (doc, fields) = fields?;
                     let stored = id_and_source(seg, fields)?;
-                    let Some((id, d)) =
-                        (stored.0.as_ref()).and_then(|id| self.ids.get_key_value(id))
-                    else {
+                    let Some((id, d)) = (stored.0.as_ref()).and_then(|id| self.get(id)) else {
                         return Ok(None);
                     };
                     if (d.segment, d.doc) != (s, doc) {
@@ -395,11 +409,13 @@ fn load_shard(index: &mut Shard, dir: &Path) -> es_codec::Result<()> {
             serde_json::from_str(changes).map_err(|e| es_codec::Error(e.to_string()))?;
     }
     index.commit = infos.user_data;
+    let mut ids = HashMap::new();
     let (mut segments, mut shard) = (
         vec![],
         Segments {
             segments: Arc::default(),
-            ids: HashMap::new(),
+            ids: Arc::default(),
+            removed: vec![],
             nested: vec![],
         },
     );
@@ -425,7 +441,7 @@ fn load_shard(index: &mut Shard, dir: &Path) -> es_codec::Result<()> {
                 seq_no: at(&seq_nos),
             };
             index.next_seq_no = index.next_seq_no.max(d.seq_no + 1);
-            shard.ids.insert(id, d);
+            ids.insert(id, d);
         };
         // Ids come from the `_id` postings, or from the stored fields where the codec cannot
         // read those (Elasticsearch writes `_id` in ES812Postings). Nested docs share their
@@ -453,6 +469,8 @@ fn load_shard(index: &mut Shard, dir: &Path) -> es_codec::Result<()> {
         );
         segments.push(seg);
     }
+    shard.ids = Arc::new(ids);
+    shard.removed = vec![Arc::default(); segments.len()];
     shard.segments = Arc::new(segments);
     index.stats = Some(stats);
     index.disk = Some(shard);
@@ -472,7 +490,7 @@ fn unsaved<'a>(
         .map(|(id, d)| (id.as_str(), Cow::Borrowed(&**d)))
         .collect();
     if let Some(disk) = &ix.disk {
-        let at: HashSet<DiskPos> = (disk.ids.iter())
+        let at: HashSet<DiskPos> = (disk.live())
             .filter(|(id, _)| !current.contains(*id))
             .map(|(_, d)| (d.segment, d.doc))
             .collect();
@@ -2497,8 +2515,8 @@ mod tests {
         ix.put("memory", json!({"n": 2}));
         let snap = ix.snapshot();
         assert!(Arc::ptr_eq(
-            &ix.shards[0].docs["memory"],
-            &snap.shards[0].docs["memory"]
+            ix.shards[0].docs.get("memory").unwrap(),
+            snap.shards[0].docs.get("memory").unwrap()
         ));
         let segments = |ix: &Index| Arc::clone(&ix.shards[0].disk.as_ref().unwrap().segments);
         assert!(Arc::ptr_eq(&segments(&ix), &segments(&snap)));

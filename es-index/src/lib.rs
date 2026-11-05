@@ -8,6 +8,7 @@ pub mod disk;
 pub mod filter_path;
 pub mod index_settings;
 pub mod mapping;
+mod memory;
 pub mod postings;
 pub mod routing;
 pub mod tz;
@@ -295,9 +296,7 @@ pub struct Shard {
     pub commit: BTreeMap<String, String>,
     /// Documents written since the index was opened; they replace any on disk. Shared with
     /// snapshots.
-    docs: HashMap<String, Arc<Document>>,
-    /// `docs` by sequence number, so searches visit them in write order without sorting.
-    by_seq_no: BTreeMap<u64, (String, Arc<Document>)>,
+    docs: memory::Docs,
     /// Postings over `docs`, built per field as queries need them (see [`postings`]).
     postings: std::sync::Mutex<postings::Postings>,
     /// The `ignore_above` changes of its keyword fields, oldest first (see
@@ -461,7 +460,6 @@ impl Shard {
     /// counted in its statistics, as a deleted document does in Lucene.
     fn take(&mut self, id: &str) -> Option<Option<Arc<Document>>> {
         if let Some(d) = self.docs.remove(id) {
-            self.by_seq_no.remove(&d.seq_no);
             self.memo_log(|m| m.removed.push(d.seq_no));
             self.postings
                 .get_mut()
@@ -573,7 +571,6 @@ impl Shard {
             seq_no,
             routing,
         });
-        self.by_seq_no.insert(seq_no, (id.to_owned(), doc.clone()));
         self.docs.insert(id.to_owned(), doc);
         self.memo_log(|m| m.written.push(id.to_owned()));
         match old {
@@ -629,13 +626,10 @@ impl Shard {
     }
 
     /// This shard's part of [`Index::snapshot`].
-    // ponytail: copies the ids and versions of the documents (not their sources); memory grows
-    // with the document count times open snapshots, where Lucene shares per-segment live docs
     fn snapshot(&self, settings: &Settings) -> Shard {
         Shard {
             stats: self.stats.clone(),
             docs: self.docs.clone(),
-            by_seq_no: self.by_seq_no.clone(),
             disk: self.disk.clone(),
             superseded: self.superseded.clone(),
             ignore_above: self.ignore_above.clone(),
@@ -881,7 +875,7 @@ impl Shard {
                 m.sort_by_cached_key(|(_, d)| d.seq_no);
                 Box::new(m.into_iter())
             }
-            None => Box::new(self.by_seq_no.values().map(|(id, d)| (id, d))),
+            None => Box::new(self.docs.iter()),
         };
         on_disk
             // ponytail: open checksums the segments; documents an I/O error since makes
@@ -894,7 +888,10 @@ impl Shard {
     /// Every live document, without reading it: its position on disk or its id in memory.
     pub fn live(&self) -> (HashSet<disk::DiskPos>, HashSet<&str>) {
         let on_disk = self.disk_live().map(|(p, _)| p).collect();
-        (on_disk, self.docs.keys().map(String::as_str).collect())
+        (
+            on_disk,
+            self.docs.iter().map(|(id, _)| id.as_str()).collect(),
+        )
     }
 
     /// Where a live document on disk is; `None` for one in memory or missing.
@@ -908,7 +905,9 @@ impl Shard {
     // document if a `_doc` sort after deletes must match ES
     pub fn seq_nos(&self) -> Vec<u64> {
         let disk = self.disk_live().map(|(_, (_, s))| s);
-        let mut all: Vec<u64> = disk.chain(self.by_seq_no.keys().copied()).collect();
+        let mut all: Vec<u64> = disk
+            .chain(self.docs.iter().map(|(_, d)| d.seq_no))
+            .collect();
         all.sort_unstable();
         all.dedup();
         all
@@ -1828,6 +1827,58 @@ mod tests {
         }
         assert_eq!(b.shards.len(), 2);
         assert!((b.shards.iter()).all(|s| Arc::ptr_eq(&s.request_cache.node, &node)));
+    }
+
+    #[test]
+    fn memory_bounds_2_snapshots_share_the_ids_and_versions() {
+        // where each document's id is held: a copy is elsewhere
+        let ids = |ix: &Index| -> HashMap<String, usize> {
+            (ix.docs()
+                .map(|(id, _)| (id.to_owned(), id.as_ptr() as usize)))
+            .collect()
+        };
+        let mut ix = Index::default();
+        for id in 0..100 {
+            ix.put(&format!("m{id}"), json!({}));
+        }
+        let dir = std::env::temp_dir().join(format!("esm-snap-share-{}", std::process::id()));
+        disk::save(&dir, &Indices::from([("i".to_owned(), ix)])).unwrap();
+        let mut ix = disk::open(&dir).unwrap().remove("i").unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        for id in 0..100 {
+            ix.put(&format!("n{id}"), json!({}));
+        }
+        let disk_ids = |ix: &Index| -> HashMap<String, usize> {
+            (ix.shards[0].disk_live())
+                .map(|(_, (id, _))| (id.to_owned(), id.as_ptr() as usize))
+                .collect()
+        };
+        let snap = ix.snapshot();
+        let (held, held_on_disk) = (ids(&snap), disk_ids(&snap));
+        assert_eq!((held.len(), held_on_disk.len()), (200, 100));
+        // writes after it replace, delete and add documents, on disk and in memory
+        ix.put("m1", json!({"v": 2}));
+        ix.delete("m2");
+        ix.put("n1", json!({"v": 2}));
+        ix.delete("n2");
+        ix.put("new", json!({}));
+        assert_eq!(ids(&snap), held, "the snapshot is unchanged");
+        assert_eq!(snap.shards[0].get("m2").unwrap().version, 1);
+        assert_eq!(snap.shards[0].get("n2").unwrap().version, 1);
+        assert!(snap.shards[0].get("new").is_none());
+        let now = ids(&ix);
+        assert_eq!(now.len(), 199);
+        for (id, at) in now
+            .iter()
+            .filter(|(id, _)| !matches!(&id[..], "m1" | "n1" | "new"))
+        {
+            assert_eq!(held[id], *at, "{id} is shared, not copied");
+        }
+        let now = disk_ids(&ix);
+        assert_eq!(now.len(), 98);
+        for (id, at) in &now {
+            assert_eq!(held_on_disk[id], *at, "{id} is shared, not copied");
+        }
     }
 
     #[test]
