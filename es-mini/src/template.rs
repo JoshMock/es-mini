@@ -137,7 +137,6 @@ fn emit<'v>(nodes: &[Node], stack: &mut Vec<&'v Value>, out: &mut String) {
 }
 
 /// A params value as Java's `toString` prints it, params being parsed into `HashMap`s.
-// ponytail: integers past u64 print as doubles; Java's are BigIntegers
 fn java_string(v: &Value) -> String {
     let join = |parts: Vec<String>| parts.join(", ");
     match v {
@@ -156,8 +155,8 @@ fn java_string(v: &Value) -> String {
 }
 
 /// Renders a search template request body (`source` + `params`) into a `_search` body.
-pub fn search_body(body: &Bytes) -> Result<Bytes, AppError> {
-    let body = parse_body(body)?;
+pub fn search_body(body_bytes: &Bytes) -> Result<Bytes, AppError> {
+    let body = parse_body(body_bytes)?;
     if body.get("id").is_some() {
         return Err(AppError::IllegalArgument(
             "stored search templates ([id]) are not supported; use an inline [source]".into(),
@@ -172,6 +171,42 @@ pub fn search_body(body: &Bytes) -> Result<Bytes, AppError> {
         }
         other => other.to_string(),
     };
-    let rendered = render(&source, &body["params"]).map_err(AppError::IllegalArgument)?;
+    let params = &parse_body(&quote_big_integers(body_bytes))?["params"];
+    let rendered = render(&source, params).map_err(AppError::IllegalArgument)?;
     Ok(Bytes::from(rendered))
+}
+
+/// `json` with the integers neither i64 nor u64 holds quoted: Java parses them as BigIntegers,
+/// which render as their digits, as strings do, where serde_json would round them to doubles.
+fn quote_big_integers(json: &[u8]) -> Bytes {
+    let (mut out, mut i, mut in_string) = (Vec::with_capacity(json.len()), 0, false);
+    while i < json.len() {
+        let c = json[i];
+        let start = i;
+        i += 1;
+        if in_string {
+            match c {
+                b'\\' => i += 1,
+                b'"' => in_string = false,
+                _ => {}
+            }
+        } else if c == b'"' {
+            in_string = true;
+        } else if c == b'-' || c.is_ascii_digit() {
+            while json.get(i).is_some_and(|b| b"0123456789.eE+-".contains(b)) {
+                i += 1;
+            }
+            let token = std::str::from_utf8(&json[start..i]).unwrap_or_default();
+            let integer = token
+                .trim_start_matches('-')
+                .bytes()
+                .all(|b| b.is_ascii_digit());
+            if integer && token.parse::<i64>().is_err() && token.parse::<u64>().is_err() {
+                out.extend_from_slice(format!("\"{token}\"").as_bytes());
+                continue;
+            }
+        }
+        out.extend_from_slice(&json[start..i.min(json.len())]);
+    }
+    out.into()
 }

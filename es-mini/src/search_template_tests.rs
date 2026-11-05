@@ -140,3 +140,16 @@ fn error_shapes_template_renders_lists_and_maps_like_java() {
         "-0.0 1.0E-5 1.23456789E8 1.0E20 1.0"
     );
 }
+
+#[test]
+fn api_fidelity_template_big_integers_print_exactly() {
+    let body =
+        br#"{"source": "{{a}} {{b}} {{c}} {{l}} {{m}}", "params": {"a": 18446744073709551616,
+        "b": -9223372036854775809, "c": 1e30, "l": [1, 123456789012345678901234567890],
+        "m": {"k": "99999999999999999999"}}}"#;
+    let rendered = crate::template::search_body(&body[..].into()).unwrap();
+    assert_eq!(
+        std::str::from_utf8(&rendered).unwrap(),
+        "18446744073709551616 -9223372036854775809 1.0E30 {0=1, 1=123456789012345678901234567890} {k=99999999999999999999}"
+    );
+}
