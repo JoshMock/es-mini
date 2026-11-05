@@ -207,7 +207,8 @@ const COMMON_RULES = (model: string) => `
 - Before writing new parsing or resolution logic, search for an existing helper (e.g. es_index::aliases::resolve_read for index expressions) and extend it instead of duplicating it.
 - Red-green TDD for behavior changes. Run \`scripts/check.sh\` until it passes. If the sandbox blocks ~/.cargo, prefix cargo commands with CARGO_HOME=/tmp/esm-cargo.
 - Commit atomically: one commit per distinct behavior, each describing it and ending with the trailer \`${trailer(model)}\`.
-- If the work needs a decision the standing orders reserve for a human, stop without committing and record it in ralph/NEEDS_HUMAN.md.`;
+- If the work needs a decision the standing orders reserve for a human, stop without committing and record it in ralph/NEEDS_HUMAN.md.
+- If the only work left on your target waits on a decision already recorded in ralph/NEEDS_HUMAN.md and nothing it names has changed since, stop at once: no commit, and no new NEEDS_HUMAN.md entry.`;
 
 function prompt(suite: Suite, id: string, model: string): string {
   const goal =
