@@ -463,7 +463,10 @@ async fn stats_and_cat_shards_take_h_s_bytes_and_help() {
     let text = cat_text(&app, "/_cat/shards/b?h=store,docs&bytes=kb").await;
     assert_eq!(text, "0 6\n");
     let text = cat_text(&app, "/_cat/shards?help").await;
-    assert!(text.starts_with("index   | i,idx"), "{text}");
+    assert!(
+        text.starts_with("index                                         | i,idx"),
+        "{text}"
+    );
     assert!(text.contains("number of docs in shard"), "{text}");
     let (s, _) = call(&app, "GET", "/_cat/shards?bytes=zz", Value::Null).await;
     assert_eq!(s, 400);
@@ -479,4 +482,33 @@ async fn stats_and_cat_stats_count_indexing_operations() {
         (&ix["index_total"], &ix["delete_total"]),
         (&json!(6), &json!(1))
     );
+}
+
+#[tokio::test]
+async fn stats_and_cat_shards_report_every_optional_column() {
+    let app = setup("keyword", "keyword").await;
+    let (_, r) = call(&app, "GET", "/_cat/shards/b?format=json&h=*", Value::Null).await;
+    let row = &r[0];
+    assert_eq!(row.as_object().unwrap().len(), 79, "{row}");
+    assert_eq!(row["id"], "es-mini-node");
+    assert_eq!(row["seq_no.max"], "5");
+    assert_eq!(row["indexing.index_total"], "6");
+    assert_eq!(row["merges.total_time"], "0s");
+    assert_eq!(row["bulk.total_size_in_bytes"], "0");
+    let text = cat_text(&app, "/_cat/shards/b?h=sqm,completion.size,unassigned.*&v").await;
+    assert!(
+        text.starts_with("seq_no.max completion.size unassigned.reason"),
+        "{text}"
+    );
+    // default columns stay the nine, without the node id
+    let (_, r) = call(&app, "GET", "/_cat/shards/b?format=json", Value::Null).await;
+    assert_eq!(r[0].as_object().unwrap().len(), 9);
+    let (_, r) = call(
+        &app,
+        "GET",
+        "/_cat/shards/b?format=json&h=state,unassigned.reason",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(r[0]["state"], "STARTED");
 }

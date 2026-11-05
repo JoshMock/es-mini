@@ -975,7 +975,7 @@ pub async fn stats(
 }
 
 /// `GET /_cat/shards[/{index}]`: one row per shard (see [`cat_table`]).
-// ponytail: only the nine default columns (no sync_id, unassigned.*, or other optional ones). Store sizes are 0b like _stats.
+// ponytail: path.data, path.state and unassigned.for report no value; store sizes and every counter es-mini keeps none of (merges, search, get, flush, ...) are 0 like _stats
 pub async fn cat_shards(
     State(state): State<AppState>,
     path: Option<Path<String>>,
@@ -984,7 +984,7 @@ pub async fn cat_shards(
 ) -> Result<axum::response::Response, AppError> {
     check(&uri, &params, &["format", "v", "h", "s", "bytes", "help"])?;
     // name, aliases and description, as RestShardsAction declares them
-    const COLUMNS: [(&str, &str, &str); 9] = [
+    const COLUMNS: [(&str, &str, &str); 79] = [
         ("index", "i,idx", "index name"),
         ("shard", "s,sh", "shard name"),
         ("prirep", "p,pr,primaryOrReplica", "primary or replica"),
@@ -995,13 +995,279 @@ pub async fn cat_shards(
             "sto",
             "store size of shard (how much disk it uses)",
         ),
-        (
-            "dataset",
-            "dto",
-            "total data set size of a shard (including the cache for partially mounted indices)",
-        ),
+        ("dataset", "", "total size of dataset"),
         ("ip", "", "ip of node where it lives"),
+        ("id", "", "unique id of node where it lives"),
         ("node", "n", "name of node where it lives"),
+        ("unassigned.reason", "ur", "reason shard became unassigned"),
+        ("unassigned.at", "ua", "time shard became unassigned (UTC)"),
+        ("unassigned.for", "uf", "time has been unassigned"),
+        (
+            "unassigned.details",
+            "ud",
+            "additional details as to why the shard became unassigned",
+        ),
+        ("recoverysource.type", "rs", "recovery source type"),
+        ("completion.size", "cs,completionSize", "size of completion"),
+        (
+            "fielddata.memory_size",
+            "fm,fielddataMemory",
+            "used fielddata cache",
+        ),
+        (
+            "fielddata.evictions",
+            "fe,fielddataEvictions",
+            "fielddata evictions",
+        ),
+        (
+            "query_cache.memory_size",
+            "qcm,queryCacheMemory",
+            "used query cache",
+        ),
+        (
+            "query_cache.evictions",
+            "qce,queryCacheEvictions",
+            "query cache evictions",
+        ),
+        ("flush.total", "ft,flushTotal", "number of flushes"),
+        (
+            "flush.total_time",
+            "ftt,flushTotalTime",
+            "time spent in flush",
+        ),
+        ("get.current", "gc,getCurrent", "number of current get ops"),
+        ("get.time", "gti,getTime", "time spent in get"),
+        ("get.total", "gto,getTotal", "number of get ops"),
+        (
+            "get.exists_time",
+            "geti,getExistsTime",
+            "time spent in successful gets",
+        ),
+        (
+            "get.exists_total",
+            "geto,getExistsTotal",
+            "number of successful gets",
+        ),
+        (
+            "get.missing_time",
+            "gmti,getMissingTime",
+            "time spent in failed gets",
+        ),
+        (
+            "get.missing_total",
+            "gmto,getMissingTotal",
+            "number of failed gets",
+        ),
+        (
+            "indexing.delete_current",
+            "idc,indexingDeleteCurrent",
+            "number of current deletions",
+        ),
+        (
+            "indexing.delete_time",
+            "idti,indexingDeleteTime",
+            "time spent in deletions",
+        ),
+        (
+            "indexing.delete_total",
+            "idto,indexingDeleteTotal",
+            "number of delete ops",
+        ),
+        (
+            "indexing.index_current",
+            "iic,indexingIndexCurrent",
+            "number of current indexing ops",
+        ),
+        (
+            "indexing.index_time",
+            "iiti,indexingIndexTime",
+            "time spent in indexing",
+        ),
+        (
+            "indexing.index_total",
+            "iito,indexingIndexTotal",
+            "number of indexing ops",
+        ),
+        (
+            "indexing.index_failed",
+            "iif,indexingIndexFailed",
+            "number of failed indexing ops",
+        ),
+        (
+            "indexing.index_failed_due_to_version_conflict",
+            "iifvc,indexingIndexFailedDueToVersionConflict",
+            "number of failed indexing ops due to version conflict",
+        ),
+        (
+            "merges.current",
+            "mc,mergesCurrent",
+            "number of current merges",
+        ),
+        (
+            "merges.current_docs",
+            "mcd,mergesCurrentDocs",
+            "number of current merging docs",
+        ),
+        (
+            "merges.current_size",
+            "mcs,mergesCurrentSize",
+            "size of current merges",
+        ),
+        (
+            "merges.total",
+            "mt,mergesTotal",
+            "number of completed merge ops",
+        ),
+        ("merges.total_docs", "mtd,mergesTotalDocs", "docs merged"),
+        ("merges.total_size", "mts,mergesTotalSize", "size merged"),
+        (
+            "merges.total_time",
+            "mtt,mergesTotalTime",
+            "time spent in merges",
+        ),
+        ("refresh.total", "rto,refreshTotal", "total refreshes"),
+        ("refresh.time", "rti,refreshTime", "time spent in refreshes"),
+        (
+            "refresh.external_total",
+            "rto,refreshTotal",
+            "total external refreshes",
+        ),
+        (
+            "refresh.external_time",
+            "rti,refreshTime",
+            "time spent in external refreshes",
+        ),
+        (
+            "refresh.listeners",
+            "rli,refreshListeners",
+            "number of pending refresh listeners",
+        ),
+        (
+            "search.fetch_current",
+            "sfc,searchFetchCurrent",
+            "current fetch phase ops",
+        ),
+        (
+            "search.fetch_time",
+            "sfti,searchFetchTime",
+            "time spent in fetch phase",
+        ),
+        (
+            "search.fetch_total",
+            "sfto,searchFetchTotal",
+            "total fetch ops",
+        ),
+        (
+            "search.open_contexts",
+            "so,searchOpenContexts",
+            "open search contexts",
+        ),
+        (
+            "search.query_current",
+            "sqc,searchQueryCurrent",
+            "current query phase ops",
+        ),
+        (
+            "search.query_time",
+            "sqti,searchQueryTime",
+            "time spent in query phase",
+        ),
+        (
+            "search.query_total",
+            "sqto,searchQueryTotal",
+            "total query phase ops",
+        ),
+        (
+            "search.scroll_current",
+            "scc,searchScrollCurrent",
+            "open scroll contexts",
+        ),
+        (
+            "search.scroll_time",
+            "scti,searchScrollTime",
+            "time scroll contexts held open",
+        ),
+        (
+            "search.scroll_total",
+            "scto,searchScrollTotal",
+            "completed scroll contexts",
+        ),
+        ("segments.count", "sc,segmentsCount", "number of segments"),
+        (
+            "segments.memory",
+            "sm,segmentsMemory",
+            "memory used by segments",
+        ),
+        (
+            "segments.index_writer_memory",
+            "siwm,segmentsIndexWriterMemory",
+            "memory used by index writer",
+        ),
+        (
+            "segments.version_map_memory",
+            "svmm,segmentsVersionMapMemory",
+            "memory used by version map",
+        ),
+        (
+            "segments.fixed_bitset_memory",
+            "sfbm,fixedBitsetMemory",
+            "memory used by fixed bit sets for nested object field types and type filters for types referred in _parent fields",
+        ),
+        ("seq_no.max", "sqm,maxSeqNo", "max sequence number"),
+        (
+            "seq_no.local_checkpoint",
+            "sql,localCheckpoint",
+            "local checkpoint",
+        ),
+        (
+            "seq_no.global_checkpoint",
+            "sqg,globalCheckpoint",
+            "global checkpoint",
+        ),
+        ("warmer.current", "wc,warmerCurrent", "current warmer ops"),
+        ("warmer.total", "wto,warmerTotal", "total warmer ops"),
+        (
+            "warmer.total_time",
+            "wtt,warmerTotalTime",
+            "time spent in warmers",
+        ),
+        ("path.data", "pd,dataPath", "shard data path"),
+        ("path.state", "ps,statsPath", "shard state path"),
+        (
+            "bulk.total_operations",
+            "bto,bulkTotalOperations",
+            "number of bulk shard ops",
+        ),
+        (
+            "bulk.total_time",
+            "btti,bulkTotalTime",
+            "time spend in shard bulk",
+        ),
+        (
+            "bulk.total_size_in_bytes",
+            "btsi,bulkTotalSizeInBytes",
+            "total size in bytes of shard bulk",
+        ),
+        (
+            "bulk.avg_time",
+            "bati,bulkAvgTime",
+            "average time spend in shard bulk",
+        ),
+        (
+            "bulk.avg_size_in_bytes",
+            "basi,bulkAvgSizeInBytes",
+            "avg size in bytes of shard bulk",
+        ),
+        (
+            "dense_vector.value_count",
+            "dvc,denseVectorCount",
+            "number of indexed dense vectors in shard",
+        ),
+        (
+            "sparse_vector.value_count",
+            "svc,sparseVectorCount",
+            "number of indexed sparse vectors in shard",
+        ),
     ];
     if let Some(unit) = params.get("bytes")
         && !["b", "kb", "mb", "gb", "tb", "pb"].contains(&unit.as_str())
@@ -1017,7 +1283,7 @@ pub async fn cat_shards(
     // Each primary is followed by its replicas, unassigned on this one node; their empty cells
     // are null in JSON.
     // with `bytes`, sizes are bare numbers of that unit
-    let zero = if params.contains_key("bytes") {
+    let size = if params.contains_key("bytes") {
         "0"
     } else {
         "0b"
@@ -1025,29 +1291,82 @@ pub async fn cat_shards(
     let rows: Vec<Vec<String>> = (names.iter())
         .flat_map(|n| (0..indices[n].number_of_shards()).map(move |i| (n, i)))
         .flat_map(|(n, i)| {
-            let docs = indices[n].shards().get(i).map_or(0, |s| s.docs().count());
-            let (i, docs) = (i.to_string(), docs.to_string());
-            let primary = [
-                n,
-                &i,
-                "p",
-                "STARTED",
-                &docs,
-                zero,
-                zero,
-                "127.0.0.1",
-                crate::CLUSTER_NAME,
-            ];
-            let replica = [n, &i, "r", "UNASSIGNED", "", "", "", "", ""];
+            let shard = indices[n].shards().get(i);
+            let docs = shard.map_or(0, |s| s.docs().count());
+            let (index_total, delete_total) = shard.map_or((0, 0), |s| s.write_totals());
+            let primary: Vec<String> = (COLUMNS.iter())
+                .map(|(c, _, _)| match *c {
+                    "index" => n.to_string(),
+                    "shard" => i.to_string(),
+                    "prirep" => "p".into(),
+                    "state" => "STARTED".into(),
+                    "docs" => docs.to_string(),
+                    "ip" => "127.0.0.1".into(),
+                    "id" => crate::nodes::NODE_ID.into(),
+                    "node" => crate::CLUSTER_NAME.into(),
+                    "indexing.index_total" => index_total.to_string(),
+                    "indexing.delete_total" => delete_total.to_string(),
+                    "seq_no.max" | "seq_no.local_checkpoint" | "seq_no.global_checkpoint" => {
+                        (i64::try_from(index_total + delete_total).unwrap_or(0) - 1).to_string()
+                    }
+                    "unassigned.reason"
+                    | "unassigned.at"
+                    | "unassigned.for"
+                    | "unassigned.details"
+                    | "recoverysource.type"
+                    | "path.data"
+                    | "path.state" => String::new(),
+                    c if c.ends_with("_in_bytes") => "0".into(),
+                    c if c.contains("time") => "0s".into(),
+                    c if c.contains("size") || c.contains("memory") || c == "store" => size.into(),
+                    "dataset" => size.into(),
+                    _ => "0".into(),
+                })
+                .collect();
+            let created = indices[n]
+                .settings
+                .get(es_index::index_settings::CREATION_DATE)
+                .and_then(|d| d.parse::<i64>().ok())
+                .map_or(String::new(), es_index::iso_date);
+            let replica: Vec<String> = (COLUMNS.iter())
+                .map(|(c, _, _)| match *c {
+                    "index" => n.to_string(),
+                    "shard" => i.to_string(),
+                    "prirep" => "r".into(),
+                    "state" => "UNASSIGNED".into(),
+                    "unassigned.reason" => "INDEX_CREATED".into(),
+                    "unassigned.at" => created.clone(),
+                    "recoverysource.type" => "peer".into(),
+                    _ => String::new(),
+                })
+                .collect();
             let replicas = indices[n].number_of_replicas();
             std::iter::once(primary)
                 .chain(std::iter::repeat_n(replica, replicas))
-                .map(|r| r.map(str::to_string).to_vec())
                 .collect::<Vec<_>>()
         })
         .collect();
-    // docs, store and dataset align right, as RestShardsAction declares
-    Ok(cat_view(&COLUMNS, rows, |c| (4..=6).contains(&c), &params))
+    // docs through the last numeric column align right, as RestShardsAction declares
+    let right = |c: usize| {
+        (4..=6).contains(&c)
+            || (COLUMNS[c].0.contains('.')
+                && !COLUMNS[c].0.starts_with("unassigned.")
+                && !COLUMNS[c].0.starts_with("path.")
+                && COLUMNS[c].0 != "recoverysource.type")
+    };
+    // every column but the node id is shown by default
+    let default = |c: usize| c <= 9 && COLUMNS[c].0 != "id";
+    Ok(cat_view(&COLUMNS, rows, right, default, &params))
+}
+
+/// Whether `name` matches `pat`, where `*` matches any run of characters.
+fn glob(pat: &str, name: &str) -> bool {
+    match pat.split_once('*') {
+        None => pat == name,
+        Some((head, rest)) => name
+            .strip_prefix(head)
+            .is_some_and(|n| (0..=n.len()).any(|i| n.is_char_boundary(i) && glob(rest, &n[i..]))),
+    }
 }
 
 /// [`cat_table`] after the `help`, `h` (columns by name or alias, unknown ones ignored) and `s`
@@ -1057,14 +1376,15 @@ fn cat_view(
     columns: &[(&str, &str, &str)],
     mut rows: Vec<Vec<String>>,
     right: impl Fn(usize) -> bool,
+    default: impl Fn(usize) -> bool,
     params: &HashMap<String, String>,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
     if params.get("help").is_some_and(|v| v != "false") {
         let w = |f: fn(&(&str, &str, &str)) -> usize| columns.iter().map(f).max().unwrap_or(0);
-        let (nw, aw) = (w(|c| c.0.len()), w(|c| c.1.len()));
+        let (nw, aw, dw) = (w(|c| c.0.len()), w(|c| c.1.len()), w(|c| c.2.len()));
         let out: String = (columns.iter())
-            .map(|(n, a, d)| format!("{n:<nw$} | {a:<aw$} | {d}\n"))
+            .map(|(n, a, d)| format!("{n:<nw$} | {a:<aw$} | {d:<dw$}\n"))
             .collect();
         return ([("content-type", "text/plain; charset=UTF-8")], out).into_response();
     }
@@ -1094,8 +1414,15 @@ fn cat_view(
         });
     }
     let shown: Vec<usize> = match params.get("h") {
-        Some(h) => h.split(',').filter_map(find).collect(),
-        None => (0..columns.len()).collect(),
+        Some(h) => (h.split(','))
+            .flat_map(|h| match h.contains('*') {
+                true => (0..columns.len())
+                    .filter(|&c| glob(h.trim(), columns[c].0))
+                    .collect(),
+                false => find(h).into_iter().collect::<Vec<_>>(),
+            })
+            .collect(),
+        None => (0..columns.len()).filter(|&c| default(c)).collect(),
     };
     let names: Vec<&str> = shown.iter().map(|&c| columns[c].0).collect();
     let rows = (rows.into_iter())
