@@ -776,3 +776,27 @@ async fn disk_fidelity_integer_fields_sort_fetch_and_aggregate_fractions_truncat
         ]
     );
 }
+
+#[tokio::test]
+async fn api_fidelity_count_skips_a_failing_index() {
+    let app = app();
+    for (index, ty) in [("a", "keyword"), ("b", "ip")] {
+        let mappings = json!({"mappings": {"properties": {"ip": {"type": ty}}}});
+        call(&app, Method::PUT, &format!("/{index}"), Some(mappings)).await;
+        let doc = json!({"ip": "nope"});
+        call(
+            &app,
+            Method::PUT,
+            &format!("/{index}/_doc/1?refresh=true"),
+            Some(doc),
+        )
+        .await;
+    }
+    let q = json!({"query": {"term": {"ip": "nope"}}});
+    let (s, r) = call(&app, Method::POST, "/a,b/_count", Some(q)).await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    assert_eq!(r["count"], 1);
+    assert_eq!(r["_shards"]["successful"], 1);
+    assert_eq!(r["_shards"]["failed"], 1);
+    assert_eq!(r["_shards"]["failures"][0]["index"], "b");
+}

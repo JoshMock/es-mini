@@ -668,8 +668,14 @@ pub async fn count(
     let indices = shared.lock(resolved.iter().map(|t| &t.index));
     let split = split(&indices, &resolved);
     let targets = targets(&indices, &resolved, &split);
-    let n = es_query::count_many(&targets, &query)?;
-    let resp = json!({"count": n, "_shards": shards(targets.len())});
+    let (n, failures) = es_query::count_many(&targets, &query)?;
+    let mut resp = json!({"count": n, "_shards": shards(targets.len())});
+    if !failures.is_empty() {
+        let s = &mut resp["_shards"];
+        s["successful"] = (targets.len() - failures.len()).into();
+        s["failed"] = failures.len().into();
+        s["failures"] = crate::error::shard_failures(failures).2.into();
+    }
     Ok(Json(resp))
 }
 

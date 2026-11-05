@@ -1393,6 +1393,9 @@ pub struct SearchResult<'a> {
 /// it was reached through. An index's shards are its targets in shard-number order.
 pub type Target<'a> = (&'a str, usize, &'a Index, Option<&'a Value>);
 
+/// A target's index, shard and the error the query failed on there.
+pub type ShardFailure<'a> = (&'a str, usize, QueryError);
+
 /// The request query, narrowed by an alias filter.
 fn with_filter(
     index: &Index,
@@ -1926,21 +1929,25 @@ fn global_stats(targets: &[Target], q: &Query) -> (FieldStats, DocFreqs) {
 
 /// [`count_many`] of one index; panics where it fails (e.g. on a date that does not parse).
 pub fn count(index: &Index, q: &Query) -> usize {
-    count_many(&[("", 0, index, None)], q).expect("count_many failed")
+    count_many(&[("", 0, index, None)], q)
+        .expect("count_many failed")
+        .0
 }
 
 /// Counts from postings and doc values where they answer the query exactly, on disk and in
-/// memory separately; the documents of the other are read and matched.
-pub fn count_many(targets: &[Target], q: &Query) -> Result<usize, QueryError> {
+/// memory separately; the documents of the other are read and matched. Targets the query fails
+/// on are left out and returned beside the count, unless it fails on all of them.
+pub fn count_many<'a>(
+    targets: &[Target<'a>],
+    q: &Query,
+) -> Result<(usize, Vec<ShardFailure<'a>>), QueryError> {
     let now = now_millis();
     let (mut n, mut failures) = (0, vec![]);
     for (name, shard, index, filter) in targets {
-        // ponytail: an index the query fails on fails the whole count, unwrapped; ES counts the
-        // others, like search_many
         let q = match with_filter(index, q, *filter, now) {
             Ok(q) => q,
             Err(e) => {
-                failures.push((name.to_string(), *shard, e));
+                failures.push((*name, *shard, e));
                 continue;
             }
         };
@@ -1980,12 +1987,13 @@ pub fn count_many(targets: &[Target], q: &Query) -> Result<usize, QueryError> {
             .count();
     }
     match failures.first() {
-        None => Ok(n),
         Some((_, _, e)) if failures.len() == targets.len() => Err(QueryError {
-            shards: failures.clone(),
+            shards: (failures.iter())
+                .map(|(i, n, e)| (i.to_string(), *n, e.clone()))
+                .collect(),
             ..e.clone()
         }),
-        Some((_, _, e)) => Err(e.clone()),
+        _ => Ok((n, failures)),
     }
 }
 

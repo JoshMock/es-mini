@@ -258,7 +258,10 @@ fn date_ranges_read_formats_time_zones_and_date_math() {
         &json!({"range": {"date": {"gte": "2021-12-31T19:00:00", "time_zone": "America/New_York"}}}),
     )
     .unwrap();
-    assert_eq!(es_query::count_many(&[("d", 0, &dates(), None)], &q), Ok(4));
+    assert_eq!(
+        es_query::count_many(&[("d", 0, &dates(), None)], &q),
+        Ok((4, vec![]))
+    );
 }
 
 #[test]
@@ -390,7 +393,9 @@ mod many {
         assert_eq!(r.hits.len(), 1);
         let q = parse_query(&json!({"match_all": {}})).unwrap();
         assert_eq!(
-            count_many(&[("a", 0, &a, Some(&only_n3)), ("b", 0, &b, None)], &q).unwrap(),
+            count_many(&[("a", 0, &a, Some(&only_n3)), ("b", 0, &b, None)], &q)
+                .unwrap()
+                .0,
             2
         );
         let bad = json!({"bogus": {}});

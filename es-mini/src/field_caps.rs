@@ -103,7 +103,7 @@ pub async fn field_caps(
             let split = crate::search::split(&indices, &one);
             let shards = crate::search::targets(&indices, &one, &split);
             es_query::count_many(&shards, &q)
-                .map_or(true, |c| c > 0 || indices[n].docs().count() == 0)
+                .map_or(true, |(c, _)| c > 0 || indices[n].docs().count() == 0)
         });
     }
     let runtime: Vec<(String, String)> =
