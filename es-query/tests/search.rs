@@ -2136,6 +2136,79 @@ fn query_gaps_2_multi_match_bool_prefix() {
     );
 }
 
+/// cross_fields blends each term's document frequency across the fields of an analyzer. The
+/// scores are Elasticsearch 9.5.5's for the same mappings and documents.
+#[test]
+fn query_gaps_2_multi_match_cross_fields() {
+    let mut idx = Index::default();
+    (idx.mappings.properties).insert(
+        "tag".into(),
+        FieldMapping::Keyword {
+            ignore_above: None,
+            split_queries_on_whitespace: false,
+        },
+    );
+    (idx.mappings.properties).insert("n".into(), FieldMapping::Integer);
+    idx.put("1", json!({"title": "quick brown fox", "body": "lazy dog"}));
+    idx.put(
+        "2",
+        json!({"title": "lazy fox", "body": "quick quick brown dog"}),
+    );
+    idx.put(
+        "3",
+        json!({"title": "brown dog", "body": "brown fox jumps"}),
+    );
+    idx.put("4", json!({"title": "slow turtle", "tag": "quick", "n": 5}));
+    let close = |mut q: Value, want: &[(&str, f32)]| {
+        if q.get("fields").is_none() {
+            q["fields"] = json!(["title", "body"]);
+        }
+        q["type"] = json!("cross_fields");
+        let req = SearchRequest::parse(&json!({"query": {"multi_match": q}})).unwrap();
+        let r = es_query::search_many(&[("", 0, &idx, None)], &req).unwrap();
+        let got: Vec<_> = (r.hits.iter())
+            .map(|h| (h.id.to_owned(), h.score.unwrap()))
+            .collect();
+        assert_eq!(got.len(), want.len(), "{got:?}");
+        for ((id, s), (wid, ws)) in got.iter().zip(want) {
+            assert_eq!(id, wid, "{got:?}");
+            assert!((s - ws).abs() < 1e-5, "{got:?} vs {want:?}");
+        }
+    };
+    // body's "fox" takes title's larger document frequency, plus one
+    close(
+        json!({"query": "quick fox"}),
+        &[("2", 1.9591966), ("1", 1.6694658), ("3", 0.13353139)],
+    );
+    close(
+        json!({"query": "quick dog", "operator": "and"}),
+        &[("2", 1.6466458), ("1", 1.6037109)],
+    );
+    close(
+        json!({"query": "quick fox", "tie_breaker": 0.3, "fields": ["title^2", "body"]}),
+        &[("1", 3.3389316), ("2", 2.685351), ("3", 0.13353139)],
+    );
+    // the keyword field is a group of its own
+    close(
+        json!({"query": "quick", "fields": ["title", "body", "tag"]}),
+        &[("2", 1.2330425), ("1", 1.0594962), ("4", 0.2876821)],
+    );
+    // as is a numeric one, beside it
+    close(
+        json!({"query": "5", "fields": ["title", "tag", "n"]}),
+        &[("4", 1.0)],
+    );
+    close(
+        json!({"query": "brown fox", "fields": ["title", "body", "missing"]}),
+        &[("1", 1.2199391), ("2", 1.1397574), ("3", 0.85968554)],
+    );
+    close(json!({"query": "the"}), &[]);
+    close(
+        json!({"query": "dog", "fields": ["title"]}),
+        &[("3", 1.2613049)],
+    );
+}
+
 /// Without `fields`, simple_query_string searches index.query.default_field, `*`.
 #[test]
 fn query_gaps_2_simple_query_string_default_fields() {

@@ -223,7 +223,7 @@ fn named_queries(q: &Query) -> Vec<(String, Query)> {
             } => {
                 (must.iter().chain(should).chain(must_not).chain(filter)).for_each(|c| walk(c, out))
             }
-            Query::Boosted { query, .. } => walk(query, out),
+            Query::Boosted { query, .. } | Query::Blended(query) => walk(query, out),
             Query::DisMax { queries, .. } => queries.iter().for_each(|c| walk(c, out)),
             _ => {}
         }
@@ -412,7 +412,9 @@ impl<'a> Searcher<'a> {
                 return;
             }
             Query::DisMax { queries, .. } => return queries.iter().for_each(|c| self.gather(c)),
-            Query::Named { query, .. } | Query::Boosted { query, .. } => return self.gather(query),
+            Query::Named { query, .. } | Query::Boosted { query, .. } | Query::Blended(query) => {
+                return self.gather(query);
+            }
             _ => return,
         };
         let (kind, path) = self.kind(field);
@@ -485,7 +487,7 @@ impl<'a> Searcher<'a> {
                     .filter_map(|t| self.term_docs(field, t, false, false))
                     .reduce(|a, b| &a & &b)
             }
-            Query::Named { query, .. } | Query::Boosted { query, .. } => {
+            Query::Named { query, .. } | Query::Boosted { query, .. } | Query::Blended(query) => {
                 self.candidates(query, exact)
             }
             Query::DisMax { queries, .. } => (queries.iter())
@@ -580,7 +582,7 @@ impl<'a> Searcher<'a> {
                     .filter_map(|t| lookup(field, t, false))
                     .reduce(|a, b| &a & &b)
             }
-            Query::Named { query, .. } | Query::Boosted { query, .. } => {
+            Query::Named { query, .. } | Query::Boosted { query, .. } | Query::Blended(query) => {
                 self.memory_candidates(query, within)
             }
             Query::DisMax { queries, .. } => (queries.iter())
@@ -751,15 +753,12 @@ impl<'a> Searcher<'a> {
 
     /// BM25's inputs and parts for a term of a field `len` terms long:
     /// `[df, docs with the field, norm length, average length, idf, tf]`.
-    fn bm25_parts(&self, field: &str, term: &str, freq: f64, len: f64) -> [f64; 6] {
+    fn bm25_parts(&self, field: &str, df: f64, freq: f64, len: f64) -> [f64; 6] {
         let (n, avg) = match self.field_stats.get(field) {
             Some(&(n, len)) if n > 0.0 => (n, len / n),
             Some(&(n, _)) => (n, 1.0),
             None => (1.0, 1.0),
         };
-        let df = (self.doc_freq.get(field).and_then(|f| f.get(term)))
-            .copied()
-            .unwrap_or(0.0);
         let len = f64::from(es_index::disk::norm_len(es_index::disk::norm_byte(
             len as u32,
         )));
@@ -768,8 +767,15 @@ impl<'a> Searcher<'a> {
         [df, n, len, avg, idf, tf]
     }
 
+    /// `term`'s document frequency in `field` (see [`gather`](Self::gather)).
+    fn df(&self, field: &str, term: &str) -> f64 {
+        (self.doc_freq.get(field).and_then(|f| f.get(term)))
+            .copied()
+            .unwrap_or(0.0)
+    }
+
     fn bm25(&self, field: &str, term: &str, freq: f64, len: f64) -> f64 {
-        let [.., idf, tf] = self.bm25_parts(field, term, freq, len);
+        let [.., idf, tf] = self.bm25_parts(field, self.df(field, term), freq, len);
         // ES's LegacyBM25Similarity scales Lucene's BM25 by (1 + k1).
         idf * (1.0 + K1) * tf
     }
@@ -801,6 +807,8 @@ impl<'a> Searcher<'a> {
                 return explanation(score, "boost".into(), vec![inner]);
             }
             Query::MatchAll => return explanation(score, "*:*".into(), vec![]),
+            // ponytail: a blended term query is one node without its terms' weights; build
+            // them from blended_score's document frequencies if an explain needs them
             _ => vec![],
         };
         match details.len() {
@@ -838,7 +846,7 @@ impl<'a> Searcher<'a> {
             if freq == 0.0 {
                 continue;
             }
-            let [df, n, len, avg, idf, tf] = self.bm25_parts(field, &w, freq, len);
+            let [df, n, len, avg, idf, tf] = self.bm25_parts(field, self.df(field, &w), freq, len);
             let leaf = |v: f64, desc: &str| explanation(v, desc.into(), vec![]);
             let idf = explanation(
                 idf,
@@ -925,11 +933,11 @@ impl<'a> Searcher<'a> {
                 }
                 // PhraseWeight: one BM25 score with the idfs of the terms in the index summed
                 let idf: f64 = (wanted.iter())
-                    .map(|w| self.bm25_parts(field, w, freq, len as f64))
+                    .map(|w| self.bm25_parts(field, self.df(field, w), freq, len as f64))
                     .filter(|p| p[0] > 0.0)
                     .map(|p| p[4])
                     .sum();
-                let [.., tf] = self.bm25_parts(field, &wanted[0], freq, len as f64);
+                let [.., tf] = self.bm25_parts(field, self.df(field, &wanted[0]), freq, len as f64);
                 Some(idf * (1.0 + K1) * tf)
             }
             Query::Prefix { field, prefix } => {
@@ -1043,7 +1051,8 @@ impl<'a> Searcher<'a> {
             // `resolve_dates` unwraps it before a search
             Query::Normalized(query) => self.score(query, id, d),
             // `resolve_dates` expands it before a search
-            Query::Fields { .. } => None,
+            Query::Fields { .. } | Query::CrossFields { .. } => None,
+            Query::Blended(query) => self.blended_score(query, id, d),
             // `resolve_dates` replaces them before a search
             Query::TermCaseInsensitive { .. } | Query::MatchBoolPrefix { .. } => None,
         }
@@ -1079,7 +1088,7 @@ impl<'a> Searcher<'a> {
             Query::DisMax { queries, .. } => queries
                 .iter()
                 .for_each(|c| self.highlight_terms(c, field, out)),
-            Query::Named { query, .. } | Query::Boosted { query, .. } => {
+            Query::Named { query, .. } | Query::Boosted { query, .. } | Query::Blended(query) => {
                 self.highlight_terms(query, field, out)
             }
             _ => {}
@@ -1186,6 +1195,8 @@ impl<'a> Searcher<'a> {
                 Some(dis_max(scores.into_iter(), *tie_breaker))
             }
             Query::Named { query, .. } => self.postings_score(query, id, matched),
+            // the blended document frequencies are left to `score`
+            Query::Blended(_) => None,
             Query::Boosted { boost, query } => self
                 .postings_score(query, id, matched)
                 .map(|s| s.map(|s| s * boost)),
@@ -1241,6 +1252,67 @@ impl<'a> Searcher<'a> {
             last.clone_from(e);
         }
         Some((field, terms, *slop))
+    }
+
+    /// A [`Query::Blended`]'s score: its term queries' with the document frequencies
+    /// BlendedTermQuery.blend gives them, combined as the dis_max it wraps.
+    fn blended_score(&self, q: &Query, id: &str, d: &Document) -> Option<f64> {
+        let Query::DisMax {
+            queries,
+            tie_breaker,
+        } = q
+        else {
+            return None;
+        };
+        let clauses: Vec<(&str, String, f64)> = (queries.iter())
+            .filter_map(|q| match q {
+                Query::Term { field, value } => Some((field.as_str(), text(value), 1.0)),
+                Query::Boosted { boost, query } => match &**query {
+                    Query::Term { field, value } => Some((field.as_str(), text(value), *boost)),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        let df: Vec<f64> = clauses.iter().map(|(f, t, _)| self.df(f, t)).collect();
+        let stats = |f: &str| self.field_stats.get(f).copied().unwrap_or((0.0, 0.0));
+        let mut blended = df.clone();
+        let max = df.iter().copied().fold(0.0, f64::max);
+        if max > 0.0 {
+            // maxDoc never binds: each field's document count does first
+            let min_sum_ttf = (clauses.iter().zip(&df))
+                .filter(|(_, df)| **df > 0.0)
+                .map(|((f, ..), _)| stats(f).1)
+                .fold(f64::INFINITY, f64::min);
+            let mut order: Vec<usize> = (0..df.len()).collect();
+            order.sort_by(|&a, &b| df[b].total_cmp(&df[a]));
+            let (mut prev, mut actual) = (df[order[0]], max.min(min_sum_ttf));
+            for i in order {
+                if df[i] == 0.0 {
+                    break;
+                }
+                // a bias towards the fields where the term is more frequent
+                if prev > df[i] {
+                    actual += 1.0;
+                }
+                blended[i] = actual.min(stats(clauses[i].0).0).min(min_sum_ttf);
+                prev = df[i];
+            }
+        }
+        let scores = (clauses.iter().zip(blended)).filter_map(|((field, w, boost), df)| {
+            let (freq, len) = match self.posting(field, w, id) {
+                Some(at) => at.map(|(f, l)| (f64::from(f), f64::from(l)))?,
+                None => {
+                    let (kind, path) = self.kind(field);
+                    let doc_terms = terms(self.at(kind, path, d), &values(&d.source, path));
+                    let freq = doc_terms.iter().filter(|t| *t == w).count();
+                    (freq > 0).then_some((freq as f64, doc_terms.len() as f64))?
+                }
+            };
+            let [.., idf, tf] = self.bm25_parts(field, df, freq, len);
+            Some(boost * idf * (1.0 + K1) * tf)
+        });
+        dis_max(scores, *tie_breaker)
     }
 
     fn score_terms(
@@ -1596,7 +1668,7 @@ fn constant_score(q: &Query) -> Option<f64> {
         Query::Bool { must, should, .. } if should.is_empty() => {
             must.iter().map(constant_score).sum()
         }
-        Query::Bool { .. } | Query::DisMax { .. } => None,
+        Query::Bool { .. } | Query::DisMax { .. } | Query::Blended(_) => None,
         _ => Some(1.0),
     }
 }
@@ -1926,7 +1998,9 @@ fn exact<K: Copy + Eq + std::hash::Hash>(
 ) -> Option<HashSet<K>> {
     match q {
         Query::MatchAll => Some(all.clone()),
-        Query::Named { query, .. } | Query::Boosted { query, .. } => exact(query, all, leaf),
+        Query::Named { query, .. } | Query::Boosted { query, .. } | Query::Blended(query) => {
+            exact(query, all, leaf)
+        }
         Query::Bool {
             must,
             should,

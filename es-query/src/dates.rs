@@ -225,27 +225,9 @@ pub(crate) fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, 
             tie_breaker,
             lenient,
         } => {
-            // ES's resolveMappingFields: a field two entries name takes both boosts
-            let mapped = index.mappings.names();
-            let mut boosts: Vec<(String, f64)> = vec![];
-            for (pattern, boost) in &fields {
-                let names = match pattern.contains('*') {
-                    true => (mapped.iter())
-                        .filter(|f| es_index::aliases::glob(pattern, f))
-                        .cloned()
-                        .collect(),
-                    false => vec![pattern.clone()],
-                };
-                for name in names {
-                    match boosts.iter_mut().find(|(f, _)| *f == name) {
-                        Some((_, b)) => *b *= boost,
-                        None => boosts.push((name, *boost)),
-                    }
-                }
-            }
             let lenient = lenient || fields.iter().any(|(f, _)| f == "*");
             let mut queries = vec![];
-            for (field, boost) in boosts {
+            for (field, boost) in field_boosts(index, &fields) {
                 match resolve_dates(index, query.as_ref().clone().on_field(&field), now) {
                     Ok(q) => queries.push(q.boosted(boost)),
                     Err(_) if lenient => {}
@@ -260,6 +242,86 @@ pub(crate) fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, 
                     filter: vec![],
                     min_should: 1,
                 },
+                1 => queries.remove(0),
+                _ => Query::DisMax {
+                    queries,
+                    tie_breaker,
+                },
+            }
+        }
+        // MultiMatchQueryParser.buildCrossFieldQuery
+        Query::CrossFields {
+            fields,
+            query,
+            and,
+            tie_breaker,
+        } => {
+            let lenient = fields.iter().any(|(f, _)| f == "*");
+            let searcher = Searcher::unscored(index, &Query::MatchAll);
+            // the fields grouped by search analyzer: standard, whitespace or keyword
+            let mut groups: Vec<(u8, Vec<(String, f64)>)> = vec![];
+            for (field, boost) in field_boosts(index, &fields) {
+                if index.mappings.unindexed(&field) {
+                    continue;
+                }
+                let analyzer = match index.mappings.properties.get(&field) {
+                    Some(FieldMapping::Keyword {
+                        split_queries_on_whitespace: true,
+                        ..
+                    }) => 1,
+                    _ if searcher.kind(&field).0 == Kind::Text => 0,
+                    _ => 2,
+                };
+                match groups.iter_mut().find(|g| g.0 == analyzer) {
+                    Some(g) => g.1.push((field, boost)),
+                    None => groups.push((analyzer, vec![(field, boost)])),
+                }
+            }
+            // blendTerms: a term on text and keyword fields is blended, on others a query
+            // beside the blended one
+            let blend = |term: &str, group: &[(String, f64)]| {
+                let (mut queries, mut blended) = (vec![], vec![]);
+                for (field, boost) in group {
+                    let q = Query::Term {
+                        field: field.clone(),
+                        value: term.into(),
+                    };
+                    match searcher.kind(field).0 {
+                        Kind::Text | Kind::Keyword(_) => blended.push(q.boosted(*boost)),
+                        _ => match resolve_dates(index, q, now) {
+                            Ok(q) => queries.push(q.boosted(*boost)),
+                            Err(_) if lenient => {}
+                            Err(e) => return Err(e),
+                        },
+                    }
+                }
+                if !blended.is_empty() {
+                    queries.push(Query::Blended(Box::new(Query::DisMax {
+                        queries: blended,
+                        tie_breaker,
+                    })));
+                }
+                Ok(match queries.len() {
+                    1 => queries.remove(0),
+                    _ => Query::DisMax {
+                        queries,
+                        tie_breaker,
+                    },
+                })
+            };
+            let mut queries = vec![];
+            for (_, group) in groups {
+                let mut clauses = (searcher.match_terms(&group[0].0, &query).iter())
+                    .map(|t| blend(t, &group))
+                    .collect::<Result<Vec<_>, _>>()?;
+                queries.push(match clauses.len() {
+                    0 => query_string::match_none(),
+                    1 => clauses.remove(0),
+                    _ => query_string::boolean_of(and, clauses),
+                });
+            }
+            match queries.len() {
+                0 => query_string::match_none(),
                 1 => queries.remove(0),
                 _ => Query::DisMax {
                     queries,
@@ -371,6 +433,29 @@ pub(crate) fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, 
         }
         q => q,
     })
+}
+
+/// The fields `fields` names, `*` patterns expanded to the mapped fields they match, with their
+/// boosts: ES's resolveMappingFields, where a field two entries name takes both boosts.
+fn field_boosts(index: &Index, fields: &[(String, f64)]) -> Vec<(String, f64)> {
+    let mapped = index.mappings.names();
+    let mut boosts: Vec<(String, f64)> = vec![];
+    for (pattern, boost) in fields {
+        let names = match pattern.contains('*') {
+            true => (mapped.iter())
+                .filter(|f| es_index::aliases::glob(pattern, f))
+                .cloned()
+                .collect(),
+            false => vec![pattern.clone()],
+        };
+        for name in names {
+            match boosts.iter_mut().find(|(f, _)| *f == name) {
+                Some((_, b)) => *b *= boost,
+                None => boosts.push((name, *boost)),
+            }
+        }
+    }
+    boosts
 }
 
 /// A field's type as ES names it in errors.

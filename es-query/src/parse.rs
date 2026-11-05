@@ -115,6 +115,18 @@ pub enum Query {
         tie_breaker: f64,
         lenient: bool,
     },
+    /// multi_match's cross_fields type: `fields` (as [`Query::Fields`] names them) grouped by
+    /// search analyzer, each group matching the analyzed terms of `query` as
+    /// [`Query::Blended`] term queries; `resolve_dates` builds it.
+    CrossFields {
+        fields: Vec<(String, f64)>,
+        query: String,
+        and: bool,
+        tie_breaker: f64,
+    },
+    /// ES's BlendedTermQuery.dismaxBlendedQuery: a [`Query::DisMax`] of (boosted) term queries
+    /// on one term, each scored with the document frequency blended across their fields.
+    Blended(Box<Query>),
     /// The documents written with this `_routing`, scoring 1: what `resolve_dates` makes of a
     /// `term` query on `_routing`, boosted by the shard's BM25 score for it.
     Routing(String),
@@ -669,7 +681,6 @@ fn parse_kind(kind: &str, body: &Value) -> Result<Query, QueryError> {
             )?;
             o.get("query")
                 .ok_or("No text specified for multi_match query")?;
-            // ponytail: no cross_fields type
             let (field_kind, params, tie) = match o.get("type").and_then(Value::as_str) {
                 None | Some("best_fields") => ("match", &["query", "operator"][..], 0.0),
                 Some("most_fields") => ("match", &["query", "operator"][..], 1.0),
@@ -683,9 +694,7 @@ fn parse_kind(kind: &str, body: &Value) -> Result<Query, QueryError> {
                     return Err("[slop] not allowed for type [bool_prefix]".into());
                 }
                 Some("bool_prefix") => ("match_bool_prefix", &["query", "operator"][..], 1.0),
-                Some(t @ "cross_fields") => {
-                    return Err(format!("[multi_match] type [{t}] is not supported").into());
-                }
+                Some("cross_fields") => ("cross_fields", &["query", "operator"][..], 0.0),
                 Some(t) => {
                     return Err(format!(
                         "failed to parse [multi_match] query type [{t}]. unknown type."
@@ -717,6 +726,17 @@ fn parse_kind(kind: &str, body: &Value) -> Result<Query, QueryError> {
                 "match_bool_prefix" => match parse_kind("match", &serde_json::json!({ "*": p }))? {
                     Query::Match { field, query, and } => {
                         Query::MatchBoolPrefix { field, query, and }
+                    }
+                    q => q,
+                },
+                "cross_fields" => match parse_kind("match", &serde_json::json!({ "*": p }))? {
+                    Query::Match { query, and, .. } => {
+                        return Ok(Query::CrossFields {
+                            fields,
+                            query,
+                            and,
+                            tie_breaker,
+                        });
                     }
                     q => q,
                 },
