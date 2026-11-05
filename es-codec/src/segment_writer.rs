@@ -130,6 +130,18 @@ impl<'a> SegmentWriter<'a> {
     /// Adds `field`, which must carry the `PerFieldPostingsFormat.format` = `Lucene104` and
     /// `.suffix` = `0` attributes if indexed, with its data.
     pub fn add(&mut self, field: FieldInfo, data: FieldData) -> Result<()> {
+        let terms = data.terms;
+        self.add_streamed(field, data, terms.iter().map(Ok))
+    }
+
+    /// As [`Self::add`], with the field's terms (in place of `data.terms`) written one at a
+    /// time as `terms` yields them, so they need not all be in memory at once.
+    pub fn add_streamed<T: std::borrow::Borrow<TermPostings>>(
+        &mut self,
+        field: FieldInfo,
+        data: FieldData,
+        terms: impl IntoIterator<Item = Result<T>>,
+    ) -> Result<()> {
         let n = field.number;
         match data.doc_values {
             Some(DocValuesData::Numeric(v)) => self.doc_values.numeric(n, v),
@@ -141,9 +153,10 @@ impl<'a> SegmentWriter<'a> {
         if let Some(norms) = data.norms {
             self.norms.add(n, norms);
         }
-        if !data.terms.is_empty() {
+        let mut terms = terms.into_iter().peekable();
+        if terms.peek().is_some() {
             let dense = (data.norms).map(|v| v.iter().map(|x| x.unwrap_or(0)).collect::<Vec<_>>());
-            self.terms.add(&field, data.terms, dense.as_deref())?;
+            self.terms.add(&field, terms, dense.as_deref())?;
         }
         if let Some(points) = data.points {
             let w = self

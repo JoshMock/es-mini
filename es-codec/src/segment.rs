@@ -115,6 +115,11 @@ impl SegmentReader {
         terms::read_terms(self, field, None)
     }
 
+    /// Every term of `field` in term order with its postings, decoded a term at a time.
+    pub fn term_stream(&self, field: &str) -> Result<terms::TermsIter<'static>> {
+        terms::term_stream(self, field)
+    }
+
     /// One term of `field` with its docs and freqs (no positions), if the field has it.
     pub fn term(&self, field: &str, term: &[u8]) -> Result<Option<terms::TermPostings>> {
         Ok(terms::read_terms(self, field, Some(term))?.pop())

@@ -4,6 +4,8 @@
 //! `.tip` trie to the only block that can hold it. Impacts and skip data are skipped.
 
 pub use crate::postings::Position;
+use std::borrow::Cow;
+
 use crate::{
     Result, SegmentReader, codec_util, err,
     field_infos::{FieldInfo, IndexOptions},
@@ -13,8 +15,8 @@ use crate::{
 };
 
 /// Deepest nesting of sub-blocks accepted before a `.tim` is called corrupt.
-// ponytail: a crafted index could otherwise recurse until the stack overflows; real block trees
-// are a handful of levels deep.
+// ponytail: a crafted index could otherwise stack a block per few bytes of `.tim`; real block
+// trees are a handful of levels deep.
 const MAX_BLOCK_DEPTH: usize = 128;
 
 /// One term of a field and its postings. `freq` is 1 for every doc when the field omits freqs.
@@ -62,6 +64,23 @@ pub(crate) fn read_terms(
     field: &str,
     want: Option<&[u8]>,
 ) -> Result<Vec<TermPostings>> {
+    let (files, suffix, info) = field_files(r, field, want.is_none())?;
+    decode_terms(&files, &r.seg.info.id, &suffix, &r.fields, info, want)
+}
+
+/// Every term of `field` in term order with its postings, decoded a block of terms at a time.
+pub(crate) fn term_stream(r: &SegmentReader, field: &str) -> Result<TermsIter<'static>> {
+    let (files, suffix, info) = field_files(r, field, true)?;
+    open_terms(Cow::Owned(files), &r.seg.info.id, &suffix, &r.fields, info)?.iter()
+}
+
+/// The postings files holding `field`, without `.pos` and `.pay` unless `positions`, with their
+/// suffix and the field.
+fn field_files<'r>(
+    r: &'r SegmentReader,
+    field: &str,
+    positions: bool,
+) -> Result<(TermFiles, String, &'r FieldInfo)> {
     let info = r.field(field)?;
     let attr = |k: &str| info.attributes.get(&format!("PerFieldPostingsFormat.{k}"));
     let (Some(format), Some(suffix)) = (attr("format"), attr("suffix")) else {
@@ -73,9 +92,9 @@ pub(crate) fn read_terms(
     let suffix = format!("{format}_{suffix}");
     let file = |ext: &str| r.cfs_file(&format!("_{suffix}.{ext}"));
     // `.pos` and `.pay` exist only when some field has positions, or offsets or payloads.
-    let positions = |ext| match want {
-        None => file(ext).unwrap_or_default(),
-        Some(_) => Vec::new(),
+    let positions = |ext| match positions {
+        true => file(ext).unwrap_or_default(),
+        false => Vec::new(),
     };
     let files = TermFiles {
         tim: file("tim")?,
@@ -86,11 +105,11 @@ pub(crate) fn read_terms(
         pay: positions("pay"),
         psm: Vec::new(),
     };
-    decode_terms(&files, &r.seg.info.id, &suffix, &r.fields, info, want)
+    Ok((files, suffix, info))
 }
 
 /// The postings files of one segment's postings format instance.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct TermFiles {
     pub tim: Vec<u8>,
     pub tip: Vec<u8>,
@@ -110,21 +129,28 @@ fn decode_terms(
     info: &FieldInfo,
     want: Option<&[u8]>,
 ) -> Result<Vec<TermPostings>> {
+    let terms = open_terms(Cow::Borrowed(files), id, suffix, fields, info)?;
+    match want {
+        Some(target) => Ok(terms.seek(target)?.into_iter().collect()),
+        None => terms.iter()?.collect(),
+    }
+}
+
+/// Checks `files` and finds `info`'s entry in the terms metadata.
+fn open_terms<'a>(
+    files: Cow<'a, TermFiles>,
+    id: &[u8; codec_util::ID_LEN],
+    suffix: &str,
+    fields: &[FieldInfo],
+    info: &FieldInfo,
+) -> Result<FieldTerms<'a>> {
     let field = info.name.as_str();
-    let (tim, tip, tmd, doc, pos, pay) = (
-        &files.tim[..],
-        &files.tip[..],
-        &files.tmd[..],
-        &files.doc[..],
-        &files.pos[..],
-        &files.pay[..],
-    );
     for (name, f, codec) in [
-        ("tim", tim, "BlockTreeTermsDict"),
-        ("tip", tip, "BlockTreeTermsIndex"),
-        ("doc", doc, "Lucene104PostingsWriterDoc"),
-        ("pos", pos, "Lucene104PostingsWriterPos"),
-        ("pay", pay, "Lucene104PostingsWriterPay"),
+        ("tim", &files.tim, "BlockTreeTermsDict"),
+        ("tip", &files.tip, "BlockTreeTermsIndex"),
+        ("doc", &files.doc, "Lucene104PostingsWriterDoc"),
+        ("pos", &files.pos, "Lucene104PostingsWriterPos"),
+        ("pay", &files.pay, "Lucene104PostingsWriterPay"),
     ] {
         if f.is_empty() {
             continue;
@@ -134,6 +160,7 @@ fn decode_terms(
             .map_err(|e| crate::Error(format!(".{name}: {e}")))?;
     }
 
+    let tmd = &files.tmd[..];
     codec_util::check_footer(tmd)?;
     let meta = &mut DataInput::new(tmd);
     codec_util::check_index_header(meta, "BlockTreeTermsMeta", 0, 0, id, suffix)?;
@@ -161,44 +188,25 @@ fn decode_terms(
         if number != info.number {
             continue;
         }
-        let Some(trie) = tip.get(index_start as usize..index_end as usize) else {
+        let index = index_start as usize..index_end as usize;
+        if files.tip.get(index.clone()).is_none() {
             return err("trie extends past the index");
-        };
-        let trie = TrieReader(trie);
-        let mut walker = Walker {
-            tim,
-            doc,
-            pos,
-            pay,
-            info,
-            want,
-            terms: 0,
-            total_term_freq: 0,
-            out: Vec::new(),
-        };
-        let mut root = trie.load(root_fp as usize)?;
-        let Some(root_out) = root.output.take() else {
-            return err("trie root has no output");
-        };
-        if let Some(target) = want {
-            walker.seek(&trie, root, root_out, target)?;
-            return Ok(walker.out);
         }
-        walker.block(root_out.fp as usize, &[], 0)?;
-        if walker.terms != num_terms || walker.total_term_freq != sum_total_term_freq as u64 {
-            return err(format!(
-                "terms of {field} do not match the committed statistics"
-            ));
-        }
-        return Ok(walker.out);
+        return Ok(FieldTerms {
+            files,
+            info: info.clone(),
+            index,
+            root_fp: root_fp as usize,
+            stats: (num_terms, sum_total_term_freq as u64),
+        });
     }
     err(format!("field {field} has no terms"))
 }
-
-/// Appends one field's terms, stats and postings to the shared output files.
-fn write_field(
+/// Appends one field's terms, stats and postings to the shared output files, a term at a time
+/// as `terms` yields them in order, like Lucene's `BlockTreeTermsWriter`.
+fn write_field<T: std::borrow::Borrow<TermPostings>>(
     info: &FieldInfo,
-    terms: &[TermPostings],
+    terms: impl IntoIterator<Item = Result<T>>,
     field_norms: Option<&[i8]>,
     files: &mut FieldOutputs,
     max: &mut postings::ImpactMax,
@@ -211,8 +219,13 @@ fn write_field(
         pos,
     } = files;
     let options = info.index_options;
-    if terms.is_empty()
-        || info.store_payloads
+    let unsupported = || {
+        crate::err(format!(
+            "field {} needs terms and postings without offsets or payloads",
+            info.name
+        ))
+    };
+    if info.store_payloads
         || !matches!(
             options,
             IndexOptions::Docs
@@ -220,16 +233,23 @@ fn write_field(
                 | IndexOptions::DocsAndFreqsAndPositions
         )
     {
-        return crate::err(format!(
-            "field {} needs terms and postings without offsets or payloads",
-            info.name
-        ));
+        return unsupported();
     }
     let has_freqs = options != IndexOptions::Docs;
     let has_positions = options == IndexOptions::DocsAndFreqsAndPositions;
     let (mut sum_df, mut docs_seen) = (0u64, std::collections::BTreeSet::new());
-    let mut metas = Vec::with_capacity(terms.len());
+    let (mut num_terms, mut sum_ttf, mut min_term) = (0i64, 0u64, None);
+    let mut tree = BlockTree {
+        has_freqs,
+        tim,
+        pending: vec![],
+        lz4: None,
+        prefix_starts: vec![],
+        last_term: vec![],
+    };
     for t in terms {
+        let t = t?;
+        let t = t.borrow();
         let df = t.docs.len() as u64;
         sum_df += df;
         docs_seen.extend(t.docs.iter().map(|d| d.0));
@@ -243,32 +263,27 @@ fn write_field(
         } else {
             None
         };
-        metas.push(TermMeta {
+        let meta = TermMeta {
             doc_freq: df,
             total_term_freq: t.total_term_freq,
             doc_fp: doc.0.len() as u64,
             singleton: (df == 1).then(|| t.docs[0].0),
             pos_fp: marks.as_ref().map(|m| m.start),
             last_pos_block_offset: marks.as_ref().and_then(|m| m.last_block_offset),
-        });
+        };
         if df > 1 {
             postings::write_docs(doc, &t.docs, has_freqs, field_norms, max, marks.as_ref());
         }
-    }
-    let mut tree = BlockTree {
-        terms,
-        metas: &metas,
-        has_freqs,
-        tim,
-        pending: vec![],
-        lz4: None,
-        prefix_starts: vec![],
-        last_term: vec![],
-    };
-    for (i, t) in terms.iter().enumerate() {
         tree.push_term(&t.term);
-        tree.pending.push(Pending::Term(i));
+        tree.pending.push(Pending::Term(t.term.clone(), meta));
+        min_term.get_or_insert_with(|| t.term.clone());
+        num_terms += 1;
+        sum_ttf += t.total_term_freq;
     }
+    let Some(min_term) = min_term else {
+        return unsupported();
+    };
+    let max_term = tree.last_term.clone();
     // An empty term closes every open prefix; then the root block takes what is left.
     tree.push_term(&[]);
     tree.write_blocks(0, tree.pending.len());
@@ -276,15 +291,15 @@ fn write_field(
         unreachable!("write_blocks leaves one block");
     };
     tmd.vint(info.number);
-    tmd.vlong(terms.len() as i64);
-    tmd.vlong(terms.iter().map(|t| t.total_term_freq).sum::<u64>() as i64);
+    tmd.vlong(num_terms);
+    tmd.vlong(sum_ttf as i64);
     if has_freqs {
         tmd.vlong(sum_df as i64);
     }
     tmd.vint(docs_seen.len() as i32);
-    for t in [&terms[0], &terms[terms.len() - 1]] {
-        tmd.vint(t.term.len() as i32);
-        tmd.bytes(&t.term);
+    for t in [&min_term, &max_term] {
+        tmd.vint(t.len() as i32);
+        tmd.bytes(t);
     }
     tmd.vlong(tip.0.len() as i64);
     tmd.vlong(trie::save(&root.index, tip) as i64);
@@ -310,8 +325,7 @@ struct TermMeta {
 }
 
 enum Pending {
-    /// An index into the field's terms.
-    Term(usize),
+    Term(Vec<u8>, TermMeta),
     Block(PendingBlock),
 }
 
@@ -326,8 +340,6 @@ struct PendingBlock {
 /// entries share a prefix that the next term leaves, they are written as a block and replaced
 /// on the stack by that block.
 struct BlockTree<'a> {
-    terms: &'a [TermPostings],
-    metas: &'a [TermMeta],
     has_freqs: bool,
     tim: &'a mut crate::output::Output,
     pending: Vec<Pending>,
@@ -367,7 +379,7 @@ impl BlockTree<'_> {
     /// prefix.
     fn lead_label(&self, entry: &Pending, prefix_len: usize) -> Option<u8> {
         match entry {
-            Pending::Term(t) => self.terms[*t].term.get(prefix_len).copied(),
+            Pending::Term(term, _) => term.get(prefix_len).copied(),
             Pending::Block(b) => Some(b.prefix[prefix_len]),
         }
     }
@@ -392,7 +404,7 @@ impl BlockTree<'_> {
                 last_lead = lead;
             }
             match self.pending[i] {
-                Pending::Term(_) => has_terms = true,
+                Pending::Term(..) => has_terms = true,
                 Pending::Block(_) => has_sub_blocks = true,
             }
         }
@@ -449,12 +461,11 @@ impl BlockTree<'_> {
         let (mut singletons, mut last, mut sub_index) = (0, None, vec![]);
         for entry in &mut self.pending[start..end] {
             match entry {
-                Pending::Term(t) => {
-                    let suffix = &self.terms[*t].term[prefix_len..];
+                Pending::Term(term, m) => {
+                    let suffix = &term[prefix_len..];
                     let shift = u32::from(has_sub_blocks);
                     lengths.vint((suffix.len() << shift) as i32);
                     suffixes.bytes(suffix);
-                    let m = &self.metas[*t];
                     // `StatsWriter`: runs of singleton terms collapse into one token.
                     if m.doc_freq == 1 && (!self.has_freqs || m.total_term_freq == 1) {
                         singletons += 1;
@@ -570,7 +581,7 @@ pub fn write_terms(
     let mut w = TermsWriter::new(id, suffix);
     for (info, terms) in fields {
         let field_norms = norms.iter().find(|n| n.0 == info.number).map(|n| n.1);
-        w.add(info, terms, field_norms)?;
+        w.add(info, terms.iter().map(Ok), field_norms)?;
     }
     Ok(w.finish())
 }
@@ -610,12 +621,12 @@ impl TermsWriter {
         }
     }
 
-    /// A field's terms, in order; `norms` are its norms per doc, for the competitive impacts of
-    /// a freq field.
-    pub fn add(
+    /// A field's terms, in order, written as `terms` yields them; `norms` are its norms per doc,
+    /// for the competitive impacts of a freq field.
+    pub fn add<T: std::borrow::Borrow<TermPostings>>(
         &mut self,
         info: &FieldInfo,
-        terms: &[TermPostings],
+        terms: impl IntoIterator<Item = Result<T>>,
         norms: Option<&[i8]>,
     ) -> crate::Result<()> {
         // Like Lucene, `.pos` exists when a field has positions (`FieldInfos.hasProx`).
@@ -686,22 +697,19 @@ impl TermsWriter {
 
 const FOOTER_LEN: i64 = 16;
 
-struct Walker<'a> {
-    tim: &'a [u8],
-    doc: &'a [u8],
-    pos: &'a [u8],
-    pay: &'a [u8],
-    info: &'a FieldInfo,
-    /// The only term to decode postings for, without positions; `None` decodes every term.
-    want: Option<&'a [u8]>,
-    /// Terms walked and their summed total term freq, checked against the field's statistics.
-    terms: i64,
-    total_term_freq: u64,
-    out: Vec<TermPostings>,
+/// One field's terms in its segment's postings files.
+struct FieldTerms<'a> {
+    files: Cow<'a, TermFiles>,
+    info: FieldInfo,
+    /// The field's trie in `.tip`, and where its root node starts there.
+    index: std::ops::Range<usize>,
+    root_fp: usize,
+    /// The committed term count and summed total term freq, checked by a walk of every term.
+    stats: (i64, u64),
 }
 
 /// Running state while decoding one block's term metadata (`IntBlockTermState`).
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct TermState {
     doc_freq: u64,
     total_term_freq: u64,
@@ -712,16 +720,106 @@ struct TermState {
     singleton_run: u64,
 }
 
-impl Walker<'_> {
+/// A block entry: a term and its state, or a sub-block's prefix and file pointer.
+enum Entry {
+    Term(Vec<u8>, TermState),
+    Block(Vec<u8>, usize),
+}
+
+/// A decoded block's entries yet to visit, and where its next floor block starts unless it is
+/// the last one.
+struct Block {
+    prefix: Vec<u8>,
+    depth: usize,
+    entries: std::vec::IntoIter<Entry>,
+    next: Option<usize>,
+}
+
+/// Every term of a field in term order with its postings (`SegmentTermsEnum.next`): a stack of
+/// the blocks being walked, each decoded when reached, and each term's postings when yielded.
+pub struct TermsIter<'a> {
+    field: FieldTerms<'a>,
+    stack: Vec<Block>,
+    /// Terms yielded and their summed total term freq.
+    seen: (i64, u64),
+}
+
+impl Iterator for TermsIter<'_> {
+    type Item = Result<TermPostings>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.step().transpose()
+    }
+}
+
+impl TermsIter<'_> {
+    fn step(&mut self) -> Result<Option<TermPostings>> {
+        loop {
+            let Some(top) = self.stack.last_mut() else {
+                return Ok(None);
+            };
+            match top.entries.next() {
+                Some(Entry::Term(term, s)) => {
+                    self.seen.0 += 1;
+                    self.seen.1 += s.total_term_freq;
+                    return self.field.postings(term, &s, true).map(Some);
+                }
+                Some(Entry::Block(prefix, fp)) => {
+                    let block = self.field.block(fp, prefix, top.depth + 1)?;
+                    self.stack.push(block);
+                }
+                None => {
+                    let Block {
+                        prefix,
+                        depth,
+                        next,
+                        ..
+                    } = self.stack.pop().expect("the stack has a top");
+                    if let Some(fp) = next {
+                        let block = self.field.block(fp, prefix, depth)?;
+                        self.stack.push(block);
+                    } else if self.stack.is_empty() && self.seen != self.field.stats {
+                        let field = &self.field.info.name;
+                        return err(format!(
+                            "terms of {field} do not match the committed statistics"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl<'a> FieldTerms<'a> {
+    fn trie(&self) -> TrieReader<'_> {
+        TrieReader(&self.files.tip[self.index.clone()])
+    }
+
+    /// The trie's root node and its output, which points at the root block.
+    fn root(&self) -> Result<(Node, NodeOutput)> {
+        let mut root = self.trie().load(self.root_fp)?;
+        let Some(out) = root.output.take() else {
+            return err("trie root has no output");
+        };
+        Ok((root, out))
+    }
+
+    /// Every term, from the root block on.
+    fn iter(self) -> Result<TermsIter<'a>> {
+        let root = self.block(self.root()?.1.fp as usize, vec![], 0)?;
+        Ok(TermsIter {
+            field: self,
+            stack: vec![root],
+            seen: (0, 0),
+        })
+    }
+
     /// `SegmentTermsEnum.seekExact`: follows `target` down the trie to the deepest block whose
     /// prefix it starts with, picks that block's floor block for the next byte, and scans it.
-    fn seek(
-        &mut self,
-        trie: &TrieReader,
-        mut node: Node,
-        mut out: NodeOutput,
-        target: &[u8],
-    ) -> Result<()> {
+    /// The term has its docs and freqs, without positions.
+    fn seek(&self, target: &[u8]) -> Result<Option<TermPostings>> {
+        let trie = self.trie();
+        let (mut node, mut out) = self.root()?;
         let mut prefix_len = 0;
         for (i, &label) in target.iter().enumerate() {
             let Some(mut child) = trie.child(&node, label)? else {
@@ -744,33 +842,29 @@ impl Walker<'_> {
                 (fp, has_terms) = (out.fp + (code >> 1), code & 1 != 0);
             }
         }
-        if has_terms {
-            self.one_block(fp as usize, &target[..prefix_len], 0)?;
+        if !has_terms {
+            return Ok(None);
         }
-        Ok(())
-    }
-
-    /// Decodes the block at `fp` and its floor blocks, recursing into sub-blocks in term order.
-    fn block(&mut self, mut fp: usize, prefix: &[u8], depth: usize) -> Result<()> {
-        loop {
-            let (end, is_last) = self.one_block(fp, prefix, depth)?;
-            if is_last {
-                return Ok(());
+        let block = self.block(fp as usize, target[..prefix_len].to_vec(), 0)?;
+        for entry in block.entries {
+            if let Entry::Term(term, s) = entry
+                && term == target
+            {
+                return self.postings(term, &s, false).map(Some);
             }
-            fp = end;
         }
+        Ok(None)
     }
 
-    /// Decodes the one block at `fp`, returning where it ends and whether it is the last of its
-    /// floor blocks. Sub-blocks are decoded only when reading every term.
-    fn one_block(&mut self, fp: usize, prefix: &[u8], depth: usize) -> Result<(usize, bool)> {
+    /// Decodes the one block at `fp`: its terms' states and its sub-blocks' pointers.
+    fn block(&self, fp: usize, prefix: Vec<u8>, depth: usize) -> Result<Block> {
         if depth > MAX_BLOCK_DEPTH {
             return err("terms blocks nest too deeply");
         }
-        let input = &mut DataInput::new(self.tim);
+        let input = &mut DataInput::new(&self.files.tim);
         input.pos = fp;
         let code = input.read_vint()?;
-        let (entries, is_last) = ((code >> 1) as usize, code & 1 != 0);
+        let (count, is_last) = ((code >> 1) as usize, code & 1 != 0);
         let code = input.read_vlong()?;
         let (is_leaf, len, algorithm) = (code & 4 != 0, (code >> 3) as usize, code & 3);
         let suffixes = match algorithm {
@@ -802,7 +896,8 @@ impl Walker<'_> {
         );
         let mut state = TermState::default();
         let mut first_term = true;
-        for _ in 0..entries {
+        let mut entries = Vec::with_capacity(count);
+        for _ in 0..count {
             let (suffix_len, sub) = if is_leaf {
                 (lengths.read_len()?, None)
             } else {
@@ -810,7 +905,7 @@ impl Walker<'_> {
                 let sub = (c & 1 != 0).then(|| lengths.read_vlong()).transpose()?;
                 ((c >> 1) as usize, sub)
             };
-            let mut term = prefix.to_vec();
+            let mut term = prefix.clone();
             term.extend_from_slice(suffixes.read_bytes(suffix_len)?);
             if let Some(sub_code) = sub {
                 // Sub-blocks are written before their parent, so the delta is positive.
@@ -818,32 +913,35 @@ impl Walker<'_> {
                     .ok()
                     .filter(|_| sub_code > 0)
                     .ok_or_else(|| crate::Error("corrupt sub-block pointer".into()))?;
-                if self.want.is_none() {
-                    self.block(sub_fp, &term, depth + 1)?;
-                }
+                entries.push(Entry::Block(term, sub_fp));
                 continue;
             }
             self.decode_stats(stats, &mut state)?;
             self.decode_postings(metas, &mut state, first_term)?;
             first_term = false;
-            self.terms += 1;
-            self.total_term_freq += state.total_term_freq;
-            if self.want.is_some_and(|w| w != term) {
-                continue;
-            }
-            let docs = self.docs(&state)?;
-            let positions = match self.want {
-                None => self.positions(&state, &docs)?,
-                Some(_) => vec![],
-            };
-            self.out.push(TermPostings {
-                term,
-                total_term_freq: state.total_term_freq,
-                positions,
-                docs,
-            });
+            entries.push(Entry::Term(term, state.clone()));
         }
-        Ok((block_end, is_last))
+        Ok(Block {
+            prefix,
+            depth,
+            entries: entries.into_iter(),
+            next: (!is_last).then_some(block_end),
+        })
+    }
+
+    /// `term`'s docs and freqs, and its positions if `positions`.
+    fn postings(&self, term: Vec<u8>, s: &TermState, positions: bool) -> Result<TermPostings> {
+        let docs = self.docs(s)?;
+        let positions = match positions {
+            true => self.positions(s, &docs)?,
+            false => vec![],
+        };
+        Ok(TermPostings {
+            term,
+            total_term_freq: s.total_term_freq,
+            positions,
+            docs,
+        })
     }
 
     /// Stats stream: doc freq and total term freq, with runs of singleton terms collapsed.
@@ -913,8 +1011,8 @@ impl Walker<'_> {
         let freqs: Vec<u32> = docs.iter().map(|(_, f)| *f).collect();
         postings::read_positions(
             &postings::PositionFiles {
-                pos: self.pos,
-                pay: self.pay,
+                pos: &self.files.pos,
+                pay: &self.files.pay,
                 pos_fp: s.pos_start_fp as usize,
                 pay_fp: s.pay_start_fp as usize,
                 offsets: options >= IndexOptions::DocsAndFreqsAndPositionsAndOffsets,
@@ -930,7 +1028,7 @@ impl Walker<'_> {
         }
         let has_freqs = self.info.index_options != IndexOptions::Docs;
         postings::read_docs(
-            self.doc,
+            &self.files.doc,
             s.doc_start_fp as usize,
             s.doc_freq as usize,
             has_freqs,

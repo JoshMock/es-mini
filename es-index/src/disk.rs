@@ -1778,11 +1778,12 @@ fn ours(mut seg: es_codec::SegmentCommitInfo, empty: &[String]) -> es_codec::Seg
 /// Merges the segments of `infos` that [`find_merge`] picks into one new segment of their live
 /// documents, in the first one's place, as Lucene's `SegmentInfos.applyMergeChanges` does. Like
 /// Lucene's `SegmentMerger`, it appends the segments' live docs in the merge's order, copying
-/// each format from them a field at a time, and stored fields a doc at a time. Fields a segment
-/// leaves out without listing them [`EMPTY`] are left out of the merge.
-// ponytail: holds one field's merged postings, doc values, norms and points at a time, plus the
-// new segment's encoded index files until it is written. Lucene streams both (term by term, to
-// its outputs); do that if one field or a segment's index outgrows memory.
+/// each format from them a field at a time, postings a term at a time, and stored fields a doc
+/// at a time. Fields a segment leaves out without listing them [`EMPTY`] are left out of the
+/// merge.
+// ponytail: holds one field's merged doc values, norms and points at a time, plus the new
+// segment's encoded index files until it is written. Lucene streams both (doc by doc, to its
+// outputs); do that if one field or a segment's index outgrows memory.
 fn merge(
     dir: &Path,
     infos: &mut SegmentInfos,
@@ -1791,7 +1792,6 @@ fn merge(
     use es_codec::{
         field_infos::DocValuesType as Dv,
         segment_writer::{DocValuesData, FieldData, SegmentWriter},
-        terms::TermPostings,
     };
     let size = |s: &es_codec::SegmentCommitInfo| {
         let files = s.info.files.iter();
@@ -1843,30 +1843,10 @@ fn merge(
         if fields.contains(&name) || empty.iter().any(|e| e == name) || !covered(name) {
             continue;
         }
-        let mut terms = BTreeMap::<Vec<u8>, TermPostings>::new();
-        if f.index_options != IndexOptions::None {
-            for (r, map) in readers.iter().zip(&maps) {
-                if r.field(name).is_err() {
-                    continue;
-                }
-                for t in r.terms(name)? {
-                    let mut positions = t.positions.into_iter();
-                    let m = terms
-                        .entry(t.term)
-                        .or_insert_with_key(|t| TermPostings::new(t.clone(), vec![]));
-                    for (doc, freq) in t.docs {
-                        let at = positions.next();
-                        if let Some(doc) = new_doc(map, doc as usize) {
-                            m.docs.push((doc, freq));
-                            m.total_term_freq += u64::from(freq);
-                            m.positions.extend(at);
-                        }
-                    }
-                }
-            }
-            terms.retain(|_, t| !t.docs.is_empty());
-        }
-        let terms: Vec<_> = terms.into_values().collect();
+        let terms = (f.index_options != IndexOptions::None)
+            .then(|| merge_terms(&readers, &maps, name))
+            .transpose()?;
+        let mut terms = terms.into_iter().flatten().peekable();
         let mut points = vec![];
         if f.point_dimensions > 0 {
             for (r, map) in readers.iter().zip(&maps) {
@@ -1910,7 +1890,10 @@ fn merge(
             }
             Dv::Sorted => return Err(wrong()),
         };
-        if !has_dv && terms.is_empty() && points.is_empty() && !meta.iter().any(|m| m.name == name)
+        if !has_dv
+            && terms.peek().is_none()
+            && points.is_empty()
+            && !meta.iter().any(|m| m.name == name)
         {
             empty.push(f.name.clone());
             continue;
@@ -1944,10 +1927,10 @@ fn merge(
         let data = FieldData {
             doc_values,
             norms: has_norms.then_some(&norms[..]),
-            terms: &terms,
+            terms: &[],
             points: (!points.is_empty()).then_some(&points[..]),
         };
-        segment.add(info, data)?;
+        segment.add_streamed(info, data, terms)?;
         fields.push(name);
     }
     // Fields no merged segment has values of
@@ -1991,6 +1974,57 @@ fn merge(
         .retain(|_| !picked.contains(&at.next().unwrap()));
     infos.segments.insert(first, ours(seg, &empty));
     Ok(())
+}
+
+/// The terms of `field` in the segments of `readers` (whose docs `maps` gives merged ids), merged
+/// in term order a term at a time as Lucene's `MultiTermsEnum` does, without deleted docs or
+/// the terms left with none.
+// ponytail: picks the next term by scanning the segments; a priority queue (as Lucene's) if a
+// merge ever takes more than MAX_MERGE_AT_ONCE.
+fn merge_terms<'a>(
+    readers: &'a [SegmentReader],
+    maps: &'a [Vec<Option<u32>>],
+    field: &str,
+) -> es_codec::Result<impl Iterator<Item = es_codec::Result<es_codec::terms::TermPostings>> + 'a> {
+    let mut streams = vec![];
+    for (r, map) in readers.iter().zip(maps) {
+        if r.field(field).is_ok() {
+            streams.push((r.term_stream(field)?.peekable(), map));
+        }
+    }
+    Ok(std::iter::from_fn(move || {
+        loop {
+            let mut min: Option<Vec<u8>> = None;
+            for (s, _) in &mut streams {
+                match s.peek() {
+                    Some(Err(_)) => return s.next(),
+                    Some(Ok(t)) if min.as_ref().is_none_or(|m| t.term < *m) => {
+                        min = Some(t.term.clone());
+                    }
+                    _ => {}
+                }
+            }
+            let mut out = es_codec::terms::TermPostings::new(min?, vec![]);
+            for (s, map) in &mut streams {
+                let Some(Ok(t)) = s.next_if(|t| t.as_ref().is_ok_and(|t| t.term == out.term))
+                else {
+                    continue;
+                };
+                let mut positions = t.positions.into_iter();
+                for (doc, freq) in t.docs {
+                    let at = positions.next();
+                    if let Some(doc) = map.get(doc as usize).copied().flatten() {
+                        out.docs.push((doc, freq));
+                        out.total_term_freq += u64::from(freq);
+                        out.positions.extend(at);
+                    }
+                }
+            }
+            if !out.docs.is_empty() {
+                return Some(Ok(out));
+            }
+        }
+    }))
 }
 
 /// Lucene 10.5.1's `MergePolicy.useCompoundFile` as Elasticsearch 9.5.5's `MergePolicyConfig`
