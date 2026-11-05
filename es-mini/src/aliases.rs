@@ -231,6 +231,7 @@ fn lookup(
     indices: &aliases::Map<impl aliases::IndexMeta>,
     index: Option<&str>,
     names: Option<&str>,
+    params: &HashMap<String, String>,
 ) -> Result<(Value, Vec<String>), AppError> {
     let selected: Vec<String> = match index {
         // Elasticsearch's GetAliasesRequest expands to hidden indices too.
@@ -238,7 +239,8 @@ fn lookup(
             let o = aliases::IndicesOptions {
                 expand_hidden: true,
                 ..aliases::IndicesOptions::READ
-            };
+            }
+            .with_params(params);
             (aliases::resolve(indices, expr, &o)?.into_iter())
                 .map(|t| t.index)
                 .collect()
@@ -296,6 +298,7 @@ fn visible_lookup(
     authn: Option<&Authn>,
     index: Option<&str>,
     names: Option<&str>,
+    params: &HashMap<String, String>,
 ) -> Result<(Value, Vec<String>), AppError> {
     let shared = state.read();
     let system = state.system();
@@ -304,16 +307,23 @@ fn visible_lookup(
     if crate::security::reads_restricted(authn) {
         all.extend(system.iter().map(|(n, i)| (n.clone(), i as _)));
     }
-    lookup(&all, index, names)
+    lookup(&all, index, names, params)
 }
 
 fn get_response(
     state: &AppState,
     authn: Option<Extension<Authn>>,
-    index: Option<&str>,
+    index: &str,
     names: Option<&str>,
+    params: &HashMap<String, String>,
 ) -> Result<Response, AppError> {
-    let (mut body, missing) = visible_lookup(state, authn.as_deref(), index, names)?;
+    // Like Elasticsearch, warn of the system indices in the response, not of all resolved.
+    let lookup = || visible_lookup(state, authn.as_deref(), Some(index), names, params);
+    let (mut body, missing) = crate::system::unnoted(lookup)?;
+    body.as_object()
+        .into_iter()
+        .flatten()
+        .for_each(|(i, _)| crate::system::note(i));
     if missing.is_empty() {
         return Ok(Json(body).into_response());
     }
@@ -334,7 +344,7 @@ pub async fn get_all(
     Query(params): Params,
 ) -> Result<Response, AppError> {
     check(&uri, &params, &["local"])?;
-    get_response(&state, authn, None, None)
+    get_response(&state, authn, "_all", None, &params)
 }
 
 pub async fn get_named(
@@ -345,7 +355,7 @@ pub async fn get_named(
     Query(params): Params,
 ) -> Result<Response, AppError> {
     check(&uri, &params, &["local"])?;
-    get_response(&state, authn, None, Some(&names))
+    get_response(&state, authn, "_all", Some(&names), &params)
 }
 
 pub async fn get_for_index(
@@ -356,7 +366,7 @@ pub async fn get_for_index(
     Query(params): Params,
 ) -> Result<Response, AppError> {
     check(&uri, &params, &["local"])?;
-    get_response(&state, authn, Some(&index), None)
+    get_response(&state, authn, &index, None, &params)
 }
 
 pub async fn get_for_index_named(
@@ -367,7 +377,7 @@ pub async fn get_for_index_named(
     Query(params): Params,
 ) -> Result<Response, AppError> {
     check(&uri, &params, &["local"])?;
-    get_response(&state, authn, Some(&index), Some(&names))
+    get_response(&state, authn, &index, Some(&names), &params)
 }
 
 /// `GET /_cat/aliases[/{alias}]`: `GET /_alias[/{alias}]`'s aliases as a table, as
@@ -390,7 +400,7 @@ pub async fn cat(
     ];
     let index = cat_aliases(authn.as_deref(), &state.read())?;
     let names = names.as_ref().map(|Path(n)| n.as_str());
-    let (body, _) = visible_lookup(&state, authn.as_deref(), index.as_deref(), names)?;
+    let (body, _) = visible_lookup(&state, authn.as_deref(), index.as_deref(), names, &params)?;
     let cell = |v: &Value| match v {
         Value::String(s) => s.clone(),
         Value::Bool(b) => b.to_string(),
@@ -425,8 +435,9 @@ fn exists(
     authn: Option<Extension<Authn>>,
     index: Option<&str>,
     names: &str,
+    params: &HashMap<String, String>,
 ) -> StatusCode {
-    match visible_lookup(state, authn.as_deref(), index, Some(names)) {
+    match visible_lookup(state, authn.as_deref(), index, Some(names), params) {
         Ok((body, missing))
             if missing.is_empty() && body.as_object().is_some_and(|o| !o.is_empty()) =>
         {
@@ -444,7 +455,7 @@ pub async fn head_named(
     Query(params): Params,
 ) -> Result<StatusCode, AppError> {
     check(&uri, &params, &["local"])?;
-    Ok(exists(&state, authn, None, &names))
+    Ok(exists(&state, authn, None, &names, &params))
 }
 
 pub async fn head_for_index_named(
@@ -455,7 +466,7 @@ pub async fn head_for_index_named(
     Query(params): Params,
 ) -> Result<StatusCode, AppError> {
     check(&uri, &params, &["local"])?;
-    Ok(exists(&state, authn, Some(&index), &names))
+    Ok(exists(&state, authn, Some(&index), &names, &params))
 }
 
 /// String-or-array parameter of an alias action, under its singular or plural key.

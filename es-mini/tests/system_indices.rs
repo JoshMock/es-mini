@@ -622,3 +622,71 @@ async fn wildcards_skip_hidden_indices_unless_expanded() {
     let caps = get("/_field_caps?fields=a").await;
     assert_eq!(caps["indices"], json!([".dotvis", "hid", "logs"]));
 }
+
+#[tokio::test]
+async fn get_alias_honors_expand_wildcards() {
+    let app = es_mini::app();
+    let doc = || Some(json!({"a": 1}));
+    for (method, uri, body) in [
+        ("PUT", "/.tasks", None),
+        ("PUT", "/logs-x/_doc/1", doc()),
+        ("PUT", "/cl", None),
+        ("POST", "/cl/_close", None),
+        (
+            "PUT",
+            "/hid",
+            Some(json!({"settings": {"index.hidden": true}})),
+        ),
+        ("PUT", "/.kibana_1/_doc/1", doc()),
+    ] {
+        let (status, res) = call(&app, "", method, uri, body).await;
+        assert!(status < 300, "{uri}: {res}");
+    }
+    // Recorded from Elasticsearch 9.5.5 (security off), before and after aliasing .kibana_1.
+    let expect = async |uri: &str, want: Value, names: &str| {
+        let (status, got) = call(&app, "", "GET", uri, None).await;
+        assert_eq!((status, got), (200, want), "{uri}");
+        let names = (!names.is_empty()).then(|| accesses(names)).flatten();
+        assert_eq!(warning(&app, "", "GET", uri, None).await, names, "{uri}");
+    };
+    let open = json!({"logs-x": {"aliases": {}}});
+    expect("/_alias?expand_wildcards=open", open.clone(), "").await;
+    let closed = json!({"cl": {"aliases": {}}});
+    expect("/_alias?expand_wildcards=closed", closed, "").await;
+    expect("/_alias?expand_wildcards=none", json!({}), "").await;
+    expect("/_alias?expand_wildcards=hidden", json!({}), "").await;
+    let hidden = json!({
+        "logs-x": {"aliases": {}}, "hid": {"aliases": {}},
+        ".kibana_1": {"aliases": {}}, ".tasks": {"aliases": {}},
+    });
+    expect(
+        "/_alias?expand_wildcards=open,hidden",
+        hidden,
+        ".kibana_1, .tasks",
+    )
+    .await;
+    let (status, _) = call(&app, "", "PUT", "/.kibana_1/_alias/kalias", None).await;
+    assert_eq!(status, 200);
+    // An open index reaches a hidden one through its visible alias.
+    let aliased = json!({".kibana_1": {"aliases": {"kalias": {}}}, "logs-x": {"aliases": {}}});
+    expect(
+        "/_alias?expand_wildcards=open",
+        aliased.clone(),
+        ".kibana_1",
+    )
+    .await;
+    expect("/*/_alias?expand_wildcards=open", aliased, ".kibana_1").await;
+    let kalias = json!({".kibana_1": {"aliases": {"kalias": {}}}});
+    expect("/_alias/*?expand_wildcards=open", kalias, ".kibana_1").await;
+    expect("/_alias/*?expand_wildcards=hidden", json!({}), "").await;
+    expect("/nope/_alias?ignore_unavailable=true", json!({}), "").await;
+    let (status, _) = call(
+        &app,
+        "",
+        "GET",
+        "/nope*/_alias?allow_no_indices=false",
+        None,
+    )
+    .await;
+    assert_eq!(status, 404);
+}

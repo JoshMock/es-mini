@@ -125,6 +125,11 @@ pub(crate) fn note(index: &str) {
     }
 }
 
+/// Runs `f` without noting the system indices it resolves.
+pub(crate) fn unnoted<R>(f: impl FnOnce() -> R) -> R {
+    ACCESSED.sync_scope(Default::default(), f)
+}
+
 /// Adds Elasticsearch's deprecation `Warning` to the response of a request that resolved
 /// system indices (`IndexNameExpressionResolver`'s system index access check).
 pub(crate) async fn warn(
