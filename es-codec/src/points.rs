@@ -1,5 +1,5 @@
 //! Lucene 10 BKD points (`.kdm`/`.kdi`/`.kdd`): a reader of one-dimensional trees that narrows a
-//! range by walking them, and a writer of one- and two-dimensional trees (`BKDWriter`).
+//! range by walking them, and a writer of trees of up to 8 dimensions (`BKDWriter`).
 
 use crate::{
     Result, SegmentReader,
@@ -435,7 +435,7 @@ const LEAF: usize = 512;
 /// `(meta, index, data)` files, as Lucene's `BKDWriter` flushes them. `fields` is
 /// `(field number, dimensions, (doc, value) pairs)`: a value is its dimensions' sortable bytes
 /// side by side, all values of a field have the same width, and a doc may have none or several,
-/// but a field has at least one. One or two dimensions, all indexed.
+/// but a field has at least one. One to 8 dimensions (`BKDConfig.MAX_INDEX_DIMS`), all indexed.
 pub fn write_points(
     fields: &[(i32, usize, PointValues)],
     id: &[u8; ID_LEN],
@@ -470,8 +470,7 @@ impl PointsWriter {
         let Some(packed) = pairs.first().map(|p| p.1.len()) else {
             return crate::err(format!("points field {number} has no values"));
         };
-        // ponytail: more dimensions recompute their bounds every few splits; port that with them
-        if !(1..=2).contains(&dims) || packed % dims != 0 {
+        if !(1..=8).contains(&dims) || packed % dims != 0 {
             return crate::err(format!("points field {number} has {dims} dimensions"));
         }
         if pairs.iter().any(|p| p.1.len() != packed) {
@@ -479,17 +478,7 @@ impl PointsWriter {
         }
         let w = packed / dims;
         let mut points: Vec<(&[u8], u32)> = pairs.iter().map(|p| (p.1.as_slice(), p.0)).collect();
-        let (mut lo, mut hi) = (points[0].0.to_vec(), points[0].0.to_vec());
-        for (v, _) in &points {
-            for r in (0..dims).map(|d| d * w..(d + 1) * w) {
-                if v[r.clone()] < lo[r.clone()] {
-                    lo[r.clone()].copy_from_slice(&v[r.clone()]);
-                }
-                if v[r.clone()] > hi[r.clone()] {
-                    hi[r.clone()].copy_from_slice(&v[r]);
-                }
-            }
-        }
+        let (lo, hi) = bounds(&points, dims, w);
         let leaves = points.len().div_ceil(LEAF);
         let mut tree = Bkd {
             dims,
@@ -569,6 +558,18 @@ impl<'a> Bkd<'a> {
             write_leaf(data, pts, self.dims, self.w);
             return;
         }
+        // like Lucene, more than two dimensions recompute their bounds below the root every
+        // `SPLITS_BEFORE_EXACT_BOUNDS` (4) splits
+        let exact;
+        let (lo, hi) = if self.dims > 2
+            && n != self.fps.len()
+            && self.parent_splits.iter().sum::<usize>() % 4 == 0
+        {
+            exact = bounds(pts, self.dims, self.w);
+            (&exact.0[..], &exact.1[..])
+        } else {
+            (lo, hi)
+        };
         let dim = self.split(lo, hi);
         let r = dim * self.w..(dim + 1) * self.w;
         let left = left_leaves(n);
@@ -610,6 +611,22 @@ impl<'a> Bkd<'a> {
         };
         (1..self.dims).fold(0, |best, d| if span(d) > span(best) { d } else { best })
     }
+}
+
+/// Each dimension's smallest and largest bytes among `pts` (`computePackedValueBounds`).
+fn bounds(pts: &[(&[u8], u32)], dims: usize, w: usize) -> (Vec<u8>, Vec<u8>) {
+    let (mut lo, mut hi) = (pts[0].0.to_vec(), pts[0].0.to_vec());
+    for (v, _) in pts {
+        for r in (0..dims).map(|d| d * w..(d + 1) * w) {
+            if v[r.clone()] < lo[r.clone()] {
+                lo[r.clone()].copy_from_slice(&v[r.clone()]);
+            }
+            if v[r.clone()] > hi[r.clone()] {
+                hi[r.clone()].copy_from_slice(&v[r]);
+            }
+        }
+    }
+    (lo, hi)
 }
 
 /// Orders points by the bytes of dimension `r`, then doc, then the whole value.
@@ -892,6 +909,38 @@ mod tests {
         ] {
             assert_eq!(decode(&sortable_bytes(v, w)), v);
         }
+    }
+
+    /// Trees of more than two dimensions pick split dimensions from exact bounds every 4 splits
+    /// below the root, as `BKDWriter.build` does.
+    #[test]
+    fn points_fidelity_more_dimensions_recompute_bounds() {
+        // 32 leaves of a 32 x 32 x 16 grid; the last dimension is 1 where y >= 16
+        let values: Vec<[u8; 4]> = (0..16384u32)
+            .map(|i| {
+                let (x, y, z) = (i % 32, i / 32 % 32, i / 1024);
+                [x as u8, y as u8, (z * 3) as u8, u8::from(y >= 16)]
+            })
+            .collect();
+        let mut pts: Vec<(&[u8], u32)> =
+            (values.iter().zip(0..)).map(|(v, d)| (&v[..], d)).collect();
+        let (lo, hi) = bounds(&pts, 4, 1);
+        let mut tree = Bkd {
+            dims: 4,
+            w: 1,
+            fps: vec![0; 32],
+            splits: vec![(0, &[][..]); 31],
+            parent_splits: vec![0; 4],
+        };
+        tree.build(&mut Output::default(), &mut pts, 0, 32, &lo, &hi);
+        let dims: Vec<usize> = tree.splits.iter().map(|s| s.0).collect();
+        // Splits on z, x, y, z leave the last dimension constant under each depth-4 node; stale
+        // bounds would still force a split on it (it was split less than half as often), exact
+        // ones split x (the widest, tied with y) instead.
+        let depth4: Vec<usize> = dims.iter().step_by(2).copied().collect();
+        assert_eq!(depth4, [0; 16]);
+        assert_eq!(dims[15], 2);
+        assert_eq!(dims[1..].iter().step_by(4).collect::<Vec<_>>(), [&2; 8]);
     }
 
     /// Elasticsearch's own `_seq_no` points, rebuilt from its doc values, must match byte for byte.
