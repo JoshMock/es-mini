@@ -1063,6 +1063,15 @@ impl Shard {
         &self.superseded
     }
 
+    /// Whether a replaced or deleted document is still kept, as Lucene's live docs then mark.
+    pub fn has_deletions(&self) -> bool {
+        !self.superseded.is_empty()
+            || self
+                .disk
+                .as_ref()
+                .is_some_and(disk::Segments::has_deletions)
+    }
+
     /// Deletes a document. Like ES, a missing document still consumes a version and seq_no.
     pub fn delete(&mut self, settings: &Settings, id: &str) -> WriteResult {
         self.prune_tombstones(settings);

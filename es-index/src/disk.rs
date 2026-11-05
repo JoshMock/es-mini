@@ -209,6 +209,12 @@ impl Segments {
         self.nested[s].iter().any(|p| under(field, p))
     }
 
+    /// Whether a segment holds a deleted document, on disk or removed since it was opened.
+    pub(crate) fn has_deletions(&self) -> bool {
+        self.removed.iter().any(|r| !r.is_empty())
+            || (self.segments.iter()).any(|s| s.seg.del_count + s.seg.soft_del_count > 0)
+    }
+
     /// Forgets a document the index replaced or deleted.
     pub(crate) fn remove(&mut self, id: &str) -> Option<DiskDoc> {
         let d = self.meta(id)?;

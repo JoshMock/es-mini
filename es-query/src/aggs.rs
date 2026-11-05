@@ -1738,6 +1738,8 @@ struct Timings {
     /// and the shard's documents.
     ords: usize,
     docs: usize,
+    /// Keyword `terms`: whether the shard keeps deleted documents.
+    deleted: bool,
     /// Top-level keyword `terms` under match_all: the terms include/exclude accepts.
     keys: Vec<terms::Key>,
 }
@@ -2264,11 +2266,17 @@ impl Collector<'_, '_> {
                 let values = self.values(i, id, &doc);
                 ords.extend(values.iter().filter_map(|v| terms::Key::of(v, format)));
             }
+            // a deleted document's terms stay in the segment until a merge drops it
+            // ponytail: but not those of documents deleted on disk, unread once removed
+            for doc in shard.superseded() {
+                let values = self.values(i, "", doc);
+                ords.extend(values.iter().filter_map(|v| terms::Key::of(v, format)));
+            }
             let accepted = stats.and_then(|st| st[i].terms.as_ref());
             let Some(t) = self.timings.as_mut().map(|t| &mut t[i]) else {
                 continue;
             };
-            (t.ords, t.docs) = (ords.len(), docs);
+            (t.ords, t.docs, t.deleted) = (ords.len(), docs, shard.has_deletions());
             if let Some(b) = accepted {
                 t.keys = ords.into_iter().filter(|k| b.accepts(k)).collect();
             }
@@ -2371,10 +2379,11 @@ impl Collector<'_, '_> {
         match (ty, &agg.metric) {
             ("StringTermsAggregatorFromFilters", _) => {
                 // FilterByFilterAggregator counts each term query's matches from its doc freq
-                // without sub-aggregations, else collects them. ponytail: no deleted docs.
-                // no filters match no documents, so no segment is visited
+                // without sub-aggregations, else collects them; deleted docs make each term
+                // query collect its count. No filters match no documents, so no segment is visited
                 let visited = used(!t.keys.is_empty());
                 let counted = used(agg.subs.is_empty());
+                let deleted = used(t.deleted);
                 let filters = t.keys.iter().map(|k| {
                     let query = match k {
                         // an ip term query is a point range of the one address
@@ -2390,7 +2399,7 @@ impl Collector<'_, '_> {
                         terms::Key::Long(x) => format!("{}:{x}", agg.field),
                         terms::Key::Double(x) => format!("{}:{x}", agg.field),
                     };
-                    serde_json::json!({"query": query, "segments_counted_in_constant_time": counted})
+                    serde_json::json!({"query": query, "segments_counted_in_constant_time": counted * (1 - deleted)})
                 });
                 out["debug"] = serde_json::json!({
                     "delegate": "FilterByFilterAggregator",
@@ -2398,7 +2407,7 @@ impl Collector<'_, '_> {
                         "filters": filters.collect::<Vec<_>>(),
                         "segments_counted": visited * counted,
                         "segments_collected": visited * (1 - counted),
-                        "segments_with_deleted_docs": 0,
+                        "segments_with_deleted_docs": visited * deleted,
                         "segments_with_doc_count_field": 0,
                     },
                 });

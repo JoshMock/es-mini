@@ -408,6 +408,32 @@ async fn profile_top_level_keyword_terms_run_filter_by_filter() {
 }
 
 #[tokio::test]
+async fn aggs_profile_filter_by_filter_sees_deleted_docs() {
+    let app = seeded().await;
+    let body = json!({"profile": true, "size": 0,
+        "aggs": {"k": {"terms": {"field": "t.keyword"}}}});
+    let debug = async |app: &axum::Router| {
+        let (s, r) = call(app, Method::POST, "/idx/_search", Some(body.clone())).await;
+        assert_eq!(s, StatusCode::OK, "{r}");
+        r["profile"]["shards"][0]["aggregations"][0]["debug"]["delegate_debug"].clone()
+    };
+    // a deleted document stays in its segment, with its terms, and the term queries then
+    // count by collecting
+    call(&app, Method::DELETE, "/idx/_doc/3", None).await;
+    let d = debug(&app).await;
+    assert_eq!(d["segments_with_deleted_docs"], 1, "{d}");
+    assert_eq!(d["segments_counted"], 1);
+    let filter = |q: &str| json!({"query": q, "segments_counted_in_constant_time": 0});
+    let filters = ["green apple", "pear", "red apple"].map(|t| filter(&format!("t.keyword:{t}")));
+    assert_eq!(d["filters"], json!(filters));
+
+    // so does an updated one
+    let app = seeded().await;
+    call(&app, Method::PUT, "/idx/_doc/3", Some(json!({"t": "fig"}))).await;
+    assert_eq!(debug(&app).await["segments_with_deleted_docs"], 1);
+}
+
+#[tokio::test]
 async fn aggs_profile_filter_by_filter_counts_all_ords() {
     let app = seeded().await;
     let profile = async |terms: serde_json::Value| {
