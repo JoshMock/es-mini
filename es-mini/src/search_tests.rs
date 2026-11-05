@@ -560,6 +560,41 @@ fn memory_bounds_2_indices_share_one_request_cache() {
     assert_eq!((evictions(&a), evictions(&b)), (1, 0));
 }
 
+/// Elasticsearch 9.5.5's `_doc` values for these writes: until a merge, deleted and replaced
+/// documents and delete tombstones keep their Lucene ids, so a document's is its `_seq_no`.
+#[tokio::test]
+async fn memory_bounds_2_doc_sort_counts_deleted_documents() {
+    let app = app();
+    let settings = json!({"settings": {"number_of_shards": 1}});
+    call(&app, Method::PUT, "/t", Some(settings)).await;
+    for (method, path, body) in [
+        (Method::PUT, "/t/_doc/a", Some(json!({"n": 1}))),
+        (Method::PUT, "/t/_doc/b", Some(json!({"n": 2}))),
+        (Method::PUT, "/t/_doc/c", Some(json!({"n": 3}))),
+        (Method::DELETE, "/t/_doc/b", None),
+        (Method::DELETE, "/t/_doc/z", None),
+        (Method::PUT, "/t/_doc/d", Some(json!({"n": 4}))),
+        (Method::PUT, "/t/_doc/a", Some(json!({"n": 5}))),
+        (Method::POST, "/t/_update/d", Some(json!({"doc": {"n": 4}}))),
+        (Method::POST, "/t/_refresh", None),
+    ] {
+        call(&app, method, path, body).await;
+    }
+    let body = json!({"sort": ["_doc"]});
+    let (_, r) = call(&app, Method::POST, "/t/_search", Some(body)).await;
+    let hits: Vec<_> = (r["hits"]["hits"].as_array().unwrap().iter())
+        .map(|h| (h["_id"].clone(), h["sort"].clone()))
+        .collect();
+    assert_eq!(
+        hits,
+        [
+            (json!("c"), json!([2])),
+            (json!("d"), json!([5])),
+            (json!("a"), json!([6]))
+        ]
+    );
+}
+
 #[tokio::test]
 async fn search_response_keys_in_es_order() {
     let app = seeded().await;

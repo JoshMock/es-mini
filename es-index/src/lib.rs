@@ -899,20 +899,6 @@ impl Shard {
         self.disk.as_ref()?.pos(id)
     }
 
-    /// Every document's sequence number, ascending; a document's position in it stands in for
-    /// its Lucene doc id.
-    // ponytail: Lucene ids also count deleted documents until a merge; add a doc id per
-    // document if a `_doc` sort after deletes must match ES
-    pub fn seq_nos(&self) -> Vec<u64> {
-        let disk = self.disk_live().map(|(_, (_, s))| s);
-        let mut all: Vec<u64> = disk
-            .chain(self.docs.iter().map(|(_, d)| d.seq_no))
-            .collect();
-        all.sort_unstable();
-        all.dedup();
-        all
-    }
-
     /// Every live document on disk, without reading it: its position, id and sequence number.
     pub fn disk_live(&self) -> impl Iterator<Item = (disk::DiskPos, (&str, u64))> {
         self.disk.iter().flat_map(disk::Segments::positions)

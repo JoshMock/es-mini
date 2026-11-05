@@ -278,8 +278,6 @@ struct Searcher<'a> {
     runtime_source: Vec<String>,
     /// The shard's position among the searched targets, as `_shard_doc` encodes it.
     shard_index: usize,
-    /// The shard's [`Shard::seq_nos`], read for the first `_doc` or `_shard_doc` sort value.
-    seq_nos: OnceCell<Vec<u64>>,
     /// The shard's [`Shard::ignored`], read for the first `_ignored` query.
     ignored: OnceCell<Ignored>,
 }
@@ -315,7 +313,6 @@ impl<'a> Searcher<'a> {
             query: q.clone(),
             runtime_source: Vec::new(),
             shard_index: 0,
-            seq_nos: OnceCell::new(),
             ignored: OnceCell::new(),
         }
     }
@@ -1374,8 +1371,11 @@ impl<'a> Searcher<'a> {
             .map(|f| match f.field.as_str() {
                 "_score" => Value::from(score as f32),
                 "_doc" | "_shard_doc" => {
-                    let ids = self.seq_nos.get_or_init(|| self.shard.seq_nos());
-                    let doc_id = ids.partition_point(|&s| s < doc.seq_no) as u64;
+                    // Lucene's doc id: every operation adds a doc (deletes a tombstone) that
+                    // keeps its id until a merge, so it is the sequence number.
+                    // ponytail: ids skip nested objects' docs, and Elasticsearch's merges
+                    // renumber docs (largest segment first, keeping retained soft deletes)
+                    let doc_id = doc.seq_no;
                     match f.field.as_str() {
                         "_doc" => doc_id.into(),
                         // ShardDocSortField.encodeShardAndDoc
