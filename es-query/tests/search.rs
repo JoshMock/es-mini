@@ -876,8 +876,7 @@ fn simple_query_string_matches_each_whitespace_term_across_fields() {
         ["4"]
     );
     let err = |p: Value| parse_query(&json!({"simple_query_string": p})).unwrap_err();
-    err(json!({"fields": ["title"], "query": "brown -dog"}));
-    err(json!({"query": "dog"}));
+    err(json!({"fields": ["title"], "query": "brown dgo~1"}));
 }
 
 /// Scores are Elasticsearch 9.5.5's for `index()`'s documents.
@@ -2034,4 +2033,43 @@ fn error_positions_malformed_decimal_patterns_fail_the_shard() {
         assert_eq!(run(range("n", p)).unwrap(), 4, "{p}");
     }
     assert_eq!(run(top_hits("nope", "#.#.#")).unwrap(), 4);
+}
+
+/// Lucene's SimpleQueryParser operators, as ES 9.5.5's simple_query_string parses them.
+#[test]
+fn query_gaps_2_simple_query_string_operators() {
+    let q = |p: Value| sorted(ids(json!({"query": {"simple_query_string": p}})));
+    let t = |s: &str| q(json!({"fields": ["title"], "query": s}));
+    assert_eq!(t("brown -dog"), ["1", "2", "4"]);
+    assert_eq!(
+        q(json!({"fields": ["title"], "query": "brown -dog", "default_operator": "and"})),
+        ["1"]
+    );
+    assert_eq!(t("quick +fox"), ["1"]);
+    assert_eq!(t("lazy | rabbits"), ["2", "3"]);
+    assert_eq!(t("\"brown fox\""), ["1"]);
+    assert_eq!(t("\"fox brown\"~2"), ["1"]);
+    assert_eq!(t("qui*"), ["1", "2"]);
+    assert_eq!(t("(lazy | quick) +dog"), ["3"]);
+    assert_eq!(t("*"), ["1", "2", "3", "4"]);
+    assert_eq!(t("dog~0"), ["3", "4"]);
+    // Every document but the negated term's, scoring match_all's 1.
+    let idx = index();
+    let req = SearchRequest::parse(
+        &json!({"query": {"simple_query_string": {"fields": ["title"], "query": "-dog"}}}),
+    )
+    .unwrap();
+    let hits: Vec<_> = (search(&idx, &req).hits.iter())
+        .map(|h| (h.id.to_owned(), h.score))
+        .collect();
+    assert_eq!(hits.len(), 2, "{hits:?}");
+    assert!(hits.iter().all(|h| h.1 == Some(1.0)), "{hits:?}");
+}
+
+/// Without `fields`, simple_query_string searches index.query.default_field, `*`.
+#[test]
+fn query_gaps_2_simple_query_string_default_fields() {
+    let q = |p: Value| sorted(ids(json!({"query": {"simple_query_string": p}})));
+    assert_eq!(q(json!({"query": "animal"})), ["1", "2"]);
+    assert_eq!(q(json!({"query": "lazy pet"})), ["3"]);
 }

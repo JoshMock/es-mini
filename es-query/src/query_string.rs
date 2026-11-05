@@ -516,3 +516,300 @@ pub fn parse_query_string(q: &str, df: &str, and: bool) -> Query {
         ))
     })
 }
+
+/// Lucene's SimpleQueryParser with ES's SimpleQueryStringQueryParser leaves: `+` and `|`
+/// join, `-` negates, `"phrase"~slop`, `prefix*`, `( )` groups and `\` escapes, each term a
+/// most_fields multi_match over `fields`. `and` makes AND the default operator.
+pub(crate) fn parse_simple_query_string(
+    q: &str,
+    fields: &[(String, f64)],
+    and: bool,
+    lenient: bool,
+) -> Result<Query, String> {
+    if q.trim() == "*" {
+        return Ok(Query::MatchAll);
+    }
+    let p = Simple {
+        data: q.chars().collect(),
+        fields,
+        and,
+        lenient,
+    };
+    Ok(p.sub_query(0, p.data.len())?.unwrap_or_else(match_none))
+}
+
+struct Simple<'a> {
+    data: Vec<char>,
+    fields: &'a [(String, f64)],
+    and: bool,
+    lenient: bool,
+}
+
+/// SimpleQueryParser.State: the query so far, and the operators joining the next clause.
+struct State {
+    index: usize,
+    end: usize,
+    top: Option<Query>,
+    /// `Some(true)` for MUST, `Some(false)` for SHOULD.
+    current: Option<bool>,
+    previous: Option<bool>,
+    not: u32,
+}
+
+fn is_sqs_ws(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\r')
+}
+
+impl Simple<'_> {
+    fn sub_query(&self, start: usize, end: usize) -> Result<Option<Query>, String> {
+        let mut s = State {
+            index: start,
+            end,
+            top: None,
+            current: None,
+            previous: None,
+            not: 0,
+        };
+        while s.index < s.end {
+            match self.data[s.index] {
+                '(' => self.consume_sub_query(&mut s)?,
+                ')' => s.index += 1,
+                '"' => self.consume_phrase(&mut s)?,
+                c @ ('+' | '|') => {
+                    if s.current.is_none() && s.top.is_some() {
+                        s.current = Some(c == '+');
+                    }
+                    s.index += 1;
+                }
+                '-' => {
+                    s.not += 1;
+                    s.index += 1;
+                    continue;
+                }
+                c if is_sqs_ws(c) => s.index += 1,
+                _ => self.consume_token(&mut s)?,
+            }
+            s.not = 0;
+        }
+        Ok(s.top)
+    }
+
+    fn consume_sub_query(&self, s: &mut State) -> Result<(), String> {
+        s.index += 1;
+        let start = s.index;
+        let mut depth = 1;
+        let mut escaped = false;
+        while s.index < s.end {
+            if !escaped {
+                match self.data[s.index] {
+                    '\\' => {
+                        escaped = true;
+                        s.index += 1;
+                        continue;
+                    }
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            escaped = false;
+            s.index += 1;
+        }
+        if s.index == s.end {
+            s.index = start;
+        } else if s.index == start {
+            s.current = None;
+            s.index += 1;
+        } else {
+            let sub = self.sub_query(start, s.index)?;
+            self.build(s, sub);
+            s.index += 1;
+        }
+        Ok(())
+    }
+
+    fn consume_phrase(&self, s: &mut State) -> Result<(), String> {
+        s.index += 1;
+        let start = s.index;
+        let mut phrase = String::new();
+        let mut escaped = false;
+        let mut has_slop = false;
+        while s.index < s.end {
+            if !escaped {
+                match self.data[s.index] {
+                    '\\' => {
+                        escaped = true;
+                        s.index += 1;
+                        continue;
+                    }
+                    '"' => {
+                        if self.data.get(s.index + 1) == Some(&'~') && s.index + 1 < s.end {
+                            s.index += 1;
+                            has_slop = s.end > s.index + 1;
+                        }
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            escaped = false;
+            phrase.push(self.data[s.index]);
+            s.index += 1;
+        }
+        if s.index == s.end {
+            s.index = start;
+        } else if s.index == start {
+            s.current = None;
+            s.index += 1;
+        } else {
+            let slop = if has_slop { self.fuzziness(s) } else { 0 };
+            let query = Query::MatchPhrase {
+                field: String::new(),
+                query: phrase,
+                slop,
+            };
+            // MultiMatchQueryParser's phrase type: dis_max, tie_breaker 0
+            self.build(s, Some(self.on_fields(query, 0.0)));
+            s.index += 1;
+        }
+        Ok(())
+    }
+
+    fn consume_token(&self, s: &mut State) -> Result<(), String> {
+        let mut token = String::new();
+        let (mut escaped, mut prefix, mut fuzzy) = (false, false, false);
+        while s.index < s.end {
+            let c = self.data[s.index];
+            if !escaped {
+                if c == '\\' {
+                    escaped = true;
+                    prefix = false;
+                    s.index += 1;
+                    continue;
+                } else if self.token_finished(s) {
+                    break;
+                } else if !token.is_empty() && c == '~' {
+                    fuzzy = true;
+                    break;
+                }
+                prefix = !token.is_empty() && c == '*';
+            }
+            escaped = false;
+            token.push(c);
+            s.index += 1;
+        }
+        if token.is_empty() {
+            return Ok(());
+        }
+        if fuzzy && self.fuzziness(s) > 0 {
+            // ponytail: no fuzzy `term~N`; es-mini has no fuzzy query to build
+            return Err("[simple_query_string] fuzzy queries (`~`) are not supported".into());
+        }
+        let branch = if prefix {
+            token.pop();
+            let prefix = Query::Prefix {
+                field: String::new(),
+                prefix: token,
+            };
+            self.on_fields(Query::Normalized(Box::new(prefix)), 1.0)
+        } else {
+            let query = Query::Match {
+                field: String::new(),
+                query: token,
+                and: self.and,
+            };
+            // the multi_match type SimpleQueryStringBuilder defaults to, most_fields
+            self.on_fields(query, 1.0)
+        };
+        self.build(s, Some(branch));
+        Ok(())
+    }
+
+    fn on_fields(&self, query: Query, tie_breaker: f64) -> Query {
+        Query::Fields {
+            fields: self.fields.to_vec(),
+            query: Box::new(query),
+            tie_breaker,
+            lenient: self.lenient,
+        }
+    }
+
+    /// SimpleQueryParser.buildQueryTree: a clause joined to the query so far, by `+` or `|`
+    /// or else the default operator, nesting the query so far when the operator changes.
+    fn build(&self, s: &mut State, branch: Option<Query>) {
+        let Some(mut branch) = branch else { return };
+        if s.not % 2 == 1 {
+            branch = Query::Bool {
+                must: vec![],
+                should: vec![Query::MatchAll],
+                must_not: vec![branch],
+                filter: vec![],
+                min_should: 1,
+            };
+        }
+        s.top = Some(match s.top.take() {
+            None => branch,
+            Some(mut top) => {
+                let must = *s.current.get_or_insert(self.and);
+                if s.previous != Some(must) {
+                    top = boolean_of(must, vec![top]);
+                }
+                if let Query::Bool {
+                    must: m, should, ..
+                } = &mut top
+                {
+                    if must { m } else { should }.push(branch);
+                }
+                s.previous = Some(must);
+                top
+            }
+        });
+        s.current = None;
+    }
+
+    /// SimpleQueryParser.parseFuzziness: the number after the `~` at `s.index`, 2 without one,
+    /// leaving `s.index` where the token ends.
+    fn fuzziness(&self, s: &mut State) -> u32 {
+        let mut text = String::new();
+        if self.data[s.index] != '~' {
+            return 0;
+        }
+        while s.index < s.end {
+            s.index += 1;
+            if s.index < s.end {
+                if self.token_finished(s) {
+                    break;
+                }
+                text.push(self.data[s.index]);
+            }
+        }
+        match text.is_empty() {
+            true => 2,
+            false => text.parse::<i32>().unwrap_or(0).max(0) as u32,
+        }
+    }
+
+    fn token_finished(&self, s: &State) -> bool {
+        matches!(self.data[s.index], '"' | '|' | '+' | '(' | ')') || is_sqs_ws(self.data[s.index])
+    }
+}
+
+/// A boolean of `clauses`, all required (`must`) or all optional.
+fn boolean_of(must: bool, clauses: Vec<Query>) -> Query {
+    let (must, should) = match must {
+        true => (clauses, vec![]),
+        false => (vec![], clauses),
+    };
+    Query::Bool {
+        min_should: usize::from(must.is_empty()),
+        must,
+        should,
+        must_not: vec![],
+        filter: vec![],
+    }
+}

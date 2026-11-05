@@ -729,61 +729,42 @@ fn parse_kind(kind: &str, body: &Value) -> Result<Query, QueryError> {
                 o.get("query")
                     .ok_or("[simple_query_string] requires query")?,
             );
-            // ponytail: no `+ | - " * ( ) ~` operators or default `*` fields
-            if query.contains(['+', '|', '"', '*', '(', ')', '~'])
-                || query.split_whitespace().any(|t| t.starts_with('-'))
-            {
-                return Err("[simple_query_string] operators are not supported".into());
-            }
-            let fields = o
-                .get("fields")
-                .and_then(Value::as_array)
-                .ok_or("[simple_query_string] requires fields")?
-                .iter()
-                .filter_map(Value::as_str)
-                .map(field_boost)
-                .collect::<Result<Vec<_>, _>>()?;
+            // ES defaults to index.query.default_field, `*`
+            let fields = match o.get("fields").and_then(Value::as_array) {
+                Some(f) => (f.iter().filter_map(Value::as_str))
+                    .map(|f| field_boost(f).map(|(f, b)| (f.to_owned(), b)))
+                    .collect::<Result<Vec<_>, _>>()?,
+                None => vec![("*".to_owned(), 1.0)],
+            };
             let and = match o.get("default_operator").and_then(Value::as_str) {
                 None => false,
                 Some(op) if op.eq_ignore_ascii_case("and") => true,
                 Some(op) if op.eq_ignore_ascii_case("or") => false,
                 Some(op) => return Err(format!("no [default_operator] for [{op}]").into()),
             };
-            // Each term matches in any field (ES: dis_max with tie_breaker 1.0, a sum).
-            let terms: Vec<Query> = query
-                .split_whitespace()
-                .map(|t| Query::Fields {
-                    fields: (fields.iter()).map(|&(f, b)| (f.to_owned(), b)).collect(),
-                    query: Box::new(Query::Match {
-                        field: String::new(),
-                        query: t.to_owned(),
-                        and: false,
-                    }),
-                    tie_breaker: 1.0,
-                    lenient,
-                })
-                .collect();
-            if and {
-                return Ok(Query::Bool {
-                    must: terms,
-                    should: vec![],
-                    must_not: vec![],
-                    filter: vec![],
-                    min_should: 0,
-                });
+            let mut q =
+                crate::query_string::parse_simple_query_string(&query, &fields, and, lenient)?;
+            // Queries.maybeApplyMinimumShouldMatch: only a boolean, on its optional clauses
+            // ponytail: a single term analyzing to several (`foo-bar`) on one field is a boolean
+            // in ES too, but here a match without minimum_should_match
+            if let (
+                Query::Bool {
+                    should, min_should, ..
+                },
+                Some(m),
+            ) = (
+                &mut q,
+                o.get("minimum_should_match").filter(|m| !m.is_null()),
+            ) {
+                let m = match m {
+                    Value::String(m) => min_should_match(should.len(), m)?,
+                    m => min_should_match(should.len(), &m.to_string())?,
+                };
+                if m > 0 {
+                    *min_should = m;
+                }
             }
-            let min_should = match o.get("minimum_should_match") {
-                None | Some(Value::Null) => 0,
-                Some(Value::String(m)) => min_should_match(terms.len(), m)?,
-                Some(m) => min_should_match(terms.len(), &m.to_string())?,
-            };
-            Ok(Query::Bool {
-                min_should: min_should.max(1),
-                must: vec![],
-                should: terms,
-                must_not: vec![],
-                filter: vec![],
-            })
+            Ok(q)
         }
         "query_string" => {
             let o = body.as_object().ok_or("[query_string] query malformed")?;
