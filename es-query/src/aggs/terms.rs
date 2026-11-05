@@ -6,6 +6,7 @@ use crate::hll::mix64;
 use crate::{QueryError, int};
 use es_index::{FieldMapping, ip_bytes, ip_string, postings::text};
 use serde_json::{Map, Value};
+use std::cell::Cell;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -296,6 +297,7 @@ impl Terms {
         &self,
         b: &mut Buckets,
         body: &mut Map<String, Value>,
+        buckets: &Cell<usize>,
         date: Option<&str>,
         mut sub: impl FnMut(&mut [Stats], &mut Map<String, Value>) -> Result<(), QueryError>,
     ) -> Result<&'static str, QueryError> {
@@ -304,6 +306,8 @@ impl Terms {
             .collect();
         v.sort_by(|a, b| self.cmp(a, b));
         let rest = v.split_off(self.size.min(v.len()));
+        // counted before their sub-aggregations, as TopBucketBuilder adds them
+        super::consume_buckets(buckets, v.len())?;
         // a single shard's counts are exact
         let error = if b.shards > 1 { b.error } else { 0 };
         body.insert("doc_count_error_upper_bound".into(), error.into());

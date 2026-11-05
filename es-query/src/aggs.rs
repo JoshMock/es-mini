@@ -2441,8 +2441,8 @@ pub(crate) fn render(
 
 /// Counts `n` more buckets toward the request's [`MAX_BUCKETS`], like ES's MultiBucketConsumer
 /// in the final reduce.
-// ponytail: terms count their buckets after rendering them and take back none they evict; ES
-// counts them first (interleaved for key order) and, ordering by a sub-aggregation, counts the
+// ponytail: terms count their buckets before their sub-aggregations and take back none they
+// evict; ES interleaves the two for key order and, ordering by a sub-aggregation, counts the
 // sub-buckets of terms it evicts, so it can fail on a peak this never reaches
 fn consume_buckets(buckets: &Cell<usize>, n: usize) -> Result<(), QueryError> {
     buckets.set(buckets.get() + n);
@@ -2508,12 +2508,7 @@ fn render_counted(
         match &agg.metric {
             Metric::Terms(t) => {
                 if let Some(b) = &mut st.terms {
-                    ty = t.render(b, &mut body, date, sub)?;
-                    let n = body
-                        .get("buckets")
-                        .and_then(Value::as_array)
-                        .map_or(0, Vec::len);
-                    consume_buckets(buckets, n)?;
+                    ty = t.render(b, &mut body, buckets, date, sub)?;
                 }
             }
             Metric::Histogram(h) => {
@@ -3208,6 +3203,27 @@ mod tests {
         // two of 2: 30,000 left counted by the first
         assert!(too_many(run(100, 30_000)));
         assert!(run(100, 9_000).is_ok());
+    }
+
+    #[test]
+    fn aggs_gaps_2_terms_count_their_buckets_before_sub_aggregations() {
+        // as Elasticsearch 9.5.5's TopBucketBuilder: the term counts before a dropped histogram
+        // bucket's 65,535 or 65,536 sub-buckets peak
+        let run = |max: u32| {
+            let sub = json!({"histogram": {"field": "i", "interval": 1, "min_doc_count": 0,
+                "extended_bounds": {"min": 0, "max": max}}});
+            let h = json!({"histogram": {"field": "i", "interval": 1000, "min_doc_count": 5},
+                "aggs": {"s": sub}});
+            let aggs = json!({"t": {"terms": {"field": "k"}, "aggs": {"h": h}}});
+            let body = json!({"query": {"term": {"k": "a"}}, "aggs": aggs});
+            let (ix, req) = (index(), SearchRequest::parse(&body).unwrap());
+            crate::search_many(&[("i", 0, &ix, None)], &req).map(drop)
+        };
+        assert_eq!(
+            run(35_535).unwrap_err().kind,
+            crate::ErrorKind::TooManyBuckets
+        );
+        assert!(run(35_534).is_ok());
     }
 
     #[test]
