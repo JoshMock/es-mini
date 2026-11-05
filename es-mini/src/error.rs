@@ -323,11 +323,21 @@ pub(crate) fn shard_failure(
     shard: usize,
     e: es_query::QueryError,
 ) -> (StatusCode, Vec<Value>, Value) {
+    let uuid = e.index_uuid.clone();
     let (status, mut reason) = AppError::from(e).parts();
-    let causes = match reason.as_object_mut().and_then(|o| o.remove("root_cause")) {
+    let mut causes = match reason.as_object_mut().and_then(|o| o.remove("root_cause")) {
         Some(Value::Array(c)) => c,
         _ => vec![],
     };
+    // a query_shard_exception names the index it failed on
+    if let Some(uuid) = uuid {
+        for c in causes.iter_mut().chain([&mut reason]) {
+            if c["type"] == "query_shard_exception" {
+                c["index_uuid"] = uuid.as_str().into();
+                c["index"] = index.into();
+            }
+        }
+    }
     let failure =
         json!({"shard": shard, "index": index, "node": crate::nodes::NODE_ID, "reason": reason});
     (status, causes, failure)
@@ -394,9 +404,13 @@ impl From<es_query::QueryError> for AppError {
             es_query::ErrorKind::XContentParse => Self::XContentParse(e.msg),
             es_query::ErrorKind::Validation => Self::ActionRequestValidation(e.msg),
             es_query::ErrorKind::TooManyBuckets => Self::TooManyBuckets(e.msg),
-            // ponytail: query_string syntax errors fail while the request is parsed, before any
-            // index, so they miss ES's all-shards-failed query_shard_exception wrapper
             es_query::ErrorKind::Parse => Self::Parse(e.msg),
+            es_query::ErrorKind::QueryShard => {
+                Self::Other(StatusCode::BAD_REQUEST, "query_shard_exception", e.msg)
+            }
+            es_query::ErrorKind::TokenMgr => {
+                Self::Other(StatusCode::BAD_REQUEST, "token_mgr_error", e.msg)
+            }
         }
     }
 }

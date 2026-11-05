@@ -52,6 +52,11 @@ pub(crate) fn resolve_dates(index: &Index, q: Query, now: i64) -> Result<Query, 
     };
     let ip = |field: &str| matches!(index.mappings.field(field), Some(FieldMapping::Ip));
     Ok(match q {
+        Query::Invalid(mut e) => {
+            let uuid = index.settings.get(es_index::index_settings::UUID);
+            e.index_uuid = uuid.map(str::to_owned);
+            return Err(*e);
+        }
         Query::Term { field, value } if field == "_routing" => routing_term(index, text(&value)),
         Query::Term { field, value } if field == "_ignored" => Query::Ignored(text(&value)),
         Query::Match { field, query, .. } if field == "_ignored" => Query::Ignored(query),

@@ -328,11 +328,12 @@ async fn unknown_route_and_method_errors() {
 }
 
 #[tokio::test]
-async fn q_syntax_errors_are_bad_requests() {
+async fn q_syntax_errors_fail_no_search_without_shards() {
+    // Elasticsearch 9.5.5 parses `q` on each shard, so with none it answers 200; with shards,
+    // see error_positions_query_string_syntax_fails_each_shard
     for uri in ["/_search?q=quick%20AND", "/_count?q=(quick"] {
         let (status, body) = call("POST", uri).await;
-        assert_eq!(status, 400, "{uri}: {body}");
-        assert_eq!(body["error"]["type"], "parse_exception", "{uri}: {body}");
+        assert_eq!(status, 200, "{uri}: {body}");
     }
 }
 

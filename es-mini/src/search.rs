@@ -215,10 +215,7 @@ pub async fn search_all(
 }
 
 /// The `q`/`df`/`default_operator` URI query as a parsed query.
-pub(crate) fn query_from_params(
-    q: &str,
-    params: &HashMap<String, String>,
-) -> Result<es_query::Query, es_query::QueryError> {
+pub(crate) fn query_from_params(q: &str, params: &HashMap<String, String>) -> es_query::Query {
     es_query::parse_query_string(
         q,
         params.get("df").map_or("_all", String::as_str),
@@ -255,7 +252,7 @@ pub async fn search(
     terms_lookups(&state.read(), &mut body)?;
     let mut req = SearchRequest::parse(&body).map_err(AppError::from)?;
     if let Some(q) = params.get("q") {
-        req.query = query_from_params(q, &params)?;
+        req.query = query_from_params(q, &params);
     }
     req.typed_keys = params
         .get("typed_keys")
@@ -662,7 +659,7 @@ pub async fn count(
     let shared = state.read();
     terms_lookups(&shared, &mut body)?;
     let query = match params.get("q") {
-        Some(q) => query_from_params(q, &params)?,
+        Some(q) => query_from_params(q, &params),
         None => body
             .get("query")
             .map_or(Ok(es_query::Query::MatchAll), parse_query)?,

@@ -488,20 +488,31 @@ fn boolean(clauses: Vec<(Occur, Query)>) -> Option<Query> {
 /// Parses Lucene query syntax: `[field:]term`, `"phrases"~slop`, `prefix*`, `wild?cards`,
 /// `[a TO b}` and `>=x` ranges, `AND`/`OR`/`NOT`/`&&`/`||`/`!`/`+`/`-`, `( )` groups,
 /// `_exists_:field` and `\` escapes. `df` is the default field; `and` makes AND the default
-/// operator.
-pub fn parse_query_string(q: &str, df: &str, and: bool) -> Result<Query, QueryError> {
+/// operator. Malformed syntax gives a [`Query::Invalid`] failing as Elasticsearch's
+/// QueryStringQueryBuilder.doToQuery does on each shard.
+pub fn parse_query_string(q: &str, df: &str, and: bool) -> Query {
     if q.trim().is_empty() {
-        return Ok(match_none());
+        return match_none();
     }
-    let err = |e: String| QueryError::new(ErrorKind::Parse, format!("Cannot parse '{q}': {e}"));
-    let mut p = Parser {
-        toks: lex(q).map_err(err)?,
-        at: 0,
-        and,
-    };
-    let query = p.query(df).map_err(err)?;
-    if p.peek().is_some() {
-        return Err(err(p.unexpected()));
-    }
-    Ok(query.unwrap_or_else(match_none))
+    let parsed = lex(q).and_then(|toks| {
+        let mut p = Parser { toks, at: 0, and };
+        let query = p.query(df)?;
+        match p.peek() {
+            Some(_) => Err(p.unexpected()),
+            None => Ok(query.unwrap_or_else(match_none)),
+        }
+    });
+    parsed.unwrap_or_else(|e| {
+        // Lucene's QueryParserBase.parse wraps the parser's ParseException or TokenMgrError
+        let kind = match e.starts_with("Lexical error") {
+            true => ErrorKind::TokenMgr,
+            false => ErrorKind::Parse,
+        };
+        let lucene = QueryError::new(ErrorKind::Parse, format!("Cannot parse '{q}': {e}"));
+        let lucene = lucene.caused_by(QueryError::new(kind, e));
+        let msg = format!("Failed to parse query [{q}]");
+        Query::Invalid(Box::new(
+            QueryError::new(ErrorKind::QueryShard, msg).caused_by(lucene),
+        ))
+    })
 }

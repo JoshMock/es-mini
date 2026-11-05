@@ -58,6 +58,10 @@ pub enum ErrorKind {
     Parse,
     /// `action_request_validation_exception`, such as a pipeline aggregation's bad bucket path
     Validation,
+    /// `query_shard_exception`: a query an index cannot run, such as a malformed query_string
+    QueryShard,
+    /// `token_mgr_error`: Lucene's query parser failing to lex a query_string
+    TokenMgr,
 }
 
 /// ES's `search.max_buckets`: a search fails rather than render more aggregation buckets.
@@ -73,16 +77,19 @@ pub struct QueryError {
     pub shards: Vec<(String, usize, QueryError)>,
     /// The error this one wraps, rendered as its `caused_by`.
     pub cause: Option<Box<QueryError>>,
+    /// The uuid of the index a `query_shard_exception` is about.
+    pub index_uuid: Option<String>,
 }
 
 impl QueryError {
     pub fn new(kind: ErrorKind, msg: impl Into<String>) -> Self {
-        let (msg, shards, cause) = (msg.into(), vec![], None);
+        let (msg, shards, cause, index_uuid) = (msg.into(), vec![], None, None);
         Self {
             kind,
             msg,
             shards,
             cause,
+            index_uuid,
         }
     }
 

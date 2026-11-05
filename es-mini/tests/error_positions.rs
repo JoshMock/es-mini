@@ -69,3 +69,105 @@ async fn error_positions_malformed_order_path_elements() {
         );
     }
 }
+
+/// The `(type, reason)` chain of an error, outermost first.
+fn chain(mut e: &Value) -> Vec<(String, String)> {
+    let mut out = vec![];
+    while e.is_object() {
+        out.push((
+            e["type"].as_str().unwrap().into(),
+            e["reason"].as_str().unwrap().into(),
+        ));
+        e = &e["caused_by"];
+    }
+    out
+}
+
+/// The innermost (Lucene) reasons are not compared: ES's are JavaCC's, listing the tokens it
+/// expected, which es-mini's parser does not word alike.
+#[tokio::test]
+async fn error_positions_query_string_syntax_fails_each_shard() {
+    let app = setup().await;
+    call(&app, "PUT", "/u", json!({})).await;
+    let uuid = |i: &str| {
+        let app = app.clone();
+        let i = i.to_owned();
+        async move {
+            let (_, s) = call(&app, "GET", &format!("/{i}/_settings"), Value::Null).await;
+            s[&i]["settings"]["index"]["uuid"].clone()
+        }
+    };
+    let (t, u) = (uuid("t").await, uuid("u").await);
+    let qs = |q: &str| json!({"query": {"query_string": {"query": q}}});
+    for (uri, body, q, indices, inner) in [
+        (
+            "/t/_search",
+            qs("k:"),
+            "k:",
+            vec![("t", &t)],
+            "parse_exception",
+        ),
+        (
+            "/t/_search",
+            qs("\"foo"),
+            "\"foo",
+            vec![("t", &t)],
+            "token_mgr_error",
+        ),
+        (
+            "/t/_search?q=k:(",
+            Value::Null,
+            "k:(",
+            vec![("t", &t)],
+            "parse_exception",
+        ),
+        (
+            "/t,u/_search",
+            qs("a AND"),
+            "a AND",
+            vec![("t", &t), ("u", &u)],
+            "parse_exception",
+        ),
+        (
+            "/t/_count",
+            qs("k:"),
+            "k:",
+            vec![("t", &t)],
+            "parse_exception",
+        ),
+    ] {
+        let (status, got) = call(&app, "POST", uri, body).await;
+        assert_eq!(status, 400, "{uri} {got}");
+        let e = &got["error"];
+        assert_eq!(
+            (&e["type"], &e["reason"]),
+            (
+                &json!("search_phase_execution_exception"),
+                &json!("all shards failed")
+            ),
+            "{uri} {got}"
+        );
+        let reason = format!("Failed to parse query [{q}]");
+        let roots: Vec<_> = (indices.iter())
+            .map(|(i, id)| json!({"type": "query_shard_exception", "reason": reason, "index_uuid": id, "index": i}))
+            .collect();
+        assert_eq!(e["root_cause"], json!(roots), "{uri}");
+        let failed = e["failed_shards"].as_array().unwrap();
+        assert_eq!(failed.len(), indices.len(), "{uri}");
+        for (f, (i, id)) in failed.iter().zip(&indices) {
+            assert_eq!((&f["index"], &f["reason"]["index_uuid"]), (&json!(i), *id));
+            let c = chain(&f["reason"]);
+            let kinds: Vec<_> = c.iter().map(|(k, _)| k.as_str()).collect();
+            assert_eq!(
+                kinds,
+                ["query_shard_exception", "parse_exception", inner],
+                "{uri}"
+            );
+            assert_eq!(c[0].1, reason);
+            assert_eq!(c[1].1, format!("Cannot parse '{q}': {}", c[2].1));
+        }
+    }
+    // without a shard to fail on, the search succeeds
+    let (status, _) = call(&app, "POST", "/none*/_search", qs("k:")).await;
+    assert_eq!(status, 200);
+}

@@ -113,6 +113,9 @@ pub enum Query {
     /// The documents listing this field in `_ignored`, scored by the shard's BM25 for it: what
     /// `resolve_dates` makes of a `term` or `match` query on `_ignored`.
     Ignored(String),
+    /// A query that fails on every index it runs on, as Elasticsearch's query_string does when
+    /// its syntax is malformed: `resolve_dates` returns the error.
+    Invalid(Box<QueryError>),
 }
 
 /// RangeQueryBuilder's allowed ShapeRelations: how a document's range relates to the query's.
@@ -785,11 +788,11 @@ fn parse_kind(kind: &str, body: &Value) -> Result<Query, QueryError> {
             };
             // ES defaults to index.query.default_field, `*`
             let df = o.get("default_field").and_then(Value::as_str);
-            crate::parse_query_string(
+            Ok(crate::parse_query_string(
                 query.ok_or("[query_string] must be provided with a [query]")?,
                 df.unwrap_or("*"),
                 and,
-            )
+            ))
         }
         other => Err(format!("unknown query [{other}]").into()),
     }

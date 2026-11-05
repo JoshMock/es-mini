@@ -870,6 +870,8 @@ impl<'a> Searcher<'a> {
     fn score(&self, q: &Query, id: &str, d: &Document) -> Option<f64> {
         match q {
             Query::MatchAll => Some(1.0),
+            // resolve_dates fails on it first
+            Query::Invalid(_) => None,
             Query::Match { field, query, and } => {
                 let wanted = self.match_terms(field, query);
                 self.score_terms(field, &wanted, *and, id, d)
@@ -1850,11 +1852,17 @@ pub fn count(index: &Index, q: &Query) -> usize {
 /// memory separately; the documents of the other are read and matched.
 pub fn count_many(targets: &[Target], q: &Query) -> Result<usize, QueryError> {
     let now = now_millis();
-    let mut n = 0;
-    for (_, _, index, filter) in targets {
+    let (mut n, mut failures) = (0, vec![]);
+    for (name, shard, index, filter) in targets {
         // ponytail: an index the query fails on fails the whole count, unwrapped; ES counts the
         // others, like search_many
-        let q = with_filter(index, q, *filter, now)?;
+        let q = match with_filter(index, q, *filter, now) {
+            Ok(q) => q,
+            Err(e) => {
+                failures.push((name.to_string(), *shard, e));
+                continue;
+            }
+        };
         let mut s = Searcher::unscored(index, &q);
         if let Some(c) = s.term_count(&q) {
             n += c;
@@ -1890,7 +1898,14 @@ pub fn count_many(targets: &[Target], q: &Query) -> Result<usize, QueryError> {
             .filter(|(id, d)| s.score(&q, id, d).is_some())
             .count();
     }
-    Ok(n)
+    match failures.first() {
+        None => Ok(n),
+        Some((_, _, e)) if failures.len() == targets.len() => Err(QueryError {
+            shards: failures.clone(),
+            ..e.clone()
+        }),
+        Some((_, _, e)) => Err(e.clone()),
+    }
 }
 
 /// The documents of `all` that `q` matches, from the exact matches `leaf` gives for leaf

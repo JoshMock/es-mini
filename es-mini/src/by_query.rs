@@ -125,7 +125,7 @@ fn by_query(
     };
     let mut req = SearchRequest::parse(&body).map_err(AppError::from)?;
     if let Some(q) = params.get("q") {
-        req.query = query_from_params(q, &params)?;
+        req.query = query_from_params(q, &params);
     }
     req.from = 0;
     req.size = max_docs.unwrap_or(usize::MAX);

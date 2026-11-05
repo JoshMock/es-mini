@@ -1291,7 +1291,7 @@ fn query_string_parses_lucene_syntax() {
         "(quick",
         "tag:a\\\\:b",
     ] {
-        let e = run(q, "or").unwrap_err();
+        let e = *run(q, "or").unwrap_err().cause.unwrap();
         assert!(
             e.msg.starts_with(&format!("Cannot parse '{q}'")),
             "{q}: {e:?}"
@@ -1455,6 +1455,13 @@ fn query_dsl_gaps_prefix_and_wildcard_need_keyword_or_text() {
     assert_eq!(run(json!({"wildcard": {"title": "do?"}})).unwrap(), 2);
 }
 
+/// The Lucene ParseException a malformed query_string fails a shard with.
+fn query_string_error(q: &str) -> es_query::QueryError {
+    let req = SearchRequest::parse(&json!({"query": {"query_string": {"query": q}}}));
+    let e = es_query::search_many(&[("", 0, &index(), None)], &req.unwrap()).unwrap_err();
+    *e.cause.unwrap()
+}
+
 #[test]
 fn query_dsl_gaps_query_string_unicode_escapes() {
     let qs = |q: &str| json!({"query": {"query_string": {"query": q}}});
@@ -1467,7 +1474,7 @@ fn query_dsl_gaps_query_string_unicode_escapes() {
             "Non-hex character in Unicode escape sequence: z",
         ),
     ] {
-        let err = SearchRequest::parse(&qs(q)).unwrap_err();
+        let err = query_string_error(q);
         assert_eq!(err.msg, format!("Cannot parse '{q}': {msg}"));
     }
 }
@@ -1509,9 +1516,8 @@ fn query_dsl_gaps_query_string_boosts() {
     times("title:(quick)^3", 3.0);
     let pet = scores("tag:pet")[0].1;
     assert_eq!(scores("tag:pet^4"), [("3".to_owned(), pet * 4.0)]);
-    let qs = |q: &str| json!({"query": {"query_string": {"query": q}}});
     for q in ["quick^", "quick^x"] {
-        let err = SearchRequest::parse(&qs(q)).unwrap_err();
+        let err = query_string_error(q);
         assert!(
             err.msg.starts_with(&format!("Cannot parse '{q}'")),
             "{q}: {err:?}"
