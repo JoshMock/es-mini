@@ -1942,3 +1942,62 @@ fn error_positions_case_insensitive_term_needs_a_term_based_field() {
     assert_eq!(run("tag", json!("PET")).unwrap(), 2);
     assert_eq!(run("nope", json!("x")).unwrap(), 0);
 }
+
+#[test]
+fn error_positions_malformed_decimal_patterns_fail_the_shard() {
+    let mut i = index();
+    i.mappings.properties.insert("n".into(), FieldMapping::Long);
+    let run = |aggs: Value| {
+        let req = SearchRequest::parse(&json!({"size": 0, "aggs": aggs})).unwrap();
+        es_query::search_many(&[("", 0, &i, None)], &req).map(|r| r.total)
+    };
+    let range = |field: &str, p: &str| json!({"a": {"range": {"field": field, "ranges": [{"to": 3}], "format": p}}});
+    let histogram = |field: &str, p: &str| json!({"a": {"histogram": {"field": field, "interval": 1, "format": p}}});
+    let top_hits = |field: &str, p: &str| json!({"a": {"top_hits": {"docvalue_fields": [{"field": field, "format": p}]}}});
+    // reasons as Elasticsearch 9.5.5 (Java's DecimalFormat.applyPattern) gives them
+    for (aggs, reason) in [
+        (
+            range("n", "#.#.#"),
+            "Multiple decimal separators in pattern \"#.#.#\"",
+        ),
+        (range("nope", "0#"), "Malformed pattern \"0#\""),
+        (range("n", "#.0#0"), "Unexpected '0' in pattern \"#.0#0\""),
+        (
+            range("n", "%%#"),
+            "Too many percent/per mille characters in pattern \"%%#\"",
+        ),
+        (range("n", "'abc"), "Malformed pattern \"'abc\""),
+        (range("n", "#,#.#,#"), "Malformed pattern \"#,#.#,#\""),
+        (range("n", "#,"), "Malformed pattern \"#,\""),
+        (range("n", "#E"), "Malformed exponential pattern \"#E\""),
+        (
+            range("n", "#;#;#"),
+            "Unquoted special character ';' in pattern \"#;#;#\"",
+        ),
+        (
+            range("n", ";#"),
+            "Unquoted special character ';' in pattern \";#\"",
+        ),
+        (range("n", "#;'abc"), "Malformed pattern \"#;'abc\""),
+        (
+            range("n", "0E0#E0"),
+            "Multiple exponential symbols in pattern \"0E0#E0\"",
+        ),
+        (range("n", "##0#.#"), "Malformed pattern \"##0#.#\""),
+        (histogram("n", "#.#,#"), "Malformed pattern \"#.#,#\""),
+        (
+            histogram("nope", "#E"),
+            "Malformed exponential pattern \"#E\"",
+        ),
+        (top_hits("n", "#,"), "Malformed pattern \"#,\""),
+    ] {
+        let got = run(aggs.clone()).map_err(|e| (e.shards.len(), e.msg));
+        assert_eq!(got, Err((1, reason.into())), "{aggs}");
+    }
+    let sub = json!({"t": {"terms": {"field": "tag"}, "aggs": histogram("n", "#,")}});
+    assert_eq!(run(sub).unwrap_err().msg, "Malformed pattern \"#,\"");
+    for p in ["#E0E0", "#;", "#.##E0#", "x#y#", ".#"] {
+        assert_eq!(run(range("n", p)).unwrap(), 4, "{p}");
+    }
+    assert_eq!(run(top_hits("nope", "#.#.#")).unwrap(), 4);
+}

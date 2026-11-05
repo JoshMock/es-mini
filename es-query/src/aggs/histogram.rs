@@ -27,7 +27,7 @@ pub(super) struct Histogram {
     extended_bounds: Bounds,
     hard_bounds: Option<Bounds>,
     /// A DecimalFormat pattern for numeric keys.
-    format: Option<String>,
+    pub(super) format: Option<String>,
     /// A date_histogram's `time_zone` other than UTC, and its id.
     time_zone: Option<TimeZone>,
     zone_id: String,

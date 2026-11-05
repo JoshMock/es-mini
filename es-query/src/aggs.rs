@@ -513,12 +513,14 @@ pub fn java_double(x: f64) -> String {
 /// prefix and suffix (`'` quotes, `%` and `\u{2030}` scale `x`) around integer digits grouped by
 /// `,`, fraction digits and an `E0` exponent, and an optional negative subpattern after `;`
 /// whose affixes replace a `-` prefix. Digits round HALF_EVEN.
-// ponytail: a malformed pattern formats as best it can; ES rejects it
 fn decimal_format(pattern: &str, x: f64) -> String {
     if x.is_nan() {
         return "NaN".into();
     }
-    let p = DecimalPattern::parse(pattern);
+    // `resolve_dates` refuses malformed patterns before any is formatted
+    let Ok(p) = DecimalPattern::parse(pattern) else {
+        return java_double(x);
+    };
     let negative = x < 0.0 || (x == 0.0 && x.is_sign_negative());
     let x = (x * p.multiplier).abs();
     let (prefix, suffix) = (
@@ -551,7 +553,9 @@ struct DecimalPattern {
 }
 
 impl DecimalPattern {
-    fn parse(pattern: &str) -> DecimalPattern {
+    /// Fails with Java's reason for a malformed pattern.
+    fn parse(pattern: &str) -> Result<DecimalPattern, String> {
+        let malformed = |what: &str| format!("{what} pattern \"{pattern}\"");
         let chars: Vec<char> = pattern.chars().collect();
         let mut p = DecimalPattern {
             affixes: Default::default(),
@@ -571,7 +575,7 @@ impl DecimalPattern {
                 break;
             };
             let mut affix = [String::new(), String::new()];
-            let (mut phase, mut quoted) = (0, false);
+            let (mut phase, mut quoted, mut scaled) = (0, false, false);
             let (mut left, mut zeros, mut right) = (0usize, 0, 0);
             let (mut decimal, mut grouping) = (None, None);
             while pos < chars.len() {
@@ -595,15 +599,23 @@ impl DecimalPattern {
                         phase = 1;
                         continue;
                     }
+                    (0 | 2, ';') if phase == 0 || neg => {
+                        return Err(malformed("Unquoted special character ';' in"));
+                    }
                     (0 | 2, ';') => {
                         start = Some(pos + 1);
                         break;
                     }
+                    (0 | 2, '%' | '\u{2030}') if scaled => {
+                        return Err(malformed("Too many percent/per mille characters in"));
+                    }
                     (0 | 2, '%' | '\u{2030}') => {
+                        scaled = true;
                         p.multiplier = if ch == '%' { 100.0 } else { 1000.0 };
                         a.push(ch);
                     }
                     (0 | 2, _) => a.push(ch),
+                    (_, '0') if right > 0 => return Err(malformed("Unexpected '0' in")),
                     (_, '#' | '0') => {
                         match ch == '#' {
                             true if zeros > 0 => right += 1,
@@ -615,10 +627,19 @@ impl DecimalPattern {
                         }
                     }
                     (_, ',') => grouping = Some(0),
+                    (_, '.') if decimal.is_some() => {
+                        return Err(malformed("Multiple decimal separators in"));
+                    }
                     (_, '.') => decimal = Some(left + zeros + right),
+                    (_, 'E') if p.exponent.is_some() => {
+                        return Err(malformed("Multiple exponential symbols in"));
+                    }
                     (_, 'E') => {
                         let digits = chars[pos + 1..].iter().take_while(|&&c| c == '0');
                         let n = digits.count();
+                        if left + zeros < 1 || n < 1 {
+                            return Err(malformed("Malformed exponential"));
+                        }
                         p.exponent = Some(n);
                         pos += n;
                         phase = 2;
@@ -631,6 +652,9 @@ impl DecimalPattern {
                 pos += 1;
             }
             let [prefix, suffix] = affix;
+            if neg && quoted {
+                return Err(malformed("Malformed"));
+            }
             if neg {
                 if prefix != p.affixes[0] || suffix != p.affixes[2] {
                     (p.affixes[1], p.affixes[3]) = (prefix, suffix);
@@ -644,6 +668,13 @@ impl DecimalPattern {
                 let n = d.max(1);
                 (right, left, zeros) = (left - n, n - 1, 1);
             }
+            if (decimal.is_none() && right > 0)
+                || decimal.is_some_and(|d| d < left || d > left + zeros)
+                || grouping == Some(0)
+                || quoted
+            {
+                return Err(malformed("Malformed"));
+            }
             let total = left + zeros + right;
             p.min_int = decimal.unwrap_or(total).saturating_sub(left);
             if p.exponent.is_some() {
@@ -656,7 +687,7 @@ impl DecimalPattern {
             p.group = grouping.unwrap_or(0);
             p.point = decimal == Some(0) || decimal == Some(total);
         }
-        p
+        Ok(p)
     }
 
     /// The digits of finite, non-negative `x`: `DecimalFormat.subformatNumber`.
@@ -783,7 +814,8 @@ pub struct Agg {
 }
 
 /// `aggs` with the queries of their filter aggregations resolved for `index` (see
-/// [`crate::dates::resolve_dates`]).
+/// [`crate::dates::resolve_dates`]). Fails, as ES's shards do, on a malformed DecimalFormat
+/// pattern for a numeric (or unmapped) field.
 pub(crate) fn resolve_dates(
     aggs: &[Agg],
     index: &es_index::Index,
@@ -796,9 +828,33 @@ pub(crate) fn resolve_dates(
     (aggs.iter())
         .map(|a| {
             let mut a = a.clone();
+            let numeric = |f: &str| index.mappings.field(f).is_none_or(FieldMapping::is_numeric);
+            let decimal = |p: Option<&String>| match p {
+                Some(p) => DecimalPattern::parse(p)
+                    .map(drop)
+                    .map_err(QueryError::illegal),
+                None => Ok(()),
+            };
             match &mut a.metric {
                 Metric::Filter(q) => resolve(q)?,
                 Metric::Filters(f) => f.filters.iter_mut().try_for_each(|(_, q)| resolve(q))?,
+                Metric::Range(r) if !r.date && numeric(&a.field) => decimal(r.format.as_ref())?,
+                Metric::Histogram(h) if !h.date && numeric(&a.field) => decimal(h.format.as_ref())?,
+                Metric::TopHits(t) => {
+                    let names = index.mappings.names();
+                    for spec in &t.docvalue_fields {
+                        let matched = |f: &String| es_index::aliases::glob(&spec.pattern, f);
+                        if names.iter().any(|f| {
+                            matched(f)
+                                && index
+                                    .mappings
+                                    .field(f)
+                                    .is_some_and(FieldMapping::is_numeric)
+                        }) {
+                            decimal(spec.format.as_ref())?;
+                        }
+                    }
+                }
                 _ => {}
             }
             a.subs = resolve_dates(&a.subs, index, now)?;
