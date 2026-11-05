@@ -1734,7 +1734,9 @@ struct Timings {
     total_buckets: usize,
     /// Whether a document had several values. ponytail: a shard profiles as one segment.
     multi_valued: bool,
-    /// keyword `terms`: the shard's accepted terms, before keeping its top `shard_size`.
+    /// Top-level keyword `terms` under match_all: the number of the field's terms on the shard
+    /// (ES's global ordinals), and those include/exclude accepts.
+    ords: usize,
     keys: Vec<String>,
 }
 
@@ -2143,10 +2145,13 @@ impl Collector<'_, '_> {
     pub(crate) fn finish(mut self, match_all: bool) -> (Vec<Stats>, Option<Value>) {
         let mut stats = std::mem::take(&mut self.stats);
         self.finish_terms(&mut stats);
-        self.stats = stats;
         let Some(mut timings) = self.timings.take() else {
-            return (self.stats, None);
+            return (stats, None);
         };
+        if match_all {
+            self.count_ords(&stats, &mut timings);
+        }
+        self.stats = stats;
         let mut stats = vec![];
         let disk = std::mem::take(&mut self.disk);
         for ((t, d), st) in timings.iter_mut().zip(disk).zip(&mut self.stats) {
@@ -2212,12 +2217,6 @@ impl Collector<'_, '_> {
             if let Some(timings) = &mut self.timings {
                 // a sub-aggregation's buckets add up over its parent's buckets
                 timings[i].total_buckets += b.counts.len();
-                timings[i].keys = (b.counts.keys())
-                    .filter_map(|k| match k {
-                        terms::Key::Str(s) => Some(s.clone()),
-                        _ => None,
-                    })
-                    .collect();
             }
             if let Some(t) = terms {
                 t.finish_shard(b);
@@ -2230,6 +2229,31 @@ impl Collector<'_, '_> {
         }
     }
 
+    /// Fills in the ordinals of each keyword `terms` aggregation, from every document's values.
+    fn count_ords(&mut self, stats: &[Stats], timings: &mut [Timings]) {
+        let (index, shard) = (self.searcher.index, self.searcher.shard);
+        for (i, (st, t)) in stats.iter().zip(timings).enumerate() {
+            let (Some(b), Some(FieldMapping::Keyword { .. })) = (&st.terms, self.mappings[i])
+            else {
+                continue;
+            };
+            let mut ords = std::collections::BTreeSet::new();
+            for (id, doc) in shard
+                .docs()
+                .filter(|(_, d)| shard.searchable(&index.settings, d.seq_no))
+            {
+                ords.extend(b.ords(&self.values(i, id, &doc)));
+            }
+            t.ords = ords.len();
+            t.keys = (ords.into_iter().filter(|k| b.accepts(k)))
+                .filter_map(|k| match k {
+                    terms::Key::Str(s) => Some(s),
+                    _ => None,
+                })
+                .collect();
+        }
+    }
+
     /// One aggregation's profile: ES's aggregator class, its timings and its debug counters
     /// (this shard is one leaf); `under_bucket` if a bucket aggregation contains it.
     fn profile(&self, i: usize, t: &Timings, under_bucket: bool, match_all: bool) -> Value {
@@ -2237,13 +2261,13 @@ impl Collector<'_, '_> {
         let keyword = matches!(m, Some(FieldMapping::Keyword { .. }));
         // TermsAggregatorFactory runs a top-level global ordinals `terms` as one term query per
         // ordinal when it merges with the search's query (only match_all does) and there are
-        // at most MAX_ORDS_TO_TRY_FILTERS ordinals. ponytail: counts accepted terms, not all ords.
+        // at most MAX_ORDS_TO_TRY_FILTERS ordinals (include/exclude then picks the filters).
         let from_filters = !under_bucket
             && match_all
             && keyword
             && agg.missing.is_none()
             && matches!(&agg.metric, Metric::Terms(terms) if !terms.map)
-            && (1..=1000).contains(&t.keys.len());
+            && (1..=1000).contains(&t.ords);
         let ty = match &agg.metric {
             Metric::Histogram(h) if h.date => "DateHistogramAggregator",
             Metric::Histogram(_) => "NumericHistogramAggregator",
@@ -2305,6 +2329,8 @@ impl Collector<'_, '_> {
             ("StringTermsAggregatorFromFilters", _) => {
                 // FilterByFilterAggregator counts each term query's matches from its doc freq
                 // without sub-aggregations, else collects them. ponytail: no deleted docs.
+                // no filters match no documents, so no segment is visited
+                let visited = used(!t.keys.is_empty());
                 let counted = used(agg.subs.is_empty());
                 let filters = t.keys.iter().map(|k| {
                     let query = format!("{}:{k}", agg.field);
@@ -2314,8 +2340,8 @@ impl Collector<'_, '_> {
                     "delegate": "FilterByFilterAggregator",
                     "delegate_debug": {
                         "filters": filters.collect::<Vec<_>>(),
-                        "segments_counted": counted,
-                        "segments_collected": 1 - counted,
+                        "segments_counted": visited * counted,
+                        "segments_collected": visited * (1 - counted),
                         "segments_with_deleted_docs": 0,
                         "segments_with_doc_count_field": 0,
                     },

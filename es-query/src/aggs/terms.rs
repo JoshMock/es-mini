@@ -636,10 +636,19 @@ pub(super) struct Buckets {
 
 impl Buckets {
     fn keys(&self, vals: Vec<Value>) -> BTreeSet<Key> {
-        (vals.iter().filter_map(|v| Key::of(v, self.format)))
-            .filter(|k| self.include.as_ref().is_none_or(|f| f.accepts(k)))
-            .filter(|k| !self.exclude.as_ref().is_some_and(|f| f.accepts(k)))
-            .collect()
+        (self.ords(&vals)).filter(|k| self.accepts(k)).collect()
+    }
+
+    /// The keys of doc values `vals`, whether include/exclude accepts them or not.
+    pub(super) fn ords<'v>(&self, vals: &'v [Value]) -> impl Iterator<Item = Key> + 'v {
+        let format = self.format;
+        vals.iter().filter_map(move |v| Key::of(v, format))
+    }
+
+    /// Whether include/exclude accepts the key `k`.
+    pub(super) fn accepts(&self, k: &Key) -> bool {
+        self.include.as_ref().is_none_or(|f| f.accepts(k))
+            && !self.exclude.as_ref().is_some_and(|f| f.accepts(k))
     }
 
     fn bucket(&mut self, k: Key) -> &mut Bucket {

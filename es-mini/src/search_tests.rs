@@ -408,6 +408,36 @@ async fn profile_top_level_keyword_terms_run_filter_by_filter() {
 }
 
 #[tokio::test]
+async fn aggs_profile_filter_by_filter_counts_all_ords() {
+    let app = seeded().await;
+    let profile = async |terms: serde_json::Value| {
+        let body = json!({"profile": true, "size": 0, "aggs": {"k": {"terms": terms}}});
+        let (s, r) = call(&app, Method::POST, "/idx/_search", Some(body)).await;
+        assert_eq!(s, StatusCode::OK, "{r}");
+        r["profile"]["shards"][0]["aggregations"][0].clone()
+    };
+    // an include that accepts no term still runs no filters, and counts no segment
+    let a = profile(json!({"field": "t.keyword", "include": ["plum"]})).await;
+    assert_eq!(a["type"], "StringTermsAggregatorFromFilters", "{a}");
+    assert_eq!(
+        a["debug"]["delegate_debug"],
+        json!({
+            "filters": [],
+            "segments_counted": 0,
+            "segments_collected": 0,
+            "segments_with_deleted_docs": 0,
+            "segments_with_doc_count_field": 0,
+        })
+    );
+
+    // more than 1000 ordinals keep the native aggregator, whatever include accepts
+    let many: Vec<String> = (0..1001).map(|i| format!("v{i:04}")).collect();
+    call(&app, Method::PUT, "/idx/_doc/4", Some(json!({"t": many}))).await;
+    let a = profile(json!({"field": "t.keyword", "include": ["pear"]})).await;
+    assert_eq!(a["type"], "GlobalOrdinalsStringTermsAggregator", "{a}");
+}
+
+#[tokio::test]
 async fn value_type_mismatch_fails_only_that_shard() {
     let app = app();
     for (index, ty) in [("a", "keyword"), ("b", "ip")] {
