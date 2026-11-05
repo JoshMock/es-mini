@@ -508,6 +508,51 @@ async fn aggs_profile_picks_execution_modes_like_es() {
 }
 
 #[tokio::test]
+async fn aggs_profile_ip_terms_collect_like_strings() {
+    let app = app();
+    let mappings =
+        json!({"mappings": {"properties": {"ip": {"type": "ip"}, "n": {"type": "long"}}}});
+    call(&app, Method::PUT, "/i", Some(mappings)).await;
+    for i in 1..=8 {
+        let doc = json!({"ip": format!("10.0.0.{}", i % 2), "n": i});
+        call(&app, Method::PUT, &format!("/i/_doc/{i}"), Some(doc)).await;
+    }
+    let profile = async |body: serde_json::Value| {
+        let (s, r) = call(&app, Method::POST, "/i/_search", Some(body)).await;
+        assert_eq!(s, StatusCode::OK, "{r}");
+        r["profile"]["shards"][0]["aggregations"][0].clone()
+    };
+    let a = profile(json!({"profile": true, "size": 0, "aggs": {"t": {"terms": {"field": "ip"}}}}))
+        .await;
+    assert_eq!(a["type"], "StringTermsAggregatorFromFilters", "{a}");
+    let query = |n: u8| {
+        format!(
+            "IndexOrDocValuesQuery(indexQuery=ip:[10.0.0.{n} TO 10.0.0.{n}], dvQuery=ip:[[0 0 0 0 0 0 0 0 0 0 ff ff a 0 0 {n}] TO [0 0 0 0 0 0 0 0 0 0 ff ff a 0 0 {n}]])"
+        )
+    };
+    let filters = &a["debug"]["delegate_debug"]["filters"];
+    assert_eq!(filters[0]["query"], query(0));
+    assert_eq!(filters[1]["query"], query(1));
+
+    let range = json!({"range": {"n": {"lt": 6}}});
+    let body = json!({"profile": true, "size": 0, "query": range, "aggs": {"t": {"terms": {"field": "ip"}}}});
+    let a = profile(body).await;
+    assert_eq!(
+        a["type"],
+        "GlobalOrdinalsStringTermsAggregator.LowCardinality"
+    );
+    assert_eq!(a["debug"]["result_strategy"], "terms");
+
+    let terms = json!({"field": "ip", "execution_hint": "map"});
+    let a = profile(json!({"profile": true, "size": 0, "aggs": {"t": {"terms": terms}}})).await;
+    assert_eq!(a["type"], "MapStringTermsAggregator");
+    assert_eq!(
+        a["debug"]["collection_strategy"],
+        "from Field [ip] of type [ip]"
+    );
+}
+
+#[tokio::test]
 async fn value_type_mismatch_fails_only_that_shard() {
     let app = app();
     for (index, ty) in [("a", "keyword"), ("b", "ip")] {

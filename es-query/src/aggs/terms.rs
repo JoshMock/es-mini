@@ -521,7 +521,7 @@ pub(super) enum Key {
 }
 
 impl Key {
-    fn of(v: &Value, format: Format) -> Option<Key> {
+    pub(super) fn of(v: &Value, format: Format) -> Option<Key> {
         match v {
             Value::String(_) if format == Format::Ip => ip_bytes(v).map(Key::Ip),
             Value::Bool(b) => Some(Key::Long(i64::from(*b))),

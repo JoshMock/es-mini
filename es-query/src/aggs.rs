@@ -1739,7 +1739,7 @@ struct Timings {
     ords: usize,
     docs: usize,
     /// Top-level keyword `terms` under match_all: the terms include/exclude accepts.
-    keys: Vec<String>,
+    keys: Vec<terms::Key>,
 }
 
 fn nanos(since: Instant) -> u64 {
@@ -2249,25 +2249,20 @@ impl Collector<'_, '_> {
             if let Some(sub) = &mut self.subs[i] {
                 sub.count_ords(None);
             }
-            let (Some(FieldMapping::Keyword { .. }), Metric::Terms(_)) =
+            let (Some(m @ (FieldMapping::Keyword { .. } | FieldMapping::Ip)), Metric::Terms(_)) =
                 (self.mappings[i], &self.aggs[i].metric)
             else {
                 continue;
             };
+            let format = terms::Format::of(Some(m));
             let (mut ords, mut docs) = (std::collections::BTreeSet::new(), 0);
             for (id, doc) in shard
                 .docs()
                 .filter(|(_, d)| shard.searchable(&index.settings, d.seq_no))
             {
                 docs += 1;
-                ords.extend(
-                    self.values(i, id, &doc)
-                        .into_iter()
-                        .filter_map(|v| match v {
-                            Value::String(s) => Some(s),
-                            _ => None,
-                        }),
-                );
+                let values = self.values(i, id, &doc);
+                ords.extend(values.iter().filter_map(|v| terms::Key::of(v, format)));
             }
             let accepted = stats.and_then(|st| st[i].terms.as_ref());
             let Some(t) = self.timings.as_mut().map(|t| &mut t[i]) else {
@@ -2275,9 +2270,7 @@ impl Collector<'_, '_> {
             };
             (t.ords, t.docs) = (ords.len(), docs);
             if let Some(b) = accepted {
-                t.keys = (ords.into_iter())
-                    .filter(|k| b.accepts(&terms::Key::Str(k.clone())))
-                    .collect();
+                t.keys = ords.into_iter().filter(|k| b.accepts(k)).collect();
             }
         }
     }
@@ -2294,7 +2287,9 @@ impl Collector<'_, '_> {
     ) -> Value {
         let (agg, m) = (&self.aggs[i], self.mappings[i]);
         let keyword = matches!(m, Some(FieldMapping::Keyword { .. }));
-        let global_ords = keyword
+        // ip fields have ordinals too, so terms collect them like strings
+        let bytes = keyword || m == Some(&FieldMapping::Ip);
+        let global_ords = bytes
             && matches!(&agg.metric, Metric::Terms(terms) if terms.maps(match_none) == Ok(false));
         // TermsAggregatorFactory runs a top-level global ordinals `terms` as one term query per
         // ordinal when it merges with the search's query (only match_all does) and there are
@@ -2350,7 +2345,7 @@ impl Collector<'_, '_> {
                 "GlobalOrdinalsStringTermsAggregator.LowCardinality"
             }
             Metric::Terms(_) if global_ords => "GlobalOrdinalsStringTermsAggregator",
-            Metric::Terms(_) if keyword => "MapStringTermsAggregator",
+            Metric::Terms(_) if bytes => "MapStringTermsAggregator",
             Metric::Terms(_) => "NumericTermsAggregator",
         };
         // the filters collect matches themselves, never through this aggregator
@@ -2381,7 +2376,20 @@ impl Collector<'_, '_> {
                 let visited = used(!t.keys.is_empty());
                 let counted = used(agg.subs.is_empty());
                 let filters = t.keys.iter().map(|k| {
-                    let query = format!("{}:{k}", agg.field);
+                    let query = match k {
+                        // an ip term query is a point range of the one address
+                        terms::Key::Ip(b) => {
+                            let ip = es_index::ip_string(*b);
+                            let hex: Vec<_> = b.iter().map(|x| format!("{x:x}")).collect();
+                            let (f, hex) = (&agg.field, hex.join(" "));
+                            format!(
+                                "IndexOrDocValuesQuery(indexQuery={f}:[{ip} TO {ip}], dvQuery={f}:[[{hex}] TO [{hex}]])"
+                            )
+                        }
+                        terms::Key::Str(s) => format!("{}:{s}", agg.field),
+                        terms::Key::Long(x) => format!("{}:{x}", agg.field),
+                        terms::Key::Double(x) => format!("{}:{x}", agg.field),
+                    };
                     serde_json::json!({"query": query, "segments_counted_in_constant_time": counted})
                 });
                 out["debug"] = serde_json::json!({
@@ -2432,7 +2440,8 @@ impl Collector<'_, '_> {
                 let result = match ty {
                     _ if global_ords => "terms",
                     "MapStringTermsAggregator" => {
-                        let field = format!("from Field [{}] of type [keyword]", agg.field);
+                        let ty = m.map_or("keyword", FieldMapping::type_name);
+                        let field = format!("from Field [{}] of type [{ty}]", agg.field);
                         debug.insert("collection_strategy".into(), field.into());
                         "terms"
                     }
