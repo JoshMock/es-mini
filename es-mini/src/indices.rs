@@ -1278,7 +1278,14 @@ pub async fn cat_shards(
     }
     let shared = state.read();
     let expr = path.map_or("_all".to_string(), |Path(p)| p);
-    let names = read_indices(&*shared, &expr, &params)?;
+    // Elasticsearch lists hidden indices' shards too.
+    let opts = aliases::IndicesOptions {
+        expand_hidden: true,
+        ..aliases::IndicesOptions::READ
+    };
+    let names: Vec<String> = (aliases::resolve(&*shared, &expr, &opts)?.into_iter())
+        .map(|t| t.index)
+        .collect();
     let indices = shared.lock(&names);
     // Each primary is followed by its replicas, unassigned on this one node; their empty cells
     // are null in JSON.

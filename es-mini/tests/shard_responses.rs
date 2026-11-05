@@ -512,3 +512,20 @@ async fn stats_and_cat_shards_report_every_optional_column() {
     .await;
     assert_eq!(r[0]["state"], "STARTED");
 }
+
+#[tokio::test]
+async fn cat_shards_lists_hidden_indices() {
+    let app = es_mini::app();
+    let settings = json!({"settings": {"index.hidden": true, "number_of_replicas": 0}});
+    call(&app, "PUT", "/h", settings).await;
+    call(
+        &app,
+        "PUT",
+        "/v",
+        json!({"settings": {"number_of_replicas": 0}}),
+    )
+    .await;
+    // Elasticsearch 9.5.5 lists hidden indices' shards without expand_wildcards.
+    assert_eq!(cat_text(&app, "/_cat/shards?h=index").await, "h\nv\n");
+    assert_eq!(cat_text(&app, "/_cat/shards/*?h=index").await, "h\nv\n");
+}
