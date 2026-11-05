@@ -112,7 +112,7 @@ impl SegmentReader {
 
     /// Every term of `field` in term order with its postings.
     pub fn terms(&self, field: &str) -> Result<Vec<terms::TermPostings>> {
-        terms::read_terms(self, field, None)
+        terms::read_terms(self, field, None, true)
     }
 
     /// Every term of `field` in term order with its postings, decoded a term at a time.
@@ -122,7 +122,12 @@ impl SegmentReader {
 
     /// One term of `field` with its docs and freqs (no positions), if the field has it.
     pub fn term(&self, field: &str, term: &[u8]) -> Result<Option<terms::TermPostings>> {
-        Ok(terms::read_terms(self, field, Some(term))?.pop())
+        Ok(terms::read_terms(self, field, Some(term), false)?.pop())
+    }
+
+    /// One term of `field` with its docs, freqs and positions, if the field has it.
+    pub fn term_positions(&self, field: &str, term: &[u8]) -> Result<Option<terms::TermPostings>> {
+        Ok(terms::read_terms(self, field, Some(term), true)?.pop())
     }
 
     /// Each doc's norm of `field` (0 for docs without one); `None` if the field omits norms.

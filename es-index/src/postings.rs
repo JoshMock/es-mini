@@ -155,6 +155,9 @@ pub struct FieldStats {
 pub struct TermFreqs {
     /// On-disk documents by position.
     pub disk: HashMap<crate::disk::DiskPos, (u32, u32)>,
+    /// The term's positions in each on-disk document holding it, ascending, if they were asked
+    /// for and every segment has them to read.
+    pub positions: Option<crate::disk::Positions>,
     /// In-memory documents by id: the term's in-memory postings, shared, not copied.
     pub memory: Arc<TermDocs>,
 }
@@ -475,13 +478,28 @@ impl crate::Shard {
         indexed: Indexed,
         term: &str,
     ) -> Option<TermFreqs> {
-        let disk = match &self.disk {
-            Some(d) => d.term_freqs(field, term)?,
-            None => HashMap::new(),
+        self.term_postings(field, path, indexed, term, false)
+    }
+
+    /// [`term_freqs`](Self::term_freqs), with the term's on-disk positions if `positions`.
+    pub fn term_postings(
+        &self,
+        field: &str,
+        path: &str,
+        indexed: Indexed,
+        term: &str,
+        positions: bool,
+    ) -> Option<TermFreqs> {
+        let mut freqs = match &self.disk {
+            Some(d) => d.term_freqs(field, term, positions)?,
+            None => TermFreqs {
+                positions: positions.then(HashMap::new),
+                ..Default::default()
+            },
         };
         let memory = self.postings_for(path, indexed, |f| f.docs.get(term).cloned());
-        let memory = memory.unwrap_or_default();
-        Some(TermFreqs { disk, memory })
+        freqs.memory = memory.unwrap_or_default();
+        Some(freqs)
     }
 
     /// The in-memory documents with a value of the numeric or date field `mapping` maps (at source `path`)

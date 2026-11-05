@@ -58,13 +58,15 @@ impl TermPostings {
     }
 }
 
-/// Every term of `field`, or only `want` (if present) and without positions.
+/// Every term of `field` with positions, or only `want` (if present), with positions if
+/// `positions`.
 pub(crate) fn read_terms(
     r: &SegmentReader,
     field: &str,
     want: Option<&[u8]>,
+    positions: bool,
 ) -> Result<Vec<TermPostings>> {
-    let (files, suffix, info) = field_files(r, field, want.is_none())?;
+    let (files, suffix, info) = field_files(r, field, want.is_none() || positions)?;
     decode_terms(&files, &r.seg.info.id, &suffix, &r.fields, info, want)
 }
 
@@ -131,7 +133,11 @@ fn decode_terms(
 ) -> Result<Vec<TermPostings>> {
     let terms = open_terms(Cow::Borrowed(files), id, suffix, fields, info)?;
     match want {
-        Some(target) => Ok(terms.seek(target)?.into_iter().collect()),
+        // `.pos` is read only when positions are wanted (see `field_files`)
+        Some(target) => Ok(terms
+            .seek(target, !files.pos.is_empty())?
+            .into_iter()
+            .collect()),
         None => terms.iter()?.collect(),
     }
 }
@@ -816,8 +822,8 @@ impl<'a> FieldTerms<'a> {
 
     /// `SegmentTermsEnum.seekExact`: follows `target` down the trie to the deepest block whose
     /// prefix it starts with, picks that block's floor block for the next byte, and scans it.
-    /// The term has its docs and freqs, without positions.
-    fn seek(&self, target: &[u8]) -> Result<Option<TermPostings>> {
+    /// The term has its docs and freqs, and its positions if `positions`.
+    fn seek(&self, target: &[u8], positions: bool) -> Result<Option<TermPostings>> {
         let trie = self.trie();
         let (mut node, mut out) = self.root()?;
         let mut prefix_len = 0;
@@ -850,7 +856,7 @@ impl<'a> FieldTerms<'a> {
             if let Entry::Term(term, s) = entry
                 && term == target
             {
-                return self.postings(term, &s, false).map(Some);
+                return self.postings(term, &s, positions).map(Some);
             }
         }
         Ok(None)

@@ -116,6 +116,9 @@ fn replay_translog(index: &mut Shard, dir: &Path) -> es_codec::Result<()> {
 /// A document's place in an opened index's segments: `(segment, doc id)`.
 pub type DiskPos = (usize, usize);
 
+/// A term's positions in each on-disk document holding it, ascending.
+pub type Positions = HashMap<DiskPos, Vec<u32>>;
+
 /// Where a live document of [`Segments`] is, with its version and sequence number.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct DiskDoc {
@@ -257,21 +260,38 @@ impl Segments {
     /// Per doc holding `term` in `field`: its frequency, and the field's length as the norm
     /// stands for it (1 for a field without norms). `None` if a segment has no postings or norms
     /// for the field the codec can read (e.g. one that does not index it). Some docs may no longer be live.
+    /// With `positions`, also each doc's positions of the term, or `None` for them if a segment
+    /// has none to read.
     // ponytail: reads the field's norms once per term; cache them per query if that shows up
     pub(crate) fn term_freqs(
         &self,
         field: &str,
         term: &str,
-    ) -> Option<HashMap<DiskPos, (u32, u32)>> {
+        positions: bool,
+    ) -> Option<crate::postings::TermFreqs> {
         let mut out = HashMap::new();
+        let mut at = positions.then(HashMap::new);
         for (s, seg) in self.segments.iter().enumerate() {
             if self.nested(s, field) {
                 return None;
             }
-            let Some(t) = seg.term(field, term.as_bytes()).ok()? else {
+            let t = match positions {
+                true => seg.term_positions(field, term.as_bytes()),
+                false => seg.term(field, term.as_bytes()),
+            };
+            let Some(t) = t.ok()? else {
                 continue;
             };
             let norms = seg.norms(field).ok()?;
+            if t.positions.len() != t.docs.len() {
+                at = None;
+            }
+            if let Some(at) = &mut at {
+                for ((doc, _), p) in t.docs.iter().zip(t.positions) {
+                    let p = p.into_iter().map(|p| p.position).collect();
+                    at.insert((s, *doc as usize), p);
+                }
+            }
             for (doc, freq) in t.docs {
                 let norm = norms
                     .as_ref()
@@ -279,7 +299,11 @@ impl Segments {
                 out.insert((s, doc as usize), (freq, norm_len(norm as i8)));
             }
         }
-        Some(out)
+        Some(crate::postings::TermFreqs {
+            disk: out,
+            positions: at,
+            memory: Default::default(),
+        })
     }
 
     /// The docs with a value of numeric `field` that monotone `place` puts in a range, walking

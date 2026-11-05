@@ -400,14 +400,17 @@ impl<'a> Searcher<'a> {
         }
     }
 
-    /// Precomputes BM25 statistics for every scored (field, term) in the query.
+    /// Precomputes BM25 statistics for every scored (field, term) in the query, with the
+    /// on-disk positions of the terms of phrases that read them (see `score`).
     fn gather(&mut self, q: &Query) {
+        let mut positions = false;
         let (field, wanted) = match q {
             Query::Match { field, query, .. } => (field, self.match_terms(field, query)),
             Query::MatchPhrase { .. } | Query::MatchPhrasePrefix { .. } => {
                 let Some((field, terms, _)) = self.phrase(q) else {
                     return;
                 };
+                positions = terms.len() > 1 && self.kind(field).0 == Kind::Text;
                 (field, terms.concat())
             }
             Query::Term { field, value } => (field, vec![text(value)]),
@@ -427,9 +430,13 @@ impl<'a> Searcher<'a> {
             return;
         }
         for w in &wanted {
-            if let Some(f) = self.shard.term_freqs(field, path, kind.indexed(), w) {
+            let f = (self.shard).term_postings(field, path, kind.indexed(), w, positions);
+            if let Some(f) = f {
                 let freqs = self.freqs.entry(field.clone()).or_default();
-                freqs.insert(w.clone(), f);
+                // keep a phrase's entry, which holds positions, over a term query's
+                if f.positions.is_some() || !freqs.contains_key(w) {
+                    freqs.insert(w.clone(), f);
+                }
             }
         }
         if let Some(m) = self.shard.field_stats(field, path, kind.indexed(), &wanted) {
@@ -490,6 +497,25 @@ impl<'a> Searcher<'a> {
                 (terms.iter())
                     .filter_map(|t| self.term_docs(field, t, false, false))
                     .reduce(|a, b| &a & &b)
+            }
+            // one place matches as its terms do (see `score`); more, from their positions
+            Query::MatchPhrase { .. } | Query::MatchPhrasePrefix { .. } => {
+                let (field, terms, slop) = self.phrase(q)?;
+                if terms.len() < 2 || self.kind(field).0 != Kind::Text {
+                    return self.term_docs(field, &terms.concat(), false, true);
+                }
+                // the documents holding a term of the first place, from its positions
+                let mut docs = BTreeSet::new();
+                for w in &terms[0] {
+                    let positions = self.freqs.get(field)?.get(w)?.positions.as_ref()?;
+                    docs.extend(positions.keys());
+                }
+                for p in docs.clone() {
+                    if self.disk_phrase_freq(field, &terms, slop, p)? == 0.0 {
+                        docs.remove(&p);
+                    }
+                }
+                Some(docs)
             }
             Query::Named { query, .. } | Query::Boosted { query, .. } | Query::Blended(query) => {
                 self.candidates(query, exact)
@@ -953,22 +979,8 @@ impl<'a> Searcher<'a> {
                         at.map(|&(_, p)| p).collect()
                     })
                     .collect();
-                let freq = match slop {
-                    _ if lists.iter().any(Vec::is_empty) => return None,
-                    0 => exact_phrase_freq(&lists),
-                    _ => sloppy_phrase_freq(&terms, &lists, slop),
-                };
-                if freq == 0.0 {
-                    return None;
-                }
-                // PhraseWeight: one BM25 score with the idfs of the terms in the index summed
-                let idf: f64 = (wanted.iter())
-                    .map(|w| self.bm25_parts(field, self.df(field, w), freq, len as f64))
-                    .filter(|p| p[0] > 0.0)
-                    .map(|p| p[4])
-                    .sum();
-                let [.., tf] = self.bm25_parts(field, self.df(field, &wanted[0]), freq, len as f64);
-                Some(idf * (1.0 + K1) * tf)
+                let freq = phrase_freq(&terms, &lists, slop);
+                (freq > 0.0).then(|| self.phrase_score(field, &wanted, freq, len as f64))
             }
             Query::Prefix { field, prefix } => {
                 let (kind, path) = self.doc_kind(field, d);
@@ -1212,8 +1224,22 @@ impl<'a> Searcher<'a> {
             Query::Match { field, query, and } => {
                 terms(field, &self.match_terms(field, query), *and)
             }
-            // ponytail: postings positions are not read; scores come from the source
-            Query::MatchPhrase { .. } | Query::MatchPhrasePrefix { .. } => None,
+            Query::MatchPhrase { .. } | Query::MatchPhrasePrefix { .. } => {
+                let (field, places, slop) = self.phrase(q)?;
+                let wanted = places.concat();
+                // Lucene rewrites a one-position phrase to term queries, any of which match
+                if places.len() < 2 || self.kind(field).0 != Kind::Text {
+                    return terms(field, &wanted, false);
+                }
+                let freq = self.disk_phrase_freq(field, &places, slop, self.shard.disk_pos(id)?)?;
+                let len = wanted.iter().find_map(|w| self.posting(field, w, id)?);
+                Some(match len {
+                    Some((_, len)) if freq > 0.0 => {
+                        Some(self.phrase_score(field, &wanted, freq, f64::from(len)))
+                    }
+                    _ => None,
+                })
+            }
             Query::DisMax {
                 queries,
                 tie_breaker,
@@ -1282,6 +1308,42 @@ impl<'a> Searcher<'a> {
             last.clone_from(e);
         }
         Some((field, terms, *slop))
+    }
+
+    /// A phrase's score in a document where it occurs `freq` times in a field of length `len`.
+    fn phrase_score(&self, field: &str, wanted: &[String], freq: f64, len: f64) -> f64 {
+        // PhraseWeight: one BM25 score with the idfs of the terms in the index summed
+        let idf: f64 = (wanted.iter())
+            .map(|w| self.bm25_parts(field, self.df(field, w), freq, len))
+            .filter(|p| p[0] > 0.0)
+            .map(|p| p[4])
+            .sum();
+        let [.., tf] = self.bm25_parts(field, self.df(field, &wanted[0]), freq, len);
+        idf * (1.0 + K1) * tf
+    }
+
+    /// How often a phrase whose places hold `terms` occurs in the on-disk document at `pos`,
+    /// from the positions [`gather`](Self::gather) read; `None` if it read none for a term.
+    fn disk_phrase_freq(
+        &self,
+        field: &str,
+        terms: &[Vec<String>],
+        slop: u32,
+        pos: DiskPos,
+    ) -> Option<f64> {
+        let at = self.freqs.get(field)?;
+        let mut lists = vec![];
+        for t in terms {
+            // a place's terms' positions merged, as in `score`
+            let mut list = vec![];
+            for w in t {
+                let positions = at.get(w)?.positions.as_ref()?;
+                list.extend(positions.get(&pos).into_iter().flatten());
+            }
+            list.sort_unstable();
+            lists.push(list);
+        }
+        Some(phrase_freq(terms, &lists, slop))
     }
 
     /// A [`Query::Blended`]'s score: its term queries' with the document frequencies
@@ -1525,8 +1587,11 @@ impl<'a> Searcher<'a> {
     /// The on-disk documents a leaf query surely matches, and those it leaves in doubt, from
     /// postings and doc values; `None` if they cannot tell (see [`exact`]).
     fn disk_leaf(&self, q: &Query) -> Option<[HashSet<DiskPos>; 2]> {
-        let (Query::Term { field, .. } | Query::Match { field, .. } | Query::Range { field, .. }) =
-            q
+        let (Query::Term { field, .. }
+        | Query::Match { field, .. }
+        | Query::Range { field, .. }
+        | Query::MatchPhrase { field, .. }
+        | Query::MatchPhrasePrefix { field, .. }) = q
         else {
             return None;
         };
@@ -2144,6 +2209,15 @@ fn dis_max(scores: impl Iterator<Item = f64>, tie_breaker: f64) -> Option<f64> {
         Some(acc.map_or((s, s), |(m, t)| (m.max(s), t + s)))
     })?;
     Some(max + (sum - max) * tie_breaker)
+}
+
+/// How often a phrase whose places hold `terms`, at positions `lists`, occurs within `slop`.
+fn phrase_freq(terms: &[Vec<String>], lists: &[Vec<u32>], slop: u32) -> f64 {
+    match slop {
+        _ if lists.iter().any(Vec::is_empty) => 0.0,
+        0 => exact_phrase_freq(lists),
+        _ => sloppy_phrase_freq(terms, lists, slop),
+    }
 }
 
 /// How often the terms with positions `lists` occur in a row: Lucene's ExactPhraseMatcher.
@@ -2784,6 +2858,94 @@ mod tests {
         // scored without reading a source; the hit returned cannot be read, so is left out
         for (q, (total, max, _)) in queries.iter().zip(before) {
             assert!(total > 0 && max.is_some(), "{q}");
+            assert_eq!(search(ix, q, 1), (total, max, vec![]), "{q}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Phrase queries on an opened index match and score from postings positions, as the
+    /// same documents in memory do from their sources.
+    #[test]
+    fn search_speed_phrases_on_disk_score_from_positions() {
+        let dir = std::env::temp_dir().join(format!("esm-speed-phrase-{}", std::process::id()));
+        let build = || {
+            let mut ix = Index::default();
+            let props = &mut ix.mappings.properties;
+            props.insert(
+                "t".into(),
+                FieldMapping::Text {
+                    store: false,
+                    fields: Default::default(),
+                },
+            );
+            props.insert(
+                "k".into(),
+                FieldMapping::Keyword {
+                    ignore_above: None,
+                    split_queries_on_whitespace: false,
+                },
+            );
+            props.insert("n".into(), FieldMapping::Long);
+            let ws = ["quick", "brown", "fox", "dog", "the"];
+            for i in 0..60 {
+                let words: Vec<_> = (0..3 + i % 6)
+                    .map(|j| ws[(i * 7 + j * j * 3 + j) % 5])
+                    .collect();
+                // every fourth document holds two values, a position gap apart
+                let t = match i % 4 {
+                    0 => json!([words[..2].join(" "), words[2..].join(" ")]),
+                    _ => json!(words.join(" ")),
+                };
+                let doc = json!({"t": t, "k": ws[i % 5], "n": i});
+                ix.put(&i.to_string(), doc);
+            }
+            ix.put("60", json!({"t": "fox fox quick fox fox", "n": 60}));
+            ix
+        };
+        let ix = build();
+        disk::save(&dir, &Indices::from([("i".to_owned(), build())])).unwrap();
+        let opened = disk::open(&dir).unwrap();
+        let search = |ix: &Index, q: &Value, size: usize| {
+            let body = json!({"query": q, "size": size});
+            let r = search(ix, &SearchRequest::parse(&body).unwrap());
+            let hits = r.hits.iter().map(|h| (h.id.to_owned(), h.score));
+            (r.total, r.max_score, hits.collect::<Vec<_>>())
+        };
+        let phrase =
+            |q: &str, slop: u32| json!({"match_phrase": {"t": {"query": q, "slop": slop}}});
+        let queries = [
+            phrase("quick brown", 0),
+            phrase("brown fox", 2),
+            phrase("fox quick", 3),
+            phrase("fox fox", 1),
+            phrase("fox fox fox", 4),
+            phrase("dog the brown", 0),
+            // across the gap between two values
+            phrase("brown the", 150),
+            phrase("fox", 0),
+            json!({"match_phrase_prefix": {"t": "quick b"}}),
+            json!({"match_phrase_prefix": {"t": {"query": "the d", "slop": 2}}}),
+            json!({"match_phrase": {"k": "fox"}}),
+            json!({"bool": {
+                "must": [phrase("quick brown", 1)],
+                "should": [{"match": {"t": "dog"}}, phrase("the fox", 0)],
+                "filter": [{"range": {"n": {"lt": 40}}}],
+            }}),
+            json!({"bool": {"should": [phrase("brown fox", 0), phrase("fox dog", 0)]}}),
+        ];
+        let before: Vec<_> = queries
+            .iter()
+            .map(|q| search(&opened["i"], q, 100))
+            .collect();
+        for (q, on_disk) in queries.iter().zip(&before) {
+            assert!(on_disk.0 > 0, "{q}");
+            assert_eq!(on_disk, &search(&ix, q, 100), "{q}");
+        }
+        zero_stored_fields(&dir);
+        let ix = &opened["i"];
+        assert!(ix.get("3").is_none(), "on-disk sources are unreadable");
+        // matched and scored without reading a source; the hit returned cannot be read
+        for (q, (total, max, _)) in queries.iter().zip(before) {
             assert_eq!(search(ix, q, 1), (total, max, vec![]), "{q}");
         }
         std::fs::remove_dir_all(&dir).unwrap();
