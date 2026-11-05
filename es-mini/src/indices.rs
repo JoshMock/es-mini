@@ -1294,6 +1294,7 @@ pub async fn cat_shards(
             let shard = indices[n].shards().get(i);
             let docs = shard.map_or(0, |s| s.docs().count());
             let (index_total, delete_total) = shard.map_or((0, 0), |s| s.write_totals());
+            let max_seq_no = shard.map_or(-1, |s| s.max_seq_no());
             let primary: Vec<String> = (COLUMNS.iter())
                 .map(|(c, _, _)| match *c {
                     "index" => n.to_string(),
@@ -1307,7 +1308,7 @@ pub async fn cat_shards(
                     "indexing.index_total" => index_total.to_string(),
                     "indexing.delete_total" => delete_total.to_string(),
                     "seq_no.max" | "seq_no.local_checkpoint" | "seq_no.global_checkpoint" => {
-                        (i64::try_from(index_total + delete_total).unwrap_or(0) - 1).to_string()
+                        max_seq_no.to_string()
                     }
                     "unassigned.reason"
                     | "unassigned.at"

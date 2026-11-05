@@ -137,6 +137,26 @@ async fn aliases_survive_restart() {
 }
 
 #[tokio::test]
+async fn cat_shards_seq_no_survives_restart() {
+    let dir = std::env::temp_dir().join(format!("esm-persist-seq-{}", std::process::id()));
+    let _cleanup = Cleanup(dir.clone());
+    let _ = std::fs::remove_dir_all(&dir);
+    let app = es_mini::app_persisted(&dir).unwrap();
+    call(&app, "PUT", "/i", json!({})).await;
+    call(&app, "PUT", "/i/_doc/1", json!({})).await;
+    call(&app, "PUT", "/i/_doc/2", json!({})).await;
+    drop(app);
+
+    let app = es_mini::app_persisted(&dir).unwrap();
+    let uri = "/_cat/shards/i?h=seq_no.max,seq_no.local_checkpoint&format=json";
+    let rows = call(&app, "GET", uri, json!({})).await;
+    assert_eq!(
+        rows[0],
+        json!({"seq_no.max": "1", "seq_no.local_checkpoint": "1"})
+    );
+}
+
+#[tokio::test]
 async fn writes_whose_path_ends_like_a_read_endpoint_survive_restart() {
     let dir = std::env::temp_dir().join(format!("esm-persist-suffix-{}", std::process::id()));
     let _cleanup = Cleanup(dir.clone());

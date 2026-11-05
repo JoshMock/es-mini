@@ -2111,7 +2111,7 @@ fn write_shard(prev: &Path, dir: &Path, ix: &Index, shard: &Shard) -> es_codec::
             true,
         ),
     };
-    let max_seq = shard.next_seq_no as i64 - 1;
+    let max_seq = shard.max_seq_no();
     let mut owned = unsaved(shard, &current)?;
     let saved_max = infos
         .user_data

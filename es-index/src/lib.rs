@@ -720,6 +720,11 @@ impl Shard {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// The highest sequence number this shard has given a write, or -1 before its first.
+    pub fn max_seq_no(&self) -> i64 {
+        self.next_seq_no as i64 - 1
+    }
+
     /// The (index, delete) operations this shard has run since it started.
     pub fn write_totals(&self) -> (u64, u64) {
         (self.index_total, self.delete_total)
