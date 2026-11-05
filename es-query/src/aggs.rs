@@ -204,12 +204,20 @@ impl TopHits {
 
     /// Keeps the hits this aggregation may render, best first.
     fn keep_top(&self, hits: &mut Vec<TopHit>) {
-        hits.sort_by(|a, b| {
-            crate::cmp_sorted(&self.sort, (&a.sort, a.score), (&b.sort, b.score))
-                .then_with(|| a.index.cmp(&b.index))
-                .then(a.doc.seq_no.cmp(&b.doc.seq_no))
-        });
+        hits.sort_by(|a, b| self.cmp((&a.sort, a.score, &a.index, a.doc.seq_no), b));
         hits.truncate(self.from.saturating_add(self.size));
+    }
+
+    /// How a hit with these sort values, score, index and seq_no ranks against `b`: by the
+    /// sort, then index name, then write order.
+    fn cmp(
+        &self,
+        (sort, score, index, seq_no): (&[Value], f64, &str, u64),
+        b: &TopHit,
+    ) -> std::cmp::Ordering {
+        crate::cmp_sorted(&self.sort, (sort, score), (&b.sort, b.score))
+            .then_with(|| index.cmp(&b.index))
+            .then(seq_no.cmp(&b.doc.seq_no))
     }
 
     /// The `hits` object of `total` matches, like a search response's.
@@ -1356,6 +1364,9 @@ pub(crate) struct Stats {
     range: Option<RangeBucket>,
     /// The best hits so far (only for `top_hits`).
     top: Vec<TopHit>,
+    /// Whether `top` was cut to its best `from + size`, which lead it in order, so no hit
+    /// ranked below the last of them can make the page.
+    top_cut: bool,
 }
 
 impl Default for Stats {
@@ -1376,6 +1387,7 @@ impl Default for Stats {
             buckets: vec![],
             range: None,
             top: vec![],
+            top_cut: false,
         }
     }
 }
@@ -1957,11 +1969,19 @@ impl<'s, 'a> Collector<'s, 'a> {
                 };
                 let st = &mut self.stats[i];
                 st.count += 1;
+                let sort = self.searcher.sort_values(&t.sort, score, doc);
+                let n = t.from.saturating_add(t.size);
+                let key = (&sort[..], score, self.index_name, doc.seq_no);
+                let last = n.checked_sub(1).and_then(|l| st.top.get(l));
+                // A hit is built only if it can make the page.
+                if st.top_cut && last.is_none_or(|l| t.cmp(key, l).is_gt()) {
+                    return;
+                }
                 st.top.push(TopHit {
                     index: self.index_name.to_owned(),
                     id: id.to_owned(),
                     score,
-                    sort: self.searcher.sort_values(&t.sort, score, doc),
+                    sort,
                     matched_queries: self.searcher.matched_queries(id, doc),
                     explanation: t.explain.then(|| self.searcher.explain(id, doc)),
                     highlight: (t.highlight.iter())
@@ -1981,9 +2001,9 @@ impl<'s, 'a> Collector<'s, 'a> {
                     doc: doc.clone(),
                     fields,
                 });
-                // ponytail: re-sorts at twice the kept hits; a heap if top_hits get large
-                if st.top.len() > 2 * t.from.saturating_add(t.size).max(8) {
+                if st.top.len() > 2 * n.max(8) {
                     t.keep_top(&mut st.top);
+                    st.top_cut = true;
                 }
                 return;
             }
@@ -3115,6 +3135,66 @@ mod tests {
                 .contains("[values] must not be an empty array: [r]"),
             "{e}"
         );
+    }
+
+    /// Over many documents, so `top` is cut down many times while collecting.
+    #[test]
+    fn search_speed_top_hits_of_many_documents() {
+        let mapped = || {
+            let mut ix = Index::default();
+            let props = &mut ix.mappings.properties;
+            props.insert("v".into(), FieldMapping::Integer);
+            let keyword = FieldMapping::Keyword {
+                ignore_above: None,
+                split_queries_on_whitespace: false,
+            };
+            props.insert("k".into(), keyword);
+            ix
+        };
+        let (mut a, mut b) = (mapped(), mapped());
+        for n in 0..200u64 {
+            // n % 5 + 1 of 5 terms match, so the score rises with n % 5
+            let t = ["x"; 5].iter().take(n as usize % 5 + 1).chain(&["y"; 5]);
+            let t = t.take(5).copied().collect::<Vec<_>>().join(" ");
+            let k = ["even", "odd"][n as usize % 2];
+            let doc = json!({"v": n % 7, "k": k, "t": t});
+            [&mut a, &mut b][n as usize % 2].put(&n.to_string(), doc);
+        }
+        let ids = |aggs: &Value| -> Vec<String> {
+            let hits = aggs["hits"]["hits"].as_array().unwrap();
+            hits.iter()
+                .map(|h| h["_id"].as_str().unwrap().into())
+                .collect()
+        };
+        let run = |body: Value| {
+            let req = SearchRequest::parse(&body).unwrap();
+            let targets = [("a", 0, &a, None), ("b", 0, &b, None)];
+            crate::search_many(&targets, &req)
+                .unwrap()
+                .aggregations
+                .unwrap()
+        };
+        let top = |t: Value| run(json!({"size": 0, "aggs": {"t": {"top_hits": t}}}))["t"].clone();
+        // ties go to index a (even n), then to write order
+        let got = top(json!({"from": 1, "size": 3, "sort": ["v"], "_source": false}));
+        assert_eq!(ids(&got), ["14", "28", "42"]);
+        assert_eq!(got["hits"]["total"]["value"], 200);
+        let got = top(json!({"from": 5, "size": 10, "sort": [{"v": "desc"}]}));
+        let want = [
+            "76", "90", "104", "118", "132", "146", "160", "174", "188", "13",
+        ];
+        assert_eq!(ids(&got), want);
+        let got = run(json!({"size": 0, "query": {"match": {"t": "x"}},
+            "aggs": {"t": {"top_hits": {"size": 3}}}}))["t"]
+            .clone();
+        assert_eq!(ids(&got), ["4", "14", "24"]);
+        assert_eq!(got["hits"]["max_score"], got["hits"]["hits"][0]["_score"]);
+        let got = run(json!({"size": 0, "aggs": {"k": {"terms": {"field": "k"},
+            "aggs": {"t": {"top_hits": {"size": 2, "sort": ["v"]}}}}}}));
+        let buckets = got["k"]["buckets"].as_array().unwrap();
+        assert_eq!(ids(&buckets[0]["t"]), ["0", "14"]);
+        assert_eq!(ids(&buckets[1]["t"]), ["7", "21"]);
+        assert_eq!(ids(&top(json!({"size": 0}))), Vec::<String>::new());
     }
 
     #[test]
