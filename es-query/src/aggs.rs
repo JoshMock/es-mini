@@ -1734,9 +1734,11 @@ struct Timings {
     total_buckets: usize,
     /// Whether a document had several values. ponytail: a shard profiles as one segment.
     multi_valued: bool,
-    /// Top-level keyword `terms` under match_all: the number of the field's terms on the shard
-    /// (ES's global ordinals), and those include/exclude accepts.
+    /// Keyword `terms`: the number of the field's terms on the shard (ES's global ordinals),
+    /// and the shard's documents.
     ords: usize,
+    docs: usize,
+    /// Top-level keyword `terms` under match_all: the terms include/exclude accepts.
     keys: Vec<String>,
 }
 
@@ -1810,6 +1812,11 @@ impl<'s, 'a> Collector<'s, 'a> {
                     }
                 },
                 _ => {}
+            }
+            if let (Some(FieldMapping::Keyword { .. } | FieldMapping::Ip), Metric::Terms(t)) =
+                (m, &agg.metric)
+            {
+                t.maps(false)?;
             }
             if let (Some(m), Metric::Terms(t)) = (m, &agg.metric)
                 && let Some(hint) = t.value_type.as_ref()
@@ -2136,21 +2143,25 @@ impl<'s, 'a> Collector<'s, 'a> {
 impl Collector<'_, '_> {
     /// This shard's results, and with `profile: true` its `aggregations` profile: one entry per
     /// aggregation, like ES's (post collection releases the doc values readers, building the
-    /// aggregation takes its result). `match_all` if the search's query matches every document.
+    /// aggregation takes its result). `match_all` if the search's query matches every document,
+    /// `match_none` if it matches none.
     /// The first failure collecting a document, here or in a sub-aggregation.
     pub(crate) fn failed(&mut self) -> Option<QueryError> {
         (self.failed.take()).or_else(|| self.subs.iter_mut().flatten().find_map(Self::failed))
     }
 
-    pub(crate) fn finish(mut self, match_all: bool) -> (Vec<Stats>, Option<Value>) {
+    pub(crate) fn finish(
+        mut self,
+        match_all: bool,
+        match_none: bool,
+    ) -> (Vec<Stats>, Option<Value>) {
         let mut stats = std::mem::take(&mut self.stats);
         self.finish_terms(&mut stats);
-        let Some(mut timings) = self.timings.take() else {
+        if self.timings.is_none() {
             return (stats, None);
-        };
-        if match_all {
-            self.count_ords(&stats, &mut timings);
         }
+        self.count_ords(match_all.then_some(&stats));
+        let mut timings = self.timings.take().unwrap_or_default();
         self.stats = stats;
         let mut stats = vec![];
         let disk = std::mem::take(&mut self.disk);
@@ -2163,7 +2174,7 @@ impl Collector<'_, '_> {
             t.build_aggregation = nanos(start);
         }
         let profile = timings.iter().enumerate();
-        let profile = profile.map(|(i, t)| self.profile(i, t, false, match_all));
+        let profile = profile.map(|(i, t)| self.profile(i, t, false, match_all, match_none));
         (stats, Some(profile.collect()))
     }
 
@@ -2229,45 +2240,79 @@ impl Collector<'_, '_> {
         }
     }
 
-    /// Fills in the ordinals of each keyword `terms` aggregation, from every document's values.
-    fn count_ords(&mut self, stats: &[Stats], timings: &mut [Timings]) {
+    /// Fills in each keyword `terms` aggregation's ordinals and the shard's documents, here
+    /// and in sub-aggregations; with this shard's `stats` of a match_all search, the terms
+    /// each top-level one's include/exclude accepts.
+    fn count_ords(&mut self, stats: Option<&[Stats]>) {
         let (index, shard) = (self.searcher.index, self.searcher.shard);
-        for (i, (st, t)) in stats.iter().zip(timings).enumerate() {
-            let (Some(b), Some(FieldMapping::Keyword { .. })) = (&st.terms, self.mappings[i])
+        for i in 0..self.aggs.len() {
+            if let Some(sub) = &mut self.subs[i] {
+                sub.count_ords(None);
+            }
+            let (Some(FieldMapping::Keyword { .. }), Metric::Terms(_)) =
+                (self.mappings[i], &self.aggs[i].metric)
             else {
                 continue;
             };
-            let mut ords = std::collections::BTreeSet::new();
+            let (mut ords, mut docs) = (std::collections::BTreeSet::new(), 0);
             for (id, doc) in shard
                 .docs()
                 .filter(|(_, d)| shard.searchable(&index.settings, d.seq_no))
             {
-                ords.extend(b.ords(&self.values(i, id, &doc)));
+                docs += 1;
+                ords.extend(
+                    self.values(i, id, &doc)
+                        .into_iter()
+                        .filter_map(|v| match v {
+                            Value::String(s) => Some(s),
+                            _ => None,
+                        }),
+                );
             }
-            t.ords = ords.len();
-            t.keys = (ords.into_iter().filter(|k| b.accepts(k)))
-                .filter_map(|k| match k {
-                    terms::Key::Str(s) => Some(s),
-                    _ => None,
-                })
-                .collect();
+            let accepted = stats.and_then(|st| st[i].terms.as_ref());
+            let Some(t) = self.timings.as_mut().map(|t| &mut t[i]) else {
+                continue;
+            };
+            (t.ords, t.docs) = (ords.len(), docs);
+            if let Some(b) = accepted {
+                t.keys = (ords.into_iter())
+                    .filter(|k| b.accepts(&terms::Key::Str(k.clone())))
+                    .collect();
+            }
         }
     }
 
     /// One aggregation's profile: ES's aggregator class, its timings and its debug counters
     /// (this shard is one leaf); `under_bucket` if a bucket aggregation contains it.
-    fn profile(&self, i: usize, t: &Timings, under_bucket: bool, match_all: bool) -> Value {
+    fn profile(
+        &self,
+        i: usize,
+        t: &Timings,
+        under_bucket: bool,
+        match_all: bool,
+        match_none: bool,
+    ) -> Value {
         let (agg, m) = (&self.aggs[i], self.mappings[i]);
         let keyword = matches!(m, Some(FieldMapping::Keyword { .. }));
+        let global_ords = keyword
+            && matches!(&agg.metric, Metric::Terms(terms) if terms.maps(match_none) == Ok(false));
         // TermsAggregatorFactory runs a top-level global ordinals `terms` as one term query per
         // ordinal when it merges with the search's query (only match_all does) and there are
         // at most MAX_ORDS_TO_TRY_FILTERS ordinals (include/exclude then picks the filters).
-        let from_filters = !under_bucket
+        let from_filters = global_ords
+            && !under_bucket
             && match_all
-            && keyword
             && agg.missing.is_none()
-            && matches!(&agg.metric, Metric::Terms(terms) if !terms.map)
             && (1..=1000).contains(&t.ords);
+        // else it counts segment ordinals without sub-aggregations or include/exclude, when
+        // there are at most 2048 ordinals and no more than half as many as documents
+        let low_cardinality = global_ords
+            && !from_filters
+            && !under_bucket
+            && agg.subs.is_empty()
+            && matches!(&agg.metric, Metric::Terms(terms) if !terms.has_filter())
+            && t.ords <= 2048
+            && t.ords as f64 / t.docs as f64 <= 0.5;
         let ty = match &agg.metric {
             Metric::Histogram(h) if h.date => "DateHistogramAggregator",
             Metric::Histogram(_) => "NumericHistogramAggregator",
@@ -2301,8 +2346,11 @@ impl Collector<'_, '_> {
             Metric::Percentiles { ranks: false, .. } => "TDigestPercentilesAggregator",
             Metric::Percentiles { .. } => "TDigestPercentileRanksAggregator",
             Metric::Terms(_) if from_filters => "StringTermsAggregatorFromFilters",
-            Metric::Terms(t) if keyword && t.map => "MapStringTermsAggregator",
-            Metric::Terms(_) if keyword => "GlobalOrdinalsStringTermsAggregator",
+            Metric::Terms(_) if low_cardinality => {
+                "GlobalOrdinalsStringTermsAggregator.LowCardinality"
+            }
+            Metric::Terms(_) if global_ords => "GlobalOrdinalsStringTermsAggregator",
+            Metric::Terms(_) if keyword => "MapStringTermsAggregator",
             Metric::Terms(_) => "NumericTermsAggregator",
         };
         // the filters collect matches themselves, never through this aggregator
@@ -2368,12 +2416,12 @@ impl Collector<'_, '_> {
             }
             (_, Metric::Terms(terms)) => {
                 let mut debug = Map::new();
-                let deferred = terms.deferred(&agg.subs);
+                let deferred = terms.deferred(&agg.subs, global_ords.then_some(t.ords));
                 if !deferred.is_empty() {
                     debug.insert("deferred_aggregators".into(), deferred.into());
                 }
-                if ty == "GlobalOrdinalsStringTermsAggregator" {
-                    let strategy = match terms.remaps(&agg.subs, under_bucket) {
+                if global_ords {
+                    let strategy = match terms.remaps(&agg.subs, under_bucket, t.ords) {
                         true if under_bucket => "remap using many bucket ords",
                         true => "remap using single bucket ords",
                         false => "dense",
@@ -2382,7 +2430,7 @@ impl Collector<'_, '_> {
                 }
                 debug.insert("total_buckets".into(), t.total_buckets.into());
                 let result = match ty {
-                    "GlobalOrdinalsStringTermsAggregator" => "terms",
+                    _ if global_ords => "terms",
                     "MapStringTermsAggregator" => {
                         let field = format!("from Field [{}] of type [keyword]", agg.field);
                         debug.insert("collection_strategy".into(), field.into());
@@ -2398,11 +2446,18 @@ impl Collector<'_, '_> {
                     _ => "long_terms",
                 };
                 debug.insert("result_strategy".into(), result.into());
-                if ty == "GlobalOrdinalsStringTermsAggregator" {
-                    let (single, multi) = (used(!t.multi_valued), used(t.multi_valued));
+                if global_ords {
+                    // LowCardinality skips a segment without values
+                    let values = !low_cardinality || t.ords > 0;
+                    let (single, multi) = (!t.multi_valued, t.multi_valued);
+                    let single = used(values && single);
                     debug.insert("segments_with_single_valued_ords".into(), single.into());
+                    let multi = used(values && multi);
                     debug.insert("segments_with_multi_valued_ords".into(), multi.into());
                     debug.insert("has_filter".into(), terms.has_filter().into());
+                }
+                if low_cardinality {
+                    debug.insert("segments_without_values".into(), used(t.ords == 0).into());
                 }
                 out["debug"] = debug.into();
             }
@@ -2412,7 +2467,9 @@ impl Collector<'_, '_> {
             && let Some(timings) = &sub.timings
         {
             let children = timings.iter().enumerate();
-            let children = children.map(|(j, t)| sub.profile(j, t, true, false));
+            // ES's matchNoDocs looks for a `global` parent
+            let none = match_none && agg.metric != Metric::Global;
+            let children = children.map(|(j, t)| sub.profile(j, t, true, false, none));
             out["children"] = children.collect();
         }
         out

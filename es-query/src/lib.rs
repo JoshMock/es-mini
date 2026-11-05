@@ -1839,7 +1839,8 @@ pub fn search_many<'a>(
             continue;
         }
         total += counted;
-        let (stats, p) = collector.finish(matches!(query, Query::MatchAll));
+        let match_none = !can_match::can_match(&targets[pos], &query);
+        let (stats, p) = collector.finish(matches!(query, Query::MatchAll), match_none);
         aggs::reduce(&mut aggs, stats);
         if let (Some(all), Some(p)) = (&mut profile, p) {
             all.push((name, shard, p));

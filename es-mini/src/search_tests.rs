@@ -438,6 +438,76 @@ async fn aggs_profile_filter_by_filter_counts_all_ords() {
 }
 
 #[tokio::test]
+async fn aggs_profile_unknown_execution_hint_fails_string_terms() {
+    let app = seeded().await;
+    let search = async |field: &str| {
+        let terms = json!({"field": field, "execution_hint": "bogus"});
+        let body = json!({"size": 0, "aggs": {"k": {"terms": terms}}});
+        call(&app, Method::POST, "/idx/_search", Some(body)).await
+    };
+    let (s, r) = search("t.keyword").await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{r}");
+    assert_eq!(
+        r["error"]["root_cause"][0]["reason"],
+        "Unknown `execution_hint`: [bogus], expected any of [map, global_ordinals]"
+    );
+    // numeric terms never read the hint
+    let (s, r) = search("n").await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+}
+
+#[tokio::test]
+async fn aggs_profile_picks_execution_modes_like_es() {
+    let app = app();
+    for i in 1..=8 {
+        let doc = json!({"k": if i % 2 == 1 { "a" } else { "b" }, "n": i});
+        call(&app, Method::PUT, &format!("/i/_doc/{i}"), Some(doc)).await;
+    }
+    let profile = async |query: serde_json::Value, agg: serde_json::Value| {
+        let body = json!({"profile": true, "size": 0, "query": query, "aggs": {"t": agg}});
+        let (s, r) = call(&app, Method::POST, "/i/_search", Some(body)).await;
+        assert_eq!(s, StatusCode::OK, "{r}");
+        r["profile"]["shards"][0]["aggregations"][0].clone()
+    };
+    let range = json!({"range": {"n": {"lt": 6}}});
+    // 2 ordinals over 8 documents, no sub-aggregations: the low cardinality collector
+    let a = profile(range.clone(), json!({"terms": {"field": "k.keyword"}})).await;
+    assert_eq!(
+        a["type"],
+        "GlobalOrdinalsStringTermsAggregator.LowCardinality"
+    );
+    assert_eq!(
+        a["debug"],
+        json!({
+            "collection_strategy": "dense",
+            "total_buckets": 2,
+            "result_strategy": "terms",
+            "segments_with_single_valued_ords": 1,
+            "segments_with_multi_valued_ords": 0,
+            "has_filter": false,
+            "segments_without_values": 0,
+        })
+    );
+    // with fewer ordinals than shard_size, sub-aggregations collect depth first
+    let agg = json!({"terms": {"field": "k.keyword"}, "aggs": {"m": {"max": {"field": "n"}}}});
+    let a = profile(range, agg).await;
+    assert_eq!(a["type"], "GlobalOrdinalsStringTermsAggregator");
+    assert!(a["debug"].get("deferred_aggregators").is_none(), "{a}");
+    assert_eq!(
+        a["debug"]["collection_strategy"],
+        "remap using single bucket ords"
+    );
+    // a query rewritten to match none, without a hint, runs the map collector, unless empty
+    // buckets are wanted
+    let none = json!({"term": {"unmapped": "x"}});
+    let a = profile(none.clone(), json!({"terms": {"field": "k.keyword"}})).await;
+    assert_eq!(a["type"], "MapStringTermsAggregator");
+    let agg = json!({"terms": {"field": "k.keyword", "min_doc_count": 0}});
+    let a = profile(none, agg).await;
+    assert_ne!(a["type"], "MapStringTermsAggregator");
+}
+
+#[tokio::test]
 async fn value_type_mismatch_fails_only_that_shard() {
     let app = app();
     for (index, ty) in [("a", "keyword"), ("b", "ip")] {

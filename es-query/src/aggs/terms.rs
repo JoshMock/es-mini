@@ -29,8 +29,8 @@ pub(super) struct Terms {
     exclude: Option<Include>,
     /// How an unmapped field's `missing` value is typed.
     pub(super) value_type: Option<FieldMapping>,
-    /// `execution_hint: map`. ponytail: hints and modes pick only ES's profiled collector.
-    pub(super) map: bool,
+    /// `execution_hint`, which string fields check when their shard collects.
+    pub(super) hint: Option<String>,
     /// `collect_mode`: `Some(true)` for `breadth_first`, `Some(false)` for `depth_first`.
     breadth_first: Option<bool>,
     /// `show_term_doc_count_error`: each bucket reports its own error bound.
@@ -75,7 +75,7 @@ impl Terms {
             include: None,
             exclude: None,
             value_type: None,
-            map: false,
+            hint: None,
             breadth_first: None,
             show_error: false,
         };
@@ -100,7 +100,7 @@ impl Terms {
             };
             match k.as_str() {
                 "field" | "missing" => {}
-                "execution_hint" => t.map = v.as_str() == Some("map"),
+                "execution_hint" => t.hint = v.as_str().map(str::to_owned),
                 "collect_mode" => {
                     t.breadth_first = match v.as_str() {
                         Some("breadth_first") => Some(true),
@@ -148,14 +148,12 @@ impl Terms {
     }
 
     /// The sub-aggregations ES's DeferableBucketAggregator defers: those not sorted on, when
-    /// collecting `breadth_first`, the default unless `shard_size` keeps every bucket.
-    /// ponytail: global ordinals default to `depth_first` when the field has at most
-    /// `shard_size` terms; not modelled, since they are not profiled.
-    pub(super) fn deferred<'a>(&self, subs: &'a [Agg]) -> Vec<&'a str> {
+    /// collecting `breadth_first` (see `breadth`).
+    pub(super) fn deferred<'a>(&self, subs: &'a [Agg], max_ord: Option<usize>) -> Vec<&'a str> {
         let sorted = |i: usize| {
             (self.order.iter()).any(|(by, _)| matches!(by, By::Agg { index, .. } if *index == i))
         };
-        match self.breadth() {
+        match self.breadth(max_ord) {
             true => (subs.iter().enumerate())
                 .filter(|&(i, _)| !sorted(i))
                 .map(|(_, s)| s.name.as_str())
@@ -164,8 +162,27 @@ impl Terms {
         }
     }
 
-    fn breadth(&self) -> bool {
-        (self.breadth_first).unwrap_or(self.shard_size() != i32::MAX as usize)
+    /// The `collect_mode`, else TermsAggregatorFactory's pick: `breadth_first` unless
+    /// `shard_size` keeps every bucket or the field has at most `shard_size` global ordinals
+    /// (`max_ord`, `None` if not collected by them).
+    fn breadth(&self, max_ord: Option<usize>) -> bool {
+        let size = self.shard_size();
+        (self.breadth_first)
+            .unwrap_or(size != i32::MAX as usize && max_ord.is_none_or(|o| o > size))
+    }
+
+    /// TermsAggregatorFactory's ExecutionMode for a string field: whether it collects
+    /// with a map rather than global ordinals, or the hint it fails on. A search that matches
+    /// no documents (`match_none`) maps unless it wants empty buckets.
+    pub(super) fn maps(&self, match_none: bool) -> Result<bool, QueryError> {
+        match self.hint.as_deref() {
+            None => Ok(match_none && self.min_doc_count > 0),
+            Some("map") => Ok(true),
+            Some("global_ordinals") => Ok(false),
+            Some(h) => Err(QueryError::illegal(format!(
+                "Unknown `execution_hint`: [{h}], expected any of [map, global_ordinals]"
+            ))),
+        }
     }
 
     /// Whether `include` or `exclude` filters the terms.
@@ -175,9 +192,11 @@ impl Terms {
 
     /// Whether ES's GlobalOrdinalsStringTermsAggregator remaps global ordinals to buckets
     /// rather than using them as bucket ordinals directly (TermsAggregatorFactory).
-    pub(super) fn remaps(&self, subs: &[Agg], under_bucket: bool) -> bool {
+    pub(super) fn remaps(&self, subs: &[Agg], under_bucket: bool, max_ord: usize) -> bool {
         let agg_sort = (self.order.iter()).any(|(by, _)| matches!(by, By::Agg { .. }));
-        under_bucket || self.has_filter() || !subs.is_empty() && (agg_sort || !self.breadth())
+        under_bucket
+            || self.has_filter()
+            || !subs.is_empty() && (agg_sort || !self.breadth(Some(max_ord)))
     }
 
     fn key_order(&self) -> bool {
