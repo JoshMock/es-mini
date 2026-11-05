@@ -68,6 +68,24 @@ pub enum SortField {
     },
 }
 
+impl SortField {
+    pub fn field(&self) -> &str {
+        match self {
+            Self::Plain { field, .. }
+            | Self::SortedNumeric { field, .. }
+            | Self::SortedSet { field, .. } => field,
+        }
+    }
+
+    pub fn reverse(&self) -> bool {
+        match self {
+            Self::Plain { reverse, .. }
+            | Self::SortedNumeric { reverse, .. }
+            | Self::SortedSet { reverse, .. } => *reverse,
+        }
+    }
+}
+
 /// Whether a sort type's missing value is an int (else a long); errors for unserializable types.
 fn missing_is_int(sort_type: &str) -> Result<bool> {
     match sort_type {

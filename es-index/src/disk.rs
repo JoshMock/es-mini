@@ -1704,9 +1704,144 @@ fn reuse_segments(
     Ok(Some((infos, current, changed)))
 }
 
+/// Elasticsearch's parent field (`Engine.ROOT_DOC_FIELD_NAME`) in a sorted index: a numeric doc
+/// value of -1 on every root, which tells Lucene's sorter where each block of nested docs ends.
+const ROOT_DOC_FIELD: &str = "__root_doc_for_nested";
+
+/// The index sort of `ix`, as Elasticsearch 9.5.5's `IndexSortConfig.buildIndexSort` builds it
+/// from the `index.sort.*` settings (order `asc`, mode `min` or `max` for `desc`, missing
+/// `_last` by default) and the fields' doc values; empty for an unsorted index.
+fn index_sort(ix: &Index) -> es_codec::Result<Vec<es_codec::segment_infos::SortField>> {
+    use crate::FieldMapping as M;
+    use es_codec::segment_infos::SortField;
+    let list = |key: &str| -> Option<Vec<String>> {
+        Some(match ix.settings.flat().get(key)? {
+            Value::Array(items) => items.iter().map(crate::setting_string).collect(),
+            v => (crate::setting_string(v).split(',').map(str::trim))
+                .filter(|e| !e.is_empty())
+                .map(str::to_owned)
+                .collect(),
+        })
+    };
+    let fields = list("index.sort.field").unwrap_or_default();
+    let (order, mode, missing) = (
+        list("index.sort.order"),
+        list("index.sort.mode"),
+        list("index.sort.missing"),
+    );
+    let err = |what: &str, f: &str| es_codec::Error(format!("{what} index sort field:[{f}]"));
+    let at = |l: &Option<Vec<String>>, i: usize| l.as_ref().and_then(|l| l.get(i)).cloned();
+    (fields.iter().enumerate())
+        .map(|(i, f)| {
+            let order = at(&order, i);
+            let reverse = order
+                .as_deref()
+                .is_some_and(|o| o.eq_ignore_ascii_case("desc"));
+            // getDefaultSortMode compares the order exactly
+            let max = at(&mode, i).map_or(order.as_deref() == Some("desc"), |m| {
+                m.eq_ignore_ascii_case("max")
+            });
+            let first = at(&missing, i).as_deref() == Some("_first");
+            // IndexFieldData.XFieldComparatorSource.missingObject
+            let min = first ^ reverse;
+            let numeric = |sort_type: &str, (lo, hi): (i64, i64)| SortField::SortedNumeric {
+                field: f.clone(),
+                sort_type: sort_type.into(),
+                reverse,
+                selector: max.into(),
+                missing: Some(if min { lo } else { hi }),
+            };
+            let float = |f: f32| i64::from(crate::mapping::sortable_int(f));
+            let infinities = |f: fn(f64) -> i64| (f(f64::NEG_INFINITY), f(f64::INFINITY));
+            Ok(
+                match ix.mappings.field(f).ok_or_else(|| err("unknown", f))? {
+                    M::Keyword { .. } | M::Ip => SortField::SortedSet {
+                        field: f.clone(),
+                        reverse,
+                        selector: max.into(),
+                        missing: if min { 1 } else { 2 }, // STRING_FIRST, STRING_LAST
+                    },
+                    M::Long | M::Boolean | M::Date { .. } => numeric("LONG", (i64::MIN, i64::MAX)),
+                    // LongValuesComparatorSource keeps date_nanos missing values non-negative.
+                    M::DateNanos { .. } => numeric("LONG", (0, i64::MAX)),
+                    M::Integer | M::Short | M::Byte => {
+                        numeric("INT", (i32::MIN.into(), i32::MAX.into()))
+                    }
+                    M::Float => numeric("FLOAT", (float(f32::NEG_INFINITY), float(f32::INFINITY))),
+                    M::Double => numeric("DOUBLE", infinities(crate::mapping::sortable_long)),
+                    // Its comparator is a custom one, which Lucene cannot sort an index by.
+                    M::HalfFloat => return Err(err("invalid", f)),
+                    _ => return Err(err("docvalues not found for", f)),
+                },
+            )
+        })
+        .collect()
+}
+
+/// A document's value of one index sort field, ordered as Lucene's `IndexSorter` compares it
+/// before a reverse sort flips it. Terms rank 0 when missing first, 1 when present, 2 when
+/// missing last.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum SortKey {
+    Number(i64),
+    Term(u8, Vec<u8>),
+}
+
+/// The key of a document holding `numbers` or `terms` (as doc values) for `sort`.
+fn sort_key(
+    sort: &es_codec::segment_infos::SortField,
+    numbers: &[i64],
+    terms: &[&[u8]],
+) -> SortKey {
+    use es_codec::segment_infos::SortField as S;
+    let (max, sort_type, missing) = match sort {
+        S::SortedSet {
+            selector, missing, ..
+        } => {
+            let t = if *selector == 1 {
+                terms.iter().max()
+            } else {
+                terms.iter().min()
+            };
+            return match t {
+                Some(t) => SortKey::Term(1, t.to_vec()),
+                None => SortKey::Term(if *missing == 2 { 2 } else { 0 }, vec![]),
+            };
+        }
+        S::SortedNumeric {
+            sort_type,
+            selector,
+            missing,
+            ..
+        } => (*selector == 1, sort_type, missing),
+        S::Plain {
+            sort_type, missing, ..
+        } => (false, sort_type, missing),
+    };
+    let v = if max {
+        numbers.iter().max()
+    } else {
+        numbers.iter().min()
+    };
+    let v = v.copied().unwrap_or(missing.unwrap_or(0));
+    // IntSorter and FloatSorter read ints (floats as their sortable bits).
+    SortKey::Number(match sort_type.as_str() {
+        "INT" | "FLOAT" => i64::from(v as i32),
+        _ => v,
+    })
+}
+
+fn cmp_keys(sort: &[es_codec::segment_infos::SortField], a: &[SortKey], b: &[SortKey]) -> Ordering {
+    (sort.iter().zip(a.iter().zip(b)))
+        .map(|(s, (a, b))| if s.reverse() { b.cmp(a) } else { a.cmp(b) })
+        .find(|o| o.is_ne())
+        .unwrap_or(Ordering::Equal)
+}
+
 /// Writes segment number `counter` of `dir` holding `docs`' `_id`, `_source`, `_version`,
 /// `_seq_no` and mapped fields, keyword ones with the `ignore_above` of their document (see
-/// [`crate::postings::limit_at`]).
+/// [`crate::postings::limit_at`]). In a sorted index, docs go in `sort` order like Lucene's
+/// `Sorter` puts them at a flush (each root after its nested docs, ties in indexing order).
 fn write_docs(
     dir: &Path,
     counter: i64,
@@ -1714,15 +1849,49 @@ fn write_docs(
     mappings: &Mappings,
     changes: &[crate::postings::LimitChange],
     fields: &[es_codec::field_infos::FieldInfo],
+    sort: &[es_codec::segment_infos::SortField],
 ) -> es_codec::Result<es_codec::SegmentCommitInfo> {
     use es_codec::{
         segment_writer::{NewSegment, write_segment},
         terms::TermPostings,
         uid::encode_id,
     };
-    let lucene = lucene_docs(mappings, docs);
-    let seq_nos: Vec<u64> = docs.iter().map(|(_, d)| d.seq_no).collect();
-    let user = user_fields(mappings, &lucene, &seq_nos, changes, fields);
+    let index = |docs| {
+        let lucene = lucene_docs(mappings, docs);
+        let seq_nos: Vec<u64> = docs.iter().map(|(_, d)| d.seq_no).collect();
+        let user = user_fields(mappings, &lucene, &seq_nos, changes, fields);
+        (lucene, user)
+    };
+    let (mut lucene, mut user) = index(docs);
+    let sorted: Vec<_>;
+    let mut docs = docs;
+    if !sort.is_empty() {
+        // The keys come from the doc values the segment holds.
+        let mut keys: Vec<Vec<SortKey>> = docs.iter().map(|_| vec![]).collect();
+        for (at, l) in lucene.iter().enumerate().filter(|(_, l)| l.path.is_empty()) {
+            for s in sort {
+                let number = (user.fields.iter())
+                    .find(|f| f.name == s.field())
+                    .map(|f| f.number);
+                let numbers = number
+                    .and_then(|n| user.sorted_numeric.iter().find(|e| e.0 == n))
+                    .map_or(&[][..], |(_, v)| &v[at]);
+                let terms: Vec<&[u8]> = number
+                    .and_then(|n| user.keyword.iter().find(|e| e.0 == n))
+                    .map_or(vec![], |(_, v)| v[at].iter().map(Vec::as_slice).collect());
+                keys[l.doc].push(sort_key(s, numbers, &terms));
+            }
+        }
+        let mut order: Vec<usize> = (0..docs.len()).collect();
+        order.sort_by(|&a, &b| cmp_keys(sort, &keys[a], &keys[b]));
+        if !order.is_sorted() {
+            // ponytail: indexes the docs twice, once for their keys; sort them by `_source`
+            // values if flushes of sorted indices get slow
+            sorted = order.iter().map(|&i| docs[i]).collect();
+            docs = &sorted;
+            (lucene, user) = index(docs);
+        }
+    }
     let nested_path = (fields.len() + user.fields.len()) as i32;
     let routing_number = nested_path + i32::from(lucene.iter().any(|l| !l.path.is_empty()));
     // Built a doc at a time as the stored fields writer asks for them.
@@ -1761,7 +1930,7 @@ fn write_docs(
         )
     });
     points.push((3, seq_nos.collect()));
-    let numeric = [
+    let mut numeric = vec![
         (2, col(|d| d.version)),
         (3, col(|d| d.seq_no)),
         (4, roots),
@@ -1803,8 +1972,22 @@ fn write_docs(
         });
         terms.push((routing_number, routings));
     }
+    if !sort.is_empty() {
+        let number = all_fields.len() as i32;
+        all_fields.push(es_codec::field_infos::FieldInfo {
+            name: ROOT_DOC_FIELD.into(),
+            number,
+            parent: true,
+            ..fields[2].clone() // a numeric doc value like `_version`
+        });
+        let parents = lucene.iter().map(|l| match l.path.is_empty() {
+            true => vec![-1],
+            false => vec![],
+        });
+        numeric.push((number, parents.collect()));
+    }
     let (name, id) = segment_name(counter);
-    let seg = write_segment(
+    let mut seg = write_segment(
         dir,
         &NewSegment {
             name: &name,
@@ -1821,6 +2004,9 @@ fn write_docs(
         },
         stored,
     )?;
+    seg.info.index_sort = sort.to_vec();
+    // Lucene marks every segment with nested docs; only a sorter reads it, to find blocks.
+    seg.info.has_blocks = !sort.is_empty() && lucene.len() > docs.len();
     Ok(ours(seg, &user.empty))
 }
 
@@ -1845,7 +2031,7 @@ fn ours(mut seg: es_codec::SegmentCommitInfo, empty: &[String]) -> es_codec::Seg
 
 /// Merges the segments of `infos` as [`find_merges`] picks, each merge into one new segment
 /// of its live documents in the first one's place, as Lucene's `SegmentInfos.applyMergeChanges`
-/// does. Like Lucene's `SegmentMerger`, it appends the segments' live docs in the merge's order,
+/// does. Like Lucene's `SegmentMerger`, it puts the segments' live docs in [`merge_order`],
 /// copying each format from them a field at a time, postings a term at a time, and stored fields
 /// a doc at a time. Fields a segment leaves out without listing them [`EMPTY`] are left out of
 /// the merge.
@@ -1853,6 +2039,7 @@ fn merge(
     dir: &Path,
     infos: &mut SegmentInfos,
     compound_format: Option<&str>,
+    sort: &[es_codec::segment_infos::SortField],
 ) -> es_codec::Result<()> {
     let sizes: Vec<_> = (infos.segments.iter())
         .map(|s| {
@@ -1868,7 +2055,7 @@ fn merge(
         let picked: Vec<usize> = (picked.iter())
             .filter_map(|&at| (infos.segments.iter()).position(|s| s.name == sizes[at].0))
             .collect();
-        merge_segments(dir, infos, &picked, compound_format)?;
+        merge_segments(dir, infos, &picked, compound_format, sort)?;
     }
     Ok(())
 }
@@ -1889,6 +2076,7 @@ fn merge_segments(
     infos: &mut SegmentInfos,
     picked: &[usize],
     compound_format: Option<&str>,
+    sort: &[es_codec::segment_infos::SortField],
 ) -> es_codec::Result<()> {
     use es_codec::{
         field_infos::DocValuesType as Dv,
@@ -1904,16 +2092,12 @@ fn merge_segments(
         .map(|&at| SegmentReader::open(dir, infos.segments[at].clone()))
         .collect::<es_codec::Result<Vec<_>>>()?;
     // Per segment, each doc's id in the merged one, `None` for deleted docs.
-    let mut max_doc = 0u32;
-    let mut maps: Vec<Vec<Option<u32>>> = vec![];
-    for r in &readers {
-        let mut next = || (max_doc, max_doc += 1).0;
-        maps.push(
-            r.live_docs()?
-                .into_iter()
-                .map(|l| l.then(&mut next))
-                .collect(),
-        );
+    let order = merge_order(&readers, sort)?;
+    let max_doc = order.len() as u32;
+    let mut maps: Vec<Vec<Option<u32>>> =
+        (readers.iter()).map(|r| vec![None; r.max_doc()]).collect();
+    for (new, &(s, doc)) in (0..).zip(&order) {
+        maps[s][doc] = Some(new);
     }
     let new_doc = |map: &[Option<u32>], doc: usize| map.get(doc).copied().flatten();
     let empties: Vec<HashSet<String>> = (readers.iter())
@@ -1952,6 +2136,7 @@ fn merge_segments(
                     points.extend(live.filter_map(|(d, v)| Some((new_doc(map, d as usize)?, v))));
                 }
             }
+            points.sort_by_key(|p| p.0);
         }
         let wrong = || es_codec::Error(format!("unexpected doc values type for {name}"));
         let (mut numbers, mut bytes) = (vec![], vec![]);
@@ -1959,14 +2144,14 @@ fn merge_segments(
         let has_dv = match f.doc_values {
             Dv::None => false,
             Dv::Numeric | Dv::SortedNumeric => {
-                numbers = concat_live(&readers, &maps, name, |r| match r.doc_values(name)? {
+                numbers = by_merged_doc(&readers, &maps, name, |r| match r.doc_values(name)? {
                     DocValues::Numbers(n) => Ok(n),
                     _ => Err(wrong()),
                 })?;
                 numbers.iter().any(|v| !v.is_empty())
             }
             Dv::SortedSet => {
-                keywords = concat_live(&readers, &maps, name, |r| match r.doc_values(name)? {
+                keywords = by_merged_doc(&readers, &maps, name, |r| match r.doc_values(name)? {
                     DocValues::Ordinals { ords, terms } => (ords.into_iter())
                         .map(|o| {
                             (o.into_iter())
@@ -1979,7 +2164,7 @@ fn merge_segments(
                 keywords.iter().any(|v| !v.is_empty())
             }
             Dv::Binary => {
-                bytes = concat_live(&readers, &maps, name, |r| match r.doc_values(name)? {
+                bytes = by_merged_doc(&readers, &maps, name, |r| match r.doc_values(name)? {
                     DocValues::Bytes(b) => Ok(b),
                     _ => Err(wrong()),
                 })?;
@@ -2008,7 +2193,7 @@ fn merge_segments(
         let mut norms = vec![];
         let has_norms = !f.omit_norms && f.index_options != IndexOptions::None;
         if has_norms {
-            norms = concat_live(&readers, &maps, name, |r| {
+            norms = by_merged_doc(&readers, &maps, name, |r| {
                 let norms = r.norms(name)?.unwrap_or_default();
                 Ok(norms
                     .into_iter()
@@ -2039,21 +2224,28 @@ fn merge_segments(
     let numbers: HashMap<&str, i32> = (fields.iter().enumerate())
         .map(|(n, &f)| (f, n as i32))
         .collect();
-    let stored = readers.iter().zip(&maps).flat_map(|(r, map)| {
-        let docs: Box<dyn Iterator<Item = _>> = match r.documents_where(|d| map[d].is_some()) {
-            Ok(docs) => Box::new(docs),
-            Err(e) => Box::new(std::iter::once(Err(e))),
-        };
-        let numbers = &numbers;
-        docs.map(move |doc| {
-            let mut out = vec![];
-            for (n, v) in doc?.1 {
-                if let Some(&n) = numbers.get(r.field_by_number(n)?.name.as_str()) {
-                    out.push((n, v));
-                }
+    // Each segment's docs come in doc order, read a chunk at a time.
+    let mut streams: Vec<Box<dyn Iterator<Item = _>>> = vec![];
+    for (r, map) in readers.iter().zip(&maps) {
+        match r.documents_where(|d| map[d].is_some()) {
+            Ok(docs) => streams.push(Box::new(docs)),
+            Err(e) => streams.push(Box::new(std::iter::once(Err(e)))),
+        }
+    }
+    let stored = order.iter().map(|&(s, doc)| {
+        let (read, fields) = streams[s]
+            .next()
+            .unwrap_or_else(|| Ok((usize::MAX, vec![])))?;
+        if read != doc {
+            return Err(es_codec::Error(format!("merge read doc {read}, not {doc}")));
+        }
+        let mut out = vec![];
+        for (n, v) in fields {
+            if let Some(&n) = numbers.get(readers[s].field_by_number(n)?.name.as_str()) {
+                out.push((n, v));
             }
-            Ok(out)
-        })
+        }
+        Ok(out)
     });
     // `MergePolicy.size`: bytes prorated by the share of live docs.
     let live_bytes = |&(bytes, max_doc, del): &(u64, i32, i32)| match max_doc {
@@ -2061,9 +2253,11 @@ fn merge_segments(
         _ => (bytes as f64 * (1.0 - f64::from(del) / f64::from(max_doc))) as u64,
     };
     let total = sizes.iter().map(live_bytes).sum();
-    let seg = segment.finish(dir, max_doc as i32, stored, |bytes| {
+    let mut seg = segment.finish(dir, max_doc as i32, stored, |bytes| {
         use_compound_file(compound_format, bytes, total)
     })?;
+    seg.info.index_sort = sort.to_vec();
+    seg.info.has_blocks = readers.iter().any(|r| r.seg.info.has_blocks);
     infos.counter += 1;
     let mut at = 0..;
     infos
@@ -2071,6 +2265,73 @@ fn merge_segments(
         .retain(|_| !picked.contains(&at.next().unwrap()));
     infos.segments.insert(first, ours(seg, &empty));
     Ok(())
+}
+
+/// The live docs of `readers` as `(reader, doc)`, in their merged segment's order: one segment
+/// after another, or for an index `sort` Lucene's `MultiSorter` order, which merges the
+/// segments' blocks (a root after its nested docs) by the roots' keys, ties to the earlier
+/// segment.
+fn merge_order(
+    readers: &[SegmentReader],
+    sort: &[es_codec::segment_infos::SortField],
+) -> es_codec::Result<Vec<(usize, usize)>> {
+    let mut order = vec![];
+    let mut blocks = vec![];
+    for (s, r) in readers.iter().enumerate() {
+        let live = r.live_docs()?;
+        if sort.is_empty() {
+            order.extend((0..live.len()).filter(|&d| live[d]).map(|d| (s, d)));
+            continue;
+        }
+        let numbers = |field: &str| match r.doc_values(field) {
+            Ok(DocValues::Numbers(n)) => Ok(n),
+            _ => Err(es_codec::Error(format!(
+                "{}: no numbers in {field}",
+                r.seg.name
+            ))),
+        };
+        // Only roots have a `_primary_term`.
+        let roots = numbers("_primary_term")?;
+        let columns = (sort.iter())
+            .map(|f| {
+                r.field(f.field())
+                    .ok()
+                    .map(|_| r.doc_values(f.field()))
+                    .transpose()
+            })
+            .collect::<es_codec::Result<Vec<_>>>()?;
+        let mut list = std::collections::VecDeque::new();
+        let mut start = 0;
+        for doc in (0..r.max_doc()).filter(|&d| roots.get(d).is_some_and(|v| !v.is_empty())) {
+            if live[doc] {
+                let keys = (sort.iter().zip(&columns))
+                    .map(|(f, c)| match c {
+                        Some(DocValues::Numbers(n)) => sort_key(f, &n[doc], &[]),
+                        Some(DocValues::Ordinals { ords, terms }) => {
+                            let held: Vec<&[u8]> =
+                                ords[doc].iter().map(|&o| &terms[o][..]).collect();
+                            sort_key(f, &[], &held)
+                        }
+                        _ => sort_key(f, &[], &[]),
+                    })
+                    .collect::<Vec<_>>();
+                list.push_back((keys, start..doc + 1));
+            }
+            start = doc + 1;
+        }
+        blocks.push(list);
+    }
+    // `min_by` keeps the first of equal keys: the earlier segment's.
+    while let Some(s) = (0..blocks.len())
+        .filter(|&s| !blocks[s].is_empty())
+        .min_by(|&a, &b| cmp_keys(sort, &blocks[a][0].0, &blocks[b][0].0))
+    {
+        let Some((_, docs)) = blocks[s].pop_front() else {
+            break;
+        };
+        order.extend(docs.map(|d| (s, d)));
+    }
+    Ok(order)
 }
 
 /// The terms of `field` in the segments of `readers` (whose docs `maps` gives merged ids), merged
@@ -2117,6 +2378,19 @@ fn merge_terms<'a>(
                     }
                 }
             }
+            if !out.docs.is_sorted() {
+                // a sorted merge interleaves the segments' docs
+                let mut at: Vec<usize> = (0..out.docs.len()).collect();
+                at.sort_by_key(|&i| out.docs[i].0);
+                out.docs = at.iter().map(|&i| out.docs[i]).collect();
+                if !out.positions.is_empty() {
+                    let mut positions = std::mem::take(&mut out.positions);
+                    out.positions = at
+                        .iter()
+                        .map(|&i| std::mem::take(&mut positions[i]))
+                        .collect();
+                }
+            }
             if !out.docs.is_empty() {
                 return Some(Ok(out));
             }
@@ -2144,22 +2418,30 @@ fn use_compound_file(compound_format: Option<&str>, merged: u64, total: u64) -> 
     ratio > 0.0 && merged <= max && (ratio >= 1.0 || merged as f64 <= ratio * total as f64)
 }
 
-/// Per live doc of `readers` in turn (where `maps` gives it a merged id), what `read` gives for
-/// it in its segment, or the default where the segment lacks `field`.
-fn concat_live<T: Default>(
+/// Per doc of a merge of `readers` (where `maps` gives their live docs merged ids), what `read`
+/// gives for it in its segment, or the default where the segment lacks `field`.
+fn by_merged_doc<T: Default>(
     readers: &[SegmentReader],
     maps: &[Vec<Option<u32>>],
     field: &str,
     read: impl Fn(&SegmentReader) -> es_codec::Result<Vec<T>>,
 ) -> es_codec::Result<Vec<T>> {
-    let mut out = vec![];
+    let mut out: Vec<T> = maps
+        .iter()
+        .flatten()
+        .flatten()
+        .map(|_| T::default())
+        .collect();
     for (r, map) in readers.iter().zip(maps) {
         let mut values = match r.field(field) {
             Ok(_) => read(r)?,
             Err(_) => vec![],
         };
-        let live = (0..map.len()).filter(|&d| map[d].is_some());
-        out.extend(live.map(|d| values.get_mut(d).map(std::mem::take).unwrap_or_default()));
+        for (d, new) in map.iter().enumerate() {
+            if let (Some(new), Some(v)) = (new, values.get_mut(d)) {
+                out[*new as usize] = std::mem::take(v);
+            }
+        }
     }
     Ok(out)
 }
@@ -2271,17 +2553,7 @@ fn write_shard(prev: &Path, dir: &Path, ix: &Index, shard: &Shard) -> es_codec::
     }
     owned.sort_by_key(|(_, d)| d.seq_no);
     let docs: Vec<_> = owned.iter().map(|(id, d)| (*id, &**d)).collect();
-    let sorted = ix
-        .settings
-        .flat()
-        .keys()
-        .any(|k| k.starts_with("index.sort."));
-    // ponytail: Lucene refuses unsorted segments in a sorted index; sort docs to support it
-    if sorted && !docs.is_empty() {
-        return Err(es_codec::Error(
-            "writing documents to an index with index.sort.* settings is unsupported".into(),
-        ));
-    }
+    let sort = index_sort(ix)?;
     if !docs.is_empty() {
         infos.segments.push(write_docs(
             dir,
@@ -2290,10 +2562,16 @@ fn write_shard(prev: &Path, dir: &Path, ix: &Index, shard: &Shard) -> es_codec::
             &ix.mappings,
             &shard.ignore_above,
             &es_codec::segment_writer::es_meta_fields(),
+            &sort,
         )?);
         infos.counter += 1;
     }
-    merge(dir, &mut infos, ix.settings.get("index.compound_format"))?;
+    merge(
+        dir,
+        &mut infos,
+        ix.settings.get("index.compound_format"),
+        &sort,
+    )?;
     infos.generation += 1;
     infos.version += 1;
     infos.user_data = shard_user_data(
@@ -2649,6 +2927,109 @@ mod tests {
         let disk = back["i"].shards[0].disk.as_ref().unwrap();
         let late = disk.number_docs("late", |v| v.cmp(&3), false).unwrap();
         assert!(late.contains(&disk.pos("3").unwrap()));
+    }
+
+    /// Like Lucene under Elasticsearch's IndexSortConfig, a sorted index's segments, flushed or
+    /// merged, record the index sort and hold their documents in its order, each root right
+    /// after its nested docs and marked with the parent field Elasticsearch configures.
+    #[test]
+    fn disk_fidelity_sorted_indices_write_segments_in_sort_order() {
+        use es_codec::segment_infos::SortField;
+        let mappings: Mappings = serde_json::from_value(json!({"properties": {
+            "k": {"type": "keyword"},
+            "n": {"type": "long"},
+            "c": {"type": "nested", "properties": {"a": {"type": "keyword"}}},
+        }}))
+        .unwrap();
+        let index = || {
+            let mut ix = Index {
+                mappings: mappings.clone(),
+                ..Index::default()
+            };
+            let sort = json!({"field": ["k", "n"], "order": ["desc", "asc"]});
+            ix.settings.merge(&json!({"index": {"sort": sort}}));
+            Indices::from([("i".to_owned(), ix)])
+        };
+        let (merged, flushed) = (scratch("sorted-merge"), scratch("sorted-flush"));
+        let (mut each, mut all) = (index(), index());
+        for round in 0..12 {
+            for i in 0..3 {
+                let n = (round * 7 + i * 5) % 11;
+                let mut doc = json!({"n": [n, 50 - n], "c": [{"a": i.to_string()}]});
+                if (round + i) % 4 != 0 {
+                    doc["k"] = json!(["a", format!("k{}", (round + i) % 3)]);
+                }
+                for ix in [&mut each, &mut all].map(|i| i.get_mut("i").unwrap()) {
+                    ix.put(&format!("{round}-{i}"), doc.clone());
+                    if round > 0 && i == 0 {
+                        ix.delete(&format!("{}-1", round - 1));
+                    }
+                }
+            }
+            save(&merged, &each).unwrap();
+        }
+        save(&flushed, &all).unwrap();
+        let want = [
+            SortField::SortedSet {
+                field: "k".into(),
+                reverse: true,
+                selector: 1,
+                missing: 1, // STRING_FIRST, which a reverse sort puts last
+            },
+            SortField::SortedNumeric {
+                field: "n".into(),
+                sort_type: "LONG".into(),
+                reverse: false,
+                selector: 0,
+                missing: Some(i64::MAX),
+            },
+        ];
+        for dir in [shard(&merged), shard(&flushed)] {
+            let infos = SegmentInfos::read_latest(&dir).unwrap();
+            for seg in infos.segments {
+                assert_eq!(seg.info.index_sort, want);
+                assert!(seg.info.has_blocks);
+                let r = SegmentReader::open(&dir, seg).unwrap();
+                let column = |f: &str| match r.doc_values(f).unwrap() {
+                    DocValues::Numbers(n) => n,
+                    _ => panic!("{f}"),
+                };
+                let (roots, parents, n) = (
+                    column("_primary_term"),
+                    column("__root_doc_for_nested"),
+                    column("n"),
+                );
+                assert!(r.field("__root_doc_for_nested").unwrap().parent);
+                let DocValues::Ordinals { ords, terms } = r.doc_values("k").unwrap() else {
+                    panic!("k");
+                };
+                // each doc has one nested object: nested, root, nested, root, ...
+                for doc in 0..r.max_doc() {
+                    let root = doc % 2 == 1;
+                    assert_eq!(roots[doc].is_empty(), !root);
+                    assert_eq!(parents[doc], if root { vec![-1] } else { vec![] });
+                }
+                let keys: Vec<_> = (0..r.max_doc())
+                    .filter(|d| d % 2 == 1)
+                    .map(|d| {
+                        let k = ords[d].iter().map(|&o| &terms[o]).max();
+                        (std::cmp::Reverse(k), n[d].iter().min().copied())
+                    })
+                    .collect();
+                assert!(keys.is_sorted(), "{keys:?}");
+            }
+        }
+        assert!(
+            SegmentInfos::read_latest(&shard(&merged))
+                .unwrap()
+                .segments
+                .len()
+                < 12
+        );
+        let want = index_data(&shard(&flushed));
+        assert_eq!(want.len(), 25);
+        assert_eq!(index_data(&shard(&merged)), want);
+        assert_eq!(open(&merged).unwrap()["i"].docs().count(), 25);
     }
 
     #[test]

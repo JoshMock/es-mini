@@ -297,21 +297,6 @@ fn a_corrupt_segment_fails_open() {
     assert!(e.contains("checksum"), "{e}");
 }
 
-#[test]
-fn saving_segments_of_a_sorted_index_fails() {
-    // es-mini writes unsorted segments, and Lucene refuses to open those in a sorted index.
-    let root = scratch("sorted");
-    let dir = root.join("data");
-    let mut indices = Indices::new();
-    let ix = indices.entry("idx".into()).or_default();
-    ix.settings
-        .merge(&json!({"index": {"sort": {"field": "n"}}}));
-    disk::save(&dir, &indices).unwrap(); // no documents, so no segments
-    indices.get_mut("idx").unwrap().put("1", json!({"n": 1}));
-    let e = disk::save(&dir, &indices).unwrap_err();
-    assert!(e.to_string().contains("index.sort"), "{e}");
-}
-
 /// List settings are written as arrays, as Elasticsearch's cluster state stores them.
 #[test]
 fn list_settings_survive_a_save() {
