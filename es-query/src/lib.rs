@@ -16,6 +16,7 @@ pub mod esql;
 mod hll;
 mod hll_tables;
 mod parse;
+mod profile;
 mod query_string;
 mod ranges;
 mod regexp;
@@ -39,6 +40,7 @@ use std::{
     cell::{OnceCell, RefCell},
     cmp::Ordering,
     collections::{BTreeSet, HashMap, HashSet},
+    time::Instant,
 };
 
 /// Whether the whole of `s` matches the Lucene regular expression `pattern`, compiled with
@@ -1383,8 +1385,8 @@ pub struct SearchResult<'a> {
     pub hits: Vec<Hit<'a>>,
     /// The rendered `aggregations`, if the request had any.
     pub aggregations: Option<Value>,
-    /// With `profile: true`, each searched target's index, shard number and `aggregations`
-    /// profile (an array), in target order.
+    /// With `profile: true`, each searched target's index, shard number and profile (its
+    /// `searches`, `aggregations` and, if it fetched hits, `fetch`), in target order.
     pub profile: Option<Vec<(&'a str, usize, Value)>>,
     /// The index and shard number of each target that failed, with why; their documents are
     /// left out.
@@ -1736,6 +1738,7 @@ pub fn search_many<'a>(
     let mut total = 0;
     let global = req.dfs.then(|| global_stats(targets, &req.query));
     for (pos, &(name, shard, index, filter)) in targets.iter().enumerate() {
+        let started = Instant::now();
         let query = match with_filter(index, &req.query, filter, now) {
             Ok(q) => q,
             Err(e) => {
@@ -1743,6 +1746,7 @@ pub fn search_many<'a>(
                 continue;
             }
         };
+        let rewrite = started.elapsed().as_nanos() as u64;
         let mut s = Searcher::unscored(index, &query);
         s.runtime_source = req.runtime_source.clone();
         s.shard_index = pos;
@@ -1843,7 +1847,12 @@ pub fn search_many<'a>(
         let (stats, p) = collector.finish(matches!(query, Query::MatchAll), match_none);
         aggs::reduce(&mut aggs, stats);
         if let (Some(all), Some(p)) = (&mut profile, p) {
-            all.push((name, shard, p));
+            let took = started.elapsed().as_nanos() as u64;
+            let searches = profile::searches(req, &query, rewrite, took);
+            all.push((
+                pos,
+                serde_json::json!({"searches": searches, "aggregations": p}),
+            ));
         }
         searchers.insert(pos, s);
     }
@@ -1871,6 +1880,7 @@ pub fn search_many<'a>(
         .then(|| hits.iter().map(|h| h.score as f32).reduce(f32::max))
         .flatten();
     let found = hits.len();
+    let fetching = Instant::now();
     // a hit whose `fields` fail fails its shard, as ES's fetch does
     let page: Vec<_> = (hits.into_iter().skip(req.from).take(req.size))
         .filter_map(|h| {
@@ -1902,6 +1912,18 @@ pub fn search_many<'a>(
         }
     }
     page_hits.retain(|(target, _)| !fetch_failed.contains(target));
+    let fetch_took = fetching.elapsed().as_nanos() as u64;
+    let profile = profile.map(|all| {
+        (all.into_iter())
+            .map(|(pos, mut p)| {
+                let n = page_hits.iter().filter(|(t, _)| *t == pos).count();
+                if n > 0 {
+                    p["fetch"] = profile::fetch(n, fetch_took);
+                }
+                (targets[pos].0, targets[pos].1, p)
+            })
+            .collect()
+    });
     if !failures.is_empty() && failures.len() == targets.len() {
         let shards = (failures.iter()).map(|(n, s, e)| (n.to_string(), *s, e.clone()));
         let shards = shards.collect();

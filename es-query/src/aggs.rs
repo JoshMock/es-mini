@@ -813,6 +813,12 @@ pub struct Agg {
     derivatives: Vec<Derivative>,
 }
 
+impl Agg {
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+}
+
 /// `aggs` with the queries of their filter aggregations resolved for `index` (see
 /// [`crate::dates::resolve_dates`]). Fails, as ES's shards do, on a malformed DecimalFormat
 /// pattern for a numeric (or unmapped) field.

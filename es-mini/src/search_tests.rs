@@ -246,6 +246,116 @@ async fn profile_times_each_aggregation_per_shard() {
 }
 
 #[tokio::test]
+async fn search_profile_reports_query_collectors_and_fetch() {
+    let app = seeded().await;
+    let body = json!({"profile": true, "query": {"term": {"t.keyword": "pear"}}});
+    let (s, r) = call(&app, Method::POST, "/idx/_search", Some(body)).await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    let shard = &r["profile"]["shards"][0];
+    let search = &shard["searches"][0];
+    let q = &search["query"][0];
+    assert_eq!(q["type"], "TermQuery");
+    assert_eq!(q["description"], "t.keyword:pear");
+    assert!(q["time_in_nanos"].as_u64().unwrap() > 0);
+    assert_eq!(q["breakdown"].as_object().unwrap().len(), 20);
+    assert_eq!(q["breakdown"]["create_weight_count"], 1);
+    assert!(q.get("children").is_none());
+    assert!(search["rewrite_time"].is_u64());
+    let c = &search["collector"][0];
+    assert_eq!(c["name"], "QueryPhaseCollector");
+    assert_eq!(c["reason"], "search_query_phase");
+    assert_eq!(c["children"][0]["name"], "TopScoreDocCollector");
+    assert_eq!(c["children"][0]["reason"], "search_top_hits");
+    assert_eq!(shard["aggregations"], json!([]));
+    let f = &shard["fetch"];
+    assert_eq!(
+        (&f["type"], &f["description"]),
+        (&json!("fetch"), &json!(""))
+    );
+    assert_eq!(f["breakdown"]["load_source_count"], 1);
+    assert_eq!(
+        f["debug"]["stored_fields"],
+        json!(["_id", "_routing", "_source"])
+    );
+    let phases: Vec<_> = f["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| &p["type"])
+        .collect();
+    assert_eq!(
+        phases,
+        ["FetchFieldsPhase", "FetchSourcePhase", "StoredFieldsPhase"]
+    );
+    assert_eq!(f["children"][1]["debug"]["fast_path"], 1);
+    assert_eq!(f["children"][0]["breakdown"]["process_count"], 1);
+}
+
+#[tokio::test]
+async fn search_profile_size_zero_counts_and_skips_fetch() {
+    let app = seeded().await;
+    let aggs = json!({"x": {"max": {"field": "n"}}, "y": {"min": {"field": "n"}}});
+    let body = json!({"profile": true, "size": 0, "aggs": aggs});
+    let (_, r) = call(&app, Method::POST, "/idx/_search", Some(body)).await;
+    let shard = &r["profile"]["shards"][0];
+    let q = &shard["searches"][0]["query"][0];
+    assert_eq!(q["type"], "ConstantScoreQuery");
+    assert_eq!(q["description"], "ConstantScore(*:*)");
+    assert_eq!(q["children"][0]["type"], "MatchAllDocsQuery");
+    let names: Vec<_> = (shard["searches"][0]["collector"][0]["children"]
+        .as_array()
+        .unwrap())
+    .iter()
+    .map(|c| (&c["name"], &c["reason"]))
+    .collect();
+    assert_eq!(
+        names,
+        [
+            (&json!("PartialHitCountCollector"), &json!("search_count")),
+            (&json!("AggregatorCollector: [x, y]"), &json!("aggregation")),
+        ]
+    );
+    assert!(shard.get("fetch").is_none());
+}
+
+#[tokio::test]
+async fn search_profile_describes_queries_like_lucene() {
+    let app = seeded().await;
+    let describe = async |query: serde_json::Value| {
+        let body = json!({"profile": true, "query": query});
+        let (_, r) = call(&app, Method::POST, "/idx/_search", Some(body)).await;
+        r["profile"]["shards"][0]["searches"][0]["query"][0].clone()
+    };
+    let t = |v: &str| json!({"term": {"t.keyword": v}});
+    let bool = json!({"bool": {"must": [t("a")], "should": [t("b"), t("c")],
+        "must_not": [t("e")], "filter": [t("f")]}});
+    let q = describe(bool).await;
+    assert_eq!(q["type"], "BooleanQuery");
+    assert_eq!(
+        q["description"],
+        "+t.keyword:a -t.keyword:e t.keyword:b t.keyword:c #t.keyword:f"
+    );
+    assert_eq!(q["children"][1]["description"], "t.keyword:e");
+    let q =
+        describe(json!({"bool": {"should": [t("b"), t("c")], "minimum_should_match": 2}})).await;
+    assert_eq!(q["description"], "(t.keyword:b t.keyword:c)~2");
+    let q = describe(json!({"term": {"t.keyword": {"value": "a", "boost": 2}}})).await;
+    assert_eq!(
+        (&q["type"], &q["description"]),
+        (&json!("BoostQuery"), &json!("(t.keyword:a)^2.0"))
+    );
+    let q = describe(json!({"match_all": {}})).await;
+    assert_eq!(
+        (&q["type"], &q["description"]),
+        (&json!("MatchAllDocsQuery"), &json!("*:*"))
+    );
+    let body = json!({"profile": true, "sort": ["n"]});
+    let (_, r) = call(&app, Method::POST, "/idx/_search", Some(body)).await;
+    let c = &r["profile"]["shards"][0]["searches"][0]["collector"][0]["children"][0];
+    assert_eq!(c["name"], "SimpleFieldCollector");
+}
+
+#[tokio::test]
 async fn profile_numeric_terms_debug_counts_shard_buckets() {
     let app = seeded().await;
     let aggs = json!({"n": {"terms": {"field": "n", "size": 1, "shard_size": 1}}});

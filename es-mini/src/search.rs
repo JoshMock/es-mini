@@ -147,19 +147,21 @@ pub(crate) fn shards(n: usize, failed: &[es_query::ShardFailure]) -> Value {
     s
 }
 
-/// The `profile` section: one entry per searched shard, ordered by id like ES. ponytail: only
-/// aggregations are profiled; there is no `searches` (query) or `fetch` profile.
+/// The `profile` section: one entry per searched shard, ordered by id like ES.
 fn profile(searched: Vec<(&str, usize, Value)>) -> Value {
     let mut shards: Vec<Value> = (searched.into_iter())
-        .map(|(index, shard, aggs)| {
-            json!({
+        .map(|(index, shard, profiled)| {
+            let mut s = json!({
                 "id": format!("[{}][{index}][{shard}]", crate::nodes::NODE_ID),
                 "node_id": crate::nodes::NODE_ID,
                 "shard_id": shard,
                 "index": index,
                 "cluster": "(local)",
-                "aggregations": aggs,
-            })
+            });
+            if let (Some(s), Value::Object(p)) = (s.as_object_mut(), profiled) {
+                s.extend(p);
+            }
+            s
         })
         .collect();
     shards.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
