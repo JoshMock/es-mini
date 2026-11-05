@@ -1327,6 +1327,38 @@ fn esql_speed_rlike_compiled_once_answers_every_row() {
     assert_eq!(r.values, [[Value::Null, json!(true)]]);
 }
 
+/// A RENAME renames only the rows a later LIMIT keeps, which are the ones it would have kept:
+/// a SORT, WHERE or STATS between them sees every row.
+#[test]
+fn esql_speed_rename_before_limit_keeps_the_same_rows() {
+    let values = |query: &str| q(query).values;
+    let row = |n: &str, a: i64| vec![json!(n), json!(a)];
+    for (query, rows) in [
+        (
+            "FROM people | RENAME name AS who | KEEP who, age | LIMIT 2",
+            vec![row("ann", 30), row("bob", 25)],
+        ),
+        (
+            "FROM people | RENAME name AS who | EVAL a = age | KEEP who, a | LIMIT 2",
+            vec![row("ann", 30), row("bob", 25)],
+        ),
+        (
+            "FROM people | RENAME name AS who | SORT age DESC | KEEP who, age | LIMIT 2",
+            vec![row("cid", 41), row("ann", 30)],
+        ),
+        (
+            "FROM people | RENAME name AS who | WHERE age < 40 | KEEP who, age | LIMIT 1",
+            vec![row("ann", 30)],
+        ),
+        (
+            "FROM people | RENAME age AS a | STATS n = COUNT(*) BY a | SORT a | KEEP a, n | LIMIT 1",
+            vec![vec![json!(25), json!(1)]],
+        ),
+    ] {
+        assert_eq!(values(query), rows, "{query}");
+    }
+}
+
 #[test]
 fn stats_count_star_by_groups() {
     let r = q("FROM people METADATA _index | STATS c = COUNT(*) BY _index");

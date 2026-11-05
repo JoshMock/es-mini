@@ -2925,6 +2925,14 @@ fn run_at(
         (Some(Command::Eval(named)), Some(Command::Where(e))) => Some((named, e)),
         _ => None,
     };
+    // The LIMIT after command `i`, when only KEEP, DROP and RENAME (which keep every row) come
+    // between them.
+    let next_limit = |i: usize| match (cmds[i + 1..].iter())
+        .find(|c| !matches!(c, Command::Keep(_) | Command::Drop(_) | Command::Rename(_)))
+    {
+        Some(&Command::Limit(n)) => Some(n.min(MAX_LIMIT)),
+        _ => None,
+    };
     // The rows at the cut of `load_counts`' plan, which it may reuse.
     let cut = plan_cut(&cmds);
     let mut at_cut = Vec::new();
@@ -3180,15 +3188,13 @@ fn run_at(
             Command::Drop(patterns) => {
                 cols.retain(|c| !patterns.iter().any(|(p, _)| aliases::glob(p, c)));
             }
-            // Only the rows a LIMIT keeps need sorting; KEEP, DROP and RENAME keep every row.
-            Command::Sort(keys) => match cmds[i + 1..]
-                .iter()
-                .find(|c| !matches!(c, Command::Keep(_) | Command::Drop(_) | Command::Rename(_)))
-            {
-                Some(&Command::Limit(n)) => top_rows(&mut rows, keys, n.min(MAX_LIMIT)),
-                _ => sort_rows(&mut rows, keys),
+            // Only the rows a LIMIT keeps need sorting or renaming.
+            Command::Sort(keys) => match next_limit(i) {
+                Some(n) => top_rows(&mut rows, keys, n),
+                None => sort_rows(&mut rows, keys),
             },
             Command::Rename(pairs) => {
+                rows.truncate(next_limit(i).unwrap_or(usize::MAX));
                 for r in &mut rows {
                     let r = owned(r, &kept);
                     for ((old, _), new, _) in pairs.iter().filter(|(o, n, _)| o.0 != *n) {
