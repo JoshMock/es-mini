@@ -775,6 +775,8 @@ pub fn update_doc(
     };
     let detect_noop = body["detect_noop"].as_bool() != Some(false);
     let (w, total, index) = write_doc(state, index, (id, routing), |i, routing| {
+        // ponytail: a long just below -2^63 in the body is read as a double that rounds to
+        // -2^63, so the update passes (and writes -2^63) where Elasticsearch refuses it
         i.update(id, routing, &partial, upsert, detect_noop, |i, source| {
             check_fields(i, java_json(source).as_bytes(), id, source)
         })

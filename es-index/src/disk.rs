@@ -536,11 +536,6 @@ pub fn norm_len(norm: i8) -> u32 {
 /// Index data for one shard segment's Lucene documents (see [`lucene_docs`]), built from the
 /// mapped fields whose values are scalars or arrays of scalars. Field numbers start at 6, after
 /// the metadata fields.
-// ponytail: integer fields holding fractions (which Elasticsearch truncates, where es-mini matches
-// them as they are), or long values just below -2^63 written by `_update` (whose body es-mini
-// reads as doubles, rounding them to -2^63 so the range check passes), are left out of the
-// segment; only Elasticsearch notices, as es-mini reads `_source` where a segment lacks a field.
-// Writing them needs es-mini to truncate fractions in its reads, as Elasticsearch does.
 #[derive(Default)]
 struct UserFields {
     fields: Vec<es_codec::field_infos::FieldInfo>,
@@ -1069,7 +1064,13 @@ fn user_fields(
                 // Like ES, numeric strings are numbers, and values that do not fit the type
                 // finitely are malformed.
                 let float = |v: &Value| crate::json_num(v).map(|f| f as f32);
-                let int = |min, max| typed(&values, &move |v| integer(v, min, max));
+                // integers truncate fractions, as es-mini reads them (see `json_int`)
+                let int = |min, max| {
+                    typed(&values, &move |v| match crate::json_int(v) {
+                        Some(n) => (min..=max).contains(&n).then_some(Some(n)),
+                        None => Some(None),
+                    })
+                };
                 let (width, nums) = match mapping {
                     M::Long => (8, int(i64::MIN, i64::MAX)),
                     M::Integer => (4, int(i32::MIN.into(), i32::MAX.into())),

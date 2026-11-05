@@ -115,9 +115,11 @@ fn disk_writer_completeness_coerces_scalars_and_skips_malformed_values() {
         panic!("longs are sorted numerics");
     };
     assert_eq!(n, [vec![10], vec![3]]);
-    // An integer with a fraction would need truncating, as Elasticsearch does, where es-mini
-    // matches the fraction, so the field stays out of the segment.
-    assert!(r.field("i").is_err());
+    // An integer with a fraction is truncated, as Elasticsearch does.
+    let Ok(DocValues::Numbers(i)) = r.doc_values("i") else {
+        panic!("integers are sorted numerics");
+    };
+    assert_eq!(i, [vec![1], vec![2]]);
 }
 
 #[test]
@@ -170,6 +172,25 @@ fn disk_fidelity_date_nanos_epoch_longs_are_written_unchecked() {
         panic!("date_nanos are sorted numerics");
     };
     assert_eq!(n, [vec![-5_000_000_000_000_000], vec![i64::MAX]]);
+}
+
+#[test]
+fn disk_fidelity_integer_fractions_are_written_truncated() {
+    use es_codec::doc_values::DocValues;
+    let mut idx = Index::default();
+    idx.mappings
+        .properties
+        .insert("n".into(), FieldMapping::Integer);
+    // NumberFieldMapper coerces fractions toward zero (Elasticsearch 9.5.5 indexes 1.5 as 1 and
+    // "-2.7" as -2), so the field is written for every document.
+    idx.put("1", json!({"n": 1.5}));
+    idx.put("2", json!({"n": "-2.7"}));
+    idx.put("3", json!({"n": 3}));
+    let (_root, r) = saved_segment("integer-fractions", idx);
+    let Ok(DocValues::Numbers(n)) = r.doc_values("n") else {
+        panic!("integers are sorted numerics");
+    };
+    assert_eq!(n, [vec![1], vec![-2], vec![3]]);
 }
 
 #[test]
