@@ -536,11 +536,10 @@ pub fn norm_len(norm: i8) -> u32 {
 /// Index data for one shard segment's Lucene documents (see [`lucene_docs`]), built from the
 /// mapped fields whose values are scalars or arrays of scalars. Field numbers start at 6, after
 /// the metadata fields.
-// ponytail: fields holding values Elasticsearch would truncate or reject but es-mini matches as
-// they are (integer fractions or out-of-range values, `date_nanos` before 1970, objects at a text
-// or keyword leaf) are left out of the segment; only Elasticsearch notices, as es-mini reads
-// `_source` where a segment lacks a field. Writing them needs es-mini to truncate or reject those
-// values at index time, as Elasticsearch does.
+// ponytail: integer fields holding fractions or out-of-range values (which Elasticsearch truncates
+// or rejects, where es-mini matches them as they are) are left out of the segment; only
+// Elasticsearch notices, as es-mini reads `_source` where a segment lacks a field. Writing them
+// needs es-mini to truncate or reject those values at index time, as Elasticsearch does.
 #[derive(Default)]
 struct UserFields {
     fields: Vec<es_codec::field_infos::FieldInfo>,
@@ -1096,7 +1095,9 @@ fn user_fields(
                     M::DateNanos { format, locale } => (
                         8,
                         typed(&values, &|v| {
-                            date_nanos(format.as_deref(), locale.as_deref(), v)
+                            let (format, locale) = (format.as_deref(), locale.as_deref());
+                            (epoch_long_nanos(format, locale, v).map(Some))
+                                .or_else(|| date_nanos(format, locale, v))
                         }),
                     ),
                     _ => continue,

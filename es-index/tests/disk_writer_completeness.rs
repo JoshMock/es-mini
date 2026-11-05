@@ -153,6 +153,26 @@ fn disk_writer_completeness_writes_date_nanos_as_epoch_nanos() {
 }
 
 #[test]
+fn disk_fidelity_date_nanos_epoch_longs_are_written_unchecked() {
+    use es_codec::doc_values::DocValues;
+    let mut idx = Index::default();
+    let dn = FieldMapping::DateNanos {
+        format: None,
+        locale: None,
+    };
+    idx.mappings.properties.insert("dn".into(), dn);
+    // Elasticsearch accepts JSON longs outside the int range as epoch millis, converting them
+    // to nanos with saturation and no range check.
+    idx.put("1", json!({"dn": -5_000_000_000_i64}));
+    idx.put("2", json!({"dn": 99_999_999_999_999_i64}));
+    let (_root, r) = saved_segment("epoch-longs", idx);
+    let Ok(DocValues::Numbers(n)) = r.doc_values("dn") else {
+        panic!("date_nanos are sorted numerics");
+    };
+    assert_eq!(n, [vec![-5_000_000_000_000_000], vec![i64::MAX]]);
+}
+
+#[test]
 fn disk_writer_completeness_lists_ignore_above_fields_in_ignored() {
     use es_codec::doc_values::DocValues;
     let mut idx = Index::default();
