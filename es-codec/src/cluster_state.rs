@@ -26,6 +26,17 @@ pub struct IndexMetadata {
     pub list_settings: BTreeMap<String, Vec<String>>,
     /// Mapping JSON as stored, e.g. `{"_doc":{"properties":{...}}}`; `None` if the index has none.
     pub mappings: Option<String>,
+    pub aliases: BTreeMap<String, AliasMetadata>,
+}
+
+/// An alias of an index, as `AliasMetadata` stores it; `filter` is the filter's JSON.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AliasMetadata {
+    pub filter: Option<String>,
+    pub index_routing: Option<String>,
+    pub search_routing: Option<String>,
+    pub is_write_index: Option<bool>,
+    pub is_hidden: Option<bool>,
 }
 
 impl IndexMetadata {
@@ -139,12 +150,38 @@ pub fn read_indices(data_dir: &Path) -> Result<Vec<IndexMetadata>> {
             .get("mappings_hash")
             .and_then(Value::as_str)
             .and_then(|h| mappings.get(h).cloned());
+        let mut aliases = BTreeMap::new();
+        if let Some(Value::Object(a)) = meta.get("aliases") {
+            for (alias, v) in a {
+                let text = |k| v.get(k).and_then(Value::as_str).map(str::to_owned);
+                let flag = |k| match v.get(k) {
+                    Some(Value::Bool(b)) => Some(*b),
+                    _ => None,
+                };
+                let filter = match v.get("filter") {
+                    Some(Value::Bytes(b)) => Some(
+                        String::from_utf8(unframe(b)?)
+                            .or_else(|_| err("alias filter is not utf-8"))?,
+                    ),
+                    _ => None,
+                };
+                let meta = AliasMetadata {
+                    filter,
+                    index_routing: text("index_routing"),
+                    search_routing: text("search_routing"),
+                    is_write_index: flag("is_write_index"),
+                    is_hidden: flag("is_hidden"),
+                };
+                aliases.insert(alias.clone(), meta);
+            }
+        }
         indices.push(IndexMetadata {
             name: name.clone(),
             uuid,
             settings,
             list_settings,
             mappings,
+            aliases,
         });
     }
     indices.sort_by(|a, b| a.name.cmp(&b.name));
@@ -257,6 +294,26 @@ pub fn write_state(
             mapping_docs.insert(hash.clone(), smile::encode(&wrapper));
             meta.push(("mappings_hash".into(), Value::String(hash)));
         }
+        // `AliasMetadata.Builder.toXContent` with `binary`: the filter as compressed JSON.
+        let aliases = ix.aliases.iter().map(|(name, a)| {
+            let text =
+                |k: &str, v: &Option<String>| v.clone().map(|v| (k.into(), Value::String(v)));
+            let flag = |k: &str, v: Option<bool>| v.map(|v| (k.into(), Value::Bool(v)));
+            let filter = (a.filter.as_ref())
+                .map(|f| ("filter".into(), Value::Bytes(inflate::frame(f.as_bytes()))));
+            let fields = [
+                filter,
+                text("index_routing", &a.index_routing),
+                text("search_routing", &a.search_routing),
+                flag("is_write_index", a.is_write_index),
+                flag("is_hidden", a.is_hidden),
+            ];
+            (
+                name.clone(),
+                Value::Object(fields.into_iter().flatten().collect()),
+            )
+        });
+        meta.push(("aliases".into(), Value::Object(aliases.collect())));
         // Without an in-sync id, Elasticsearch recovers the primary from an empty store.
         let in_sync = (0..ix.number_of_shards()).map(|n| {
             let ids = Value::Array(vec![Value::String(ALLOCATION_ID.into())]);
@@ -368,6 +425,16 @@ mod tests {
                 settings: [("index.number_of_shards".to_string(), "1".to_string())].into(),
                 list_settings: [("index.sort.field".to_string(), vec!["t".to_string()])].into(),
                 mappings: Some(r#"{"_doc":{"properties":{"t":{"type":"text"}}}}"#.into()),
+                aliases: [(
+                    "al".to_string(),
+                    AliasMetadata {
+                        filter: Some(r#"{"term":{"t":"x"}}"#.into()),
+                        index_routing: Some("1".into()),
+                        is_hidden: Some(true),
+                        ..Default::default()
+                    },
+                )]
+                .into(),
             },
             IndexMetadata {
                 name: "b".into(),
@@ -375,6 +442,7 @@ mod tests {
                 settings: BTreeMap::new(),
                 list_settings: BTreeMap::new(),
                 mappings: None,
+                aliases: BTreeMap::new(),
             },
         ];
         let global = GlobalMetadata {

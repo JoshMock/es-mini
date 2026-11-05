@@ -114,6 +114,29 @@ async fn a_write_that_cannot_be_saved_fails() {
 }
 
 #[tokio::test]
+async fn aliases_survive_restart() {
+    let dir = std::env::temp_dir().join(format!("esm-persist-alias-{}", std::process::id()));
+    let _cleanup = Cleanup(dir.clone());
+    let _ = std::fs::remove_dir_all(&dir);
+    let app = es_mini::app_persisted(&dir).unwrap();
+    call(&app, "PUT", "/a", json!({})).await;
+    call(&app, "PUT", "/b", json!({})).await;
+    let filter = json!({"term": {"n": 1}});
+    let actions = json!({"actions": [
+        {"add": {"index": "a", "alias": "f", "filter": filter, "routing": "1"}},
+        {"add": {"index": "a", "alias": "w", "is_write_index": true, "is_hidden": true}},
+        {"add": {"index": "b", "alias": "w", "is_hidden": true}},
+    ]});
+    call(&app, "POST", "/_aliases", actions).await;
+    let before = call(&app, "GET", "/_alias", json!({})).await;
+    assert_eq!(before["a"]["aliases"]["f"]["filter"], filter);
+    drop(app);
+
+    let app = es_mini::app_persisted(&dir).unwrap();
+    assert_eq!(call(&app, "GET", "/_alias", json!({})).await, before);
+}
+
+#[tokio::test]
 async fn writes_whose_path_ends_like_a_read_endpoint_survive_restart() {
     let dir = std::env::temp_dir().join(format!("esm-persist-suffix-{}", std::process::id()));
     let _cleanup = Cleanup(dir.clone());

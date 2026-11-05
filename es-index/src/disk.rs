@@ -40,6 +40,19 @@ pub fn open(data_dir: &Path) -> es_codec::Result<Indices> {
             let m: Value = serde_json::from_str(&m).map_err(|e| es_codec::Error(e.to_string()))?;
             index.mappings = Mappings::deserialize(&m["_doc"]).unwrap_or_default();
         }
+        for (name, a) in meta.aliases {
+            let filter = (a.filter.as_deref().map(serde_json::from_str))
+                .transpose()
+                .map_err(|e| es_codec::Error(e.to_string()))?;
+            let alias = crate::aliases::Alias {
+                filter,
+                index_routing: a.index_routing,
+                search_routing: a.search_routing,
+                is_write_index: a.is_write_index,
+                is_hidden: a.is_hidden,
+            };
+            index.aliases.insert(name, alias);
+        }
         // An index whose shards never started (e.g. a system index made just before shutdown)
         // has no shard directory. Some but not all is damage: loading the missing ones empty
         // would let the next save erase their documents.
@@ -2042,6 +2055,18 @@ fn metas(indices: &Indices) -> Vec<es_codec::cluster_state::IndexMetadata> {
                 settings,
                 list_settings,
                 mappings: serde_json::to_string(&serde_json::json!({"_doc": ix.mappings})).ok(),
+                aliases: (ix.aliases.iter())
+                    .map(|(name, a)| {
+                        let alias = es_codec::cluster_state::AliasMetadata {
+                            filter: a.filter.as_ref().map(Value::to_string),
+                            index_routing: a.index_routing.clone(),
+                            search_routing: a.search_routing.clone(),
+                            is_write_index: a.is_write_index,
+                            is_hidden: a.is_hidden,
+                        };
+                        (name.clone(), alias)
+                    })
+                    .collect(),
             }
         })
         .collect()
