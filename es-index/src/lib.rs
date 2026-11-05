@@ -342,10 +342,11 @@ pub const REQUEST_CACHE_BYTES: usize = (1 << 30) / 100;
 #[derive(Default)]
 struct Memo(Mutex<Option<Memoized>>);
 
-/// A value [`Index::memo`] built, the mappings it was built with, and the writes since: the
-/// sequence numbers of the documents removed and the ids of those stored.
+/// A value [`Index::memo`] built, the mappings and stamp it was built with, and the writes
+/// since: the sequence numbers of the documents removed and the ids of those stored.
 struct Memoized {
     mappings: Mappings,
+    stamp: Vec<u64>,
     value: Arc<dyn std::any::Any + Send + Sync>,
     removed: Vec<u64>,
     written: Vec<String>,
@@ -647,14 +648,15 @@ impl Shard {
         }
     }
 
-    /// What `build` makes of the documents and mappings, reused until a mapping change. After
-    /// writes, `follow` updates it with the sequence numbers of the documents they removed and
+    /// What `build` makes of the documents and mappings, reused until a mapping change or a
+    /// new `stamp`. After writes, `follow` updates it with the sequence numbers of the documents they removed and
     /// the live documents they stored, by sequence number; it is rebuilt instead if `follow`
     /// returns false or a caller still holds it. One value at a time: building another type
     /// replaces it.
     pub fn memo<T: std::any::Any + Send + Sync>(
         &self,
         mappings: &Mappings,
+        stamp: Vec<u64>,
         build: impl FnOnce() -> T,
         follow: impl FnOnce(&mut T, &[u64], &[(&str, &Document)]) -> bool,
     ) -> Arc<T> {
@@ -662,12 +664,14 @@ impl Shard {
         let mut memo = self.memo.0.lock().unwrap_or_else(PoisonError::into_inner);
         let keep = |v: &Arc<T>| Memoized {
             mappings: mappings.clone(),
+            stamp: stamp.clone(),
             value: v.clone(),
             removed: Vec::new(),
             written: Vec::new(),
         };
         if let Some(m) = memo.take()
             && m.mappings == *mappings
+            && m.stamp == stamp
             && let Ok(mut v) = m.value.downcast::<T>()
         {
             if m.removed.is_empty() && m.written.is_empty() {
@@ -1279,12 +1283,13 @@ impl Index {
         build: impl FnOnce() -> T,
         follow: impl FnOnce(&mut T, &[u64], &[(&str, &Document)]) -> bool,
     ) -> Arc<T> {
-        // ponytail: an index of several shards builds anew each time; one memo per shard if
-        // multi-shard ES|QL gets slow
-        if self.shards.len() > 1 {
-            return Arc::new(build());
+        if let [shard] = &self.shards[..] {
+            return shard.memo(&self.mappings, Vec::new(), build, follow);
         }
-        self.shards[0].memo(&self.mappings, build, follow)
+        // Several shards: kept in shard 0 and rebuilt after a write to any of them (whose
+        // sequence numbers then move), as a value of all of them cannot follow one shard's.
+        let stamp = self.shards.iter().map(|s| s.next_seq_no).collect();
+        self.shards[0].memo(&self.mappings, stamp, build, |_, _, _| false)
     }
 
     /// A copy for point-in-time searches: later writes to `self` do not change it. It shares
@@ -1775,6 +1780,32 @@ mod tests {
         drop(held);
         ix.mappings.source = Some(json!({"enabled": false}));
         assert_eq!(memo(&ix, true), "4");
+    }
+
+    #[test]
+    fn shard_search_speed_multi_shard_memo_is_reused_until_any_shard_changes() {
+        let mut ix = Index::default();
+        (ix.settings).merge(&json!({index_settings::NUMBER_OF_SHARDS: "2"}));
+        ix.put_in(0, "a", json!({}));
+        ix.put_in(1, "b", json!({}));
+        let builds = std::cell::Cell::new(0);
+        let memo = |ix: &Index| {
+            let build = || {
+                builds.set(builds.get() + 1);
+                builds.get()
+            };
+            *ix.memo(build, |_, _, _| true)
+        };
+        assert_eq!(memo(&ix), 1);
+        assert_eq!(memo(&ix), 1);
+        // rebuilt after a write to any shard, which it does not follow
+        ix.put_in(1, "c", json!({}));
+        assert_eq!(memo(&ix), 2);
+        ix.delete_in(0, "none");
+        assert_eq!(memo(&ix), 3);
+        assert_eq!(memo(&ix), 3);
+        ix.mappings.source = Some(json!({"enabled": false}));
+        assert_eq!(memo(&ix), 4);
     }
 
     #[test]

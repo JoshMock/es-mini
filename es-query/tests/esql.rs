@@ -220,6 +220,32 @@ fn filtered_alias_matches_in_every_shard() {
 }
 
 #[test]
+fn shard_search_speed_multi_shard_tables_follow_every_shard() {
+    let mut all = BTreeMap::from([("i".to_owned(), Index::default())]);
+    let i = all.get_mut("i").unwrap();
+    (i.settings).merge(&json!({"index.number_of_shards": "2"}));
+    i.mappings.properties.insert("v".into(), FieldMapping::Long);
+    for (n, id) in [(0, "a"), (1, "b"), (0, "c"), (1, "d")] {
+        i.put_in(n, id, json!({"v": id.as_bytes()[0]}));
+    }
+    let rows = |all: &BTreeMap<String, Index>| run(all, "FROM i").unwrap().values;
+    // rows by sequence number, then shard
+    let v = |vs: &[u8]| -> Vec<Vec<Value>> { vs.iter().map(|v| vec![json!(v)]).collect() };
+    assert_eq!(rows(&all), v(b"abcd"));
+    assert_eq!(rows(&all), v(b"abcd"));
+    let i = all.get_mut("i").unwrap();
+    i.put_in(1, "e", json!({"v": 101}));
+    assert_eq!(rows(&all), v(b"abcde"));
+    let i = all.get_mut("i").unwrap();
+    i.delete_in(0, "a");
+    i.put_in(0, "c", json!({"v": 102}));
+    assert_eq!(rows(&all), v(b"bdef"));
+    let i = all.get_mut("i").unwrap();
+    i.put_in(1, "g", json!({"v": 103}));
+    assert_eq!(rows(&all), v(b"bdefg"));
+}
+
+#[test]
 fn text_with_keyword_subfield_keeps_both_columns() {
     let mut i = Index::default();
     i.map_dynamic("1", &json!({"t": "Hello"})).unwrap();
