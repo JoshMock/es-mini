@@ -301,7 +301,11 @@ fn after_list(follow: &'static str, stats: bool) -> &'static str {
         (AFTER_LITERAL, true) => {
             "{<EOF>, 'where', '|', 'and', 'by', '::', ',', 'or', '+', '-', '*', '/', '%'}"
         }
-        // ponytail: other STATS aggregate endings keep the plain set, unchecked against ES
+        (AFTER_FIELD, true) => {
+            "{<EOF>, 'where', '|', 'and', 'by', '::', ',', '.', 'or', '+', '-', '*', '/', '%'}"
+        }
+        (AFTER_IS_NULL, true) => "{<EOF>, 'where', '|', 'and', 'by', ',', 'or'}",
+        // A parenthesized expression's set is the same in any list.
         _ => follow,
     }
 }

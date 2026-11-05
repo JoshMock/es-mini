@@ -2781,3 +2781,25 @@ fn esql_semantics_2_subnormal_hexadecimal_floats_round_once() {
         ]]
     );
 }
+
+/// What Elasticsearch 9.5.5 expects after each way a STATS aggregate can end.
+#[test]
+fn esql_semantics_2_stats_aggregate_endings() {
+    let err = |q: &str| match run(&indices(), q) {
+        Err(EsqlError::Parse(m)) => m,
+        other => panic!("{q}: {other:?}"),
+    };
+    let ops = "'or', '+', '-', '*', '/', '%'}";
+    for (q, msg) in [
+        ("ROW a = 1 | STATS c = a 2 3", format!("1:25: mismatched input '2' expecting {{<EOF>, 'where', '|', 'and', 'by', '::', ',', '.', {ops}")),
+        ("ROW a = 1 | STATS a 2 3", format!("1:21: mismatched input '2' expecting {{<EOF>, 'where', '|', 'and', 'by', '::', ',', '.', {ops}")),
+        ("ROW a = 1 | STATS c = a.b 2 3", format!("1:27: mismatched input '2' expecting {{<EOF>, 'where', '|', 'and', 'by', '::', ',', '.', {ops}")),
+        ("ROW a = 1 | STATS c = a is null 2 3", "1:33: mismatched input '2' expecting {<EOF>, 'where', '|', 'and', 'by', ',', 'or'}".into()),
+        ("ROW a = 1 | STATS c = a is not null 2 3", "1:37: mismatched input '2' expecting {<EOF>, 'where', '|', 'and', 'by', ',', 'or'}".into()),
+        ("ROW a = 1 | STATS c = (a) 2 3", "1:27: mismatched input '2' expecting {'and', '::', '.', 'or', '+', '-', '*', '/', '%', ')'}".into()),
+        ("ROW a = 1 | STATS c = (1) 2 3", "1:27: mismatched input '2' expecting {'and', '::', 'or', '+', '-', '*', '/', '%', ')'}".into()),
+        ("ROW a = 1 | STATS c = 1 day 2 3", format!("1:29: mismatched input '2' expecting {{<EOF>, 'where', '|', 'and', 'by', '::', ',', {ops}")),
+    ] {
+        assert_eq!(err(q), format!("line {msg}"), "{q}");
+    }
+}
