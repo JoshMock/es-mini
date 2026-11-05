@@ -1672,7 +1672,7 @@ fn doc_value(s: &Searcher, field: &str, mapping: &FieldMapping, v: &Value) -> Op
             (!es_index::postings::ignored(*ignore_above, &t)).then(|| t.into())
         }
         M::Ip => es_index::ip_bytes(v).map(|ip| es_index::ip_string(ip).into()),
-        // ponytail: ip ranges are not aggregated
+        // aggregations read ip ranges in `Collector::values`
         M::IpRange => None,
         M::LongRange | M::IntegerRange | M::DateRange { .. } => {
             let (from, to) = mapping.range_keys(v).flatten()?;
@@ -1787,6 +1787,26 @@ impl<'s, 'a> Collector<'s, 'a> {
                         agg.metric.name()
                     )));
                 }
+                Some(FieldMapping::IpRange) => match &agg.metric {
+                    Metric::ValueCount | Metric::Cardinality { .. } | Metric::Missing => {}
+                    Metric::Histogram(h) if h.date => {
+                        return Err(QueryError::illegal(
+                            "Expected date range type but found range type [ip_range]",
+                        ));
+                    }
+                    Metric::Histogram(_) => {
+                        return Err(QueryError::illegal(
+                            "Expected numeric range type but found non-numeric range [ip_range]",
+                        ));
+                    }
+                    m => {
+                        return Err(QueryError::illegal(format!(
+                            "Field [{}] of type [ip_range] is not supported for aggregation [{}]",
+                            agg.field,
+                            m.name()
+                        )));
+                    }
+                },
                 _ => {}
             }
             if let (Some(m), Metric::Terms(t)) = (m, &agg.metric)
@@ -2034,6 +2054,27 @@ impl<'s, 'a> Collector<'s, 'a> {
         let agg = &self.aggs[i];
         match self.mappings[i] {
             None => vec![],
+            Some(m @ FieldMapping::IpRange) => {
+                // one doc value: the ranges as ES's BinaryRangeUtil.encodeIPRanges writes them
+                // ponytail: sorted, where ES writes a HashSet's order; a document with several
+                // ranges hashes differently, which `cardinality` shows past precision_threshold
+                let path = source_path(self.searcher.index, &agg.field);
+                let mut ranges: Vec<_> = (values(&doc.source, path).into_iter())
+                    .filter_map(|v| m.range_keys(v).flatten())
+                    .collect();
+                ranges.sort_unstable();
+                ranges.dedup();
+                if ranges.is_empty() {
+                    return vec![];
+                }
+                let mut out = es_codec::output::Output(vec![]);
+                out.vint(ranges.len() as i32);
+                for (from, to) in ranges {
+                    out.bytes(&from.to_be_bytes());
+                    out.bytes(&to.to_be_bytes());
+                }
+                vec![out.0.into()]
+            }
             Some(m) => {
                 self.disk[i](id).unwrap_or_else(|| doc_values(self.searcher, &agg.field, m, doc))
             }
@@ -2361,6 +2402,14 @@ fn hash(m: Option<&FieldMapping>, v: &Value) -> u64 {
             hll::mix64(num(v).unwrap_or_default().to_bits())
         }
         Some(M::Keyword { .. }) | None => hll::murmur3(es_index::postings::text(v).as_bytes()),
+        Some(M::IpRange) => {
+            let bytes = v.as_array().into_iter().flatten();
+            hll::murmur3(
+                &bytes
+                    .filter_map(|b| Some(b.as_u64()? as u8))
+                    .collect::<Vec<_>>(),
+            )
+        }
         Some(_) => {
             let x = int(v).or_else(|| v.as_bool().map(i64::from));
             hll::mix64(x.unwrap_or_default() as u64)
@@ -3071,6 +3120,52 @@ mod tests {
         assert!(run(body).is_ok());
         let body = json!({"query": none, "fields": [{"field": "k", "format": "x"}]});
         assert!(run(body).is_ok());
+    }
+
+    #[test]
+    fn aggs_gaps_2_ip_ranges_aggregate_one_value_per_document() {
+        // as Elasticsearch 9.5.5: a document's ip ranges are one binary doc value, which only
+        // value_count, cardinality and missing read
+        let mut ix = Index::default();
+        (ix.mappings.properties).insert("r".into(), FieldMapping::IpRange);
+        let b = "192.168.0.0/16";
+        ix.put(
+            "1",
+            json!({"r": [{"gte": "10.0.0.1", "lte": "10.0.0.5"}, b]}),
+        );
+        ix.put("2", json!({"r": b}));
+        ix.put("3", json!({"r": [b]}));
+        ix.put("4", json!({}));
+        let aggs = json!({"v": {"value_count": {"field": "r"}},
+            "c": {"cardinality": {"field": "r"}}, "m": {"missing": {"field": "r"}}});
+        let r = aggs_of(&ix, json!({"size": 0, "aggs": aggs}));
+        assert_eq!(
+            r,
+            json!({"v": {"value": 3}, "c": {"value": 2}, "m": {"doc_count": 1}})
+        );
+        let err = |agg: Value| {
+            let req = SearchRequest::parse(&json!({"aggs": {"a": agg}})).unwrap();
+            crate::search_many(&[("i", 0, &ix, None)], &req)
+                .unwrap_err()
+                .msg
+        };
+        let unsupported = "Field [r] of type [ip_range] is not supported for aggregation";
+        assert_eq!(
+            err(json!({"terms": {"field": "r"}})),
+            format!("{unsupported} [terms]")
+        );
+        assert_eq!(
+            err(json!({"min": {"field": "r"}})),
+            format!("{unsupported} [min]")
+        );
+        assert_eq!(
+            err(json!({"histogram": {"field": "r", "interval": 1}})),
+            "Expected numeric range type but found non-numeric range [ip_range]"
+        );
+        assert_eq!(
+            err(json!({"date_histogram": {"field": "r", "fixed_interval": "1d"}})),
+            "Expected date range type but found range type [ip_range]"
+        );
     }
 
     #[test]
