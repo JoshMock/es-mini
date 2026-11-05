@@ -10,6 +10,8 @@ use crate::{
 };
 use std::cmp::Ordering;
 
+mod order;
+
 /// The value of sortable big-endian point bytes 1 to 8 wide, as doc values hold it (inverse of
 /// [`sortable_bytes`]; doubles and floats come back as their sortable bits).
 pub fn decode(v: &[u8]) -> i64 {
@@ -436,11 +438,14 @@ const LEAF: usize = 512;
 /// `(field number, dimensions, (doc, value) pairs)`: a value is its dimensions' sortable bytes
 /// side by side, all values of a field have the same width, and a doc may have none or several,
 /// but a field has at least one. One to 8 dimensions (`BKDConfig.MAX_INDEX_DIMS`), all indexed.
+/// Pairs come in doc order, each doc's in the order it added them, as Lucene's flush takes them.
+/// `max_doc` is the segment's.
 pub fn write_points(
     fields: &[(i32, usize, PointValues)],
     id: &[u8; ID_LEN],
+    max_doc: i32,
 ) -> crate::Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
-    let mut w = PointsWriter::new(id);
+    let mut w = PointsWriter::new(id, max_doc);
     for (number, dims, pairs) in fields {
         w.add(*number, *dims, pairs)?;
     }
@@ -452,21 +457,33 @@ pub struct PointsWriter {
     meta: Output,
     index: Output,
     data: Output,
+    /// the segment's, which orders points by doc in as many bytes as Lucene does
+    max_doc: i32,
 }
 
 impl PointsWriter {
-    pub fn new(id: &[u8; ID_LEN]) -> Self {
+    pub fn new(id: &[u8; ID_LEN], max_doc: i32) -> Self {
         let (mut meta, mut index, mut data) =
             (Output::default(), Output::default(), Output::default());
         meta.index_header("Lucene90PointsFormatMeta", 1, id, "");
         index.index_header("Lucene90PointsFormatIndex", 1, id, "");
         data.index_header("Lucene90PointsFormatData", 1, id, "");
-        Self { meta, index, data }
+        Self {
+            meta,
+            index,
+            data,
+            max_doc,
+        }
     }
 
     /// A field of `dims` dimensions and its `(doc, value)` pairs, as [`write_points`] takes them.
     pub fn add(&mut self, number: i32, dims: usize, pairs: &[(u32, Vec<u8>)]) -> crate::Result<()> {
-        let Self { meta, index, data } = self;
+        let Self {
+            meta,
+            index,
+            data,
+            max_doc,
+        } = self;
         let Some(packed) = pairs.first().map(|p| p.1.len()) else {
             return crate::err(format!("points field {number} has no values"));
         };
@@ -486,6 +503,7 @@ impl PointsWriter {
             fps: vec![0; leaves],
             splits: vec![(0, &[][..]); leaves - 1],
             parent_splits: vec![0; dims],
+            max_doc: *max_doc,
         };
         let data_start = data.0.len() as u64;
         tree.build(data, &mut points, 0, leaves, &lo, &hi);
@@ -516,6 +534,7 @@ impl PointsWriter {
             mut meta,
             index,
             data,
+            ..
         } = self;
         let (index, data) = (index.finish(), data.finish());
         meta.bytes(&(-1i32).to_le_bytes());
@@ -534,16 +553,20 @@ struct Bkd<'a> {
     splits: Vec<(usize, &'a [u8])>,
     /// How often each dimension split the ancestors of the node being built
     parent_splits: Vec<usize>,
+    /// the segment's
+    max_doc: i32,
 }
 
 impl<'a> Bkd<'a> {
     /// `BKDWriter.build`: writes `n` leaves from leaf `off` of `pts`, whose values lie in
     /// `lo..=hi`. An inner node splits the dimension `split` picks, leaving `left_leaves(n)` full
     /// leaves of the smallest values (then lowest docs) on the left, so one dimension makes
-    /// consecutive leaves of the sorted values.
-    // ponytail: Lucene's selector and sorter order points equal in the split (or leaf sort)
-    // dimension and doc arbitrarily; here the other dimension breaks the tie, so such points can
-    // sit on another side of a split or in another order than in Lucene (the tree reads the same)
+    /// consecutive leaves of the sorted values. Points in the order Lucene's flush added them
+    /// land where its flush puts them (see [`order`]).
+    // ponytail: merges write points as a flush would; Lucene's merges add them a segment's leaves
+    // at a time and order them with BKDRadixSelector, and an index sort's flush adds them in the
+    // order docs came, not the sorted one, so points equal in a split (or leaf sort) dimension
+    // and doc can land elsewhere in those segments than in Lucene's (the tree reads the same)
     fn build(
         &mut self,
         data: &mut Output,
@@ -574,7 +597,10 @@ impl<'a> Bkd<'a> {
         let r = dim * self.w..(dim + 1) * self.w;
         let left = left_leaves(n);
         let mid = left * LEAF;
-        pts.select_nth_unstable_by(mid, |a, b| by_dim(a, b, &r));
+        let prefix = (lo[r.clone()].iter().zip(&hi[r.clone()]))
+            .take_while(|(a, b)| a == b)
+            .count();
+        order::partition(pts, r.clone(), prefix, self.max_doc, mid);
         let value: &'a [u8] = pts[mid].0;
         let split = &value[r.clone()];
         self.splits[off + left - 1] = (dim, split);
@@ -629,11 +655,6 @@ fn bounds(pts: &[(&[u8], u32)], dims: usize, w: usize) -> (Vec<u8>, Vec<u8>) {
     (lo, hi)
 }
 
-/// Orders points by the bytes of dimension `r`, then doc, then the whole value.
-fn by_dim(a: &(&[u8], u32), b: &(&[u8], u32), r: &std::ops::Range<usize>) -> Ordering {
-    (&a.0[r.clone()], a.1, a.0).cmp(&(&b.0[r.clone()], b.1, b.0))
-}
-
 /// A leaf as `BKDWriter.build` (and `OneDimensionBKDWriter.writeLeafBlock`) writes it: doc ids,
 /// each dimension's common prefix, then the values all equal, by distinct value (low
 /// cardinality), or by runs of their first differing byte in the sorted dimension, whichever is
@@ -663,7 +684,7 @@ fn write_leaf(out: &mut Output, leaf: &mut [(&[u8], u32)], dims: usize, w: usize
         }
     }
     let sorted = sorted.0;
-    leaf.sort_by(|a, b| by_dim(a, b, &dim(sorted)));
+    order::sort_by_dim(leaf, dim(sorted));
     out.vint(leaf.len() as i32);
     write_doc_ids(out, &leaf.iter().map(|p| p.1).collect::<Vec<_>>());
     for (d, &p) in prefix.iter().enumerate() {
@@ -931,6 +952,7 @@ mod tests {
             fps: vec![0; 32],
             splits: vec![(0, &[][..]); 31],
             parent_splits: vec![0; 4],
+            max_doc: 16384,
         };
         tree.build(&mut Output::default(), &mut pts, 0, 32, &lo, &hi);
         let dims: Vec<usize> = tree.splits.iter().map(|s| s.0).collect();
@@ -967,7 +989,8 @@ mod tests {
                     .enumerate()
                     .flat_map(|(d, v)| v.iter().map(move |n| (d as u32, sortable_bytes(*n, 8))))
                     .collect();
-                let (m, i, d) = write_points(&[(f.number, 1, pairs)], &seg.info.id).unwrap();
+                let (m, i, d) =
+                    write_points(&[(f.number, 1, pairs)], &seg.info.id, seg.info.max_doc).unwrap();
                 let name = |ext: &str| {
                     r.cfs
                         .names()

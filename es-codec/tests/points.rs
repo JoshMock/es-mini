@@ -1,5 +1,6 @@
 //! Multi-leaf BKD trees written by real Lucene 10.5.1: see tests/gen/GenPoints.java and
-//! GenRanges.java, regenerate with tests/gen/gen_docker.sh Points points (or Ranges ranges).
+//! GenRanges.java and GenRangeTies.java, regenerate with tests/gen/gen_docker.sh Points points
+//! (or Ranges ranges, RangeTies range-ties).
 
 mod common;
 
@@ -109,7 +110,7 @@ fn written_trees_match_lucene() {
             (f.number, 1, pairs)
         })
         .collect();
-    let (meta, index, data) = write_points(&fields, &r.seg.info.id).unwrap();
+    let (meta, index, data) = write_points(&fields, &r.seg.info.id, r.seg.info.max_doc).unwrap();
     for (ext, ours) in [(".kdm", meta), (".kdi", index), (".kdd", data)] {
         let real = r.cfs.file(ext).unwrap().unwrap();
         let at = (real.iter().zip(&ours)).position(|(a, b)| a != b);
@@ -152,7 +153,65 @@ fn written_range_trees_match_lucene() {
             (f.number, 2, pairs)
         })
         .collect();
-    let (meta, index, data) = write_points(&fields, &r.seg.info.id).unwrap();
+    let (meta, index, data) = write_points(&fields, &r.seg.info.id, r.seg.info.max_doc).unwrap();
+    for (ext, ours) in [(".kdm", meta), (".kdi", index), (".kdd", data)] {
+        let real = r.cfs.file(ext).unwrap().unwrap();
+        let at = (real.iter().zip(&ours)).position(|(a, b)| a != b);
+        assert!(
+            at.is_none() && real.len() == ours.len(),
+            "{ext} differs at {at:?}"
+        );
+    }
+}
+
+/// `(doc, from, to)` of every LongRange tests/gen/GenRangeTies.java wrote for `field`, in the
+/// order it added them; `from` and `to` hold one value per range dimension.
+fn expected_ties(field: &str) -> Vec<(u32, Vec<i64>, Vec<i64>)> {
+    (0..4000)
+        .flat_map(|d: i64| {
+            let m = d % 50;
+            let ranges = match field {
+                "ties" => [3, 1, 2]
+                    .map(|k| (vec![m], vec![m + k]))
+                    .into_iter()
+                    .chain([2, 0, 1].map(|k| (vec![m - k], vec![m + 5])))
+                    .collect(),
+                "box" => [2, 3, 1]
+                    .map(|k| (vec![d % 37, d % 11], vec![d % 37 + k, d % 11 + 2 * k]))
+                    .to_vec(),
+                "leaf" if d % 1000 == 0 => [3, 1, 2]
+                    .map(|k| (vec![k], vec![5]))
+                    .into_iter()
+                    .chain([(vec![4], vec![6])])
+                    .collect(),
+                _ => vec![],
+            };
+            ranges.into_iter().map(move |(f, t)| (d as u32, f, t))
+        })
+        .collect()
+}
+
+/// es-codec orders points that tie in a split or leaf sort dimension and doc as Lucene's flush
+/// does, in trees of two and four dimensions.
+#[test]
+fn points_fidelity_equal_points_order_like_lucene_flush() {
+    use es_codec::points::{sortable_bytes, write_points};
+    let r = common::open("range-ties");
+    // in the order Lucene's flush wrote them (its field hash table's)
+    let fields: Vec<_> = ["ties", "box", "leaf"]
+        .iter()
+        .map(|name| {
+            let f = r.field(name).unwrap();
+            let pairs = (expected_ties(name).into_iter())
+                .map(|(d, from, to)| {
+                    let bytes = from.iter().chain(&to).map(|v| sortable_bytes(*v, 8));
+                    (d, bytes.collect::<Vec<_>>().concat())
+                })
+                .collect();
+            (f.number, f.point_dimensions as usize, pairs)
+        })
+        .collect();
+    let (meta, index, data) = write_points(&fields, &r.seg.info.id, r.seg.info.max_doc).unwrap();
     for (ext, ours) in [(".kdm", meta), (".kdi", index), (".kdd", data)] {
         let real = r.cfs.file(ext).unwrap().unwrap();
         let at = (real.iter().zip(&ours)).position(|(a, b)| a != b);

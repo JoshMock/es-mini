@@ -2172,7 +2172,7 @@ fn merge_segments(
     };
     let meta = es_codec::segment_writer::es_meta_fields();
     let (name, id) = segment_name(infos.counter);
-    let mut segment = SegmentWriter::new(&name, id);
+    let mut segment = SegmentWriter::new(&name, id, max_doc as i32);
     let (mut fields, mut empty) = (Vec::<&str>::new(), Vec::<String>::new());
     for f in readers.iter().flat_map(|r| &r.fields) {
         let name = f.name.as_str();
@@ -2308,7 +2308,7 @@ fn merge_segments(
         _ => (bytes as f64 * (1.0 - f64::from(del) / f64::from(max_doc))) as u64,
     };
     let total = sizes.iter().map(live_bytes).sum();
-    let mut seg = segment.finish(dir, max_doc as i32, stored, |bytes| {
+    let mut seg = segment.finish(dir, stored, |bytes| {
         use_compound_file(compound_format, bytes, total)
     })?;
     seg.info.index_sort = sort.to_vec();

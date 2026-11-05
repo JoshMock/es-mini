@@ -63,7 +63,7 @@ pub fn write_segment(
     fn of<T>(list: &[(i32, T)], number: i32) -> Option<&T> {
         list.iter().find(|e| e.0 == number).map(|e| &e.1)
     }
-    let mut w = SegmentWriter::new(s.name, s.id);
+    let mut w = SegmentWriter::new(s.name, s.id, s.max_doc);
     for f in s.fields {
         let n = f.number;
         let doc_values = (of(s.numeric, n).map(|v| DocValuesData::Numeric(v)))
@@ -78,7 +78,7 @@ pub fn write_segment(
         };
         w.add(f.clone(), data)?;
     }
-    w.finish(dir, s.max_doc, stored, |_| true)
+    w.finish(dir, stored, |_| true)
 }
 
 /// One field's doc values, by type, per doc of the segment.
@@ -112,10 +112,12 @@ pub struct SegmentWriter<'a> {
     terms: TermsWriter,
     norms: NormsWriter,
     points: Option<PointsWriter>,
+    max_doc: i32,
 }
 
 impl<'a> SegmentWriter<'a> {
-    pub fn new(name: &'a str, id: [u8; ID_LEN]) -> Self {
+    /// A segment of `max_doc` docs.
+    pub fn new(name: &'a str, id: [u8; ID_LEN], max_doc: i32) -> Self {
         Self {
             name,
             id,
@@ -124,6 +126,7 @@ impl<'a> SegmentWriter<'a> {
             terms: TermsWriter::new(&id, "Lucene104_0"),
             norms: NormsWriter::new(&id),
             points: None,
+            max_doc,
         }
     }
 
@@ -161,21 +164,20 @@ impl<'a> SegmentWriter<'a> {
         if let Some(points) = data.points {
             let w = self
                 .points
-                .get_or_insert_with(|| PointsWriter::new(&self.id));
+                .get_or_insert_with(|| PointsWriter::new(&self.id, self.max_doc));
             w.add(n, field.point_dimensions as usize, points)?;
         }
         self.fields.push(field);
         Ok(())
     }
 
-    /// Writes the segment of `max_doc` docs into `dir`, as [`write_segment`]. Like Lucene's
-    /// `IndexWriter`, it writes each format's files, then puts them in a compound file if
-    /// `compound` says so given their total bytes (`MergePolicy.useCompoundFile`); otherwise
-    /// they stay, fsynced, as the segment's files.
+    /// Writes the segment, of the `max_doc` docs [`Self::new`] took, into `dir`, as
+    /// [`write_segment`]. Like Lucene's `IndexWriter`, it writes each format's files, then puts
+    /// them in a compound file if `compound` says so given their total bytes
+    /// (`MergePolicy.useCompoundFile`); otherwise they stay, fsynced, as the segment's files.
     pub fn finish(
         self,
         dir: &Path,
-        max_doc: i32,
         stored: impl IntoIterator<Item = Result<Doc>>,
         compound: impl FnOnce(u64) -> bool,
     ) -> Result<SegmentCommitInfo> {
@@ -187,6 +189,7 @@ impl<'a> SegmentWriter<'a> {
             terms,
             norms,
             points,
+            max_doc,
         } = self;
         // Stored fields go to disk a chunk at a time, the other formats' files here, and the
         // compound file copies them from there.
@@ -459,7 +462,7 @@ mod tests {
     fn memory_bounds_segment_writer_takes_one_field_at_a_time() {
         let dir = std::env::temp_dir().join(format!("esm-seg-each-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let mut w = SegmentWriter::new("_0", [9; 16]);
+        let mut w = SegmentWriter::new("_0", [9; 16], 2);
         // Formats and doc values types interleave by field, and positions start after a field
         // without them. Each field's data is dropped once added.
         {
@@ -526,9 +529,7 @@ mod tests {
             };
             w.add(f, data).unwrap();
         }
-        let seg = w
-            .finish(&dir, 2, [Ok(vec![]), Ok(vec![])], |_| true)
-            .unwrap();
+        let seg = w.finish(&dir, [Ok(vec![]), Ok(vec![])], |_| true).unwrap();
         let r = SegmentReader::open(&dir, seg).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         let DocValues::Ordinals { ords, terms } = r.doc_values("k").unwrap() else {
