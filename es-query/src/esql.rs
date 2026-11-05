@@ -125,6 +125,8 @@ fn lex(src: &str) -> Result<(Vec<Token>, Pos), EsqlError> {
     // Whether the command being lexed takes patterns, where `*` is part of a name; elsewhere it
     // multiplies (or is `COUNT(*)`).
     let mut patterns = false;
+    // Whether the command being lexed is FROM, whose sources are ES's `UNQUOTED_SOURCE`s.
+    let mut sources = false;
     let (mut line, mut line_start) = (1, 0);
     let digits = |from: usize| {
         from + src[from..]
@@ -177,6 +179,13 @@ fn lex(src: &str) -> Result<(Vec<Token>, Pos), EsqlError> {
                 }
             }
             Tok::Word(s)
+        } else if sources && !":\"=|,[]/()".contains(c) {
+            // ponytail: no `/` (ES allows one not followed by `*` or `/`, for date math)
+            let e = src[i..]
+                .find(|c: char| c.is_whitespace() || ":\"=|,[]/()".contains(c))
+                .map_or(src.len(), |n| i + n);
+            end = Some(e);
+            Tok::Word(src[i..e].to_owned())
         } else if c.is_ascii_digit()
             || c == '.' && src[i + 1..].starts_with(|d: char| d.is_ascii_digit())
         {
@@ -234,6 +243,7 @@ fn lex(src: &str) -> Result<(Vec<Token>, Pos), EsqlError> {
         if let (Tok::Word(w), None | Some((Tok::Sym("|"), ..))) = (&tok, out.last()) {
             patterns =
                 ["from", "keep", "drop", "rename"].contains(&w.to_ascii_lowercase().as_str());
+            sources = w.eq_ignore_ascii_case("from");
         }
         out.push((tok, at, i..end));
     }

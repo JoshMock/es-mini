@@ -485,6 +485,15 @@ async fn accessing_system_indices_warns_of_deprecation() {
     assert_eq!(both, accesses(".kibana_1, .tasks"));
     let all = warning(&app, "", "GET", "/_search?expand_wildcards=all", None).await;
     assert_eq!(all, accesses(".kibana_1, .tasks"));
+    for (query, names) in [
+        ("FROM .tasks | LIMIT 1", ".tasks"),
+        ("FROM .t* | LIMIT 1", ".tasks"),
+        ("FROM .tasks,.kibana_1 | LIMIT 1", ".kibana_1, .tasks"),
+    ] {
+        let body = Some(json!({ "query": query }));
+        let got = warning(&app, "", "POST", "/_query", body).await;
+        assert_eq!(got, accesses(names), "{query}");
+    }
     let aliased = warning(&app, "", "POST", "/_aliases", Some(alias)).await;
     assert_eq!(aliased, accesses(".kibana_1"));
     let via_alias = warning(&app, "", "GET", "/kalias/_search", None).await;

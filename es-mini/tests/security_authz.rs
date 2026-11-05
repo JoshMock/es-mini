@@ -1311,8 +1311,9 @@ async fn patterns_cannot_reach_the_security_index() {
             ),
         ] {
             let (status, r) = call(&app, &k, m, uri, body).await;
+            // ES|QL finds no columns: `{"columns":[{"name":"<no-fields>",...}],"values":[]}`.
             assert!(
-                status >= 400 || r["hits"]["total"]["value"] == 0,
+                status >= 400 || r["hits"]["total"]["value"] == 0 || r["values"] == json!([]),
                 "{names} {m} {uri}: {status} {r}"
             );
             assert!(
