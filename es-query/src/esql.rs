@@ -2373,6 +2373,18 @@ const CASTABLE: [&str; 4] = ["date", "date_nanos", "ip", "boolean"];
 
 const NUMERIC: [&str; 4] = ["integer", "long", "unsigned_long", "double"];
 
+/// The metadata fields `METADATA` can list.
+const METADATA: [&str; 3] = ["_id", "_index", "_version"];
+
+/// Metadata field `f` of document `d` (with id `id`) in index `index`.
+fn metadata_value(f: &str, index: &str, id: &str, d: &Document) -> Value {
+    match f {
+        "_id" => Value::from(id),
+        "_index" => Value::from(index),
+        _ => Value::from(d.version),
+    }
+}
+
 /// The ES|QL type of a supported `METADATA` field.
 fn metadata_type(field: &str) -> Option<&'static str> {
     match field {
@@ -2851,7 +2863,7 @@ fn run_at(
         Source::From(sources, metadata, from) => (Some((sources, metadata, from)), cmds),
     };
     let reads = read(&cmds);
-    let table = match source {
+    let (table, metadata) = match source {
         Some((sources, metadata, from)) => {
             let names: Vec<String> = metadata.iter().map(|(f, _)| f.clone()).collect();
             let table = table_from(indices, &sources, &names, &reads, narrow)?;
@@ -2869,25 +2881,35 @@ fn run_at(
                     (bad.iter()).map(|(f, at)| (*at, format!("Unresolved metadata pattern [{f}]")));
                 return Err(problems(std::iter::once(fields).chain(patterns).collect()));
             }
-            table
+            (table, names)
         }
-        None => Arc::new(Table {
-            types: BTreeMap::new(),
-            conflicts: BTreeMap::new(),
-            groups: vec![Group::new(1, BTreeMap::new())],
-            cols: Vec::new(),
-            empty: false,
-            counted: false,
-        }),
+        None => (
+            Arc::new(Table {
+                types: BTreeMap::new(),
+                conflicts: BTreeMap::new(),
+                groups: vec![Group::new(1, BTreeMap::new())],
+                cols: Vec::new(),
+                empty: false,
+                counted: false,
+            }),
+            Vec::new(),
+        ),
     };
     let (mut types, mut conflicts, mut cols) = (
         table.types.clone(),
         table.conflicts.clone(),
         table.cols.clone(),
     );
+    // Metadata columns follow the fields, in the order listed.
+    for f in &metadata {
+        cols.retain(|c| c != f);
+        cols.push(f.clone());
+        types.insert(f.clone(), metadata_type(f).unwrap_or_default().into());
+    }
+    let source_cols = cols.clone();
     let (groups, empty, counted) = (&table.groups, table.empty, table.counted);
     // The columns the query reads, which a row it changes keeps: decided once, not per row.
-    let kept: Vec<&String> = table.cols.iter().filter(|c| reads(c)).collect();
+    let kept: Vec<&String> = source_cols.iter().filter(|c| reads(c)).collect();
     // A referenced column must exist and have one type.
     let check = |cols: &[String], conflicts: &BTreeMap<String, _>, f: &str| match conflicts.get(f) {
         _ if !cols.iter().any(|c| c == f) => Some(unknown(f)),
@@ -3749,14 +3771,15 @@ fn table_from(
     // A whole index's table, every column read, is kept until the index changes.
     // ponytail: holds every value of the index in memory until its next write; cache per
     // column, or bound it, if memory matters more than repeated queries
+    // It holds every metadata column too, which a query sees only when it lists them.
     if let [t] = &targets[..]
         && t.filter.is_none()
-        && metadata.is_empty()
     {
         let index: &Index = indices[&t.index].borrow();
+        let all = METADATA.map(String::from);
         return Ok(index.memo(
-            || table_of(indices, &targets, &filters, &[], &|_| true),
-            |t, removed, written| follow(t, index, removed, written),
+            || table_of(indices, &targets, &filters, &all, &|_| true),
+            |table, removed, written| follow(table, index, &t.index, removed, written),
         ));
     }
     Ok(Arc::new(table_of(
@@ -3767,7 +3790,13 @@ fn table_from(
 /// Updates a whole index's cached table after writes (see [`Index::memo`]): drops the rows of
 /// the `removed` sequence numbers and appends the `written` documents. False when the writes
 /// may change its columns: when it has an unmapped column, or a written document adds one.
-fn follow(t: &mut Table, index: &Index, removed: &[u64], written: &[(&str, &Document)]) -> bool {
+fn follow(
+    t: &mut Table,
+    index: &Index,
+    name: &str,
+    removed: &[u64],
+    written: &[(&str, &Document)],
+) -> bool {
     let mapped = columns(index, std::iter::empty());
     let [g] = &mut t.groups[..] else {
         return false;
@@ -3782,12 +3811,15 @@ fn follow(t: &mut Table, index: &Index, removed: &[u64], written: &[(&str, &Docu
     for (c, v) in &mut g.cols {
         let mut keep = keep.iter();
         v.retain(|_| *keep.next().unwrap_or(&true));
-        v.extend(column(
-            written.iter().map(|(_, d)| *d),
-            c,
-            &t.types[c],
-            index,
-        ));
+        match metadata_type(c) {
+            Some(_) => v.extend(written.iter().map(|(id, d)| metadata_value(c, name, id, d))),
+            None => v.extend(column(
+                written.iter().map(|(_, d)| *d),
+                c,
+                &t.types[c],
+                index,
+            )),
+        }
     }
     g.seqs.retain(|s| !removed.contains(s));
     g.seqs.extend(written.iter().map(|(_, d)| d.seq_no));
@@ -3873,7 +3905,7 @@ fn table_of(
             (c.clone(), m.clone())
         })
         .collect();
-    let mut types: BTreeMap<String, String> = mapped
+    let types: BTreeMap<String, String> = mapped
         .into_iter()
         .map(|(c, (t, _))| {
             let t = if conflicts.contains_key(&c) {
@@ -3901,11 +3933,7 @@ fn table_of(
                 })
                 .collect();
             for f in metadata {
-                let v = g.iter().map(|(id, d)| match f.as_str() {
-                    "_id" => Value::from(id.to_string()),
-                    "_index" => Value::from(t.index.as_str()),
-                    _ => Value::from(d.version),
-                });
+                let v = g.iter().map(|(id, d)| metadata_value(f, &t.index, id, d));
                 cols.insert(f.clone(), v.collect());
             }
             Group {
@@ -3914,15 +3942,8 @@ fn table_of(
             }
         })
         .collect();
-    // Metadata columns follow the fields, in the order listed.
-    let mut cols: Vec<String> = types.keys().cloned().collect();
-    for f in metadata {
-        cols.retain(|c| c != f);
-        cols.push(f.clone());
-        types.insert(f.clone(), metadata_type(f).unwrap_or_default().into());
-    }
     Table {
-        cols,
+        cols: types.keys().cloned().collect(),
         types,
         conflicts,
         groups,
@@ -4301,6 +4322,32 @@ mod tests {
             write(indices.get_mut("i").unwrap());
             check(&indices);
         }
+    }
+
+    /// METADATA reads an index's cached table, which follows writes: updated versions, deleted
+    /// and new documents.
+    #[test]
+    fn esql_speed_metadata_follows_writes() {
+        let mut indices = BTreeMap::from([("i".to_owned(), Index::default())]);
+        let i = indices.get_mut("i").unwrap();
+        i.mappings.properties.insert("n".into(), FieldMapping::Long);
+        for n in 0..3 {
+            i.put(&n.to_string(), serde_json::json!({"n": n}));
+        }
+        let q = "FROM i METADATA _version, _id, _index | SORT n | KEEP _id, n, _version, _index";
+        let row = |id: &str, n: i64, v: i64| -> Vec<Value> {
+            vec![id.into(), n.into(), v.into(), "i".into()]
+        };
+        let r = run(&indices, q).unwrap();
+        assert_eq!(r.values, [row("0", 0, 1), row("1", 1, 1), row("2", 2, 1)]);
+        let i = indices.get_mut("i").unwrap();
+        i.put("1", serde_json::json!({"n": 5}));
+        i.delete("2");
+        i.put("3", serde_json::json!({"n": 3}));
+        let r = run(&indices, q).unwrap();
+        assert_eq!(r.values, [row("0", 0, 1), row("3", 3, 1), row("1", 5, 2)]);
+        // Without METADATA, a metadata column is unknown.
+        assert!(run(&indices, "FROM i | KEEP _id").is_err());
     }
 
     /// Equal STATS keys hash alike, so they share a group.
