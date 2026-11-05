@@ -537,9 +537,9 @@ pub fn norm_len(norm: i8) -> u32 {
 /// mapped fields whose values are scalars or arrays of scalars. Field numbers start at 6, after
 /// the metadata fields.
 // ponytail: integer fields holding fractions (which Elasticsearch truncates, where es-mini matches
-// them as they are), or out-of-range values written by `_update` (only index and create reject
-// them), are left out of the segment; only Elasticsearch notices, as es-mini reads `_source` where
-// a segment lacks a field. Writing them needs es-mini to truncate fractions in its reads and to
+// them as they are), or out-of-range integer and `date_nanos` values written by `_update` (only
+// index and create reject them), are left out of the segment; only Elasticsearch notices, as
+// es-mini reads `_source` where a segment lacks a field. Writing them needs es-mini to truncate fractions in its reads and to
 // check updated documents, as Elasticsearch does.
 #[derive(Default)]
 struct UserFields {
