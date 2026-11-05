@@ -232,8 +232,17 @@ fn lookup(
     index: Option<&str>,
     names: Option<&str>,
 ) -> Result<(Value, Vec<String>), AppError> {
-    let selected = match index {
-        Some(expr) => resolved_names(indices, expr)?,
+    let selected: Vec<String> = match index {
+        // Elasticsearch's GetAliasesRequest expands to hidden indices too.
+        Some(expr) => {
+            let o = aliases::IndicesOptions {
+                expand_hidden: true,
+                ..aliases::IndicesOptions::READ
+            };
+            (aliases::resolve(indices, expr, &o)?.into_iter())
+                .map(|t| t.index)
+                .collect()
+        }
         None => indices.keys().cloned().collect(),
     };
     let patterns = names.map(split);

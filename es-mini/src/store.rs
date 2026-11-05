@@ -19,6 +19,7 @@ type Map = BTreeMap<String, Slot>;
 pub(crate) struct Slot {
     aliases: BTreeMap<String, Alias>,
     closed: bool,
+    hidden: bool,
     index: RwLock<Index>,
 }
 
@@ -28,6 +29,9 @@ impl IndexMeta for Slot {
     }
     fn closed(&self) -> bool {
         self.closed
+    }
+    fn hidden(&self) -> bool {
+        self.hidden
     }
 }
 
@@ -104,12 +108,13 @@ fn wrap(indices: Indices) -> Map {
     indices
         .into_iter()
         .map(|(name, ix)| {
-            let (aliases, closed) = (ix.aliases.clone(), ix.closed);
+            let (aliases, closed, hidden) = (ix.aliases.clone(), ix.closed, ix.hidden());
             (
                 name,
                 Slot {
                     aliases,
                     closed,
+                    hidden,
                     index: RwLock::new(ix),
                 },
             )
@@ -180,6 +185,9 @@ impl IndexMeta for Locked<'_> {
     }
     fn closed(&self) -> bool {
         self.0.closed
+    }
+    fn hidden(&self) -> bool {
+        self.0.hidden()
     }
 }
 

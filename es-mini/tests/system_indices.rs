@@ -516,3 +516,100 @@ async fn elastic_reading_system_indices_is_warned_of_deprecation() {
         assert_eq!(got, accesses(".security-7"), "{uri}");
     }
 }
+
+#[tokio::test]
+async fn wildcards_skip_hidden_indices_unless_expanded() {
+    let app = es_mini::app();
+    let alias = json!({"actions": [
+        {"add": {"index": "logs", "alias": "hal", "is_hidden": true}},
+        {"add": {"index": "hid", "alias": "visal"}},
+    ]});
+    let hidden = json!({"settings": {"index.hidden": true}});
+    for (method, uri, body) in [
+        ("PUT", "/logs/_doc/1?refresh=true", Some(json!({"a": 1}))),
+        (
+            "PUT",
+            "/.tasks/_doc/1?refresh=true",
+            Some(json!({"completed": true})),
+        ),
+        ("PUT", "/hid", Some(hidden.clone())),
+        ("PUT", "/.dotvis/_doc/1?refresh=true", Some(json!({"a": 1}))),
+        ("PUT", "/cl", Some(hidden)),
+        ("POST", "/cl/_close", None),
+        ("POST", "/_aliases", Some(alias)),
+    ] {
+        let (status, res) = call(&app, "", method, uri, body).await;
+        assert!(status < 300, "{uri}: {res}");
+    }
+    // Recorded from Elasticsearch 9.5.5 (security off; its own hidden
+    // `.ds-.logs-elasticsearch.deprecation-*` index left out of `.*`).
+    let get = async |uri: &str| {
+        let (status, body) = call(&app, "", "GET", uri, None).await;
+        assert_eq!(status, 200, "{uri}: {body}");
+        body
+    };
+    for (uri, shards) in [
+        ("/*/_count", 3),
+        ("/_count", 3),
+        ("/.*/_count", 2),
+        ("/.t*/_count", 1),
+        ("/.t*/_count?expand_wildcards=open", 1),
+        ("/h*/_count", 0),
+        ("/h*/_count?expand_wildcards=all", 2),
+        ("/*,-.dotvis/_count", 2),
+    ] {
+        let body = get(uri).await;
+        assert_eq!(body["_shards"]["total"], shards, "{uri}: {body}");
+    }
+    let (status, _) = call(&app, "", "GET", "/h*/_count?allow_no_indices=false", None).await;
+    assert_eq!(status, 404);
+    let keys = async |uri: &str| {
+        let body = get(uri).await;
+        let mut keys: Vec<String> = body.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        keys.join(",")
+    };
+    for (uri, indices) in [
+        ("/.t*", ".tasks"),
+        ("/h*", ""),
+        ("/h*?expand_wildcards=all", "hid,logs"),
+        ("/h*/_mapping?expand_wildcards=open,hidden", "hid,logs"),
+        ("/*/_settings", ".dotvis,hid,logs"),
+        // Getting aliases expands to hidden and closed indices by default.
+        ("/*/_alias", ".dotvis,.tasks,cl,hid,logs"),
+        ("/h*/_alias", "hid,logs"),
+        ("/_alias", ".dotvis,.tasks,cl,hid,logs"),
+        ("/_alias/h*", "logs"),
+    ] {
+        assert_eq!(keys(uri).await, indices, "{uri}");
+    }
+    for (uri, indices) in [
+        ("/_cat/indices/*", ".dotvis,hid,logs"),
+        ("/_cat/indices/.t*", ".tasks"),
+        ("/_cat/indices/h*", ""),
+        (
+            "/_cat/indices/h*?expand_wildcards=open,closed,hidden",
+            "hid,logs",
+        ),
+        (
+            "/_cat/indices?expand_wildcards=all",
+            ".dotvis,.tasks,cl,hid,logs",
+        ),
+    ] {
+        let rows = get(&format!(
+            "{uri}{}format=json",
+            ["?", "&"][uri.contains('?') as usize]
+        ))
+        .await;
+        let mut names: Vec<&str> = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["index"].as_str().unwrap())
+            .collect();
+        names.sort();
+        assert_eq!(names.join(","), indices, "{uri}");
+    }
+    let caps = get("/_field_caps?fields=a").await;
+    assert_eq!(caps["indices"], json!([".dotvis", "hid", "logs"]));
+}

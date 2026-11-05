@@ -122,6 +122,7 @@ pub type Map<I> = BTreeMap<String, I>;
 pub trait IndexMeta {
     fn aliases(&self) -> &BTreeMap<String, Alias>;
     fn closed(&self) -> bool;
+    fn hidden(&self) -> bool;
 }
 
 impl IndexMeta for Index {
@@ -130,6 +131,9 @@ impl IndexMeta for Index {
     }
     fn closed(&self) -> bool {
         self.closed
+    }
+    fn hidden(&self) -> bool {
+        self.settings.get("index.hidden") == Some("true")
     }
 }
 
@@ -140,6 +144,9 @@ impl<T: IndexMeta + ?Sized> IndexMeta for &T {
     }
     fn closed(&self) -> bool {
         (**self).closed()
+    }
+    fn hidden(&self) -> bool {
+        (**self).hidden()
     }
 }
 
@@ -159,6 +166,9 @@ pub struct IndicesOptions {
     /// Which indices wildcards (and `_all`) expand to. Literal names are never filtered.
     pub expand_open: bool,
     pub expand_closed: bool,
+    /// Whether wildcards also expand to hidden indices and aliases (`.` patterns always reach
+    /// hidden `.` names).
+    pub expand_hidden: bool,
     /// Whether the expression may name aliases (deletion takes concrete indices only).
     pub aliases: bool,
     /// Document reads and searches refuse closed indices named directly or through an alias.
@@ -172,6 +182,7 @@ impl IndicesOptions {
         allow_no_indices: true,
         expand_open: true,
         expand_closed: true,
+        expand_hidden: false,
         aliases: true,
         refuse_closed: false,
     };
@@ -188,7 +199,6 @@ impl IndicesOptions {
     };
 
     /// Applies a request's `ignore_unavailable`, `allow_no_indices` and `expand_wildcards`.
-    // ponytail: `hidden` is accepted and ignored; es-mini has no hidden indices
     pub fn with_params(mut self, params: &std::collections::HashMap<String, String>) -> Self {
         let flag = |k: &str| params.get(k).map(|v| v.is_empty() || v == "true");
         self.ignore_unavailable = flag("ignore_unavailable").unwrap_or(self.ignore_unavailable);
@@ -196,6 +206,7 @@ impl IndicesOptions {
         if let Some(w) = params.get("expand_wildcards") {
             let has = |s: &str| w.split(',').any(|x| x == s || x == "all");
             (self.expand_open, self.expand_closed) = (has("open"), has("closed"));
+            self.expand_hidden = has("hidden");
         }
         self
     }
@@ -258,17 +269,19 @@ pub fn resolve(
         }
         let pattern = if part == "_all" { "*" } else { part };
         if pattern.contains('*') {
+            // Elasticsearch's `isVisibleDueToImplicitHidden`.
+            let visible = |name: &str, hidden: bool| {
+                !hidden || o.expand_hidden || (name.starts_with('.') && pattern.starts_with('.'))
+            };
             let mut found = false;
             for (name, index) in indices.iter().filter(|(_, i)| expands(*i)) {
-                if glob(pattern, name) {
+                if glob(pattern, name) && visible(name, index.hidden()) {
                     add(&mut hits, name, None);
                     found = true;
                 }
-                for (_, meta) in index
-                    .aliases()
-                    .iter()
-                    .filter(|(a, _)| o.aliases && glob(pattern, a))
-                {
+                for (_, meta) in index.aliases().iter().filter(|(a, m)| {
+                    o.aliases && glob(pattern, a) && visible(a, m.is_hidden == Some(true))
+                }) {
                     add(&mut hits, name, Some(meta));
                     found = true;
                 }
@@ -565,6 +578,42 @@ mod tests {
         assert_eq!(names(&resolve(&all, "*", &o).unwrap()), ["other"]);
         // expand_wildcards never filters literal names.
         assert_eq!(names(&resolve(&all, "logs-1", &o).unwrap()), ["logs-1"]);
+    }
+
+    #[test]
+    fn wildcards_skip_hidden_indices_and_aliases() {
+        let mut all = indices();
+        for name in [".tasks", "hid"] {
+            let mut index = Index::default();
+            index.settings.merge(&json!({"hidden": "true"}));
+            all.insert(name.into(), index);
+        }
+        let hidden = Alias::parse(&json!({"is_hidden": true})).unwrap();
+        all.get_mut("other")
+            .unwrap()
+            .aliases
+            .insert("hal".into(), hidden);
+        let visible = Alias::parse(&json!({})).unwrap();
+        all.get_mut("hid")
+            .unwrap()
+            .aliases
+            .insert("visal".into(), visible);
+        let r = |e, params: &[(&str, &str)]| {
+            let o = opts(IndicesOptions::READ, params);
+            names(&resolve(&all, e, &o).unwrap()).join(",")
+        };
+        // `hid` through its visible alias `visal`, as in Elasticsearch.
+        assert_eq!(r("*", &[]), "hid,logs-1,logs-2,other");
+        assert_eq!(r("*,-visal", &[]), "logs-1,logs-2,other");
+        assert_eq!(r("h*", &[]), "");
+        // A visible alias reaches its hidden index; `.` patterns reach hidden `.` indices.
+        assert_eq!(r("vis*", &[]), "hid");
+        assert_eq!(r(".t*", &[]), ".tasks");
+        assert_eq!(r("hid,hal", &[]), "hid,other");
+        let all_hidden = [("expand_wildcards", "open,hidden")];
+        assert_eq!(r("h*", &all_hidden), "hid,other");
+        assert_eq!(r("h*", &[("expand_wildcards", "all")]), "hid,other");
+        assert_eq!(r("*", &all_hidden), ".tasks,hid,logs-1,logs-2,other");
     }
 
     #[test]
