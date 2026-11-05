@@ -109,9 +109,12 @@ pub fn reject_bad_scalars(name: &str, v: &Value) -> Result<(), AppError> {
 pub fn parse_alias(v: &Value) -> Result<Alias, AppError> {
     let alias = Alias::parse(v).map_err(AppError::IllegalArgument)?;
     if let Some(f) = &alias.filter {
-        es_query::parse_query(f).map_err(|e| {
-            AppError::IllegalArgument(format!("failed to parse filter for alias: {e}"))
-        })?;
+        // Elasticsearch also builds the query, which a malformed query_string fails.
+        let q = es_query::parse_query(f);
+        if let Some(e) = q.as_ref().map_or_else(Some, |q| q.invalid()) {
+            let msg = format!("failed to parse filter for alias: {e}");
+            return Err(AppError::IllegalArgument(msg));
+        }
     }
     Ok(alias)
 }

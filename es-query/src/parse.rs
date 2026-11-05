@@ -141,6 +141,26 @@ impl Query {
         }
     }
 
+    /// The error of the first [`Query::Invalid`] in this query.
+    pub fn invalid(&self) -> Option<&QueryError> {
+        match self {
+            Query::Invalid(e) => Some(e),
+            Query::Bool {
+                must,
+                should,
+                must_not,
+                filter,
+                ..
+            } => (must.iter().chain(should).chain(must_not).chain(filter)).find_map(Query::invalid),
+            Query::DisMax { queries, .. } => queries.iter().find_map(Query::invalid),
+            Query::Boosted { query, .. }
+            | Query::Named { query, .. }
+            | Query::Normalized(query)
+            | Query::Fields { query, .. } => query.invalid(),
+            _ => None,
+        }
+    }
+
     /// This query (a leaf, maybe boosted, named or normalized) on `field` instead.
     pub(crate) fn on_field(mut self, to: &str) -> Query {
         match &mut self {

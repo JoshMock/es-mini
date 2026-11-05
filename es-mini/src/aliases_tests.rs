@@ -254,6 +254,13 @@ async fn name_conflicts_and_bad_filters() {
     )
     .await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
+    // Elasticsearch builds the filter's Lucene query, so a malformed query_string fails too.
+    let bad = json!({"filter": {"query_string": {"query": "a:("}}});
+    let (s, _) = call(&app, Method::PUT, "/a/_alias/z", Some(bad.clone())).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let bad = json!({"actions": [{"add": {"index": "a", "alias": "z", "filter": bad["filter"]}}]});
+    let (s, _) = call(&app, Method::POST, "/_aliases", Some(bad)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
     let (s, r) = call(&app, Method::PUT, "/nope/_alias/z", None).await;
     assert_eq!(
         (s, &r["error"]["type"]),
