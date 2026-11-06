@@ -568,6 +568,23 @@ fn multi_node_bulk_reaches_the_owners() {
 }
 
 #[test]
+fn multi_node_search_reads_every_node() {
+    let one = Cluster::start(1, "reference-search");
+    let three = Cluster::start(3, "search");
+    load(&one, |_| 0);
+    load(&three, |k| k % 3);
+    for node in 0..3 {
+        for (m, p, b) in reads().into_iter().filter(|r| r.1 == "/i/_search") {
+            assert_eq!(
+                stable(three.ok(node, m, p, &b)),
+                stable(one.ok(0, m, p, &b)),
+                "node {node}: {b}"
+            );
+        }
+    }
+}
+
+#[test]
 #[ignore = "target: multi-node"]
 fn multi_node_any_node_serves_all_docs_like_one_node() {
     let one = Cluster::start(1, "reference");

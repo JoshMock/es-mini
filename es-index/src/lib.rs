@@ -628,6 +628,28 @@ impl Shard {
         }
     }
 
+    /// Its live documents visible to search, oldest first, as a translog generation: what
+    /// another node needs to search it (see [`Index::remote_shard`]).
+    pub fn visible_translog(&self, settings: &Settings) -> Vec<u8> {
+        let mut docs: Vec<_> = (self.docs())
+            .filter(|(_, d)| self.searchable(settings, d.seq_no))
+            .collect();
+        docs.sort_by_key(|(_, d)| d.seq_no);
+        let mut out = es_codec::translog::header("", 1);
+        for (id, d) in docs {
+            out.extend(es_codec::translog::encode(&es_codec::translog::Op::Index {
+                id: id.to_owned(),
+                source: serde_json::to_vec(&d.source).unwrap_or_default(),
+                seq_no: d.seq_no as i64,
+                version: d.version as i64,
+                primary_term: 1,
+                routing: d.routing.clone(),
+                auto_id_timestamp: -1,
+            }));
+        }
+        out
+    }
+
     /// Writes not yet in the translog, oldest first; taking them marks them logged.
     pub fn take_unlogged(&mut self) -> Vec<es_codec::translog::Op> {
         std::mem::take(&mut self.unlogged)
@@ -1436,6 +1458,22 @@ impl Index {
                 }
             })
             .collect()
+    }
+
+    /// A one-shard snapshot like those of [`Index::shard_snapshots`], of a shard another node
+    /// holds, from its [`Shard::visible_translog`].
+    // ponytail: rebuilt from live documents only, so its BM25 statistics miss the deleted and
+    // updated documents the other node still counts; ship them too if scores must match then
+    pub fn remote_shard(&self, translog: &[u8]) -> es_codec::Result<Index> {
+        let mut shard = Shard::default();
+        for op in es_codec::translog::read(translog)?.1 {
+            shard.replay(op);
+        }
+        shard.refresh();
+        Ok(Index {
+            shards: vec![shard],
+            ..self.snapshot_meta()
+        })
     }
 
     /// Merges `partial` into an existing document, or indexes `upsert` if it is missing,

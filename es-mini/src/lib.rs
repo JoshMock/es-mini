@@ -486,6 +486,7 @@ fn router(state: AppState, security: Option<Arc<security::Security>>) -> Router 
         .route("/_cat/aliases", get(aliases::cat))
         .route("/_cat/aliases/{alias}", get(aliases::cat))
         .route("/_cat/nodes", get(nodes::cat))
+        .route("/{index}/_es_mini_shard/{shard}", get(nodes::shard))
         .route("/_cat/shards", get(indices::cat_shards))
         .route("/_cat/shards/{index}", get(indices::cat_shards))
         .route("/_query", post(search::esql))

@@ -320,7 +320,9 @@ fn steps<'a>(method: &Method, segs: &[&'a str], params: &HashMap<String, String>
         ("GET", [_, "_mapping"]) => vec![at("indices:admin/mappings/get", 0)],
         (_, [_, "_mapping"]) => vec![at("indices:admin/mapping/put", 0)],
         (_, [_, "_stats", ..]) => vec![at("indices:monitor/stats", 0)],
-        (_, [_, "_search" | "_count"]) => vec![at("indices:data/read/search", 0)],
+        (_, [_, "_search" | "_count"] | [_, "_es_mini_shard", _]) => {
+            vec![at("indices:data/read/search", 0)]
+        }
         (_, [_, "_field_caps"]) => vec![at("indices:data/read/field_caps", 0)],
         (_, [_, "_pit"]) => vec![at("indices:data/read/open_point_in_time", 0)],
         ("GET", [_, "_doc" | "_source", _]) => vec![at("indices:data/read/get", 0)],

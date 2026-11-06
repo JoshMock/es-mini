@@ -10,7 +10,7 @@ use axum::{
     Extension, Json,
     body::Bytes,
     extract::{OriginalUri, Path, Query, State},
-    http::{StatusCode, Uri, uri::InvalidUri},
+    http::{HeaderMap, StatusCode, Uri, uri::InvalidUri},
 };
 use es_index::aliases;
 use es_query::{
@@ -208,13 +208,14 @@ pub async fn search_all(
     authn: Option<Extension<Authn>>,
     uri: Uri,
     params: Query<HashMap<String, String>>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
     search(
         state,
         contexts,
         authn,
-        OriginalUri(uri),
+        (OriginalUri(uri), headers),
         Path("_all".into()),
         params,
         body,
@@ -241,7 +242,7 @@ pub async fn search(
     Extension(contexts): Extension<Contexts>,
     authn: Option<Extension<Authn>>,
     // As sent: authorization may have rewritten the path (not the query) to name indices.
-    OriginalUri(uri): OriginalUri,
+    (OriginalUri(uri), headers): (OriginalUri, HeaderMap),
     Path(name): Path<String>,
     Query(params): Query<HashMap<String, String>>,
     body: Bytes,
@@ -288,7 +289,11 @@ pub async fn search(
         None if scroll.is_some() => Some(crate::scroll::snapshot(&state, &name, &params)?),
         None => None,
     };
-    let (shared, indices, resolved, split);
+    let remote = match snapshot {
+        None => crate::nodes::pull(&state, &headers, &name, &params).await?,
+        Some(_) => crate::nodes::Remote::new(),
+    };
+    let (shared, indices, resolved, mut split);
     // Like Elasticsearch's IndicesService.canCache, per shard of each index searched.
     // ponytail: each shard caches the merged response rather than its own result, so the
     // counts and invalidation are per shard but a miss on any shard recomputes the search
@@ -298,7 +303,7 @@ pub async fn search(
     let mut routing = String::new();
     let flag = params.get("request_cache").map(String::as_str);
     let cacheable = |index: &es_index::Index| match flag {
-        _ if scroll.is_some() || snapshot.is_some() || req.profile => false,
+        _ if scroll.is_some() || snapshot.is_some() || req.profile || !remote.is_empty() => false,
         Some(v) => v == "true",
         None => req.size == 0 && index.settings.get("index.requests.cache.enable") != Some("false"),
     };
@@ -312,6 +317,7 @@ pub async fn search(
             resolved = crate::indices::data_targets(&*shared, &name, &params)?;
             indices = shared.lock(resolved.iter().map(|t| &t.index));
             split = self::split(&indices, &resolved);
+            crate::nodes::place(&remote, &indices, &resolved, &mut split)?;
             routing = format!(
                 "{:?}",
                 resolved.iter().map(|t| &t.routing).collect::<Vec<_>>()
@@ -473,13 +479,14 @@ pub async fn search_template_all(
     authn: Option<Extension<Authn>>,
     uri: Uri,
     params: Query<HashMap<String, String>>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
     search_template(
         state,
         contexts,
         authn,
-        OriginalUri(uri),
+        (OriginalUri(uri), headers),
         Path("_all".into()),
         params,
         body,
@@ -492,13 +499,13 @@ pub async fn search_template(
     state: State<AppState>,
     contexts: Extension<Contexts>,
     authn: Option<Extension<Authn>>,
-    uri: OriginalUri,
+    sent: (OriginalUri, HeaderMap),
     name: Path<String>,
     params: Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
     let body = crate::template::search_body(&body)?;
-    search(state, contexts, authn, uri, name, params, body).await
+    search(state, contexts, authn, sent, name, params, body).await
 }
 
 pub async fn msearch(
@@ -506,10 +513,10 @@ pub async fn msearch(
     contexts: Extension<Contexts>,
     path: Option<Path<String>>,
     authn: Option<Extension<Authn>>,
-    uri: Uri,
+    sent: (Uri, HeaderMap),
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
-    msearch_impl(state, contexts, path, authn, uri, body, false).await
+    msearch_impl(state, contexts, path, authn, sent, body, false).await
 }
 
 pub async fn msearch_template(
@@ -517,10 +524,10 @@ pub async fn msearch_template(
     contexts: Extension<Contexts>,
     path: Option<Path<String>>,
     authn: Option<Extension<Authn>>,
-    uri: Uri,
+    sent: (Uri, HeaderMap),
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
-    msearch_impl(state, contexts, path, authn, uri, body, true).await
+    msearch_impl(state, contexts, path, authn, sent, body, true).await
 }
 
 /// `_msearch`: NDJSON header/body pairs, each run as a `_search`; a failing search fails only its own entry.
@@ -530,7 +537,7 @@ async fn msearch_impl(
     Extension(contexts): Extension<Contexts>,
     path: Option<Path<String>>,
     authn: Option<Extension<Authn>>,
-    uri: Uri,
+    (uri, headers): (Uri, HeaderMap),
     body: Bytes,
     template: bool,
 ) -> Result<Json<Value>, AppError> {
@@ -593,7 +600,7 @@ async fn msearch_impl(
                 State(state.clone()),
                 Extension(contexts.clone()),
                 authn.clone(),
-                OriginalUri(original),
+                (OriginalUri(original), headers.clone()),
                 Path(name),
                 Query(params),
                 search_body,

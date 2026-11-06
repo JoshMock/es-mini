@@ -209,6 +209,94 @@ fn doc_owner(
     Some(state.nodes().owner(i.shard_for(id, routing)))
 }
 
+/// The shards of a search other nodes hold: each one's [`es_index::Shard::visible_translog`],
+/// by index name and shard number.
+pub(crate) type Remote = HashMap<(String, usize), Vec<u8>>;
+
+/// Fetches from their nodes the shards a client's search of `expr` reads that other nodes hold,
+/// as Elasticsearch's coordinating node fans a search out to each shard's node. None without a
+/// node list, for a [`PEER`], or if `expr` does not resolve (the search then fails as on one
+/// node).
+// ponytail: pulls whole shards and searches them here, so every search moves every remote
+// shard's documents; run the query on each node and reduce its results if that gets slow
+pub(crate) async fn pull(
+    state: &AppState,
+    headers: &HeaderMap,
+    expr: &str,
+    params: &HashMap<String, String>,
+) -> Result<Remote, AppError> {
+    let nodes = state.nodes();
+    if nodes.addrs.len() < 2 || headers.contains_key(PEER) {
+        return Ok(Remote::new());
+    }
+    let wanted: Vec<(String, usize)> = {
+        let shared = state.read();
+        let resolved = crate::indices::data_targets(&*shared, expr, params).unwrap_or_default();
+        (resolved.iter())
+            .flat_map(|t| {
+                let of = shared.read(&t.index).map_or(0, |i| i.number_of_shards());
+                (0..of)
+                    .filter(move |&n| nodes.owner(n) != nodes.me && crate::search::routed(t, n, of))
+                    .map(|n| (t.index.clone(), n))
+            })
+            .collect()
+    };
+    let mut remote = Remote::new();
+    for (index, n) in wanted {
+        let uri = format!("/{index}/_es_mini_shard/{n}")
+            .parse()
+            .expect("index names");
+        let res = send_to(state, nodes.owner(n), &Method::GET, &uri, headers, b"").await?;
+        let status = res.status();
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX).await;
+        match body {
+            Ok(b) if status.is_success() => _ = remote.insert((index, n), b.to_vec()),
+            _ => {
+                return Err(AppError::Io(format!(
+                    "node [{}] did not send shard [{index}][{n}]: {status}",
+                    nodes.name(nodes.owner(n))
+                )));
+            }
+        }
+    }
+    Ok(remote)
+}
+
+/// Puts the shards in `remote` in place of this node's empty copies in `split` (see
+/// [`crate::search::split`]), splitting an index of one shard too.
+pub(crate) fn place(
+    remote: &Remote,
+    indices: &es_index::aliases::Map<impl std::borrow::Borrow<es_index::Index>>,
+    resolved: &[es_index::aliases::Target],
+    split: &mut [Vec<es_index::Index>],
+) -> Result<(), AppError> {
+    for (t, shards) in resolved.iter().zip(split) {
+        let index = indices[&t.index].borrow();
+        for ((_, n), translog) in remote.iter().filter(|((i, _), _)| *i == t.index) {
+            if shards.is_empty() {
+                *shards = index.shard_snapshots();
+            }
+            shards[*n] = (index.remote_shard(translog))
+                .map_err(|e| AppError::Io(format!("shard [{}][{n}]: {}", t.index, e.0)))?;
+        }
+    }
+    Ok(())
+}
+
+/// `GET /{index}/_es_mini_shard/{shard}`: shard `shard` of `index` as a [`pull`] needs it.
+pub async fn shard(
+    State(state): State<AppState>,
+    Path((index, n)): Path<(String, usize)>,
+) -> Result<Vec<u8>, AppError> {
+    let shared = state.read();
+    let i = shared.read(&index).ok_or(AppError::IndexNotFound(index))?;
+    let empty = es_index::Shard::default();
+    Ok(i.shards()
+        .get(n)
+        .unwrap_or(&empty)
+        .visible_translog(&i.settings))
+}
+
 /// Repeats a successful index creation or deletion on every other node, as Elasticsearch's
 /// master publishes the cluster state, before answering.
 // ponytail: each node records its own uuid and creation date for the index
