@@ -27,6 +27,10 @@ Single node; binds `127.0.0.1` unless `ES_MINI_HOST` says otherwise. Security is
   `MAX`, `MEDIAN`, `PERCENTILE`, `VALUES`) and string, math, date (`DATE_TRUNC`, `BUCKET`,
   `DATE_EXTRACT`, `DATE_FORMAT`), conversion (`TO_*`), multi-value and `CASE`/`COALESCE` functions
 - **Cluster info:** `/`, `_cluster/health`, `_cluster/stats`, `_cluster/settings`, `_nodes`
+- **Multi-node (basic):** up to 3 es-mini processes given a fixed node list (`ES_MINI_NODES`).
+  Shards go round the nodes; index creation and deletion reach every node, single-document
+  requests and `_bulk` items go to the shard's node, and `_search`, `_count` and ES|QL read every
+  node's shards. No replicas, failover or master election.
 - **Storage:** in memory by default, or an Elasticsearch-compatible Lucene 10 data directory.
   Writes are fsynced to a translog and replayed on start; segments are committed on flush, so
   Elasticsearch and es-mini can take turns on one directory.
@@ -34,7 +38,7 @@ Single node; binds `127.0.0.1` unless `ES_MINI_HOST` says otherwise. Security is
   most requests (`term`, `range` with sort, `count`, ES|QL and aggregations), and about even on
   `match`, `match_phrase` and `bool`; see [bench/RESULTS.md](bench/RESULTS.md).
 
-Out of scope: multi-node clusters, `_cat`, ILM, vector storage, async search, scripting (Painless),
+Out of scope: multi-node beyond the basics above, `_cat`, ILM, vector storage, async search, scripting (Painless),
 runtime fields, ingest pipelines, highlighting, suggesters, percolator, geo queries, `nested`
 queries, join fields (see `z_old/PLAN.md`).
 
@@ -48,6 +52,7 @@ cargo run -p es-mini                                # in memory, on 127.0.0.1:92
 ES_MINI_DATA=/path/to/data cargo run -p es-mini     # persist to a data directory
 ES_MINI_PORT=9201 cargo run -p es-mini              # another port
 ES_MINI_HOST=0.0.0.0 cargo run -p es-mini           # another bind address (default 127.0.0.1)
+ES_MINI_PORT=9201 ES_MINI_NODES=127.0.0.1:9201,127.0.0.1:9202 cargo run -p es-mini  # one of 2 nodes
 env xpack.security.enabled=true ELASTIC_PASSWORD=changeme cargo run -p es-mini  # require auth
 ```
 

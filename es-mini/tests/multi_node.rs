@@ -2,7 +2,7 @@
 //!
 //! `multi_node_guard_*` tests pin today's single-node behavior that multi-node support will
 //! touch (shard routing, multi-shard merging, `_bulk`, refresh, index lifecycle, persistence).
-//! The `#[ignore]`d `multi_node_*` tests state the target: up to 3 es-mini processes, given a
+//! The other `multi_node_*` tests check the target: up to 3 es-mini processes, given a
 //! fixed node list at startup (`ES_MINI_NODES`, comma-separated `host:port` including the node's
 //! own), coordinate over es-mini's own HTTP protocol, without replicas, failover, or master
 //! election, and answer like one node holding the same data.
@@ -619,7 +619,6 @@ fn multi_node_esql_reads_every_node() {
 }
 
 #[test]
-#[ignore = "target: multi-node"]
 fn multi_node_any_node_serves_all_docs_like_one_node() {
     let one = Cluster::start(1, "reference");
     let three = Cluster::start(3, "serve");
