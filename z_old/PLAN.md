@@ -51,7 +51,7 @@ Aggregations (in `_search` and `_count`-free searches with `size: 0`):
 
 This is a non-exhaustive list:
 
-- multi-node; single-node support only
+- multi-node beyond very basic es-mini-only clusters of up to 3 nodes (multi-node goals in ralph/goals.txt; human decision 2026-11-05)
 - `_cat` APIs
 - index lifecycle management
 - vector storage (for now, unless it's easy to support "for free")
