@@ -569,6 +569,10 @@ fn router(state: AppState, security: Option<Arc<security::Security>>) -> Router 
             state.clone(),
             nodes::broadcast,
         ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            nodes::forward,
+        ))
         .with_state(state)
         // Elasticsearch's default http.max_content_length; axum's own default is 2 MB.
         .layer(axum::extract::DefaultBodyLimit::max(100 << 20))

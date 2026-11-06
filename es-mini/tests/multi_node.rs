@@ -498,6 +498,40 @@ fn multi_node_three_shards_spread_over_three_nodes() {
 }
 
 #[test]
+fn multi_node_single_doc_requests_reach_the_owner() {
+    let one = Cluster::start(1, "reference-docs");
+    let three = Cluster::start(3, "docs");
+    // Each shard numbers its own writes, so equal `_seq_no`s mean each shard lives on one node.
+    assert_eq!(load(&three, |k| k % 3), load(&one, |_| 0));
+    let update = json!({"doc": {"n": 100}}).to_string();
+    for k in 0..DOCS {
+        let (node, path) = (k % 3, format!("/i/_update/{k}"));
+        assert_eq!(
+            three.ok(node, "POST", &path, &update),
+            one.ok(0, "POST", &path, &update)
+        );
+    }
+    for node in 0..3 {
+        for k in 0..DOCS {
+            for path in [format!("/i/_doc/{k}"), format!("/i/_source/{k}")] {
+                assert_eq!(
+                    three.call(node, "GET", &path, ""),
+                    one.call(0, "GET", &path, "")
+                );
+            }
+        }
+    }
+    for k in 0..DOCS {
+        let path = format!("/i/_doc/{k}");
+        assert_eq!(
+            three.call(k % 3, "DELETE", &path, ""),
+            one.call(0, "DELETE", &path, "")
+        );
+        assert_eq!(three.call((k + 1) % 3, "GET", &path, "").0, 404);
+    }
+}
+
+#[test]
 #[ignore = "target: multi-node"]
 fn multi_node_any_node_serves_all_docs_like_one_node() {
     let one = Cluster::start(1, "reference");

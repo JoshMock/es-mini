@@ -4,8 +4,8 @@
 use crate::{AppState, CLUSTER_NAME, error::AppError};
 use axum::{
     Json,
-    extract::{MatchedPath, Query, Request, State},
-    http::{HeaderMap, Method, StatusCode, Uri},
+    extract::{FromRequestParts, MatchedPath, Path, Query, Request, State},
+    http::{HeaderMap, Method, StatusCode, Uri, header::CONTENT_TYPE},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -73,14 +73,15 @@ impl Nodes {
 const PEER: &str = "x-es-mini-peer";
 
 /// Sends `method uri` with `body` and the client's `content-type` and `authorization` from
-/// `headers` to the node at `addr`, marked as from a [`PEER`]; returns the answer's status.
+/// `headers` to the node at `addr`, marked as from a [`PEER`]; returns the answer, keeping only
+/// its status, `content-type` and body.
 async fn send(
     addr: &str,
     method: &Method,
     uri: &Uri,
     headers: &HeaderMap,
     body: &[u8],
-) -> std::io::Result<StatusCode> {
+) -> std::io::Result<Response> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut head = format!("{method} {uri} HTTP/1.0\r\n{PEER}: 1\r\n");
     for name in ["content-type", "authorization"] {
@@ -95,9 +96,80 @@ async fn send(
     // HTTP/1.0: the server closes the connection after answering.
     let mut res = Vec::new();
     s.read_to_end(&mut res).await?;
-    (res.split(|&b| b == b' ').nth(1))
-        .and_then(|code| StatusCode::from_bytes(code).ok())
-        .ok_or_else(|| std::io::Error::other("malformed HTTP response"))
+    let malformed = || std::io::Error::other("malformed HTTP response");
+    let split = (res.windows(4).position(|w| w == b"\r\n\r\n")).ok_or_else(malformed)?;
+    let head = String::from_utf8_lossy(&res[..split]);
+    let mut lines = head.split("\r\n");
+    let status = (lines.next().and_then(|l| l.split(' ').nth(1)))
+        .and_then(|code| StatusCode::from_bytes(code.as_bytes()).ok())
+        .ok_or_else(malformed)?;
+    let mut answer = (status, res[split + 4..].to_vec()).into_response();
+    for (name, value) in lines.filter_map(|l| l.split_once(':')) {
+        if name.eq_ignore_ascii_case("content-type")
+            && let Ok(value) = value.trim().parse()
+        {
+            answer.headers_mut().insert(CONTENT_TYPE, value);
+        }
+    }
+    Ok(answer)
+}
+
+/// Sends a single-document request to the node that holds the document's shard, as
+/// Elasticsearch routes it to the primary, and answers with that node's response. Requests whose
+/// index or routing does not resolve here run here, to fail as on one node.
+// ponytail: POST /{index}/_doc (auto id) is not forwarded, so its doc stays on this node
+pub async fn forward(State(state): State<AppState>, req: Request, next: Next) -> Response {
+    const ROUTES: [&str; 4] = [
+        "/{index}/_doc/{id}",
+        "/{index}/_create/{id}",
+        "/{index}/_update/{id}",
+        "/{index}/_source/{id}",
+    ];
+    let route = (req.extensions().get::<MatchedPath>()).map(MatchedPath::as_str);
+    if state.nodes().addrs.len() < 2
+        || !route.is_some_and(|r| ROUTES.contains(&r))
+        || req.headers().contains_key(PEER)
+    {
+        return next.run(req).await;
+    }
+    let (mut parts, body) = req.into_parts();
+    let owner = match Path::<(String, String)>::from_request_parts(&mut parts, &state).await {
+        Ok(Path((index, id))) => doc_owner(&state, &parts.method, &parts.uri, &index, &id),
+        Err(_) => None,
+    };
+    let nodes = state.nodes();
+    let Some(owner) = owner.filter(|&o| o != nodes.me) else {
+        return next.run(Request::from_parts(parts, body)).await;
+    };
+    let Ok(body) = axum::body::to_bytes(body, usize::MAX).await else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let sent = send(
+        &nodes.addrs[owner],
+        &parts.method,
+        &parts.uri,
+        &parts.headers,
+        &body,
+    );
+    sent.await.unwrap_or_else(|e| {
+        let node = nodes.name(owner);
+        AppError::Io(format!("node [{node}] did not answer: {e}")).into_response()
+    })
+}
+
+/// The node holding document `id` that a request `method uri` sent to `index` reaches, if the
+/// index and the routing resolve.
+fn doc_owner(state: &AppState, method: &Method, uri: &Uri, index: &str, id: &str) -> Option<usize> {
+    let shared = state.read();
+    let target = match method.is_safe() {
+        true => crate::docs::single_index(&*shared, index).ok(),
+        false => es_index::aliases::resolve_write(&*shared, index).ok(),
+    };
+    let i = shared.read(&target?)?;
+    let params = Query::<HashMap<String, String>>::try_from_uri(uri).ok()?;
+    let routing = params.get("routing").map(String::as_str);
+    let routing = crate::docs::routing(&i, index, routing).ok()??;
+    Some(state.nodes().owner(i.shard_for(id, routing)))
 }
 
 /// Repeats a successful index creation or deletion on every other node, as Elasticsearch's
@@ -136,9 +208,9 @@ pub async fn broadcast(State(state): State<AppState>, req: Request, next: Next) 
         .filter(|(n, _)| *n != nodes.me)
     {
         match send(addr, &method, &uri, &headers, &body).await {
-            Ok(status) if status.is_success() => {}
+            Ok(res) if res.status().is_success() => {}
             failed => {
-                let why = failed.map_or_else(|e| e.to_string(), |s| s.to_string());
+                let why = failed.map_or_else(|e| e.to_string(), |r| r.status().to_string());
                 return AppError::Io(format!(
                     "applied on this node, but node [{}] answered: {why}",
                     nodes.name(n)

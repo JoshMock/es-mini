@@ -124,7 +124,7 @@ fn write_doc<T>(
 /// The routing of a document request with `routing` sent to `name` that reached index `i`:
 /// that of the alias `name` if it has one. `Ok(None)` if the request lacks the routing `i`'s
 /// mapping requires.
-fn routing<'a>(
+pub(crate) fn routing<'a>(
     i: &'a Index,
     name: &str,
     routing: Option<&'a str>,
