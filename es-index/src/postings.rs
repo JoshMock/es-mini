@@ -462,8 +462,16 @@ impl crate::Shard {
             seq_nos.select_nth_unstable(n);
             seq_nos.truncate(n);
         }
-        let docs = seq_nos.iter().filter_map(|&s| self.docs.by_seq_no(s));
-        (count, docs.map(|(id, d)| (id.as_str(), &**d)).collect())
+        (
+            count,
+            seq_nos.iter().filter_map(|&s| self.memory_doc(s)).collect(),
+        )
+    }
+
+    /// The live in-memory document with sequence number `seq_no`, as postings list it.
+    pub fn memory_doc(&self, seq_no: u64) -> Option<(&str, &crate::Document)> {
+        let (id, d) = self.docs.by_seq_no(seq_no)?;
+        Some((id.as_str(), &**d))
     }
 
     /// The frequency of `term` in each live document holding it in `field` (at source `path`),

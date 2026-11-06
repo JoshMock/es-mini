@@ -664,7 +664,17 @@ impl<'a> Searcher<'a> {
             let (kind, path) = self.kind(field);
             let (count, page) =
                 (self.shard).memory_term_first(path, kind.indexed(), &text(value), n, visible);
-            return Some((score, count, page));
+            let page = page.into_iter().map(|(id, d)| (score, id, d));
+            return Some((count, page.collect()));
+        }
+        if let (Query::Match { field, query, and }, []) = (q, sort) {
+            return self.memory_match_first(
+                field,
+                &self.match_terms(field, query),
+                *and,
+                n,
+                visible,
+            );
         }
         let (
             Query::Range {
@@ -688,7 +698,56 @@ impl<'a> Searcher<'a> {
                 self.shard
                     .memory_numbers_first(m, path, bounds, f.desc, n, visible)
             })
-            .map(|(count, page)| (1.0, count, page))
+            .map(|(count, page)| {
+                (
+                    count,
+                    page.into_iter().map(|(id, d)| (1.0, id, d)).collect(),
+                )
+            })
+    }
+
+    /// The in-memory documents below `visible` matching all (or any) of `wanted` terms of
+    /// `field`, scored from their postings as [`postings_terms`](Self::postings_terms) scores
+    /// them: how many there are, and the best `n` (ties in write order, in no order). Only the
+    /// `n` are read.
+    fn memory_match_first(
+        &self,
+        field: &str,
+        wanted: &[String],
+        all: bool,
+        n: usize,
+        visible: u64,
+    ) -> Option<MemoryPage<'a>> {
+        if matches!(self.kind(field).0, Kind::Number | Kind::Bool) {
+            return None;
+        }
+        let freqs = self.freqs.get(field)?;
+        let postings = (wanted.iter().map(|w| freqs.get(w))).collect::<Option<Vec<_>>>()?;
+        // (seq_no, term, posting), so each document sums its terms' scores in query order
+        let mut at: Vec<_> = (postings.iter().enumerate())
+            .flat_map(|(i, f)| f.memory.values().map(move |p| (p.seq_no, i, p.at)))
+            .filter(|&(seq_no, ..)| seq_no < visible)
+            .collect();
+        at.sort_unstable_by_key(|&(seq_no, i, _)| (seq_no, i));
+        let mut hits: Vec<(f64, u64)> = (at.chunk_by(|a, b| a.0 == b.0))
+            .filter(|doc| !all || doc.len() == wanted.len())
+            .map(|doc| {
+                let score = |s, &(_, i, (freq, len)): &(u64, usize, (u32, u32))| {
+                    s + self.bm25(field, &wanted[i], freq.into(), len.into())
+                };
+                (doc.iter().fold(0.0, score), doc[0].0)
+            })
+            .collect();
+        let count = hits.len();
+        if n < count {
+            hits.select_nth_unstable_by(n, |a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+            hits.truncate(n);
+        }
+        let page = hits.into_iter().map(|(score, seq_no)| {
+            let (id, d) = self.shard.memory_doc(seq_no)?;
+            Some((score, id, d))
+        });
+        Some((count, page.collect::<Option<_>>()?))
     }
 
     /// The on-disk documents indexing all (or any) of `terms` in `field` (see
@@ -1784,8 +1843,8 @@ fn constant_score(q: &Query) -> Option<f64> {
     }
 }
 
-/// The score of some in-memory hits, how many there are, and the first of them in order.
-type MemoryPage<'a> = (f64, usize, Vec<(&'a str, &'a Document)>);
+/// How many in-memory hits there are, and the first of them in order with their scores.
+type MemoryPage<'a> = (usize, Vec<(f64, &'a str, &'a Document)>);
 
 /// A matching document, before hits are paged and read.
 struct Found<'a> {
@@ -1897,9 +1956,9 @@ pub fn search_many<'a>(
         let before = hits.len();
         hits.extend(selected.into_iter().flatten());
         let mut counted = 0;
-        if let Some((score, count, page)) = memory_page {
+        if let Some((count, page)) = memory_page {
             counted = count - page.len();
-            hits.extend(page.into_iter().map(|(id, doc)| Found {
+            hits.extend(page.into_iter().map(|(score, id, doc)| Found {
                 target: pos,
                 id,
                 seq_no: doc.seq_no,
@@ -2949,6 +3008,46 @@ mod tests {
             assert_eq!(search(ix, q, 1), (total, max, vec![]), "{q}");
         }
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A match query pages its in-memory hits from postings, reading only the page's documents,
+    /// with the hits, scores and total the per-document scoring gives.
+    #[test]
+    fn match_speed_in_memory_match_pages_from_postings() {
+        let mut ix = Index::default();
+        for i in 0..40 {
+            let title = format!("w{} {} quick {}", i % 7, "fox ".repeat(i % 3), i % 5);
+            let k = ["a b", "b"][i % 2];
+            ix.put(&i.to_string(), json!({"title": title, "k": k}));
+        }
+        // replaced and deleted documents stay in the statistics, not in the hits
+        ix.put("3", json!({"title": "quick quick fox"}));
+        ix.delete("4");
+        let queries = [
+            json!({"match": {"title": "quick fox"}}),
+            json!({"match": {"title": "fox fox 2"}}),
+            json!({"match": {"title": {"query": "quick fox", "operator": "and"}}}),
+            json!({"match": {"title": "absent"}}),
+            json!({"match": {"k": "b"}}),
+        ];
+        for q in queries {
+            let query = parse_query(&q).unwrap();
+            let s = Searcher::new(&ix, &query);
+            let mut want: Vec<_> = (ix.docs())
+                .filter_map(|(id, d)| Some((s.score(&query, id, &d)?, d.seq_no, id)))
+                .collect();
+            want.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+            let (count, _) = s.memory_sorted(&query, &[], 5, u64::MAX).expect("paged");
+            assert_eq!(count, want.len(), "{q}");
+            let r = search(
+                &ix,
+                &SearchRequest::parse(&json!({"query": q, "size": 5})).unwrap(),
+            );
+            let got: Vec<_> = r.hits.iter().map(|h| (h.id, h.score)).collect();
+            let want_page = want.iter().take(5).map(|w| (w.2, Some(w.0 as f32)));
+            assert_eq!(got, want_page.collect::<Vec<_>>(), "{q}");
+            assert_eq!(r.total, want.len(), "{q}");
+        }
     }
 
     /// Scores come from postings in memory too: a keyword counts once per document and has
