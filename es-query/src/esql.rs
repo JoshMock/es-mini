@@ -2838,15 +2838,17 @@ pub fn run_narrowed(
     }
 }
 
-/// `run` with `now` (epoch millis) as the query's start time.
-fn run_at(
-    indices: &aliases::Map<impl aliases::IndexMeta + std::borrow::Borrow<Index>>,
-    query: &str,
-    now: i64,
-    narrow: Narrow,
-) -> Result<Response, EsqlError> {
+/// The index expressions of a query's `FROM`: none for `ROW`, or if the query does not parse.
+pub fn sources(query: &str) -> Vec<String> {
+    match parse(query, 0) {
+        Ok((Source::From(sources, ..), _)) => sources,
+        _ => vec![],
+    }
+}
+
+fn parse(query: &str, now: i64) -> Result<(Source, Vec<Command>), EsqlError> {
     let (toks, eof) = lex(query)?;
-    let (source, cmds) = Parser {
+    Parser {
         src: query,
         toks,
         eof,
@@ -2856,7 +2858,17 @@ fn run_at(
         follow: "<EOF>",
         now,
     }
-    .query()?;
+    .query()
+}
+
+/// `run` with `now` (epoch millis) as the query's start time.
+fn run_at(
+    indices: &aliases::Map<impl aliases::IndexMeta + std::borrow::Borrow<Index>>,
+    query: &str,
+    now: i64,
+    narrow: Narrow,
+) -> Result<Response, EsqlError> {
+    let (source, cmds) = parse(query, now)?;
     let (source, cmds) = match source {
         // A row is an EVAL over one empty row.
         Source::Row(fields) => (None, [vec![Command::Eval(fields)], cmds].concat()),

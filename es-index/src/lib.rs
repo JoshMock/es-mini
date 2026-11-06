@@ -1476,6 +1476,20 @@ impl Index {
         })
     }
 
+    /// A [`Index::snapshot`] with shards other nodes hold in place of its own copies: each one's
+    /// number and [`Shard::visible_translog`].
+    pub fn with_remote<'t>(
+        &self,
+        remote: impl IntoIterator<Item = (usize, &'t [u8])>,
+    ) -> es_codec::Result<Index> {
+        let mut ix = self.snapshot();
+        for (n, translog) in remote {
+            let shard = self.remote_shard(translog)?.shards.remove(0);
+            *ix.shard_mut(n).1 = shard;
+        }
+        Ok(ix)
+    }
+
     /// Merges `partial` into an existing document, or indexes `upsert` if it is missing,
     /// mapping new fields as [`Index::map_dynamic`] does (whose error it returns). `check` sees
     /// the document to write first, and its error stops the write. `None` means the document is

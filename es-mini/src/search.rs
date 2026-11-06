@@ -691,6 +691,7 @@ pub async fn esql(
     authn: Option<Extension<Authn>>,
     uri: Uri,
     Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
     params::check(
@@ -704,6 +705,12 @@ pub async fn esql(
         .as_str()
         .filter(|q| !q.is_empty())
         .ok_or_else(|| AppError::ActionRequestValidation("[query] is required".into()))?;
+    let from = esql::sources(query).join(",");
+    let from = esql_from(authn.as_deref(), &state.read(), &from).unwrap_or_default();
+    let remote = match from.is_empty() {
+        true => crate::nodes::Remote::new(),
+        false => crate::nodes::pull(&state, &headers, &from, &HashMap::new()).await?,
+    };
     // The narrowing's own error, which ES|QL's errors cannot carry.
     let refused = std::cell::Cell::new(None);
     let shared = state.read();
@@ -713,7 +720,12 @@ pub async fn esql(
             EsqlError::Verification(String::new())
         })
     };
-    let r = esql::run_narrowed(&shared.all(), query, &narrow);
+    let all = shared.all();
+    let rebuilt = crate::nodes::rebuild(&remote, &all)?;
+    let indices: aliases::Map<&es_index::Index> = (all.iter())
+        .map(|(n, i)| (n.clone(), rebuilt.get(n).unwrap_or(i.borrow())))
+        .collect();
+    let r = esql::run_narrowed(&indices, query, &narrow);
     if let Some(e) = refused.take() {
         return Err(e);
     }

@@ -283,6 +283,24 @@ pub(crate) fn place(
     Ok(())
 }
 
+/// Each index with shards in `remote`, as [`es_index::Index::with_remote`] makes it.
+pub(crate) fn rebuild(
+    remote: &Remote,
+    indices: &es_index::aliases::Map<impl std::borrow::Borrow<es_index::Index>>,
+) -> Result<HashMap<String, es_index::Index>, AppError> {
+    let mut by_index: HashMap<&str, Vec<(usize, &[u8])>> = HashMap::new();
+    for ((index, n), translog) in remote {
+        by_index.entry(index).or_default().push((*n, translog));
+    }
+    (by_index.into_iter())
+        .map(|(name, shards)| {
+            let index = indices[name].borrow().with_remote(shards);
+            let index = index.map_err(|e| AppError::Io(format!("index [{name}]: {}", e.0)))?;
+            Ok((name.to_owned(), index))
+        })
+        .collect()
+}
+
 /// `GET /{index}/_es_mini_shard/{shard}`: shard `shard` of `index` as a [`pull`] needs it.
 pub async fn shard(
     State(state): State<AppState>,
