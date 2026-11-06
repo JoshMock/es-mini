@@ -551,7 +551,6 @@ fn multi_node_cluster_reports_three_nodes() {
 }
 
 #[test]
-#[ignore = "target: multi-node"]
 fn multi_node_index_create_delete_seen_on_all() {
     let c = Cluster::start(3, "lifecycle");
     create_index(&c, 1);

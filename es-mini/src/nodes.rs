@@ -4,8 +4,10 @@
 use crate::{AppState, CLUSTER_NAME, error::AppError};
 use axum::{
     Json,
-    extract::{Query, State},
-    http::Uri,
+    extract::{MatchedPath, Query, Request, State},
+    http::{HeaderMap, Method, StatusCode, Uri},
+    middleware::Next,
+    response::{IntoResponse, Response},
 };
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -18,6 +20,8 @@ pub(crate) const NODE_ID: &str = "es-mini-node";
 #[derive(Default)]
 pub(crate) struct Nodes {
     addrs: Vec<String>,
+    /// This node's place in `addrs`.
+    me: usize,
 }
 
 impl Nodes {
@@ -27,12 +31,9 @@ impl Nodes {
         };
         let addrs: Vec<String> = list.split(',').map(|a| a.trim().to_owned()).collect();
         let me = settings.get("es_mini.node").map_or("", String::as_str);
-        if !addrs.iter().any(|a| a == me) {
-            return Err(format!(
-                "es_mini.nodes [{list}] does not list this node [{me}]"
-            ));
-        }
-        Ok(Self { addrs })
+        let me = (addrs.iter().position(|a| a == me))
+            .ok_or_else(|| format!("es_mini.nodes [{list}] does not list this node [{me}]"))?;
+        Ok(Self { addrs, me })
     }
 
     pub fn count(&self) -> usize {
@@ -53,6 +54,87 @@ impl Nodes {
             .and_then(|a| a.rsplit_once(':'))
             .map_or("127.0.0.1", |(host, _)| host)
     }
+}
+
+/// Marks a request one node sends another, so the receiver applies it alone.
+const PEER: &str = "x-es-mini-peer";
+
+/// Sends `method uri` with `body` and the client's `content-type` and `authorization` from
+/// `headers` to the node at `addr`, marked as from a [`PEER`]; returns the answer's status.
+async fn send(
+    addr: &str,
+    method: &Method,
+    uri: &Uri,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> std::io::Result<StatusCode> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut head = format!("{method} {uri} HTTP/1.0\r\n{PEER}: 1\r\n");
+    for name in ["content-type", "authorization"] {
+        if let Some(v) = headers.get(name).and_then(|v| v.to_str().ok()) {
+            head += &format!("{name}: {v}\r\n");
+        }
+    }
+    head += &format!("content-length: {}\r\n\r\n", body.len());
+    let mut s = tokio::net::TcpStream::connect(addr).await?;
+    s.write_all(head.as_bytes()).await?;
+    s.write_all(body).await?;
+    // HTTP/1.0: the server closes the connection after answering.
+    let mut res = Vec::new();
+    s.read_to_end(&mut res).await?;
+    (res.split(|&b| b == b' ').nth(1))
+        .and_then(|code| StatusCode::from_bytes(code).ok())
+        .ok_or_else(|| std::io::Error::other("malformed HTTP response"))
+}
+
+/// Repeats a successful index creation or deletion on every other node, as Elasticsearch's
+/// master publishes the cluster state, before answering.
+// ponytail: each node records its own uuid and creation date for the index
+pub async fn broadcast(State(state): State<AppState>, req: Request, next: Next) -> Response {
+    let route = req
+        .extensions()
+        .get::<MatchedPath>()
+        .map(MatchedPath::as_str);
+    let metadata =
+        route == Some("/{index}") && [Method::PUT, Method::DELETE].contains(req.method());
+    if state.nodes().addrs.len() < 2 || !metadata || req.headers().contains_key(PEER) {
+        return next.run(req).await;
+    }
+    let (parts, body) = req.into_parts();
+    let (method, uri, headers) = (
+        parts.method.clone(),
+        parts.uri.clone(),
+        parts.headers.clone(),
+    );
+    let Ok(body) = axum::body::to_bytes(body, usize::MAX).await else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let res = next
+        .run(Request::from_parts(parts, body.clone().into()))
+        .await;
+    if !res.status().is_success() {
+        return res;
+    }
+    let nodes = state.nodes();
+    for (n, addr) in nodes
+        .addrs
+        .iter()
+        .enumerate()
+        .filter(|(n, _)| *n != nodes.me)
+    {
+        match send(addr, &method, &uri, &headers, &body).await {
+            Ok(status) if status.is_success() => {}
+            failed => {
+                let why = failed.map_or_else(|e| e.to_string(), |s| s.to_string());
+                return AppError::Io(format!(
+                    "applied on this node, but node [{}] answered: {why}",
+                    nodes.name(n)
+                ))
+                .into_response();
+            }
+        }
+    }
+    res
 }
 
 /// `GET /_cat/nodes`: one row per node, with zero resource use.
