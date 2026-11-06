@@ -41,6 +41,9 @@ pub struct SearchRequest {
     /// URL `search_type=dfs_query_then_fetch`: score with the statistics of every target
     /// summed, instead of each target's own.
     pub dfs: bool,
+    /// The epoch millis date math reads as `now`, fixed when the request is parsed so every
+    /// page of a scroll reads the same (ES's ShardSearchRequest.nowInMillis).
+    pub now: i64,
 }
 
 /// Which Elasticsearch error type a query failure maps to.
@@ -222,6 +225,7 @@ impl SearchRequest {
             pipelines,
             typed_keys: false,
             dfs: false,
+            now: crate::dates::now_millis(),
             profile: body.get("profile").and_then(Value::as_bool) == Some(true),
             query,
             track_total_hits,

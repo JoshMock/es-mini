@@ -315,3 +315,38 @@ async fn error_shapes_undecodable_ids_fail_like_elasticsearch() {
         json!({"root_cause": [root], "type": "illegal_argument_exception", "reason": "Cannot parse scroll id", "caused_by": cause})
     );
 }
+
+#[tokio::test]
+async fn scroll_now_is_fixed_when_the_scroll_opens() {
+    let app = app();
+    let mappings = json!({"mappings": {"properties": {"t": {"type": "date"}}}});
+    call(&app, Method::PUT, "/idx", Some(mappings)).await;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    // two documents in the past, one a second ahead
+    for (id, t) in [("1", now - 2000), ("2", now - 1000), ("3", now + 1000)] {
+        let path = format!("/idx/_doc/{id}?refresh=true");
+        call(&app, Method::PUT, &path, Some(json!({"t": t}))).await;
+    }
+    let body = json!({"size": 1, "sort": ["t"], "query": {"range": {"t": {"lte": "now"}}}});
+    let (s, r) = call(&app, Method::POST, "/idx/_search?scroll=1m", Some(body)).await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    assert_eq!(
+        (ids(&r), &r["hits"]["total"]["value"]),
+        (vec!["1"], &json!(2))
+    );
+    let id = r["_scroll_id"].as_str().unwrap().to_owned();
+
+    // once document 3 is in the past, the scroll's `now` still leaves it out
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let body = json!({"scroll": "1m", "scroll_id": id});
+    let (_, r) = call(&app, Method::POST, "/_search/scroll", Some(body.clone())).await;
+    assert_eq!(
+        (ids(&r), &r["hits"]["total"]["value"]),
+        (vec!["2"], &json!(2))
+    );
+    let (_, r) = call(&app, Method::POST, "/_search/scroll", Some(body)).await;
+    assert_eq!(ids(&r), Vec::<&str>::new());
+}

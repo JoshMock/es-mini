@@ -1891,7 +1891,7 @@ pub fn search_many<'a>(
     targets: &[Target<'a>],
     req: &SearchRequest,
 ) -> Result<SearchResult<'a>, QueryError> {
-    let now = now_millis();
+    let now = req.now;
     let by_score = req.sort.is_empty() || req.sort.iter().any(|f| f.field == "_score");
     let mut hits = Vec::new();
     let mut searchers = HashMap::new();
