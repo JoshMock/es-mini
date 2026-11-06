@@ -211,7 +211,7 @@ above are retagged to the perf goals that now hold them.
 - `es-mini/src/indices.rs:892` **shard-reads**: the request cache is counted per index, so shards report it empty; no
 - `es-mini/src/indices.rs:925` **stats-and-cat**: only the default columns; no h, s, bytes or help. Store sizes are 0b like _stats.
 - `es-mini/src/lib.rs:126` **replica-counts**: every shard is a green primary, no replicas
-- `es-mini/src/scroll.rs:158` **api-fidelity**: ES reads a base64 id on and fails on what it holds; es-mini, whose ids are
+- `es-mini/src/scroll.rs:158` **keep** (human 2026-11-05: ids es-mini never issues): ES reads a base64 id on and fails on what it holds; es-mini, whose ids are
 - `es-mini/src/scroll.rs:17` **search-speed**: a page reruns the query, costing a search of the hits before it, and reads `now`
 - `es-mini/src/search.rs:136` **search-profile**: only
 - `es-mini/src/security.rs:1176` **needs-scope**: ES hashes the bootstrap password with bcrypt; it never leaves memory, so SSHA256
