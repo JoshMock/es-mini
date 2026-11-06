@@ -633,9 +633,10 @@ pub async fn count_all(
     state: State<AppState>,
     uri: Uri,
     params: Query<HashMap<String, String>>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
-    count(state, Path("_all".into()), uri, params, body).await
+    count(state, Path("_all".into()), uri, params, headers, body).await
 }
 
 pub async fn count(
@@ -643,6 +644,7 @@ pub async fn count(
     Path(name): Path<String>,
     uri: Uri,
     Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
     params::check(&uri, &params, &COUNT_PARAMS)?;
@@ -664,6 +666,7 @@ pub async fn count(
             "request does not support [{k}]"
         )));
     }
+    let remote = crate::nodes::pull(&state, &headers, &name, &params).await?;
     let shared = state.read();
     terms_lookups(&shared, &mut body)?;
     let query = match params.get("q") {
@@ -674,7 +677,8 @@ pub async fn count(
     };
     let resolved = crate::indices::data_targets(&*shared, &name, &params)?;
     let indices = shared.lock(resolved.iter().map(|t| &t.index));
-    let split = split(&indices, &resolved);
+    let mut split = split(&indices, &resolved);
+    crate::nodes::place(&remote, &indices, &resolved, &mut split)?;
     let targets = targets(&indices, &resolved, &split);
     let (n, failures) = es_query::count_many(&targets, &query)?;
     Ok(Json(
