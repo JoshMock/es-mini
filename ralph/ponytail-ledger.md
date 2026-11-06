@@ -212,7 +212,8 @@ above are retagged to the perf goals that now hold them.
 - `es-mini/src/indices.rs:925` **stats-and-cat**: only the default columns; no h, s, bytes or help. Store sizes are 0b like _stats.
 - `es-mini/src/lib.rs:126` **replica-counts**: every shard is a green primary, no replicas
 - `es-mini/src/scroll.rs:158` **keep** (human 2026-11-05: ids es-mini never issues): ES reads a base64 id on and fails on what it holds; es-mini, whose ids are
-- `es-mini/src/scroll.rs:17` **search-speed**: a page reruns the query, costing a search of the hits before it, and reads `now`
+- `es-mini/src/scroll.rs:17` **keep** (human 2026-11-05): a page reruns the query, one search per page; holding the matches would cost memory
+- `es-mini/src/scroll.rs:18` **scroll-now**: a page reads `now` again, where ES fixes it when the scroll opens
 - `es-mini/src/search.rs:136` **search-profile**: only
 - `es-mini/src/security.rs:1176` **needs-scope**: ES hashes the bootstrap password with bcrypt; it never leaves memory, so SSHA256
 - `es-mini/src/security.rs:195` **security-validation**: refused with security off too, where ES has no .security-7 to protect

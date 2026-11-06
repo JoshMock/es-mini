@@ -14,8 +14,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// A search's snapshot, which each page searches again, so later writes do not change it.
-// ponytail: a page reruns the query, costing a search of the hits before it, and reads `now`
-// again where ES fixes it when the scroll opens
+// ponytail: a page reruns the query, one search per page; holding the matches would cost memory
+// ponytail: a page reads `now` again, where ES fixes it when the scroll opens
 struct Scroll {
     /// The first response, without hits, as the template of every page.
     template: Value,
