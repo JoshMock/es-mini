@@ -190,7 +190,7 @@ above are retagged to the perf goals that now hold them.
 - `es-index/src/disk.rs:332` **keep**: only Lucene104 postings are read, which Elasticsearch writes for every field
 - `es-index/src/disk.rs:504` **disk-fidelity**: fields holding values Elasticsearch would truncate or reject but es-mini matches as
 - `es-index/src/disk.rs:647` **disk-fidelity**: a dotted source key that crosses into a nested path (`{"c.a": 1}` with `c` nested)
-- `es-index/src/disk.rs:888` **disk-fidelity**: ip ranges are sorted where ES writes its HashSet's order; readers
+- `es-index/src/disk.rs:1070` **keep**: ip ranges are sorted; ES writes a HashSet's order, which varies per
 - `es-index/src/index_settings.rs:532` **keep**: Lucene codec names are the Lucene9x/10x ones; SimpleText is not shipped
 - `es-index/src/lib.rs:1088` **shard-search-speed**: an index of several shards builds anew each time; one memo per shard if
 - `es-index/src/lib.rs:1150` **shard-search-speed**: copies each shard's document ids on every search of a multi-shard index, and

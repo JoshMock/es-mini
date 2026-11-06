@@ -1067,8 +1067,8 @@ fn user_fields(
                         .collect(),
                 ));
                 (point_width, point_dims) = (width as i32, 2);
-                // ponytail: ip ranges are sorted where ES writes its HashSet's order; readers
-                // do not depend on it
+                // ponytail: ip ranges are sorted; ES writes a HashSet's order, which varies per
+                // JVM run, so none matches it, and readers do not depend on it
                 ranges.iter_mut().for_each(|rs| {
                     rs.sort();
                     rs.dedup();
