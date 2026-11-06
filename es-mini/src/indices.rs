@@ -1387,7 +1387,7 @@ pub async fn cat_shards(
 /// [`cat_table`] after the `help`, `h` (columns by name or alias, unknown ones ignored) and `s`
 /// (`col[:asc|:desc]`, numeric when both cells are numbers) parameters, for `columns` given as
 /// (name, comma-separated aliases, description).
-fn cat_view(
+pub(crate) fn cat_view(
     columns: &[(&str, &str, &str)],
     mut rows: Vec<Vec<String>>,
     right: impl Fn(usize) -> bool,

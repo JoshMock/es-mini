@@ -1,10 +1,113 @@
-//! Single-node stubs for nodes.info, nodes.stats, cluster.stats and cluster.get_settings.
+//! The cluster's node list, `_cat/nodes`, and single-node stubs for nodes.info, nodes.stats,
+//! cluster.stats and cluster.get_settings.
 
-use crate::{AppState, CLUSTER_NAME};
-use axum::{Json, extract::State};
+use crate::{AppState, CLUSTER_NAME, error::AppError};
+use axum::{
+    Json,
+    extract::{Query, State},
+    http::Uri,
+};
 use serde_json::{Value, json};
+use std::collections::HashMap;
 
 pub(crate) const NODE_ID: &str = "es-mini-node";
+
+/// The cluster's nodes, fixed at startup by the `es_mini.nodes` setting (comma-separated
+/// `host:port`, listing this node's own `es_mini.node` too); without it, this node alone.
+/// Node 0 acts as the elected master; there is no election.
+#[derive(Default)]
+pub(crate) struct Nodes {
+    addrs: Vec<String>,
+}
+
+impl Nodes {
+    pub fn from_settings(settings: &HashMap<String, String>) -> Result<Self, String> {
+        let Some(list) = settings.get("es_mini.nodes") else {
+            return Ok(Self::default());
+        };
+        let addrs: Vec<String> = list.split(',').map(|a| a.trim().to_owned()).collect();
+        let me = settings.get("es_mini.node").map_or("", String::as_str);
+        if !addrs.iter().any(|a| a == me) {
+            return Err(format!(
+                "es_mini.nodes [{list}] does not list this node [{me}]"
+            ));
+        }
+        Ok(Self { addrs })
+    }
+
+    pub fn count(&self) -> usize {
+        self.addrs.len().max(1)
+    }
+
+    /// Node `node`'s name; one node alone keeps the cluster's name.
+    pub fn name(&self, node: usize) -> String {
+        match self.addrs.is_empty() {
+            true => CLUSTER_NAME.into(),
+            false => format!("{CLUSTER_NAME}-{node}"),
+        }
+    }
+
+    /// Node `node`'s IP address.
+    fn ip(&self, node: usize) -> &str {
+        (self.addrs.get(node))
+            .and_then(|a| a.rsplit_once(':'))
+            .map_or("127.0.0.1", |(host, _)| host)
+    }
+}
+
+/// `GET /_cat/nodes`: one row per node, with zero resource use.
+pub async fn cat(
+    State(state): State<AppState>,
+    uri: Uri,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<axum::response::Response, AppError> {
+    crate::params::check(&uri, &params, &["format", "v", "h", "s", "help"])?;
+    // RestNodesAction's default columns
+    const COLUMNS: [(&str, &str, &str); 10] = [
+        ("ip", "i", "ip address"),
+        ("heap.percent", "hp,heapPercent", "used heap ratio"),
+        ("ram.percent", "rp,ramPercent", "used machine memory ratio"),
+        ("cpu", "", "recent cpu usage"),
+        ("load_1m", "l", "1m load avg"),
+        ("load_5m", "l", "5m load avg"),
+        ("load_15m", "l", "15m load avg"),
+        (
+            "node.role",
+            "r,role,nodeRole",
+            "m:master eligible node, d:data node, i:ingest node, -:coordinating node only",
+        ),
+        ("master", "m", "*:current master"),
+        ("name", "n", "node name"),
+    ];
+    let nodes = state.nodes();
+    let rows = (0..nodes.count())
+        .map(|n| {
+            let master = if n == 0 { "*" } else { "-" };
+            [
+                nodes.ip(n),
+                "0",
+                "0",
+                "0",
+                "0.00",
+                "0.00",
+                "0.00",
+                "dim",
+                master,
+            ]
+            .map(str::to_owned)
+            .into_iter()
+            .chain([nodes.name(n)])
+            .collect()
+        })
+        .collect();
+    Ok(crate::indices::cat_view(
+        &COLUMNS,
+        rows,
+        |c| (1..=6).contains(&c),
+        |_| true,
+        &params,
+    ))
+}
 
 fn nodes_header() -> Value {
     json!({"total": 1, "successful": 1, "failed": 0})

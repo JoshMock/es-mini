@@ -11,6 +11,10 @@ async fn main() {
     // like settings (`xpack.security.enabled`), and ELASTIC_PASSWORD as `bootstrap.password`.
     let mut settings: std::collections::HashMap<String, String> =
         std::env::vars().filter(|(k, _)| k.contains('.')).collect();
+    if let Ok(nodes) = std::env::var("ES_MINI_NODES") {
+        settings.insert("es_mini.nodes".into(), nodes);
+        settings.insert("es_mini.node".into(), format!("{host}:{port}"));
+    }
     if let Ok(p) = std::env::var("ELASTIC_PASSWORD") {
         settings.insert("bootstrap.password".into(), p);
     }

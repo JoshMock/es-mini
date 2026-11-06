@@ -81,7 +81,7 @@ async fn health(
         Some(Path(expr)) => match es_index::aliases::resolve_read(&*store, expr) {
             Ok(targets) => targets.into_iter().map(|t| t.index).collect(),
             Err(_) => {
-                let mut body = health_body(0, 0);
+                let mut body = health_body(state.nodes().count(), 0, 0);
                 body["status"] = json!("red");
                 body["timed_out"] = json!(true);
                 return Ok((StatusCode::REQUEST_TIMEOUT, Json(body)));
@@ -97,7 +97,11 @@ async fn health(
         .collect();
     let level = params.get("level").map(String::as_str);
     let shards = copies.iter().map(|(n, _)| n).sum();
-    let mut body = health_body(shards, copies.iter().map(|(n, r)| n * r).sum());
+    let mut body = health_body(
+        state.nodes().count(),
+        shards,
+        copies.iter().map(|(n, r)| n * r).sum(),
+    );
     if matches!(level, Some("indices" | "shards")) {
         let indices: serde_json::Map<String, Value> = (names.iter().zip(copies))
             .map(|(name, (n, r))| (name.clone(), index_health(n, r, level == Some("shards"))))
@@ -118,8 +122,8 @@ pub(crate) fn status(unassigned: usize) -> &'static str {
     if unassigned > 0 { "yellow" } else { "green" }
 }
 
-/// Cluster health over `shards` active primaries and `unassigned` replicas.
-fn health_body(shards: usize, unassigned: usize) -> Value {
+/// Cluster health over `nodes` nodes, `shards` active primaries and `unassigned` replicas.
+fn health_body(nodes: usize, shards: usize, unassigned: usize) -> Value {
     let percent = match shards + unassigned {
         0 => 100.0,
         total => shards as f64 / total as f64 * 100.0,
@@ -128,8 +132,8 @@ fn health_body(shards: usize, unassigned: usize) -> Value {
         "cluster_name": CLUSTER_NAME,
         "status": status(unassigned),
         "timed_out": false,
-        "number_of_nodes": 1,
-        "number_of_data_nodes": 1,
+        "number_of_nodes": nodes,
+        "number_of_data_nodes": nodes,
         "active_primary_shards": shards,
         "active_shards": shards,
         "relocating_shards": 0,
@@ -188,6 +192,7 @@ pub fn app_with(indices: Indices) -> Router {
 /// `bootstrap.password`.
 pub fn app_with_settings(settings: &HashMap<String, String>) -> Result<Router, String> {
     let state = Arc::new(Store::new(Indices::new()));
+    state.join(nodes::Nodes::from_settings(settings)?);
     let security = security::from_settings(settings, &state)?;
     let app = with_es_405(router(state, security.clone()));
     Ok(secured(app, security))
@@ -252,6 +257,7 @@ fn persisted(
         Indices::new()
     };
     let state = Arc::new(Store::new(indices));
+    state.join(nodes::Nodes::from_settings(settings)?);
     let security = security::from_settings(settings, &state)?;
     spawn_syncer(dir.to_owned(), Arc::downgrade(&state));
     let (dir, saved, group) = (dir.to_owned(), state.clone(), Arc::new(Group::default()));
@@ -479,6 +485,7 @@ fn router(state: AppState, security: Option<Arc<security::Security>>) -> Router 
         .route("/_cat/indices/{index}", get(indices::cat_indices))
         .route("/_cat/aliases", get(aliases::cat))
         .route("/_cat/aliases/{alias}", get(aliases::cat))
+        .route("/_cat/nodes", get(nodes::cat))
         .route("/_cat/shards", get(indices::cat_shards))
         .route("/_cat/shards/{index}", get(indices::cat_shards))
         .route("/_query", post(search::esql))

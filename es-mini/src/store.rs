@@ -2,11 +2,12 @@
 //! reads proceed concurrently. Locks are taken in one order: the map, then indices by name,
 //! then the system indices.
 
+use crate::nodes::Nodes;
 use es_index::aliases::{Alias, IndexMeta};
 use es_index::{Index, Indices, RequestCache};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 /// System indices: once [`Store::secure`]d, only the API that owns one reads or writes it,
 /// through [`Store::system`]; index expressions, listings and document requests never see them.
@@ -35,9 +36,15 @@ impl IndexMeta for Slot {
     }
 }
 
-/// The indices, the system indices once [`Store::secure`]d, whether it was, and the request
-/// cache the indices share, as a node's do.
-pub(crate) struct Store(RwLock<Map>, Mutex<Indices>, AtomicBool, Arc<RequestCache>);
+/// The indices, the system indices once [`Store::secure`]d, whether it was, the request
+/// cache the indices share, as a node's do, and the cluster's nodes once [`Store::join`]ed.
+pub(crate) struct Store(
+    RwLock<Map>,
+    Mutex<Indices>,
+    AtomicBool,
+    Arc<RequestCache>,
+    OnceLock<Nodes>,
+);
 
 impl Store {
     pub fn new(indices: Indices) -> Self {
@@ -47,7 +54,18 @@ impl Store {
             Mutex::new(Indices::new()),
             false.into(),
             cache,
+            OnceLock::new(),
         )
+    }
+
+    /// Makes this node one of `nodes`; called at most once, at startup.
+    pub fn join(&self, nodes: Nodes) {
+        _ = self.4.set(nodes);
+    }
+
+    /// The cluster's nodes: this one alone unless [`Store::join`]ed.
+    pub fn nodes(&self) -> &Nodes {
+        self.4.get_or_init(Nodes::default)
     }
 
     /// Moves the system indices out of the API's reach, as security on does; with it off,

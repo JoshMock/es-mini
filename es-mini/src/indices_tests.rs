@@ -774,3 +774,19 @@ async fn mapping_and_settings_registers_every_index_scoped_setting() {
         json!(["*"])
     );
 }
+
+#[tokio::test]
+async fn cat_nodes_lists_the_one_node() {
+    let (s, r) = call(
+        &app(),
+        Method::GET,
+        "/_cat/nodes?format=json&h=name,master,node.role",
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(
+        r,
+        json!([{"name": "es-mini", "master": "*", "node.role": "dim"}])
+    );
+}

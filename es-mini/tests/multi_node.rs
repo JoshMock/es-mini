@@ -539,7 +539,6 @@ fn multi_node_any_node_serves_all_docs_like_one_node() {
 }
 
 #[test]
-#[ignore = "target: multi-node"]
 fn multi_node_cluster_reports_three_nodes() {
     let c = Cluster::start(3, "nodes");
     for node in 0..3 {

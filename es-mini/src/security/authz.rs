@@ -264,6 +264,12 @@ fn steps<'a>(method: &Method, segs: &[&'a str], params: &HashMap<String, String>
         (_, ["_flush"]) => vec![every("indices:admin/flush")],
         (_, ["_mapping"]) => vec![every("indices:admin/mappings/get")],
         (_, ["_stats", ..]) => vec![every("indices:monitor/stats")],
+        // RestNodesAction reads the cluster state, then nodes info and stats.
+        (_, ["_cat", "nodes"]) => vec![
+            Cluster("cluster:monitor/state"),
+            Cluster("cluster:monitor/nodes/info"),
+            Cluster("cluster:monitor/nodes/stats"),
+        ],
         (_, ["_cat", "shards" | "indices"]) => vec![
             Indices {
                 action: "indices:monitor/stats",
