@@ -238,7 +238,7 @@ above are retagged to the perf goals that now hold them.
 - `es-query/src/aggs.rs:1215` **search-speed**: clones the digest per comparison; cache values per bucket if
 - `es-query/src/aggs.rs:1429` **aggs-gaps-2**: a `format` a field cannot take is ignored, and text fields matched by a pattern
 - `es-query/src/aggs.rs:1542` **aggs-gaps-2**: ip ranges are not aggregated
-- `es-query/src/aggs.rs:1602` **aggs-profile**: a shard profiles as one segment.
+- `es-query/src/aggs.rs:1602` **keep** (human 2026-11-05: ES's own counts vary with merges): a shard profiles as one segment.
 - `es-query/src/aggs.rs:2036` **aggs-profile**: counts accepted terms, not all ords.
 - `es-query/src/aggs.rs:2103` **aggs-profile**: no deleted docs.
 - `es-query/src/aggs.rs:2232` **aggs-gaps-2**: counts the buckets rendered; ES also counts buckets it drops (min_doc_count, size),
