@@ -134,7 +134,12 @@ pub async fn forward(State(state): State<AppState>, req: Request, next: Next) ->
     }
     let (mut parts, body) = req.into_parts();
     let owner = match Path::<(String, String)>::from_request_parts(&mut parts, &state).await {
-        Ok(Path((index, id))) => doc_owner(&state, &parts.method, &parts.uri, &index, &id),
+        Ok(Path((index, id))) => Query::<HashMap<String, String>>::try_from_uri(&parts.uri)
+            .ok()
+            .and_then(|Query(params)| {
+                let routing = params.get("routing").map(String::as_str);
+                doc_owner(&state, !parts.method.is_safe(), &index, &id, routing)
+            }),
         Err(_) => None,
     };
     let nodes = state.nodes();
@@ -144,30 +149,62 @@ pub async fn forward(State(state): State<AppState>, req: Request, next: Next) ->
     let Ok(body) = axum::body::to_bytes(body, usize::MAX).await else {
         return StatusCode::BAD_REQUEST.into_response();
     };
-    let sent = send(
-        &nodes.addrs[owner],
+    let sent = send_to(
+        &state,
+        owner,
         &parts.method,
         &parts.uri,
         &parts.headers,
         &body,
     );
-    sent.await.unwrap_or_else(|e| {
-        let node = nodes.name(owner);
-        AppError::Io(format!("node [{node}] did not answer: {e}")).into_response()
-    })
+    sent.await.unwrap_or_else(IntoResponse::into_response)
 }
 
-/// The node holding document `id` that a request `method uri` sent to `index` reaches, if the
-/// index and the routing resolve.
-fn doc_owner(state: &AppState, method: &Method, uri: &Uri, index: &str, id: &str) -> Option<usize> {
+/// [`send`] to node `node`, failing as Elasticsearch does when a node does not answer.
+pub(crate) async fn send_to(
+    state: &AppState,
+    node: usize,
+    method: &Method,
+    uri: &Uri,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<Response, AppError> {
+    let nodes = state.nodes();
+    let sent = send(&nodes.addrs[node], method, uri, headers, body).await;
+    sent.map_err(|e| AppError::Io(format!("node [{}] did not answer: {e}", nodes.name(node))))
+}
+
+/// The other node holding document `id` that a client's write to `index` with `routing`
+/// reaches, when there is a node list, the index and the routing resolve, and it is not this
+/// node; `None` for a request from a [`PEER`], which applies it here.
+pub(crate) fn remote_owner(
+    state: &AppState,
+    headers: &HeaderMap,
+    index: &str,
+    id: &str,
+    routing: Option<&str>,
+) -> Option<usize> {
+    if state.nodes().addrs.len() < 2 || headers.contains_key(PEER) {
+        return None;
+    }
+    doc_owner(state, true, index, id, routing).filter(|&o| o != state.nodes().me)
+}
+
+/// The node holding document `id` that a read (or a `write`) of `index` with `routing`
+/// reaches, if the index and the routing resolve.
+fn doc_owner(
+    state: &AppState,
+    write: bool,
+    index: &str,
+    id: &str,
+    routing: Option<&str>,
+) -> Option<usize> {
     let shared = state.read();
-    let target = match method.is_safe() {
-        true => crate::docs::single_index(&*shared, index).ok(),
-        false => es_index::aliases::resolve_write(&*shared, index).ok(),
+    let target = match write {
+        false => crate::docs::single_index(&*shared, index).ok(),
+        true => es_index::aliases::resolve_write(&*shared, index).ok(),
     };
     let i = shared.read(&target?)?;
-    let params = Query::<HashMap<String, String>>::try_from_uri(uri).ok()?;
-    let routing = params.get("routing").map(String::as_str);
     let routing = crate::docs::routing(&i, index, routing).ok()??;
     Some(state.nodes().owner(i.shard_for(id, routing)))
 }

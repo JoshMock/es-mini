@@ -532,6 +532,42 @@ fn multi_node_single_doc_requests_reach_the_owner() {
 }
 
 #[test]
+fn multi_node_bulk_reaches_the_owners() {
+    let one = Cluster::start(1, "reference-bulk");
+    let three = Cluster::start(3, "bulk");
+    create_index(&one, 0);
+    create_index(&three, 0);
+    let mut body: String = (0..DOCS)
+        .map(|k| {
+            format!(
+                "{}\n{}\n",
+                json!({"index": {"_index": "i", "_id": k.to_string()}}),
+                doc(k)
+            )
+        })
+        .collect();
+    body += &format!("{}\n", json!({"delete": {"_id": "3"}}));
+    body += &format!(
+        "{}\n{}\n",
+        json!({"update": {"_id": "4"}}),
+        json!({"doc": {"n": 100}})
+    );
+    let bulk = |c: &Cluster, node| stable(c.ok(node, "POST", "/i/_bulk", &body));
+    // Each shard numbers its own writes, so equal `_seq_no`s mean each shard lives on one node.
+    assert_eq!(bulk(&three, 1), bulk(&one, 0));
+    for node in 0..3 {
+        for k in 0..DOCS {
+            let path = format!("/i/_doc/{k}");
+            assert_eq!(
+                three.call(node, "GET", &path, ""),
+                one.call(0, "GET", &path, ""),
+                "node {node}"
+            );
+        }
+    }
+}
+
+#[test]
 #[ignore = "target: multi-node"]
 fn multi_node_any_node_serves_all_docs_like_one_node() {
     let one = Cluster::start(1, "reference");

@@ -9,11 +9,14 @@ use axum::{
     Extension, Json,
     body::Bytes,
     extract::{Path, Query, State},
-    http::Uri,
+    http::{HeaderMap, Method, Uri},
 };
 use es_index::{aliases, auto_id};
 use serde_json::{Value, json};
-use std::{collections::HashMap, time::Instant};
+use std::{
+    collections::{BTreeMap, HashMap},
+    time::Instant,
+};
 
 struct Action {
     op: String,
@@ -23,6 +26,8 @@ struct Action {
     body: Option<Value>,
     /// The source line `body` was parsed from.
     raw: Vec<u8>,
+    /// The action/metadata line.
+    meta: Vec<u8>,
     require_alias: bool,
 }
 
@@ -92,6 +97,7 @@ fn parse(
             routing: meta["routing"].as_str().map(str::to_owned),
             body,
             raw,
+            meta: line.to_vec(),
             require_alias: meta["require_alias"].as_bool().unwrap_or(require_alias),
         });
     }
@@ -165,18 +171,60 @@ fn execute(
     json!({ a.op: item })
 }
 
+/// Runs the actions of a `_bulk` request `uri` on this node, but sends those for documents another
+/// node holds to it, in one `_bulk` per node, ahead of the others.
+// ponytail: if a node fails, the actions already run stay applied and the request fails
 async fn run(
     state: AppState,
     authn: Option<Extension<Authn>>,
+    (uri, headers): (&Uri, &HeaderMap),
     default_index: Option<&str>,
     params: &HashMap<String, String>,
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
     let start = Instant::now();
-    let items: Vec<Value> = parse(&body, default_index, flag(params))?
-        .into_iter()
-        .map(|a| execute(&state, authn.as_deref(), params, a))
+    let actions = parse(&body, default_index, flag(params))?;
+    let owners: Vec<_> = (actions.iter())
+        .map(|a| {
+            let routing = a
+                .routing
+                .as_deref()
+                .or(params.get("routing").map(String::as_str));
+            let id = a.id.as_deref()?;
+            crate::nodes::remote_owner(&state, headers, &a.index, id, routing)
+        })
         .collect();
+    let mut remote: BTreeMap<usize, Vec<u8>> = BTreeMap::new();
+    for (a, owner) in actions.iter().zip(&owners) {
+        if let Some(node) = owner {
+            let sub = remote.entry(*node).or_default();
+            // a delete's empty source line is skipped
+            for line in [&a.meta, &a.raw] {
+                sub.extend_from_slice(line);
+                sub.push(b'\n');
+            }
+        }
+    }
+    let bad = |node| AppError::Io(format!("node [{node}] gave no _bulk items"));
+    let mut answers = HashMap::new();
+    for (node, sub) in remote {
+        let res = crate::nodes::send_to(&state, node, &Method::POST, uri, headers, &sub).await?;
+        let res = axum::body::to_bytes(res.into_body(), usize::MAX).await;
+        let mut v: Value =
+            (res.ok().and_then(|b| serde_json::from_slice(&b).ok())).unwrap_or_default();
+        let Value::Array(items) = v["items"].take() else {
+            return Err(bad(node));
+        };
+        answers.insert(node, items.into_iter());
+    }
+    let items = (actions.into_iter().zip(owners))
+        .map(|(a, owner)| match owner {
+            Some(node) => {
+                (answers.get_mut(&node).and_then(Iterator::next)).ok_or_else(|| bad(node))
+            }
+            None => Ok(execute(&state, authn.as_deref(), params, a)),
+        })
+        .collect::<Result<Vec<Value>, _>>()?;
     let errors = items.iter().any(|i| {
         i.as_object()
             .and_then(|m| m.values().next())
@@ -210,11 +258,12 @@ pub async fn bulk(
     State(state): State<AppState>,
     authn: Option<Extension<Authn>>,
     uri: Uri,
+    headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
     params::check(&uri, &params, &BULK_PARAMS)?;
-    run(state, authn, None, &params, body).await
+    run(state, authn, (&uri, &headers), None, &params, body).await
 }
 
 pub async fn bulk_index(
@@ -222,11 +271,12 @@ pub async fn bulk_index(
     Path(index): Path<String>,
     authn: Option<Extension<Authn>>,
     uri: Uri,
+    headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
     params::check(&uri, &params, &BULK_PARAMS)?;
-    run(state, authn, Some(&index), &params, body).await
+    run(state, authn, (&uri, &headers), Some(&index), &params, body).await
 }
 
 #[cfg(test)]
