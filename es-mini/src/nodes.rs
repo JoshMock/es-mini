@@ -48,8 +48,21 @@ impl Nodes {
         }
     }
 
+    /// Node `node`'s id; one node alone keeps [`NODE_ID`].
+    pub fn id(&self, node: usize) -> String {
+        match self.addrs.is_empty() {
+            true => NODE_ID.into(),
+            false => format!("{NODE_ID}-{node}"),
+        }
+    }
+
+    /// The node that holds shard `shard` of every index: shards go round the node list.
+    pub fn owner(&self, shard: usize) -> usize {
+        shard % self.count()
+    }
+
     /// Node `node`'s IP address.
-    fn ip(&self, node: usize) -> &str {
+    pub fn ip(&self, node: usize) -> &str {
         (self.addrs.get(node))
             .and_then(|a| a.rsplit_once(':'))
             .map_or("127.0.0.1", |(host, _)| host)

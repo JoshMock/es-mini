@@ -1304,6 +1304,7 @@ pub async fn cat_shards(
         .map(|t| t.index)
         .collect();
     let indices = shared.lock(&names);
+    let nodes = state.nodes();
     // Each primary is followed by its replicas, unassigned on this one node; their empty cells
     // are null in JSON.
     // with `bytes`, sizes are bare numbers of that unit
@@ -1326,9 +1327,9 @@ pub async fn cat_shards(
                     "prirep" => "p".into(),
                     "state" => "STARTED".into(),
                     "docs" => docs.to_string(),
-                    "ip" => "127.0.0.1".into(),
-                    "id" => crate::nodes::NODE_ID.into(),
-                    "node" => crate::CLUSTER_NAME.into(),
+                    "ip" => nodes.ip(nodes.owner(i)).into(),
+                    "id" => nodes.id(nodes.owner(i)),
+                    "node" => nodes.name(nodes.owner(i)),
                     "indexing.index_total" => index_total.to_string(),
                     "indexing.delete_total" => delete_total.to_string(),
                     "seq_no.max" | "seq_no.local_checkpoint" | "seq_no.global_checkpoint" => {

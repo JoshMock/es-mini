@@ -471,7 +471,6 @@ fn multi_node_guard_data_survives_restart() {
 }
 
 #[test]
-#[ignore = "target: multi-node"]
 fn multi_node_three_shards_spread_over_three_nodes() {
     let c = Cluster::start(3, "spread");
     create_index(&c, 0);
